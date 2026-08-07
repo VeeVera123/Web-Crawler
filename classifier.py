@@ -19,12 +19,13 @@ log = logging.getLogger(__name__)
 client = Groq(api_key=GROQ_API_KEY)
 
 # Retry config for rate limits
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 10  # seconds
+MAX_RETRIES = 2
+RETRY_BASE_DELAY = 3  # seconds
 
 
 def _groq_call_with_retry(messages: list[dict], max_tokens: int = 500) -> str | None:
-    """Call Groq with retry on rate limit (429). Returns response text or None."""
+    """Call Groq with retry on rate limit (429). Returns response text or None.
+    Uses short delays since daily quota exhaustion won't recover with waiting."""
     for attempt in range(MAX_RETRIES):
         try:
             resp = client.chat.completions.create(
@@ -37,9 +38,14 @@ def _groq_call_with_retry(messages: list[dict], max_tokens: int = 500) -> str | 
         except Exception as e:
             error_str = str(e)
             is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+            is_daily_limit = "tokens per day" in error_str.lower() or "tpd" in error_str.lower()
+
+            if is_daily_limit:
+                log.error(f"Groq daily token limit reached — skipping remaining AI calls")
+                return None
 
             if is_rate_limit and attempt < MAX_RETRIES - 1:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)  # 10s, 20s, 40s
+                delay = RETRY_BASE_DELAY * (attempt + 1)  # 3s, 6s
                 log.warning(f"Groq rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
                 time.sleep(delay)
                 continue
