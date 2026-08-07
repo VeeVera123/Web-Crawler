@@ -9,6 +9,7 @@ Then a separate location filter:
 """
 
 import re
+import time
 import logging
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL, AI_BATCH_SIZE
@@ -16,6 +17,37 @@ from config import GROQ_API_KEY, GROQ_MODEL, AI_BATCH_SIZE
 log = logging.getLogger(__name__)
 
 client = Groq(api_key=GROQ_API_KEY)
+
+# Retry config for rate limits
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 10  # seconds
+
+
+def _groq_call_with_retry(messages: list[dict], max_tokens: int = 500) -> str | None:
+    """Call Groq with retry on rate limit (429). Returns response text or None."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            error_str = str(e)
+            is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+
+            if is_rate_limit and attempt < MAX_RETRIES - 1:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)  # 10s, 20s, 40s
+                log.warning(f"Groq rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                time.sleep(delay)
+                continue
+            else:
+                log.error(f"Groq API error (attempt {attempt + 1}): {e}")
+                return None
+
+    return None
 
 
 # ═══════════════════════════════════════════════════════
@@ -151,7 +183,8 @@ Respond ONLY with lines like:
 
 
 def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
-    """Send ambiguous titles to Groq. Returns {title: is_relevant}."""
+    """Send ambiguous titles to Groq. Returns {title: is_relevant}.
+    On rate limit/failure: defaults to False (exclude)."""
     if not titles:
         return {}
 
@@ -161,23 +194,31 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
         numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
         prompt = ROLE_AI_PROMPT.format(titles=numbered)
 
-        try:
-            resp = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=500,
-            )
-            text = resp.choices[0].message.content.strip()
-            for line in text.splitlines():
-                parts = line.strip().split(None, 1)
-                if len(parts) == 2:
-                    idx = int(parts[0]) - 1
-                    if 0 <= idx < len(batch):
-                        results[batch[idx]] = parts[1].upper().startswith("YES")
-        except Exception as e:
-            log.error(f"Groq role classification error: {e}")
+        text = _groq_call_with_retry(
+            [{"role": "user", "content": prompt}],
+            max_tokens=500,
+        )
+
+        if text is None:
+            # Rate limit exhausted or error — default to EXCLUDE
+            log.warning(f"AI role classification failed for batch of {len(batch)}, defaulting to exclude")
             for t in batch:
+                results[t] = False
+            continue
+
+        for line in text.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                try:
+                    idx = int(parts[0]) - 1
+                except ValueError:
+                    continue
+                if 0 <= idx < len(batch):
+                    results[batch[idx]] = parts[1].upper().startswith("YES")
+
+        # Any titles not in results default to exclude
+        for t in batch:
+            if t not in results:
                 results[t] = False
 
     return results
@@ -220,7 +261,7 @@ STANDALONE_GLOBAL_RE = re.compile(
     r"^\s*(global|worldwide|anywhere)\s*$", re.I
 )
 
-# US cities / states / regions that should be excluded
+# US locations — hard reject
 US_LOCATION_PATTERNS = [
     r"\bnew\s*york\b", r"\bsan\s*francisco\b", r"\blos\s*angeles\b",
     r"\bchicago\b", r"\bseattle\b", r"\bboston\b", r"\baustin\b",
@@ -231,7 +272,9 @@ US_LOCATION_PATTERNS = [
     r"\bunited\s*states\b", r"\busa\b", r"\b\(us\)\b", r"\bus\s*only\b",
     r"\busa\s*only\b", r"\bus\s*remote\b", r"\bremote\s*[\-–—,]?\s*us\b",
     r"\bremote\s*[\-–—,]?\s*usa\b", r"\bremote\s*[\-–—,]?\s*united\s*states\b",
-    r"\bnorth\s*america\b",
+    r"\bnorth\s*america\b", r"\bnorth\s*america\s*only\b",
+    r"\bus\s*based\b", r"\busa\s*based\b", r"\bbased\s*in\s*(the\s*)?us\b",
+    r"\bmust\s*be\s*(in|located\s*in)\s*(the\s*)?us\b",
     # US states
     r"\bcalifornia\b", r"\btexas\b", r"\bflorida\b", r"\billinois\b",
     r"\bpennsylvania\b", r"\bgeorgia\b", r"\bmassachusetts\b",
@@ -240,22 +283,51 @@ US_LOCATION_PATTERNS = [
 ]
 US_LOCATION_RE = [re.compile(p, re.I) for p in US_LOCATION_PATTERNS]
 
+# UK locations — hard reject
+UK_LOCATION_PATTERNS = [
+    r"\bunited\s*kingdom\b", r"\b\(uk\)\b", r"\buk\s*only\b",
+    r"\buk\s*remote\b", r"\bremote\s*[\-–—,]?\s*uk\b",
+    r"\buk\s*based\b", r"\bbased\s*in\s*(the\s*)?uk\b",
+    r"\blondon\b", r"\bmanchester\b", r"\bbirmingham\b", r"\bleeds\b",
+    r"\bbristol\b", r"\bedinburgh\b", r"\bglasgow\b", r"\bcardiff\b",
+    r"\bengland\b", r"\bscotland\b", r"\bwales\b",
+]
+UK_LOCATION_RE = [re.compile(p, re.I) for p in UK_LOCATION_PATTERNS]
+
 # Other non-African specific locations
 OTHER_NON_AFRICA_PATTERNS = [
-    r"\bunited\s*kingdom\b", r"\buk\b", r"\blondon\b", r"\bcanada\b",
-    r"\btoronto\b", r"\bvancouver\b", r"\bgermany\b", r"\bberlin\b",
-    r"\bfrance\b", r"\bparis\b", r"\baustralia\b", r"\bsydney\b",
-    r"\bjapan\b", r"\btokyo\b", r"\bindia\b", r"\bbangalore\b",
-    r"\bsingapore\b", r"\bdublin\b", r"\bireland\b", r"\bnetherlands\b",
-    r"\bamsterdam\b", r"\bspain\b", r"\bitaly\b", r"\bsweden\b",
-    r"\bstockholm\b", r"\bdenmark\b", r"\bswitzerland\b", r"\baustr(ia|alian)\b",
-    r"\bisrael\b", r"\btel\s*aviv\b", r"\bchina\b", r"\bbeijing\b",
-    r"\bshanghai\b", r"\bbrazil\b", r"\bsao\s*paulo\b", r"\bmexico\b",
-    r"\bargentina\b", r"\bcolombia\b", r"\bkorea\b", r"\bseoul\b",
-    r"\beurope\b", r"\bemea\b", r"\bapac\b", r"\blatam\b",
+    r"\bcanada\b", r"\btoronto\b", r"\bvancouver\b",
+    r"\bgermany\b", r"\bberlin\b", r"\bmunich\b",
+    r"\bfrance\b", r"\bparis\b",
+    r"\baustralia\b", r"\bsydney\b", r"\bmelbourne\b",
+    r"\bjapan\b", r"\btokyo\b",
+    r"\bindia\b", r"\bbangalore\b", r"\bmumbai\b", r"\bhyderabad\b",
+    r"\bsingapore\b",
+    r"\bdublin\b", r"\bireland\b",
+    r"\bnetherlands\b", r"\bamsterdam\b",
+    r"\bspain\b", r"\bmadrid\b", r"\bbarcelona\b",
+    r"\bitaly\b", r"\bmilan\b",
+    r"\bsweden\b", r"\bstockholm\b",
+    r"\bdenmark\b", r"\bcopenhagen\b",
+    r"\bswitzerland\b", r"\bzurich\b",
+    r"\baustr(ia|alian)\b",
+    r"\bisrael\b", r"\btel\s*aviv\b",
+    r"\bchina\b", r"\bbeijing\b", r"\bshanghai\b",
+    r"\bbrazil\b", r"\bsao\s*paulo\b",
+    r"\bmexico\b", r"\bmexico\s*city\b",
+    r"\bargentina\b", r"\bbogota\b", r"\bcolombia\b",
+    r"\bkorea\b", r"\bseoul\b",
+    r"\bapac\b", r"\blatam\b",
     r"\bseur\b", r"\bneur\b", r"\bdach\b", r"\banz\b",
+    r"\beurope\s*only\b", r"\beu\s*only\b",
 ]
 OTHER_NON_AFRICA_RE = [re.compile(p, re.I) for p in OTHER_NON_AFRICA_PATTERNS]
+
+# "Remote, US" / "Remote, UK" / "Remote, Canada" etc. — hard reject
+REMOTE_COUNTRY_RE = re.compile(
+    r"\bremote\s*[\-–—/,]\s*(us|usa|united\s*states|uk|united\s*kingdom|canada|australia|germany|france|india|europe|apac|latam|dach|anz)\b",
+    re.I,
+)
 
 
 def keyword_classify_location(job: dict) -> str:
@@ -282,6 +354,14 @@ def keyword_classify_location(job: dict) -> str:
 
     # ── 2. Explicit US location → reject immediately ──
     if any(rx.search(loc) for rx in US_LOCATION_RE):
+        return "no_match"
+
+    # ── 2b. Explicit UK location → reject immediately ──
+    if any(rx.search(loc) for rx in UK_LOCATION_RE):
+        return "no_match"
+
+    # ── 2c. "Remote, <country>" patterns → reject ──
+    if REMOTE_COUNTRY_RE.search(loc):
         return "no_match"
 
     # ── 3. Truly global signals (compound phrases only) ──
@@ -313,6 +393,19 @@ def keyword_classify_location(job: dict) -> str:
         for pattern in global_desc_signals:
             if re.search(pattern, desc, re.I):
                 return "match"
+
+        # Check description for US/UK signals — reject if found
+        us_desc_signals = [
+            r"us\s*work\s*authorization",
+            r"united\s*states\s*work\s*authorization",
+            r"must\s*be\s*(authorized|eligible)\s*to\s*work\s*in\s*(the\s*)?u\.?s",
+            r"w-?2\s*(employee|employment)",
+            r"this\s*(role|position)\s*is\s*(based\s*in|located\s*in)\s*(the\s*)?(us|united\s*states|uk|united\s*kingdom)",
+        ]
+        for pattern in us_desc_signals:
+            if re.search(pattern, desc, re.I):
+                return "no_match"
+
         # Bare "Remote" is ambiguous — let AI decide from description
         return "unsure"
 
@@ -340,6 +433,7 @@ NO_MATCH if:
 - Location is UK, Canada, Europe, EMEA, APAC, Australia, India, etc.
 - Description says "US work authorization required" or similar
 - Any specific non-African country or region is mentioned
+- Description mentions US-only benefits (401k, H1B, etc.)
 
 When in doubt, say NO_MATCH. We only want roles a person in Africa can actually get.
 
@@ -356,11 +450,12 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     """
     Send ambiguous jobs to Groq for location classification.
     Returns list of 'match', 'no_match', or 'uncertain' in same order.
+    On rate limit/failure: defaults to 'no_match' (exclude).
     """
     if not jobs:
         return []
 
-    results = ["uncertain"] * len(jobs)
+    results = ["no_match"] * len(jobs)  # SAFE DEFAULT: exclude on failure
 
     for i in range(0, len(jobs), AI_BATCH_SIZE):
         batch = jobs[i:i + AI_BATCH_SIZE]
@@ -373,30 +468,30 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
             )
         prompt = LOCATION_AI_PROMPT.format(jobs="\n".join(numbered_lines))
 
-        try:
-            resp = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=1000,
-            )
-            text = resp.choices[0].message.content.strip()
-            for line in text.splitlines():
-                parts = line.strip().split(None, 1)
-                if len(parts) >= 1:
-                    try:
-                        idx = int(parts[0].rstrip(".")) - 1
-                    except ValueError:
-                        continue
-                    if 0 <= idx < len(batch):
-                        label = parts[1].upper() if len(parts) > 1 else ""
-                        if label.startswith("MATCH"):
-                            results[i + idx] = "match"
-                        elif label.startswith("NO_MATCH"):
-                            results[i + idx] = "no_match"
-                        else:
-                            results[i + idx] = "uncertain"
-        except Exception as e:
-            log.error(f"Groq location classification error: {e}")
+        text = _groq_call_with_retry(
+            [{"role": "user", "content": prompt}],
+            max_tokens=1000,
+        )
+
+        if text is None:
+            # Rate limit exhausted or error — all default to no_match (already set)
+            log.warning(f"AI location classification failed for batch of {len(batch)}, defaulting to exclude")
+            continue
+
+        for line in text.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) >= 1:
+                try:
+                    idx = int(parts[0].rstrip(".")) - 1
+                except ValueError:
+                    continue
+                if 0 <= idx < len(batch):
+                    label = parts[1].upper() if len(parts) > 1 else ""
+                    if label.startswith("MATCH"):
+                        results[i + idx] = "match"
+                    elif label.startswith("NO_MATCH"):
+                        results[i + idx] = "no_match"
+                    else:
+                        results[i + idx] = "no_match"  # ambiguous AI response = exclude
 
     return results
