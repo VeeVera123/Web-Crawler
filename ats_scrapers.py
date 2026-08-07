@@ -276,9 +276,9 @@ def scrape_lever(slug: str) -> list[dict]:
             "slug": slug,
         })
 
-    # Company name from first post
-    if jobs and data:
-        company = data[0].get("categories", {}).get("team", "") or slug.replace("-", " ").title()
+    # Company name from slug (Lever API categories.team is the department, not company)
+    if jobs:
+        company = slug.replace("-", " ").title()
         for j in jobs:
             j["company"] = company
 
