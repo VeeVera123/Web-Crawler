@@ -4,6 +4,7 @@ Slug Discovery via Common Crawl Index API
 Queries the free Common Crawl CDX index to find company slugs for
 Workable, Recruitee, and SmartRecruiters by searching for crawled
 career-page URLs. Merges results with existing local slug files.
+Also backs up discovered slugs to Supabase slug_registry.
 
 Usage:
     python discover_slugs.py                  # query latest 3 crawls
@@ -254,6 +255,42 @@ def discover_platform(
     return all_new_slugs
 
 
+def backup_to_supabase(platform: str, slugs: set[str]):
+    """Back up discovered slugs to Supabase slug_registry."""
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_KEY", "")
+    if not supabase_url or not supabase_key:
+        log.info("  Supabase credentials not set, skipping backup")
+        return
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal,resolution=merge-duplicates",
+    }
+
+    slug_list = list(slugs)
+    chunk_size = 500
+    total = 0
+
+    for i in range(0, len(slug_list), chunk_size):
+        chunk = slug_list[i:i + chunk_size]
+        rows = [{"ats": platform, "slug": s, "source": "commoncrawl"} for s in chunk]
+        try:
+            r = requests.post(
+                f"{supabase_url}/rest/v1/slug_registry",
+                headers=headers, json=rows, timeout=60,
+                params={"on_conflict": "ats,slug"},
+            )
+            r.raise_for_status()
+            total += len(chunk)
+        except Exception as e:
+            log.error(f"  Supabase backup failed: {e}")
+
+    log.info(f"  {platform}: backed up {total} slugs to Supabase")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Discover ATS company slugs via Common Crawl")
     parser.add_argument("--crawls", type=int, default=3, help="Number of recent CC crawls to query (default: 3)")
@@ -286,6 +323,11 @@ def main():
         if args.dry_run and new_slugs:
             for slug in sorted(new_slugs):
                 print(f"  {slug}")
+        elif new_slugs:
+            # Back up all slugs (existing + new) to Supabase
+            filepath = os.path.join(SLUGS_DIR, config["file"])
+            all_slugs = load_existing_slugs(filepath)
+            backup_to_supabase(platform, all_slugs)
 
     log.info(f"\nDone! Discovered {total_new} new slugs total.")
 
