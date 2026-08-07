@@ -1,8 +1,9 @@
 """
 Supabase handler — writes filtered jobs to PostgreSQL via REST API.
-Handles deduplication by job URL, upserts companies, and logs scan reports.
+Handles deduplication by job URL, populates slug_registry, and logs scan reports.
 """
 
+import re
 import logging
 from datetime import date, datetime, timezone
 
@@ -24,11 +25,11 @@ REST = f"{SUPABASE_URL}/rest/v1"
 
 # ── Helpers ──────────────────────────────────────────────
 
-def _post(table: str, data: dict | list[dict], upsert_cols: str = "") -> dict | list | None:
+def _post(table: str, data: dict | list[dict], upsert: bool = False) -> dict | list | None:
     """POST to Supabase REST API. Returns parsed JSON or None on error."""
     headers = {**HEADERS}
-    if upsert_cols:
-        headers["Prefer"] = f"return=representation,resolution=merge-duplicates"
+    if upsert:
+        headers["Prefer"] = "return=representation,resolution=merge-duplicates"
     try:
         r = http_requests.post(f"{REST}/{table}", headers=headers, json=data, timeout=30)
         r.raise_for_status()
@@ -64,33 +65,97 @@ def _get(table: str, params: str = "", limit: int = 10000) -> list[dict]:
         return []
 
 
-# ── Companies ────────────────────────────────────────────
+# ── Location Priority ────────────────────────────────────
 
-def upsert_company(ats: str, slug: str, name: str = "") -> int | None:
-    """Insert or update a company. Returns company ID."""
-    data = {
-        "ats": ats,
-        "slug": slug,
-        "name": name or slug,
-        "last_seen": datetime.now(timezone.utc).isoformat(),
+def _compute_location_priority(job: dict) -> int:
+    """
+    Compute location priority for sorting:
+    1 = Global / Anywhere / International / Worldwide
+    2 = EMEA
+    3 = Africa-wide
+    4 = Nigeria specifically
+    5 = Other African countries
+    """
+    loc = (job.get("location", "") + " " + job.get("country", "")).lower()
+
+    # Priority 4: Nigeria
+    if "nigeria" in loc or "lagos" in loc or "abuja" in loc:
+        return 4
+
+    # Priority 3: Africa-wide
+    if "africa" in loc:
+        return 3
+
+    # Priority 2: EMEA
+    if "emea" in loc:
+        return 2
+
+    # Priority 1: Global / Anywhere / Worldwide / International
+    global_patterns = [
+        r"\bglobal\b", r"\bworldwide\b", r"\banywhere\b",
+        r"\binternational\b", r"\bwork\s*from\s*anywhere\b",
+    ]
+    for pattern in global_patterns:
+        if re.search(pattern, loc, re.I):
+            return 1
+
+    # Priority 5: Other African countries
+    african_countries = {
+        "kenya", "south africa", "ghana", "egypt", "morocco", "tunisia",
+        "ethiopia", "tanzania", "uganda", "rwanda", "senegal", "cameroon",
+        "angola", "mozambique", "zimbabwe", "zambia", "botswana", "namibia",
     }
-    headers = {
-        **HEADERS,
-        "Prefer": "return=representation,resolution=merge-duplicates",
-    }
-    try:
-        r = http_requests.post(
-            f"{REST}/companies",
-            headers=headers, json=data, timeout=30,
-            params={"on_conflict": "ats,slug"},
-        )
-        r.raise_for_status()
-        rows = r.json()
-        if rows and len(rows) > 0:
-            return rows[0]["id"]
-    except Exception as e:
-        log.error(f"Failed to upsert company {ats}/{slug}: {e}")
-    return None
+    for country in african_countries:
+        if country in loc:
+            return 5
+
+    # Default: treat as global-ish (it passed the location filter)
+    return 1
+
+
+# ── Slug Registry ────────────────────────────────────────
+
+def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -> int:
+    """
+    Upsert slugs into slug_registry. Each slug is (ats, slug_value).
+    Returns count of rows upserted.
+    """
+    if not slugs:
+        return 0
+
+    # Batch upsert in chunks of 500
+    total = 0
+    chunk_size = 500
+
+    for i in range(0, len(slugs), chunk_size):
+        chunk = slugs[i:i + chunk_size]
+        rows = [
+            {
+                "ats": ats,
+                "slug": slug,
+                "source": source,
+                "last_seen": datetime.now(timezone.utc).isoformat(),
+            }
+            for ats, slug in chunk
+        ]
+
+        headers = {
+            **HEADERS,
+            "Prefer": "return=minimal,resolution=merge-duplicates",
+        }
+        try:
+            r = http_requests.post(
+                f"{REST}/slug_registry",
+                headers=headers, json=rows, timeout=60,
+                params={"on_conflict": "ats,slug"},
+            )
+            r.raise_for_status()
+            total += len(chunk)
+        except Exception as e:
+            log.error(f"Failed to upsert slug batch: {e}")
+
+    log.info(f"Slug registry: upserted {total} slugs (source={source})")
+    return total
 
 
 # ── Deduplication ────────────────────────────────────────
@@ -119,8 +184,10 @@ def get_existing_urls() -> set[str]:
 
 # ── Job insertion ────────────────────────────────────────
 
-def add_job(job: dict, location_confidence: str = "Match", company_id: int | None = None) -> bool:
+def add_job(job: dict, location_confidence: str = "Match") -> bool:
     """Insert a single job. Returns True on success."""
+    priority = _compute_location_priority(job)
+
     row = {
         "title": (job.get("title") or "")[:500],
         "job_url": job.get("url", ""),
@@ -134,10 +201,9 @@ def add_job(job: dict, location_confidence: str = "Match", company_id: int | Non
         "salary": (job.get("salary") or "")[:200],
         "description": (job.get("description") or "")[:50000],
         "location_confidence": location_confidence.capitalize(),
+        "location_priority": priority,
         "date_added": date.today().isoformat(),
     }
-    if company_id:
-        row["company_id"] = company_id
 
     result = _post("jobs", row)
     return result is not None
@@ -152,24 +218,13 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
     added = 0
     skipped = 0
 
-    # Cache company IDs to avoid repeated upserts
-    company_cache: dict[tuple[str, str], int | None] = {}
-
     for job, confidence in zip(jobs, location_confidences):
         url = job.get("url", "")
         if not url or url in existing:
             skipped += 1
             continue
 
-        # Upsert company
-        ats = job.get("source_ats", "unknown")
-        slug = job.get("slug", "")
-        cache_key = (ats, slug)
-        if cache_key not in company_cache:
-            company_cache[cache_key] = upsert_company(ats, slug, job.get("company", ""))
-        company_id = company_cache[cache_key]
-
-        if add_job(job, confidence, company_id):
+        if add_job(job, confidence):
             added += 1
             existing.add(url)
 
