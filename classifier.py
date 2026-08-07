@@ -198,24 +198,24 @@ AFRICAN_COUNTRIES = {
     "rwanda", "sao tome", "senegal", "seychelles", "sierra leone", "somalia",
     "south africa", "south sudan", "sudan", "tanzania", "togo", "tunisia",
     "uganda", "zambia", "zimbabwe",
-      }
+}
 
 GLOBAL_KEYWORDS = [
-    r"\bremote\s*[\-\u2013\u2014/,]\s*global\b",
-    r"\bremote\s*[\-\u2013\u2014/,]\s*worldwide\b",
-    r"\bremote\s*[\-\u2013\u2014/,]\s*anywhere\b",
-    r"\bremote\s*[\-\u2013\u2014/,]\s*international\b",
-    r"\bglobal\s*[\-\u2013\u2014/,]?\s*remote\b",
-    r"\bworldwide\s*[\-\u2013\u2014/,]?\s*remote\b",
+    r"\bremote\s*[\-–—/,]\s*global\b",
+    r"\bremote\s*[\-–—/,]\s*worldwide\b",
+    r"\bremote\s*[\-–—/,]\s*anywhere\b",
+    r"\bremote\s*[\-–—/,]\s*international\b",
+    r"\bglobal\s*[\-–—/,]?\s*remote\b",
+    r"\bworldwide\s*[\-–—/,]?\s*remote\b",
     r"\bwork\s*from\s*anywhere\b",
     r"\bhire\s*(globally|worldwide|anywhere)\b",
     r"\bopen\s*to\s*(all|any)\s*location",
-    r"\blocation\s*[\-\u2013\u2014:]?\s*anywhere\b",
+    r"\blocation\s*[\-–—:]?\s*anywhere\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
-# Standalone "global" or "worldwide" in the location field
+# Standalone "global" or "worldwide" in the location field (not in compound words)
 STANDALONE_GLOBAL_RE = re.compile(
     r"^\s*(global|worldwide|anywhere)\s*$", re.I
 )
@@ -229,8 +229,8 @@ US_LOCATION_PATTERNS = [
     r"\bwashington\b", r"\bphiladelphia\b", r"\bminneapolis\b",
     r"\braleigh\b", r"\bsalt\s*lake\b", r"\bdetroit\b", r"\btampa\b",
     r"\bunited\s*states\b", r"\busa\b", r"\b\(us\)\b", r"\bus\s*only\b",
-    r"\busa\s*only\b", r"\bus\s*remote\b", r"\bremote\s*[\-\u2013\u2014,]?\s*us\b",
-    r"\bremote\s*[\-\u2013\u2014,]?\s*usa\b", r"\bremote\s*[\-\u2013\u2014,]?\s*united\s*states\b",
+    r"\busa\s*only\b", r"\bus\s*remote\b", r"\bremote\s*[\-–—,]?\s*us\b",
+    r"\bremote\s*[\-–—,]?\s*usa\b", r"\bremote\s*[\-–—,]?\s*united\s*states\b",
     r"\bnorth\s*america\b",
     # US states
     r"\bcalifornia\b", r"\btexas\b", r"\bflorida\b", r"\billinois\b",
@@ -267,7 +267,7 @@ def keyword_classify_location(job: dict) -> str:
     loc = (job.get("location", "") + " " + job.get("country", "")).lower()
     desc = job.get("description_snippet", "").lower()
 
-    # -- 1. Direct Africa match --
+    # ── 1. Direct Africa match ──
     if "africa" in loc:
         return "match"
     for country in AFRICAN_COUNTRIES:
@@ -280,13 +280,11 @@ def keyword_classify_location(job: dict) -> str:
             if country in desc:
                 return "match"
 
-    # -- 2. Explicit US/non-Africa location -> reject immediately --
+    # ── 2. Explicit US location → reject immediately ──
     if any(rx.search(loc) for rx in US_LOCATION_RE):
         return "no_match"
-    if any(rx.search(loc) for rx in OTHER_NON_AFRICA_RE):
-        return "no_match"
 
-    # -- 3. Truly global signals (compound phrases only) --
+    # ── 3. Truly global signals (compound phrases only) ──
     if any(rx.search(loc) for rx in GLOBAL_RE):
         return "match"
 
@@ -294,37 +292,36 @@ def keyword_classify_location(job: dict) -> str:
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
         return "match"
 
-    # -- 4. "Remote" alone = no_match (most mean US remote) --
+    # ── 4. EMEA includes Africa — send to AI ──
+    if re.search(r"\bemea\b", loc, re.I):
+        return "unsure"
+
+    # ── 5. Other non-Africa specific locations → reject ──
+    if any(rx.search(loc) for rx in OTHER_NON_AFRICA_RE):
+        return "no_match"
+
+    # ── 6. "Remote" alone → check description, then send to AI ──
     if re.search(r"\bremote\b", loc, re.I):
-        # Check if description has strong global signals
+        # Quick check for strong global signals in description
         global_desc_signals = [
             r"open\s*to\s*(candidates\s*)?(globally|worldwide|anywhere)",
             r"hire\s*(in\s*)?(\d+\+?\s*)?countries",
             r"work\s*from\s*anywhere",
             r"location[\s:]+anywhere",
             r"distributed\s*team.*global",
-            r"remote.*global",
         ]
         for pattern in global_desc_signals:
             if re.search(pattern, desc, re.I):
                 return "match"
-        return "no_match"
+        # Bare "Remote" is ambiguous — let AI decide from description
+        return "unsure"
 
-    # -- 5. Specific non-African location in any form --
+    # ── 7. Specific non-African location in any form ──
     if loc.strip():
         return "no_match"
 
-    # -- 6. No location at all -- check description --
-    global_desc_signals = [
-        r"open\s*to\s*(candidates\s*)?(globally|worldwide|anywhere)",
-        r"hire\s*(in\s*)?(\d+\+?\s*)?countries",
-        r"work\s*from\s*anywhere",
-    ]
-    for pattern in global_desc_signals:
-        if re.search(pattern, desc, re.I):
-            return "match"
-
-    return "no_match"
+    # ── 8. No location at all — send to AI ──
+    return "unsure"
 
 
 LOCATION_AI_PROMPT = """\
@@ -363,7 +360,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     if not jobs:
         return []
 
-    results = ["no_match"] * len(jobs)
+    results = ["uncertain"] * len(jobs)
 
     for i in range(0, len(jobs), AI_BATCH_SIZE):
         batch = jobs[i:i + AI_BATCH_SIZE]
@@ -395,8 +392,10 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
                         label = parts[1].upper() if len(parts) > 1 else ""
                         if label.startswith("MATCH"):
                             results[i + idx] = "match"
-                        else:
+                        elif label.startswith("NO_MATCH"):
                             results[i + idx] = "no_match"
+                        else:
+                            results[i + idx] = "uncertain"
         except Exception as e:
             log.error(f"Groq location classification error: {e}")
 
