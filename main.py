@@ -6,6 +6,7 @@ Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
 Workable, Recruitee, SmartRecruiters.
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
+Backs up all slugs to Supabase slug_registry.
 """
 
 import os
@@ -20,7 +21,10 @@ from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
 )
-from supabase_handler import add_jobs_batch, start_scan_report, finish_scan_report
+from supabase_handler import (
+    add_jobs_batch, start_scan_report, finish_scan_report,
+    populate_slug_registry,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,33 +91,51 @@ def load_slugs() -> list[tuple[str, str]]:
     Load (ats, slug) pairs — fetches from GitHub repo for each ATS,
     falls back to local slugs/ text files if GitHub is unreachable.
     Rippling, Workable, Recruitee, SmartRecruiters are local-only.
+    Also backs up all slugs to Supabase slug_registry.
     """
     pairs = []
+    feashliaa_pairs = []
+    seed_pairs = []
 
-    # Fetch from GitHub repo
+    # Fetch from GitHub repo (Feashliaa)
     for ats, url in SLUG_SOURCES.items():
         slugs = _fetch_remote_slugs(ats, url)
+        source = "feashliaa"
         if slugs:
             log.info(f"  {ats}: {len(slugs)} companies (GitHub)")
         else:
             slugs = _load_local_slugs(ats)
+            source = "seed"
             if slugs:
                 log.info(f"  {ats}: {len(slugs)} companies (local fallback)")
         for slug in slugs:
             pairs.append((ats, slug))
+            if source == "feashliaa":
+                feashliaa_pairs.append((ats, slug))
+            else:
+                seed_pairs.append((ats, slug))
 
-    # Local-only platforms (no GitHub repo source yet)
+    # Local-only platforms
     for local_ats in ["rippling", "workable", "recruitee", "smartrecruiters"]:
         local_slugs = _load_local_slugs(local_ats)
         if local_slugs:
             log.info(f"  {local_ats}: {len(local_slugs)} companies (local)")
             for slug in local_slugs:
                 pairs.append((local_ats, slug))
+                seed_pairs.append((local_ats, slug))
 
     ats_counts = {}
     for ats, _ in pairs:
         ats_counts[ats] = ats_counts.get(ats, 0) + 1
     log.info(f"Total: {len(pairs)} boards across {len(ats_counts)} ATS platforms")
+
+    # Back up to Supabase slug_registry
+    log.info("Backing up slugs to Supabase slug_registry...")
+    if feashliaa_pairs:
+        populate_slug_registry(feashliaa_pairs, source="feashliaa")
+    if seed_pairs:
+        populate_slug_registry(seed_pairs, source="seed")
+
     return pairs
 
 
@@ -183,11 +205,9 @@ def filter_roles(jobs: list[dict]) -> list[dict]:
             included.append(job)
         elif result == "unsure":
             unsure.append(job)
-        # "exclude" → drop
 
     log.info(f"Role filter: {len(included)} keyword match, {len(unsure)} unsure → sending to AI")
 
-    # AI classify the unsure batch
     if unsure:
         unsure_titles = [j["title"] for j in unsure]
         ai_results = ai_classify_roles(unsure_titles)
@@ -212,11 +232,9 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             matched_confidences.append("match")
         elif result == "unsure":
             unsure_jobs.append(job)
-        # "no_match" → drop
 
     log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
 
-    # AI classify the unsure batch
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
         for job, label in zip(unsure_jobs, ai_results):
@@ -226,6 +244,7 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             elif label == "uncertain":
                 matched.append(job)
                 matched_confidences.append("uncertain")
+            # "no_match" → drop (this is now the default on AI failure too)
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
@@ -236,11 +255,10 @@ def main():
     log.info("ATS GLOBAL SCANNER — starting")
     log.info("=" * 60)
 
-    # Start scan report
     report_id = start_scan_report()
 
     try:
-        # 1. Load slug lists
+        # 1. Load slug lists + back up to Supabase
         log.info("Loading company slugs...")
         boards = load_slugs()
         if not boards:
