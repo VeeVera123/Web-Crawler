@@ -25,7 +25,7 @@ jobs:
 
       - name: Run scanner
         env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_JOBS_DB_ID: ${{ secrets.NOTION_JOBS_DB_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python main.py
