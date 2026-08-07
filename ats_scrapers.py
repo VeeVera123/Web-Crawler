@@ -7,10 +7,21 @@ Each returns a list of job dicts with standardised keys:
 
 import re
 import logging
+import random
+import time
+import xml.etree.ElementTree as ET
+from urllib.parse import unquote
 import requests
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 
 log = logging.getLogger(__name__)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0",
+]
 
 
 def _get(url: str, **kwargs) -> requests.Response | None:
@@ -337,6 +348,197 @@ def scrape_ashby(slug: str) -> list[dict]:
     return jobs
 
 
+# ── BambooHR ───────────────────────────────────────────
+
+def scrape_bamboohr(slug: str) -> list[dict]:
+    """BambooHR careers list — JSON endpoint, no auth required."""
+    url = f"https://{slug}.bamboohr.com/careers/list"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+    try:
+        r = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
+        if r.status_code != 200:
+            return []
+        if "application/json" not in r.headers.get("Content-Type", ""):
+            return []
+        data = r.json()
+    except Exception:
+        return []
+
+    jobs_list = data.get("result")
+    if not jobs_list or not isinstance(jobs_list, list):
+        return []
+
+    jobs = []
+    for job in jobs_list:
+        loc = job.get("location") or {}
+        if isinstance(loc, dict):
+            city = loc.get("city", "")
+            state = loc.get("state", "")
+            country = loc.get("country", "")
+            location = ", ".join(filter(None, [city, state, country]))
+        else:
+            location = str(loc) if loc else ""
+            country = ""
+
+        dept = job.get("departmentLabel", "") or ""
+        desc = _snippet(job.get("description", "") or "")
+        salary = _extract_salary(desc)
+
+        jobs.append({
+            "title": (job.get("jobOpeningName") or "").strip(),
+            "url": f"https://{slug}.bamboohr.com/careers/{job.get('id', '')}",
+            "company": slug.replace("-", " ").title(),
+            "location": location or "Not specified",
+            "country": country,
+            "department": dept,
+            "workplace_type": "",
+            "employment_type": job.get("employmentStatusLabel", ""),
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "BambooHR",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── iCIMS ──────────────────────────────────────────────
+
+def scrape_icims(slug: str) -> list[dict]:
+    """iCIMS sitemap scraper — parses sitemap.xml for job URLs.
+    Title is extracted from URL path. No description/location from sitemap."""
+    sitemap_url = f"https://careers-{slug}.icims.com/sitemap.xml"
+    headers = {
+        "Accept": "application/xml",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+    try:
+        r = requests.get(sitemap_url, timeout=REQUEST_TIMEOUT, headers=headers)
+        if r.status_code != 200:
+            return []
+        root = ET.fromstring(r.content)
+    except Exception:
+        return []
+
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    jobs = []
+
+    for url_el in root.findall(".//s:url", ns):
+        loc_el = url_el.find("s:loc", ns)
+        if loc_el is None:
+            continue
+        job_url = (loc_el.text or "").strip()
+        if not job_url or "/jobs/" not in job_url or job_url.endswith("/jobs/intro"):
+            continue
+
+        path = job_url.split("/jobs/")[-1]
+        parts = path.split("/")
+        if len(parts) >= 2:
+            title = unquote(parts[1]).replace("-", " ").strip().title()
+        else:
+            continue
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": slug.replace("-", " ").title(),
+            "location": "",  # iCIMS sitemap doesn't include location
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "iCIMS",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Workday ────────────────────────────────────────────
+
+def scrape_workday(slug: str) -> list[dict]:
+    """Workday CXS JSON API. Slug format: 'company|wd#|site_id'.
+    POST to /wday/cxs/{company}/{site_id}/jobs for paginated results."""
+    parts = slug.split("|")
+    if len(parts) != 3:
+        log.debug(f"Invalid Workday slug format: {slug}")
+        return []
+
+    company, wd, site_id = parts
+    wd_num = wd.replace("wd", "")
+    base_url = f"https://{company}.wd{wd_num}.myworkdayjobs.com"
+    api_url = f"{base_url}/wday/cxs/{company}/{site_id}/jobs"
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": random.choice(USER_AGENTS),
+        "Origin": base_url,
+        "Referer": f"{base_url}/{site_id}",
+    }
+
+    all_jobs = []
+    offset = 0
+    limit = 20
+
+    while True:
+        payload = {
+            "appliedFacets": {},
+            "limit": limit,
+            "offset": offset,
+            "searchText": "",
+        }
+
+        try:
+            r = requests.post(
+                api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
+            )
+            if r.status_code != 200:
+                break
+            data = r.json()
+        except Exception:
+            break
+
+        postings = data.get("jobPostings", [])
+        total = data.get("total", 0)
+
+        if not postings:
+            break
+
+        for post in postings:
+            job_path = post.get("externalPath", "")
+            location = (post.get("locationsText") or "")[:200]
+
+            all_jobs.append({
+                "title": (post.get("title") or "").strip(),
+                "url": f"{base_url}/{site_id}{job_path}",
+                "company": company.replace("-", " ").title(),
+                "location": location or "Not specified",
+                "country": "",
+                "department": "",
+                "workplace_type": "",
+                "employment_type": "",
+                "salary": "",
+                "description_snippet": "",  # Would need per-job fetch, too slow
+                "source_ats": "Workday",
+                "slug": slug,
+            })
+
+        offset += limit
+        if offset >= total:
+            break
+
+        # Jitter to avoid bot detection
+        time.sleep(random.uniform(0.3, 1.0))
+
+    return all_jobs
+
+
 # ── Dispatcher ──────────────────────────────────────────
 
 SCRAPERS = {
@@ -344,6 +546,9 @@ SCRAPERS = {
     "greenhouse": scrape_greenhouse,
     "lever": scrape_lever,
     "ashby": scrape_ashby,
+    "bamboohr": scrape_bamboohr,
+    "icims": scrape_icims,
+    "workday": scrape_workday,
 }
 
 
