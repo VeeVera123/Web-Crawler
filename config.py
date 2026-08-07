@@ -18,8 +18,8 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ── Scraper settings ────────────────────────────────────
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 20
 MAX_RETRIES = 2
-CONCURRENT_WORKERS = 8
-AI_BATCH_SIZE = 25       # jobs per AI location-filter call
+CONCURRENT_WORKERS = 8        # legacy fallback; main.py uses per-platform limits
+AI_BATCH_SIZE = 25            # jobs per AI location-filter call
 SLUGS_DIR = os.path.join(os.path.dirname(__file__), "slugs")
