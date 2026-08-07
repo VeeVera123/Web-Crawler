@@ -5,7 +5,7 @@ Scans 20,000+ company boards across 10 ATS platforms:
 Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
 Workable, Recruitee, SmartRecruiters.
 Filters for CSM/Account Management roles hiring globally or in Africa.
-Pushes matches to Notion.
+Pushes matches to Supabase (PostgreSQL).
 """
 
 import os
@@ -20,7 +20,7 @@ from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
 )
-from notion_handler import add_jobs_batch
+from supabase_handler import add_jobs_batch, start_scan_report, finish_scan_report
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,7 +86,7 @@ def load_slugs() -> list[tuple[str, str]]:
     """
     Load (ats, slug) pairs — fetches from GitHub repo for each ATS,
     falls back to local slugs/ text files if GitHub is unreachable.
-    Rippling is local-only (not in the GitHub repo).
+    Rippling, Workable, Recruitee, SmartRecruiters are local-only.
     """
     pairs = []
 
@@ -117,10 +117,12 @@ def load_slugs() -> list[tuple[str, str]]:
     return pairs
 
 
-def scrape_all(boards: list[tuple[str, str]]) -> list[dict]:
-    """Scrape all boards in parallel, grouped by ATS platform."""
+def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
+    """Scrape all boards in parallel, grouped by ATS platform.
+    Returns (jobs, boards_ok, boards_failed)."""
     all_jobs = []
-    failed = 0
+    total_ok = 0
+    total_failed = 0
 
     # Group boards by ATS to apply per-platform concurrency
     by_ats = {}
@@ -160,13 +162,14 @@ def scrape_all(boards: list[tuple[str, str]]) -> list[dict]:
             try:
                 ok, bad, jobs = future.result()
                 all_jobs.extend(jobs)
-                failed += bad
+                total_ok += ok
+                total_failed += bad
                 log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
             except Exception as e:
                 log.error(f"  {ats}: platform error: {e}")
 
-    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({failed} boards failed)")
-    return all_jobs
+    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed)")
+    return all_jobs, total_ok, total_failed
 
 
 def filter_roles(jobs: list[dict]) -> list[dict]:
@@ -233,40 +236,87 @@ def main():
     log.info("ATS GLOBAL SCANNER — starting")
     log.info("=" * 60)
 
-    # 1. Load slug lists
-    log.info("Loading company slugs...")
-    boards = load_slugs()
-    if not boards:
-        log.error("No boards to scrape.")
-        return
+    # Start scan report
+    report_id = start_scan_report()
 
-    # 2. Scrape all boards
-    log.info(f"\nScraping {len(boards)} boards across 10 ATS platforms...")
-    all_jobs = scrape_all(boards)
-    if not all_jobs:
-        log.info("No jobs found across any board.")
-        return
+    try:
+        # 1. Load slug lists
+        log.info("Loading company slugs...")
+        boards = load_slugs()
+        if not boards:
+            log.error("No boards to scrape.")
+            if report_id:
+                finish_scan_report(report_id, status="failed")
+            return
 
-    # 3. Filter for CSM/AM roles
-    log.info(f"\nFiltering for CSM/AM roles...")
-    csm_jobs = filter_roles(all_jobs)
-    if not csm_jobs:
-        log.info("No CSM/AM roles found.")
-        return
+        # 2. Scrape all boards
+        log.info(f"\nScraping {len(boards)} boards across 10 ATS platforms...")
+        all_jobs, boards_ok, boards_failed = scrape_all(boards)
+        if not all_jobs:
+            log.info("No jobs found across any board.")
+            if report_id:
+                finish_scan_report(
+                    report_id,
+                    boards_scanned=boards_ok,
+                    boards_failed=boards_failed,
+                )
+            return
 
-    # 4. Filter for Africa/Global locations
-    log.info(f"\nFiltering for Africa/Global eligibility...")
-    global_jobs, confidences = filter_locations(csm_jobs)
-    if not global_jobs:
-        log.info("No global/Africa-eligible CSM/AM roles found.")
-        return
+        # 3. Filter for CSM/AM roles
+        log.info(f"\nFiltering for CSM/AM roles...")
+        csm_jobs = filter_roles(all_jobs)
+        if not csm_jobs:
+            log.info("No CSM/AM roles found.")
+            if report_id:
+                finish_scan_report(
+                    report_id,
+                    boards_scanned=boards_ok,
+                    boards_failed=boards_failed,
+                    total_jobs_raw=len(all_jobs),
+                )
+            return
 
-    # 5. Push to Notion
-    log.info(f"\nPushing {len(global_jobs)} jobs to Notion...")
-    added = add_jobs_batch(global_jobs, confidences)
+        # 4. Filter for Africa/Global locations
+        log.info(f"\nFiltering for Africa/Global eligibility...")
+        global_jobs, confidences = filter_locations(csm_jobs)
+        if not global_jobs:
+            log.info("No global/Africa-eligible CSM/AM roles found.")
+            if report_id:
+                finish_scan_report(
+                    report_id,
+                    boards_scanned=boards_ok,
+                    boards_failed=boards_failed,
+                    total_jobs_raw=len(all_jobs),
+                    csm_roles=len(csm_jobs),
+                )
+            return
 
-    log.info(f"\nDone! {added} new jobs added to Notion.")
-    log.info(f"   Pipeline: {len(all_jobs)} scraped -> {len(csm_jobs)} CSM/AM -> {len(global_jobs)} global/Africa -> {added} new")
+        # 5. Push to Supabase
+        log.info(f"\nPushing {len(global_jobs)} jobs to Supabase...")
+        added = add_jobs_batch(global_jobs, confidences)
+
+        # 6. Finalize report
+        duplicates = len(global_jobs) - added
+        if report_id:
+            finish_scan_report(
+                report_id,
+                boards_scanned=boards_ok,
+                boards_failed=boards_failed,
+                total_jobs_raw=len(all_jobs),
+                csm_roles=len(csm_jobs),
+                global_jobs=len(global_jobs),
+                new_jobs_added=added,
+                duplicates=duplicates,
+            )
+
+        log.info(f"\nDone! {added} new jobs added to Supabase.")
+        log.info(f"   Pipeline: {len(all_jobs)} scraped -> {len(csm_jobs)} CSM/AM -> {len(global_jobs)} global/Africa -> {added} new")
+
+    except Exception as e:
+        log.error(f"Scanner failed: {e}")
+        if report_id:
+            finish_scan_report(report_id, status="failed")
+        raise
 
 
 if __name__ == "__main__":
