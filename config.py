@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Notion ──────────────────────────────────────────────
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-JOBS_DB_ID = os.environ.get("NOTION_JOBS_DB_ID", "")  # Output: filtered jobs land here
+# ── Supabase ───────────────────────────────────────────
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]  # service_role key (server-side only)
 
 # ── Groq (free LLM for classification) ─────────────────
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
