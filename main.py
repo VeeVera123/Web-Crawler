@@ -1,8 +1,9 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 20,000+ company boards across 7 ATS platforms:
-Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling.
+Scans 20,000+ company boards across 10 ATS platforms:
+Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
+Workable, Recruitee, SmartRecruiters.
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Notion.
 """
@@ -48,6 +49,9 @@ PLATFORM_WORKERS = {
     "icims": 30,
     "workday": 15,
     "rippling": 8,
+    "workable": 10,
+    "recruitee": 10,
+    "smartrecruiters": 10,
 }
 
 
@@ -98,12 +102,13 @@ def load_slugs() -> list[tuple[str, str]]:
         for slug in slugs:
             pairs.append((ats, slug))
 
-    # Rippling — local only
-    rippling_slugs = _load_local_slugs("rippling")
-    if rippling_slugs:
-        log.info(f"  rippling: {len(rippling_slugs)} companies (local)")
-        for slug in rippling_slugs:
-            pairs.append(("rippling", slug))
+    # Local-only platforms (no GitHub repo source yet)
+    for local_ats in ["rippling", "workable", "recruitee", "smartrecruiters"]:
+        local_slugs = _load_local_slugs(local_ats)
+        if local_slugs:
+            log.info(f"  {local_ats}: {len(local_slugs)} companies (local)")
+            for slug in local_slugs:
+                pairs.append((local_ats, slug))
 
     ats_counts = {}
     for ats, _ in pairs:
@@ -236,7 +241,7 @@ def main():
         return
 
     # 2. Scrape all boards
-    log.info(f"\nScraping {len(boards)} boards across 7 ATS platforms...")
+    log.info(f"\nScraping {len(boards)} boards across 10 ATS platforms...")
     all_jobs = scrape_all(boards)
     if not all_jobs:
         log.info("No jobs found across any board.")
