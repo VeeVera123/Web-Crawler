@@ -539,6 +539,214 @@ def scrape_workday(slug: str) -> list[dict]:
     return all_jobs
 
 
+# ── Workable ──────────────────────────────────────────
+
+def scrape_workable(slug: str) -> list[dict]:
+    """Workable public widget API — no auth, no pagination (returns all at once)."""
+    url = f"https://apply.workable.com/api/v1/widget/accounts/{slug}"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(url, params={"details": "true"}, headers=headers)
+    if not r:
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    company_name = data.get("name", slug.replace("-", " ").title())
+    jobs_list = data.get("jobs")
+    if not jobs_list or not isinstance(jobs_list, list):
+        return []
+
+    jobs = []
+    for post in jobs_list:
+        city = post.get("city", "")
+        country = post.get("country", "")
+        state = post.get("state", "")
+        location = ", ".join(filter(None, [city, state, country]))
+
+        desc = _snippet(post.get("description", ""))
+        salary = _extract_salary(desc)
+
+        # Workplace type from telecommuting flag
+        telecommuting = post.get("telecommuting", False)
+        workplace = "Remote" if telecommuting else ""
+
+        jobs.append({
+            "title": (post.get("title") or "").strip(),
+            "url": post.get("url") or post.get("shortlink") or "",
+            "company": company_name,
+            "location": location or "Not specified",
+            "country": country,
+            "department": post.get("department", ""),
+            "workplace_type": workplace,
+            "employment_type": post.get("employment_type", ""),
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "Workable",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Recruitee ─────────────────────────────────────────
+
+def scrape_recruitee(slug: str) -> list[dict]:
+    """Recruitee Careers Site API — no auth, returns all offers at once."""
+    url = f"https://{slug}.recruitee.com/api/offers/"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    offers = data.get("offers")
+    if not offers or not isinstance(offers, list):
+        return []
+
+    jobs = []
+    for offer in offers:
+        city = offer.get("city", "")
+        country = offer.get("country", "")
+        location = offer.get("location", "") or ", ".join(filter(None, [city, country]))
+
+        # Remote flag
+        remote = offer.get("remote", False)
+        workplace = "Remote" if remote else ""
+
+        # Description — try translations first, then direct field
+        translations = offer.get("translations") or {}
+        en_trans = translations.get("en", {})
+        desc_html = en_trans.get("description", "") or offer.get("description", "")
+        desc = _snippet(desc_html)
+
+        # Salary — structured object or fallback to text extraction
+        salary_str = ""
+        salary_obj = offer.get("salary")
+        if isinstance(salary_obj, dict):
+            min_sal = salary_obj.get("min", "")
+            max_sal = salary_obj.get("max", "")
+            currency = salary_obj.get("currency", "")
+            period = salary_obj.get("period", "")
+            if min_sal and max_sal:
+                salary_str = f"{currency} {min_sal}-{max_sal}".strip()
+                if period:
+                    salary_str += f" per {period}"
+        elif isinstance(salary_obj, str) and salary_obj:
+            salary_str = salary_obj
+        if not salary_str:
+            salary_str = _extract_salary(desc)
+
+        # Employment type
+        emp_type = offer.get("employment_type_code", "")
+
+        jobs.append({
+            "title": (offer.get("title") or "").strip(),
+            "url": offer.get("careers_url") or offer.get("url") or f"https://{slug}.recruitee.com/o/{offer.get('slug', '')}",
+            "company": offer.get("company_name", slug.replace("-", " ").title()),
+            "location": location or "Not specified",
+            "country": country,
+            "department": offer.get("department", ""),
+            "workplace_type": workplace,
+            "employment_type": emp_type,
+            "salary": salary_str or "",
+            "description_snippet": desc,
+            "source_ats": "Recruitee",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── SmartRecruiters ───────────────────────────────────
+
+def scrape_smartrecruiters(slug: str) -> list[dict]:
+    """SmartRecruiters Posting API — no auth for public postings, paginated."""
+    base_url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    all_jobs = []
+    offset = 0
+    limit = 100
+
+    while True:
+        r = _get(base_url, params={"limit": limit, "offset": offset}, headers=headers)
+        if not r:
+            break
+        try:
+            data = r.json()
+        except Exception:
+            break
+
+        content = data.get("content", [])
+        total = data.get("totalFound", 0)
+
+        if not content:
+            break
+
+        for post in content:
+            # Location
+            loc = post.get("location") or {}
+            city = loc.get("city", "")
+            region = loc.get("region", "")
+            country = loc.get("country", "")
+            remote = loc.get("remote", False)
+            location = ", ".join(filter(None, [city, region, country]))
+            if remote and not location:
+                location = "Remote"
+            elif remote:
+                location += " (Remote)"
+
+            # Company
+            company_obj = post.get("company") or {}
+            company_name = company_obj.get("name", slug.replace("-", " ").title())
+
+            # Department
+            dept_obj = post.get("department") or {}
+            department = dept_obj.get("label", "")
+
+            # Employment type
+            toe_obj = post.get("typeOfEmployment") or {}
+            employment_type = toe_obj.get("label", "")
+
+            # Job URL — use ref for detail, or construct careers page URL
+            ref_url = post.get("ref", "")
+            posting_id = post.get("id", "")
+            job_url = f"https://jobs.smartrecruiters.com/{slug}/{posting_id}" if posting_id else ref_url
+
+            workplace = "Remote" if remote else ""
+
+            all_jobs.append({
+                "title": (post.get("name") or "").strip(),
+                "url": job_url,
+                "company": company_name,
+                "location": location or "Not specified",
+                "country": country,
+                "department": department,
+                "workplace_type": workplace,
+                "employment_type": employment_type,
+                "salary": "",  # Not available in list endpoint
+                "description_snippet": "",  # Need per-posting fetch, too slow at scale
+                "source_ats": "SmartRecruiters",
+                "slug": slug,
+            })
+
+        offset += limit
+        if offset >= total:
+            break
+
+        # Jitter to avoid rate limits
+        time.sleep(random.uniform(0.2, 0.6))
+
+    return all_jobs
+
+
 # ── Dispatcher ──────────────────────────────────────────
 
 SCRAPERS = {
@@ -549,6 +757,9 @@ SCRAPERS = {
     "bamboohr": scrape_bamboohr,
     "icims": scrape_icims,
     "workday": scrape_workday,
+    "workable": scrape_workable,
+    "recruitee": scrape_recruitee,
+    "smartrecruiters": scrape_smartrecruiters,
 }
 
 
