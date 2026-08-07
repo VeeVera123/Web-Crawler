@@ -118,13 +118,16 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 
     log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
 
-    # AI classify the unsure batch — strict: only MATCH, no uncertain
+    # AI classify the unsure batch
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
         for job, label in zip(unsure_jobs, ai_results):
             if label == "match":
                 matched.append(job)
                 matched_confidences.append("match")
+            elif label == "uncertain":
+                matched.append(job)
+                matched_confidences.append("uncertain")
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
