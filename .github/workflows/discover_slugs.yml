@@ -24,6 +24,9 @@ jobs:
         run: pip install requests
 
       - name: Discover slugs from Common Crawl
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python discover_slugs.py --crawls 3
 
       - name: Check for changes
