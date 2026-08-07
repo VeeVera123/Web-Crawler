@@ -198,77 +198,153 @@ AFRICAN_COUNTRIES = {
     "rwanda", "sao tome", "senegal", "seychelles", "sierra leone", "somalia",
     "south africa", "south sudan", "sudan", "tanzania", "togo", "tunisia",
     "uganda", "zambia", "zimbabwe",
-}
+      }
 
 GLOBAL_KEYWORDS = [
-    r"\bglobal\b", r"\bworldwide\b", r"\banywhere\b",
-    r"\bremote\s*[\-–—]?\s*global\b", r"\bglobally\b",
-    r"\binternational\b", r"\bwork\s*from\s*anywhere\b",
-    r"\bremote\b(?!.*\bunited\s*states\b)(?!.*\bus\s*only\b)(?!.*\busa\s*only\b)",
+    r"\bremote\s*[\-\u2013\u2014/,]\s*global\b",
+    r"\bremote\s*[\-\u2013\u2014/,]\s*worldwide\b",
+    r"\bremote\s*[\-\u2013\u2014/,]\s*anywhere\b",
+    r"\bremote\s*[\-\u2013\u2014/,]\s*international\b",
+    r"\bglobal\s*[\-\u2013\u2014/,]?\s*remote\b",
+    r"\bworldwide\s*[\-\u2013\u2014/,]?\s*remote\b",
+    r"\bwork\s*from\s*anywhere\b",
+    r"\bhire\s*(globally|worldwide|anywhere)\b",
+    r"\bopen\s*to\s*(all|any)\s*location",
+    r"\blocation\s*[\-\u2013\u2014:]?\s*anywhere\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
-US_ONLY_PATTERNS = [
-    r"\bunited\s*states\s*only\b", r"\bus[\s-]*only\b",
-    r"\busa\s*only\b", r"\bmust\s*be\s*(located|based)\s*in\s*the\s*(us|united\s*states)\b",
-    r"\bauthori[sz]ed\s*to\s*work\s*in\s*the\s*(us|united\s*states)\b",
+# Standalone "global" or "worldwide" in the location field
+STANDALONE_GLOBAL_RE = re.compile(
+    r"^\s*(global|worldwide|anywhere)\s*$", re.I
+)
+
+# US cities / states / regions that should be excluded
+US_LOCATION_PATTERNS = [
+    r"\bnew\s*york\b", r"\bsan\s*francisco\b", r"\blos\s*angeles\b",
+    r"\bchicago\b", r"\bseattle\b", r"\bboston\b", r"\baustin\b",
+    r"\bdenver\b", r"\batlanta\b", r"\bportland\b", r"\bphoenix\b",
+    r"\bdallas\b", r"\bhouston\b", r"\bmiami\b", r"\bdc\b",
+    r"\bwashington\b", r"\bphiladelphia\b", r"\bminneapolis\b",
+    r"\braleigh\b", r"\bsalt\s*lake\b", r"\bdetroit\b", r"\btampa\b",
+    r"\bunited\s*states\b", r"\busa\b", r"\b\(us\)\b", r"\bus\s*only\b",
+    r"\busa\s*only\b", r"\bus\s*remote\b", r"\bremote\s*[\-\u2013\u2014,]?\s*us\b",
+    r"\bremote\s*[\-\u2013\u2014,]?\s*usa\b", r"\bremote\s*[\-\u2013\u2014,]?\s*united\s*states\b",
+    r"\bnorth\s*america\b",
+    # US states
+    r"\bcalifornia\b", r"\btexas\b", r"\bflorida\b", r"\billinois\b",
+    r"\bpennsylvania\b", r"\bgeorgia\b", r"\bmassachusetts\b",
+    r"\bcolorado\b", r"\bvirginia\b", r"\bmaryland\b", r"\boregon\b",
+    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b",
 ]
-US_ONLY_RE = [re.compile(p, re.I) for p in US_ONLY_PATTERNS]
+US_LOCATION_RE = [re.compile(p, re.I) for p in US_LOCATION_PATTERNS]
+
+# Other non-African specific locations
+OTHER_NON_AFRICA_PATTERNS = [
+    r"\bunited\s*kingdom\b", r"\buk\b", r"\blondon\b", r"\bcanada\b",
+    r"\btoronto\b", r"\bvancouver\b", r"\bgermany\b", r"\bberlin\b",
+    r"\bfrance\b", r"\bparis\b", r"\baustralia\b", r"\bsydney\b",
+    r"\bjapan\b", r"\btokyo\b", r"\bindia\b", r"\bbangalore\b",
+    r"\bsingapore\b", r"\bdublin\b", r"\bireland\b", r"\bnetherlands\b",
+    r"\bamsterdam\b", r"\bspain\b", r"\bitaly\b", r"\bsweden\b",
+    r"\bstockholm\b", r"\bdenmark\b", r"\bswitzerland\b", r"\baustr(ia|alian)\b",
+    r"\bisrael\b", r"\btel\s*aviv\b", r"\bchina\b", r"\bbeijing\b",
+    r"\bshanghai\b", r"\bbrazil\b", r"\bsao\s*paulo\b", r"\bmexico\b",
+    r"\bargentina\b", r"\bcolombia\b", r"\bkorea\b", r"\bseoul\b",
+    r"\beurope\b", r"\bemea\b", r"\bapac\b", r"\blatam\b",
+    r"\bseur\b", r"\bneur\b", r"\bdach\b", r"\banz\b",
+]
+OTHER_NON_AFRICA_RE = [re.compile(p, re.I) for p in OTHER_NON_AFRICA_PATTERNS]
 
 
 def keyword_classify_location(job: dict) -> str:
     """
     Returns 'match' (Africa/global), 'no_match', or 'unsure'.
-    Checks location fields only.
+    Strict: only matches explicit Africa or truly global roles.
+    Bare 'Remote' = no_match (most companies mean US remote).
     """
     loc = (job.get("location", "") + " " + job.get("country", "")).lower()
+    desc = job.get("description_snippet", "").lower()
 
-    # Direct Africa match
+    # -- 1. Direct Africa match --
     if "africa" in loc:
         return "match"
     for country in AFRICAN_COUNTRIES:
         if country in loc:
             return "match"
 
-    # Global/worldwide/anywhere
+    # Check description for Africa mentions too
+    if "africa" in desc or "nigeria" in desc or "lagos" in desc or "nairobi" in desc:
+        for country in AFRICAN_COUNTRIES:
+            if country in desc:
+                return "match"
+
+    # -- 2. Explicit US/non-Africa location -> reject immediately --
+    if any(rx.search(loc) for rx in US_LOCATION_RE):
+        return "no_match"
+    if any(rx.search(loc) for rx in OTHER_NON_AFRICA_RE):
+        return "no_match"
+
+    # -- 3. Truly global signals (compound phrases only) --
     if any(rx.search(loc) for rx in GLOBAL_RE):
-        # But check for US-only signals
-        full_text = loc + " " + job.get("description_snippet", "").lower()
-        if any(rx.search(full_text) for rx in US_ONLY_RE):
-            return "no_match"
         return "match"
 
-    # "Remote" without country restriction could be global
-    if re.search(r"\bremote\b", loc, re.I):
-        # If location says "Remote" with a specific non-African country, it's not global
-        specific_non_africa = re.search(
-            r"remote.*\b(united states|usa|us|uk|united kingdom|canada|germany|france|australia|india|japan|china)\b",
-            loc, re.I
-        )
-        if specific_non_africa:
-            return "no_match"
-        # Bare "Remote" is ambiguous
-        return "unsure"
+    # Check if location is standalone "Global" or "Worldwide"
+    if STANDALONE_GLOBAL_RE.search(loc.strip()):
+        return "match"
 
-    # Specific non-African location
+    # -- 4. "Remote" alone = no_match (most mean US remote) --
+    if re.search(r"\bremote\b", loc, re.I):
+        # Check if description has strong global signals
+        global_desc_signals = [
+            r"open\s*to\s*(candidates\s*)?(globally|worldwide|anywhere)",
+            r"hire\s*(in\s*)?(\d+\+?\s*)?countries",
+            r"work\s*from\s*anywhere",
+            r"location[\s:]+anywhere",
+            r"distributed\s*team.*global",
+            r"remote.*global",
+        ]
+        for pattern in global_desc_signals:
+            if re.search(pattern, desc, re.I):
+                return "match"
+        return "no_match"
+
+    # -- 5. Specific non-African location in any form --
     if loc.strip():
         return "no_match"
 
-    # No location info at all
-    return "unsure"
+    # -- 6. No location at all -- check description --
+    global_desc_signals = [
+        r"open\s*to\s*(candidates\s*)?(globally|worldwide|anywhere)",
+        r"hire\s*(in\s*)?(\d+\+?\s*)?countries",
+        r"work\s*from\s*anywhere",
+    ]
+    for pattern in global_desc_signals:
+        if re.search(pattern, desc, re.I):
+            return "match"
+
+    return "no_match"
 
 
 LOCATION_AI_PROMPT = """\
-You are a job location classifier. For each job below, determine if the role \
-could be filled by someone based in Africa or if it's open globally \
-(not restricted to a specific non-African country).
+You are a strict job location classifier. For each job below, determine if \
+someone based in AFRICA (specifically Nigeria) could realistically apply.
 
-Look at the location, country, and description for clues like:
-- "Remote - Global", "Work from anywhere", "We hire in 30+ countries"
-- Mentions of African countries or "Africa"
-- "Open to candidates worldwide"
-- Conversely: "Must be based in the US", "US work authorization required"
+MATCH only if:
+- Location explicitly mentions an African country (Nigeria, Kenya, South Africa, etc.)
+- Location says "Global", "Worldwide", "Anywhere", "Work from anywhere"
+- Description explicitly says they hire globally or in Africa
+- Location says "Remote - Global" or similar compound global phrase
+
+NO_MATCH if:
+- Location is a specific US city/state (New York, California, etc.)
+- Location says just "Remote" with no global qualifier (this usually means US)
+- Location is UK, Canada, Europe, EMEA, APAC, Australia, India, etc.
+- Description says "US work authorization required" or similar
+- Any specific non-African country or region is mentioned
+
+When in doubt, say NO_MATCH. We only want roles a person in Africa can actually get.
 
 Jobs:
 {jobs}
@@ -276,7 +352,6 @@ Jobs:
 Respond ONLY with lines like:
 1 MATCH (reason)
 2 NO_MATCH (reason)
-3 UNCERTAIN (reason)
 """
 
 
@@ -288,7 +363,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     if not jobs:
         return []
 
-    results = ["uncertain"] * len(jobs)
+    results = ["no_match"] * len(jobs)
 
     for i in range(0, len(jobs), AI_BATCH_SIZE):
         batch = jobs[i:i + AI_BATCH_SIZE]
@@ -320,10 +395,8 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
                         label = parts[1].upper() if len(parts) > 1 else ""
                         if label.startswith("MATCH"):
                             results[i + idx] = "match"
-                        elif label.startswith("NO_MATCH"):
-                            results[i + idx] = "no_match"
                         else:
-                            results[i + idx] = "uncertain"
+                            results[i + idx] = "no_match"
         except Exception as e:
             log.error(f"Groq location classification error: {e}")
 
