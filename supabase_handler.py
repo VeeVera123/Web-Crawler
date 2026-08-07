@@ -236,7 +236,11 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
 
 def start_scan_report() -> int | None:
     """Create a new scan report row. Returns the report ID."""
-    result = _post("scan_reports", {"status": "running"})
+    result = _post("scan_reports", {
+        "status": "running",
+        "run_date": date.today().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
     if result and len(result) > 0:
         report_id = result[0]["id"]
         log.info(f"Scan report #{report_id} started")
