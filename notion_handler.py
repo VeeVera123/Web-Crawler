@@ -2,7 +2,9 @@
 Notion API handler — writes filtered jobs, deduplicates by URL.
 """
 
+import re
 import logging
+import requests as http_requests
 from datetime import date
 from notion_client import Client
 from config import NOTION_TOKEN, JOBS_DB_ID
@@ -11,35 +13,40 @@ log = logging.getLogger(__name__)
 notion = Client(auth=NOTION_TOKEN)
 
 
+def _format_db_id(raw_id: str) -> str:
+    """Ensure database ID is in UUID format with hyphens."""
+    clean = raw_id.replace("-", "")
+    if len(clean) == 32:
+        return f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
+    return raw_id
+
+
 def get_existing_urls() -> set[str]:
     """Pull all job URLs already in the database to avoid duplicates."""
     urls = set()
+    db_id = _format_db_id(JOBS_DB_ID)
     has_more = True
     start_cursor = None
 
     while has_more:
-        kwargs = {"database_id": JOBS_DB_ID, "page_size": 100}
+        body = {"page_size": 100}
         if start_cursor:
-            kwargs["start_cursor"] = start_cursor
+            body["start_cursor"] = start_cursor
 
         try:
-            # notion-client 2.x uses notion.databases.query()
-            # Some versions may use a different method path
-            try:
-                response = notion.databases.query(**kwargs)
-            except AttributeError:
-                # Fallback: use the raw POST endpoint
-                response = notion.request(
-                    path=f"databases/{JOBS_DB_ID}/query",
-                    method="POST",
-                    body={"page_size": kwargs.get("page_size", 100)},
-                )
-                if start_cursor:
-                    response = notion.request(
-                        path=f"databases/{JOBS_DB_ID}/query",
-                        method="POST",
-                        body={"page_size": 100, "start_cursor": start_cursor},
-                    )
+            # Use raw HTTP to avoid notion-client URL formatting issues
+            resp = http_requests.post(
+                f"https://api.notion.com/v1/databases/{db_id}/query",
+                headers={
+                    "Authorization": f"Bearer {NOTION_TOKEN}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            response = resp.json()
         except Exception as e:
             log.error(f"Failed to query Notion: {e}")
             break
