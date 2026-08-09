@@ -1289,6 +1289,604 @@ def scrape_successfactors(slug: str) -> list[dict]:
     return all_jobs
 
 
+# ── BreezyHR ────────────────────────────────────────────
+
+def scrape_breezyhr(slug: str) -> list[dict]:
+    """BreezyHR — HTML scrape, parses /p/<job_id> links.
+    Slug is the company subdomain (e.g. 'acme')."""
+    company_name = slug.replace("-", " ").title()
+    base_url = f"https://{slug}.breezy.hr"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(base_url, headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+    seen_urls = set()
+
+    # Find all job links: /p/<hex_id>/<job-title-slug>
+    for match in re.finditer(
+        r'href=["\'](/p/([a-f0-9]+)/([^"\']+))["\']', r.text
+    ):
+        path = match.group(1)
+        job_url = f"{base_url}{path}"
+
+        if job_url in seen_urls:
+            continue
+        seen_urls.add(job_url)
+
+        # Title from the slug part of the URL
+        title_slug = match.group(3).rstrip("/")
+        title = title_slug.replace("-", " ").strip().title()
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": company_name,
+            "location": "",
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "BreezyHR",
+            "slug": slug,
+        })
+
+    # Try to enrich from nearby HTML context
+    for job in jobs:
+        # Look for location near the job link
+        pattern = re.escape(job["url"].replace(base_url, ""))
+        context_match = re.search(
+            pattern + r'[^<]*</a>.*?(?:location|loc)["\s:>]*([^<]{3,60})',
+            r.text, re.I | re.DOTALL
+        )
+        if context_match:
+            job["location"] = context_match.group(1).strip()
+
+    return jobs
+
+
+# ── ApplyToJob ──────────────────────────────────────────
+
+def scrape_applytojob(slug: str) -> list[dict]:
+    """ApplyToJob — HTML scrape, parses job listings.
+    Slug is the company subdomain (e.g. 'acme').
+    Supports newer 'list-group-item-heading' and legacy 'resumator-job-title-link'."""
+    company_name = slug.replace("-", " ").title()
+    base_url = f"https://{slug}.applytojob.com"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(base_url, headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+    seen_urls = set()
+
+    # Pattern 1: Newer layout — list-group-item-heading with links
+    for match in re.finditer(
+        r'class="list-group-item-heading"[^>]*>.*?'
+        r'<a\s+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+        r.text, re.I | re.DOTALL
+    ):
+        url = match.group(1).strip()
+        title = match.group(2).strip()
+        if not url.startswith("http"):
+            url = base_url + url
+        if url not in seen_urls:
+            seen_urls.add(url)
+            jobs.append({
+                "title": title,
+                "url": url,
+                "company": company_name,
+                "location": "",
+                "country": "",
+                "department": "",
+                "workplace_type": "",
+                "employment_type": "",
+                "salary": "",
+                "description_snippet": "",
+                "source_ats": "ApplyToJob",
+                "slug": slug,
+            })
+
+    # Pattern 2: Legacy layout — resumator-job-title-link
+    if not jobs:
+        for match in re.finditer(
+            r'class="resumator-job-title-link"[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+            r.text, re.I
+        ):
+            url = match.group(1).strip()
+            title = match.group(2).strip()
+            if not url.startswith("http"):
+                url = base_url + url
+            if url not in seen_urls:
+                seen_urls.add(url)
+                jobs.append({
+                    "title": title,
+                    "url": url,
+                    "company": company_name,
+                    "location": "",
+                    "country": "",
+                    "department": "",
+                    "workplace_type": "",
+                    "employment_type": "",
+                    "salary": "",
+                    "description_snippet": "",
+                    "source_ats": "ApplyToJob",
+                    "slug": slug,
+                })
+
+    # Pattern 3: Generic fallback — any link to /apply/ pages
+    if not jobs:
+        for match in re.finditer(
+            r'<a\s+[^>]*href=["\']([^"\']*(?:/apply/|/opening/)[^"\']*)["\'][^>]*>'
+            r'([^<]+)</a>',
+            r.text, re.I
+        ):
+            url = match.group(1).strip()
+            title = match.group(2).strip()
+            if not url.startswith("http"):
+                url = base_url + url
+            if url not in seen_urls and len(title) > 3:
+                seen_urls.add(url)
+                jobs.append({
+                    "title": title,
+                    "url": url,
+                    "company": company_name,
+                    "location": "",
+                    "country": "",
+                    "department": "",
+                    "workplace_type": "",
+                    "employment_type": "",
+                    "salary": "",
+                    "description_snippet": "",
+                    "source_ats": "ApplyToJob",
+                    "slug": slug,
+                })
+
+    # Try to extract location from nearby elements
+    for job in jobs:
+        loc_match = re.search(
+            re.escape(job["title"]) + r'</a>.*?class="[^"]*location[^"]*"[^>]*>([^<]+)',
+            r.text, re.I | re.DOTALL
+        )
+        if loc_match:
+            job["location"] = loc_match.group(1).strip()
+
+    return jobs
+
+
+# ── HRMDirect ───────────────────────────────────────────
+
+def scrape_hrmdirect(slug: str) -> list[dict]:
+    """HRMDirect — HTML scrape of job openings table.
+    Slug is the company subdomain (e.g. 'acme').
+    Parses table rows with reqitem, posTitle, cities, state, departments."""
+    company_name = slug.replace("-", " ").title()
+    url = f"https://{slug}.hrmdirect.com/employment/job-openings.php"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+    seen_urls = set()
+
+    # Parse job rows — HRMDirect uses table with job links
+    # Pattern: link to job-opening.php?req=XXXX with title
+    for match in re.finditer(
+        r'<a\s+[^>]*href=["\']([^"\']*job-opening\.php\?req=\d+[^"\']*)["\'][^>]*>'
+        r'\s*([^<]+)</a>',
+        r.text, re.I
+    ):
+        job_path = match.group(1).strip()
+        title = match.group(2).strip()
+
+        if not job_path.startswith("http"):
+            job_url = f"https://{slug}.hrmdirect.com/employment/{job_path}"
+        else:
+            job_url = job_path
+
+        if job_url in seen_urls:
+            continue
+        seen_urls.add(job_url)
+
+        # Try to find location/department in the same table row
+        row_pattern = re.escape(match.group(0))
+        row_match = re.search(
+            row_pattern + r'(.*?)</tr>',
+            r.text, re.I | re.DOTALL
+        )
+
+        location = ""
+        department = ""
+        if row_match:
+            row_html = row_match.group(1)
+            # Extract td cells after the title
+            cells = re.findall(r'<td[^>]*>\s*([^<]+?)\s*</td>', row_html, re.I)
+            if len(cells) >= 1:
+                location = cells[0].strip()
+            if len(cells) >= 2:
+                department = cells[-1].strip()
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": company_name,
+            "location": location,
+            "country": "",
+            "department": department,
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "HRMDirect",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Softgarden ──────────────────────────────────────────
+
+def scrape_softgarden(slug: str) -> list[dict]:
+    """Softgarden — REST API scraper.
+    Slug is the channel/board ID.
+    API: GET https://api.softgarden.io/api/rest/v3/frontend/jobboards/{channelId}/jobs"""
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+    }
+
+    # Try API endpoint first
+    api_url = f"https://api.softgarden.io/api/rest/v3/frontend/jobboards/{slug}/jobs"
+    r = _get(api_url, headers=headers, params={"limit": 100, "offset": 0})
+
+    if r:
+        try:
+            data = r.json()
+            results = data.get("results") or data.get("jobs") or data.get("content") or []
+            if isinstance(data, list):
+                results = data
+
+            jobs = []
+            for item in results:
+                loc = item.get("geo_city", "") or item.get("city", "") or ""
+                country = item.get("geo_country", "") or item.get("country", "") or ""
+
+                desc_html = item.get("jobDescription", "") or item.get("description", "") or ""
+                desc = _snippet(desc_html)
+                salary = _extract_salary(desc)
+
+                job_id = item.get("jobDbId") or item.get("id") or ""
+                job_url = item.get("jobUrl") or item.get("url") or ""
+                if not job_url and job_id:
+                    job_url = f"https://jobdb.softgarden.de/jobdb/public/jobposting/{job_id}/applicationForm"
+
+                jobs.append({
+                    "title": (item.get("jobName") or item.get("title") or "").strip(),
+                    "url": job_url,
+                    "company": (item.get("companyName") or item.get("company") or "").strip(),
+                    "location": loc,
+                    "country": country,
+                    "department": (item.get("audience") or item.get("department") or "").strip(),
+                    "workplace_type": (item.get("workplaceType") or "").strip(),
+                    "employment_type": (item.get("employmentType") or item.get("projectNumber") or "").strip(),
+                    "salary": salary,
+                    "description_snippet": desc,
+                    "source_ats": "Softgarden",
+                    "slug": slug,
+                })
+
+            if jobs:
+                return jobs
+        except Exception:
+            pass
+
+    # Fallback: HTML scrape of the softgarden career page
+    html_url = f"https://{slug}.softgarden.io/job/list"
+    r = _get(html_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return []
+
+    jobs = []
+    seen = set()
+
+    # Parse JSON-LD structured data
+    for ld_match in re.finditer(
+        r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
+        r.text, re.I
+    ):
+        try:
+            import json
+            ld_data = json.loads(ld_match.group(1))
+            items = ld_data if isinstance(ld_data, list) else [ld_data]
+            for item in items:
+                if item.get("@type") != "JobPosting":
+                    continue
+                job_url = item.get("url", "")
+                if job_url in seen:
+                    continue
+                seen.add(job_url)
+
+                loc_obj = item.get("jobLocation", {})
+                if isinstance(loc_obj, dict):
+                    addr = loc_obj.get("address", {})
+                    loc = addr.get("addressLocality", "")
+                    country = addr.get("addressCountry", "")
+                elif isinstance(loc_obj, list) and loc_obj:
+                    addr = loc_obj[0].get("address", {})
+                    loc = addr.get("addressLocality", "")
+                    country = addr.get("addressCountry", "")
+                else:
+                    loc = ""
+                    country = ""
+
+                desc = _snippet(item.get("description", ""))
+                salary = _extract_salary(desc)
+                org = item.get("hiringOrganization", {})
+
+                jobs.append({
+                    "title": item.get("title", "").strip(),
+                    "url": job_url,
+                    "company": (org.get("name", "") if isinstance(org, dict) else "").strip(),
+                    "location": loc,
+                    "country": country,
+                    "department": "",
+                    "workplace_type": "",
+                    "employment_type": item.get("employmentType", ""),
+                    "salary": salary,
+                    "description_snippet": desc,
+                    "source_ats": "Softgarden",
+                    "slug": slug,
+                })
+        except Exception:
+            continue
+
+    return jobs
+
+
+# ── Zoho Recruit ────────────────────────────────────────
+
+def scrape_zoho(slug: str) -> list[dict]:
+    """Zoho Recruit — HTML scrape with embedded JSON.
+    Slug is the company subdomain (e.g. 'acme').
+    Parses hidden input#jobs JSON data."""
+    company_name = slug.replace("-", " ").title()
+    url = f"https://{slug}.zohorecruit.com/jobs/Careers"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+
+    # Primary: Parse hidden input#jobs JSON
+    jobs_input = re.search(
+        r'<input[^>]*id=["\']jobs["\'][^>]*value=["\']([^"\']+)["\']',
+        r.text, re.I
+    )
+    if jobs_input:
+        import json
+        try:
+            raw = jobs_input.group(1)
+            # Unescape HTML entities
+            raw = raw.replace("&quot;", '"').replace("&amp;", "&")
+            raw = raw.replace("&lt;", "<").replace("&gt;", ">")
+            raw = raw.replace("&#39;", "'")
+            job_data = json.loads(raw)
+
+            if isinstance(job_data, list):
+                for item in job_data:
+                    title = item.get("Posting_Title") or item.get("Job_Opening_Name") or ""
+                    job_id = item.get("id") or item.get("Job Opening Id") or ""
+                    job_url_val = item.get("$url") or ""
+                    if not job_url_val and job_id:
+                        job_url_val = f"https://{slug}.zohorecruit.com/jobs/Careers/{job_id}"
+
+                    loc = item.get("City") or item.get("city") or ""
+                    state = item.get("State") or ""
+                    country = item.get("Country") or ""
+                    if state and loc:
+                        loc = f"{loc}, {state}"
+
+                    salary = item.get("Salary") or ""
+                    desc = _snippet(item.get("Job_Description") or item.get("description") or "")
+                    if not salary:
+                        salary = _extract_salary(desc)
+
+                    jobs.append({
+                        "title": title.strip(),
+                        "url": job_url_val,
+                        "company": company_name,
+                        "location": loc.strip(),
+                        "country": country.strip() if isinstance(country, str) else "",
+                        "department": (item.get("Department") or "").strip(),
+                        "workplace_type": (item.get("Remote_Job") or item.get("Work_Mode") or "").strip(),
+                        "employment_type": (item.get("Job_Type") or item.get("jobtype") or "").strip(),
+                        "salary": str(salary).strip() if salary else "",
+                        "description_snippet": desc,
+                        "source_ats": "Zoho",
+                        "slug": slug,
+                    })
+        except (json.JSONDecodeError, Exception) as e:
+            log.debug(f"Zoho: JSON parse failed for {slug}: {e}")
+
+    # Fallback: Parse JSON-LD structured data
+    if not jobs:
+        for ld_match in re.finditer(
+            r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
+            r.text, re.I
+        ):
+            try:
+                import json
+                ld_data = json.loads(ld_match.group(1))
+                items = ld_data if isinstance(ld_data, list) else [ld_data]
+                for item in items:
+                    if item.get("@type") != "JobPosting":
+                        continue
+                    loc_obj = item.get("jobLocation", {})
+                    addr = loc_obj.get("address", {}) if isinstance(loc_obj, dict) else {}
+                    desc = _snippet(item.get("description", ""))
+                    salary = _extract_salary(desc)
+                    org = item.get("hiringOrganization", {})
+
+                    jobs.append({
+                        "title": item.get("title", "").strip(),
+                        "url": item.get("url", ""),
+                        "company": (org.get("name", "") if isinstance(org, dict) else company_name).strip(),
+                        "location": addr.get("addressLocality", ""),
+                        "country": addr.get("addressCountry", ""),
+                        "department": "",
+                        "workplace_type": "",
+                        "employment_type": item.get("employmentType", ""),
+                        "salary": salary,
+                        "description_snippet": desc,
+                        "source_ats": "Zoho",
+                        "slug": slug,
+                    })
+            except Exception:
+                continue
+
+    # Fallback 2: Generic link scrape
+    if not jobs:
+        seen = set()
+        for match in re.finditer(
+            r'<a\s+[^>]*href=["\']([^"\']*(?:/jobs/|/careers/|/opening)[^"\']*)["\'][^>]*>([^<]+)</a>',
+            r.text, re.I
+        ):
+            link = match.group(1).strip()
+            title = match.group(2).strip()
+            if not link.startswith("http"):
+                link = f"https://{slug}.zohorecruit.com{link}"
+            if link not in seen and len(title) > 3:
+                seen.add(link)
+                jobs.append({
+                    "title": title,
+                    "url": link,
+                    "company": company_name,
+                    "location": "",
+                    "country": "",
+                    "department": "",
+                    "workplace_type": "",
+                    "employment_type": "",
+                    "salary": "",
+                    "description_snippet": "",
+                    "source_ats": "Zoho",
+                    "slug": slug,
+                })
+
+    return jobs
+
+
+# ── YCombinator (Work at a Startup) ─────────────────────
+
+def scrape_ycombinator(slug: str) -> list[dict]:
+    """YCombinator Work at a Startup — scrapes company pages on workatastartup.com.
+    Slug is the company identifier on workatastartup.com."""
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/json",
+    }
+    company_url = f"https://www.workatastartup.com/companies/{slug}"
+
+    r = _get(company_url, headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+
+    # Try parsing __NEXT_DATA__ or embedded JSON
+    next_data_match = re.search(
+        r'<script\s+id="__NEXT_DATA__"[^>]*>([^<]+)</script>',
+        r.text, re.I
+    )
+    if next_data_match:
+        import json
+        try:
+            nd = json.loads(next_data_match.group(1))
+            # Navigate through Next.js data structure
+            props = nd.get("props", {}).get("pageProps", {})
+            company = props.get("company", {})
+            company_name = company.get("name", slug.replace("-", " ").title())
+            job_list = company.get("jobs", []) or props.get("jobs", [])
+
+            for item in job_list:
+                loc = item.get("pretty_location") or item.get("location") or ""
+                desc = _snippet(item.get("description") or "")
+                salary_min = item.get("salary_min")
+                salary_max = item.get("salary_max")
+                salary = ""
+                if salary_min and salary_max:
+                    salary = f"${salary_min:,}-${salary_max:,}"
+                elif salary_min:
+                    salary = f"${salary_min:,}+"
+                if not salary:
+                    salary = _extract_salary(desc)
+
+                job_id = item.get("id") or ""
+                job_url = item.get("url") or ""
+                if not job_url and job_id:
+                    job_url = f"https://www.workatastartup.com/jobs/{job_id}"
+                if not job_url:
+                    job_url = company_url
+
+                jobs.append({
+                    "title": (item.get("title") or "").strip(),
+                    "url": job_url,
+                    "company": company_name,
+                    "location": loc,
+                    "country": "",
+                    "department": (item.get("role_type") or item.get("role") or "").strip(),
+                    "workplace_type": (item.get("remote") or "").strip() if isinstance(item.get("remote"), str) else ("Remote" if item.get("remote") else ""),
+                    "employment_type": (item.get("type") or "").strip(),
+                    "salary": salary,
+                    "description_snippet": desc,
+                    "source_ats": "YCombinator",
+                    "slug": slug,
+                })
+
+            if jobs:
+                return jobs
+        except Exception as e:
+            log.debug(f"YCombinator: NEXT_DATA parse failed for {slug}: {e}")
+
+    # Fallback: parse job links from HTML
+    seen = set()
+    for match in re.finditer(
+        r'<a\s+[^>]*href=["\'](?:https://www\.workatastartup\.com)?(/jobs/\d+)["\'][^>]*>'
+        r'\s*([^<]+)</a>',
+        r.text, re.I
+    ):
+        path = match.group(1)
+        title = match.group(2).strip()
+        job_url = f"https://www.workatastartup.com{path}"
+        if job_url not in seen and len(title) > 3:
+            seen.add(job_url)
+            jobs.append({
+                "title": title,
+                "url": job_url,
+                "company": slug.replace("-", " ").title(),
+                "location": "",
+                "country": "",
+                "department": "",
+                "workplace_type": "",
+                "employment_type": "",
+                "salary": "",
+                "description_snippet": "",
+                "source_ats": "YCombinator",
+                "slug": slug,
+            })
+
+    return jobs
+
+
 # ── Dispatcher ──────────────────────────────────────────
 
 SCRAPERS = {
@@ -1307,6 +1905,12 @@ SCRAPERS = {
     "brassring": scrape_brassring,
     "teamtailor": scrape_teamtailor,
     "successfactors": scrape_successfactors,
+    "breezyhr": scrape_breezyhr,
+    "applytojob": scrape_applytojob,
+    "hrmdirect": scrape_hrmdirect,
+    "softgarden": scrape_softgarden,
+    "zoho": scrape_zoho,
+    "ycombinator": scrape_ycombinator,
 }
 
 
@@ -1441,12 +2045,64 @@ def _fetch_taleo_description(job: dict) -> str:
     return ""
 
 
+def _fetch_generic_description(job: dict) -> str:
+    """Generic description fetcher — loads the job URL and extracts
+    text from common HTML patterns (JSON-LD, meta description, body text)."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(url, headers=headers)
+    if not r:
+        return ""
+
+    # Try JSON-LD first
+    ld_match = re.search(
+        r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
+        r.text, re.I
+    )
+    if ld_match:
+        try:
+            import json
+            ld = json.loads(ld_match.group(1))
+            if isinstance(ld, dict) and ld.get("description"):
+                return _snippet(ld["description"])
+        except Exception:
+            pass
+
+    # Try meta description
+    meta_match = re.search(
+        r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
+        r.text, re.I
+    )
+    if meta_match:
+        desc = meta_match.group(1).strip()
+        if len(desc) > 50:
+            return _snippet(desc)
+
+    # Try common job description containers
+    for pattern in [
+        r'class="[^"]*(?:job-description|job_description|description|posting-content|job-details)[^"]*"[^>]*>(.*?)</(?:div|section)',
+        r'<article[^>]*>(.*?)</article>',
+    ]:
+        match = re.search(pattern, r.text, re.DOTALL | re.I)
+        if match:
+            text = _snippet(match.group(1))
+            if len(text) > 50:
+                return text
+
+    return ""
+
+
 # Platforms that need description enrichment
 DESCRIPTION_FETCHERS = {
     "iCIMS": _fetch_icims_description,
     "Workday": _fetch_workday_description,
     "SmartRecruiters": _fetch_smartrecruiters_description,
     "Taleo": _fetch_taleo_description,
+    "BreezyHR": _fetch_generic_description,
+    "ApplyToJob": _fetch_generic_description,
+    "HRMDirect": _fetch_generic_description,
 }
 
 
