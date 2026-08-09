@@ -17,7 +17,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config_anthropic import CONCURRENT_WORKERS, SLUGS_DIR
-from ats_scrapers import scrape_board
+from ats_scrapers import scrape_board, enrich_descriptions
 from classifier_anthropic import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
@@ -96,7 +96,8 @@ def load_slugs() -> list[tuple[str, str]]:
     """
     Load (ats, slug) pairs — fetches from GitHub repo for each ATS,
     falls back to local slugs/ text files if GitHub is unreachable.
-    Rippling, Workable, Recruitee, SmartRecruiters are local-only.
+    Rippling, Workable, Recruitee, SmartRecruiters, Taleo,
+    Oracle Cloud HCM, BrassRing, Teamtailor, SuccessFactors are local-only.
     Also backs up all slugs to Supabase slug_registry.
     """
     pairs = []
@@ -301,6 +302,10 @@ def main():
                     total_jobs_raw=len(all_jobs),
                 )
             return
+
+        # 3b. Enrich descriptions for platforms that lack them
+        log.info(f"\nFetching descriptions for iCIMS/Workday/SmartRecruiters/Taleo jobs...")
+        csm_jobs = enrich_descriptions(csm_jobs)
 
         # 4. Filter for Africa/Global locations
         log.info(f"\nFiltering for Africa/Global eligibility...")
