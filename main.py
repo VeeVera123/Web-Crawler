@@ -1,9 +1,10 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 20,000+ company boards across 10 ATS platforms:
+Scans 20,000+ company boards across 15 ATS platforms:
 Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
-Workable, Recruitee, SmartRecruiters.
+Workable, Recruitee, SmartRecruiters, Taleo, Oracle Cloud HCM,
+BrassRing, Teamtailor, SAP SuccessFactors.
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
 Backs up all slugs to Supabase slug_registry.
@@ -15,9 +16,9 @@ import logging
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config import CONCURRENT_WORKERS, SLUGS_DIR
+from config_anthropic import CONCURRENT_WORKERS, SLUGS_DIR
 from ats_scrapers import scrape_board
-from classifier import (
+from classifier_anthropic import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
 )
@@ -56,6 +57,11 @@ PLATFORM_WORKERS = {
     "workable": 10,
     "recruitee": 10,
     "smartrecruiters": 10,
+    "taleo": 8,
+    "oracle_cloud_hcm": 8,
+    "brassring": 8,
+    "teamtailor": 10,
+    "successfactors": 8,
 }
 
 
@@ -116,7 +122,9 @@ def load_slugs() -> list[tuple[str, str]]:
                 seed_pairs.append((ats, slug))
 
     # Local-only platforms
-    for local_ats in ["rippling", "workable", "recruitee", "smartrecruiters"]:
+    for local_ats in ["rippling", "workable", "recruitee", "smartrecruiters",
+                       "taleo", "oracle_cloud_hcm", "brassring", "teamtailor",
+                       "successfactors"]:
         local_slugs = _load_local_slugs(local_ats)
         if local_slugs:
             log.info(f"  {local_ats}: {len(local_slugs)} companies (local)")
@@ -268,7 +276,7 @@ def main():
             return
 
         # 2. Scrape all boards
-        log.info(f"\nScraping {len(boards)} boards across 10 ATS platforms...")
+        log.info(f"\nScraping {len(boards)} boards across {len(set(a for a,_ in boards))} ATS platforms...")
         all_jobs, boards_ok, boards_failed = scrape_all(boards)
         if not all_jobs:
             log.info("No jobs found across any board.")
