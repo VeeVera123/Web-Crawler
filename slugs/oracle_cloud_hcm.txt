@@ -1,0 +1,8 @@
+# Oracle Cloud HCM — format: tenant|site_number
+# Example: eeho|CX_1
+# Find more at https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{site}/
+eeho|CX_1
+hcmx|CX_1
+ergp|CX_1
+ebsr|CX_1
+ejhm|CX_1

@@ -1,0 +1,8 @@
+# SAP SuccessFactors — format: instance|company_key
+# Example: performancemanager5.successfactors.eu|company_key
+# Find at: https://{instance}/career?company={company_key}
+performancemanager5.successfactors.eu|SAP
+hcm41.sapsf.com|siloamhospitals
+hcm17.sapsf.com|dangoteGroup
+performancemanager10.successfactors.com|olaboraT
+hcm12.sapsf.com|airaboraExt
