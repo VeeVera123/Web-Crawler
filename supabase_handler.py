@@ -230,7 +230,7 @@ def add_job(job: dict, location_confidence: str = "Match") -> bool:
         "workplace_type": (job.get("workplace_type") or "")[:100],
         "employment_type": (job.get("employment_type") or "")[:100],
         "salary": (job.get("salary") or "")[:200],
-        "description": (job.get("description") or "")[:50000],
+        "visa_sponsorship": (job.get("visa_sponsorship") or "unknown")[:50],
         "location_confidence": location_confidence.capitalize(),
         "location_priority": priority,
         "date_added": date.today().isoformat(),
