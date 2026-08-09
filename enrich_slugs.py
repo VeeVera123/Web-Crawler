@@ -5,17 +5,20 @@ Pulls company slugs from multiple sources and upserts them
 into the Supabase slug_registry table.
 
 Sources:
-  1. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
-  2. Common Crawl index (ongoing discovery for 9 platforms)
+  1. Feashliaa GitHub (50k+ slugs for 6 platforms — greenhouse,
+     lever, ashby, bamboohr, icims, workday)
+  2. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
+  3. Common Crawl index (ongoing discovery for 15 platforms)
 
 Runs weekly (Sunday) via GitHub Actions. The daily scanner
 reads from Supabase slug_registry — no local .txt files needed.
 
 Usage:
-    python enrich_slugs.py                    # full enrichment
+    python enrich_slugs.py                        # full enrichment (all 3)
+    python enrich_slugs.py --source feashliaa     # Feashliaa only
     python enrich_slugs.py --source openpostings  # OpenPostings only
     python enrich_slugs.py --source commoncrawl   # Common Crawl only
-    python enrich_slugs.py --dry-run          # count without writing
+    python enrich_slugs.py --dry-run              # count without writing
 """
 
 import argparse
@@ -47,6 +50,20 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 OPENPOSTINGS_DB_URL = (
     "https://github.com/Masterjx9/OpenPostings/raw/main/jobs.db"
 )
+
+# Feashliaa GitHub (JSON arrays of slugs — no URL conversion needed)
+FEASHLIAA_BASE = (
+    "https://raw.githubusercontent.com/Feashliaa/"
+    "job-board-aggregator/main/data"
+)
+FEASHLIAA_SOURCES = {
+    "greenhouse": f"{FEASHLIAA_BASE}/greenhouse_companies.json",
+    "lever":      f"{FEASHLIAA_BASE}/lever_companies.json",
+    "ashby":      f"{FEASHLIAA_BASE}/ashby_companies.json",
+    "bamboohr":   f"{FEASHLIAA_BASE}/bamboohr_companies.json",
+    "icims":      f"{FEASHLIAA_BASE}/icims_companies.json",
+    "workday":    f"{FEASHLIAA_BASE}/workday_companies.json",
+}
 
 # Common Crawl
 CC_INDEX_URL = "https://index.commoncrawl.org"
@@ -130,7 +147,14 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
 def _url_to_slug_lever(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
+    # Match lever.co and jobs.lever.co
     if "lever.co" in host:
+        parts = parsed.path.strip("/").split("/")
+        slug = parts[0] if parts else None
+        if slug and slug.lower() not in SKIP_SLUGS:
+            return slug
+    # Some OpenPostings URLs use levergreen or leverjobs subdomains
+    if "lever" in host and ".co" in host:
         parts = parsed.path.strip("/").split("/")
         slug = parts[0] if parts else None
         if slug and slug.lower() not in SKIP_SLUGS:
@@ -392,6 +416,13 @@ def _url_to_slug_ycombinator(url: str) -> str | None:
             slug = parts[0]
             if slug.lower() not in SKIP_SLUGS and slug not in ("jobs", "about", "faq"):
                 return slug
+    # OpenPostings may store YC URLs as ycombinator.com/companies/{slug}
+    if "ycombinator.com" in host:
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) >= 2 and parts[0] == "companies":
+            slug = parts[1]
+            if slug and slug.lower() not in SKIP_SLUGS:
+                return slug
     return None
 
 
@@ -421,7 +452,40 @@ URL_TO_SLUG = {
 
 
 # ══════════════════════════════════════════════════════════
-# SOURCE 1: OpenPostings
+# SOURCE 1: Feashliaa GitHub
+# ══════════════════════════════════════════════════════════
+
+def fetch_feashliaa_slugs() -> dict[str, set[str]]:
+    """Download slug lists from Feashliaa's job-board-aggregator repo.
+    Returns JSON arrays of slugs directly — no URL conversion needed.
+    Covers 6 platforms: greenhouse, lever, ashby, bamboohr, icims, workday."""
+    slugs_by_ats: dict[str, set[str]] = {}
+
+    for ats, url in FEASHLIAA_SOURCES.items():
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list):
+                clean = {s.strip() for s in data
+                         if isinstance(s, str) and s.strip()
+                         and s.strip().lower() not in SKIP_SLUGS}
+                slugs_by_ats[ats] = clean
+                log.info(f"  {ats}: {len(clean)} slugs from Feashliaa")
+            else:
+                log.warning(f"  {ats}: unexpected JSON format (not a list)")
+                slugs_by_ats[ats] = set()
+        except Exception as e:
+            log.error(f"  {ats}: failed to fetch from Feashliaa: {e}")
+            slugs_by_ats[ats] = set()
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    log.info(f"Feashliaa total: {total} slugs across {len(slugs_by_ats)} platforms")
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE 2: OpenPostings
 # ══════════════════════════════════════════════════════════
 
 def fetch_openpostings_slugs() -> dict[str, set[str]]:
@@ -507,7 +571,7 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
 
 
 # ══════════════════════════════════════════════════════════
-# SOURCE 2: Common Crawl (reused from discover_slugs.py)
+# SOURCE 3: Common Crawl (ongoing discovery)
 # ══════════════════════════════════════════════════════════
 
 CC_PLATFORM_PATTERNS = {
@@ -692,11 +756,11 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set[str]], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich Supabase slug_registry from OpenPostings + Common Crawl"
+        description="Enrich Supabase slug_registry from Feashliaa + OpenPostings + Common Crawl"
     )
     parser.add_argument(
         "--source",
-        choices=["openpostings", "commoncrawl", "all"],
+        choices=["feashliaa", "openpostings", "commoncrawl", "all"],
         default="all",
         help="Which source to pull from (default: all)",
     )
@@ -712,11 +776,25 @@ def main():
 
     log.info("=" * 60)
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
+    log.info("  Sources: Feashliaa + OpenPostings + Common Crawl")
     log.info("=" * 60)
 
     grand_total = 0
 
-    # Source 1: OpenPostings
+    # Source 1: Feashliaa (50k+ slugs for 6 platforms)
+    if args.source in ("feashliaa", "all"):
+        log.info("\n--- FEASHLIAA (6 platforms, 50k+ slugs) ---")
+        fa_slugs = fetch_feashliaa_slugs()
+        fa_total = sum(len(s) for s in fa_slugs.values())
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(fa_slugs, source="feashliaa",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += fa_total
+
+    # Source 2: OpenPostings (110k+ companies across 80+ ATSs)
     if args.source in ("openpostings", "all"):
         log.info("\n--- OPENPOSTINGS (110k+ companies) ---")
         op_slugs = fetch_openpostings_slugs()
@@ -731,7 +809,7 @@ def main():
         else:
             grand_total += op_total
 
-    # Source 2: Common Crawl
+    # Source 3: Common Crawl (ongoing discovery for 15 platforms)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
         cc_slugs = fetch_commoncrawl_slugs(args.crawls)
