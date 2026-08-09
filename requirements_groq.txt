@@ -1,0 +1,3 @@
+requests>=2.31
+groq>=0.4
+python-dotenv>=1.0
