@@ -61,36 +61,32 @@ SUPPORTED_ATS = {
 }
 
 # Map OpenPostings ATS names → our ATS keys
-OPENPOSTINGS_ATS_MAP = {
-    "Greenhouse": "greenhouse",
+# Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
+_OPENPOSTINGS_ATS_MAP_RAW = {
     "greenhouse": "greenhouse",
-    "Lever": "lever",
     "lever": "lever",
-    "Ashby": "ashby",
     "ashby": "ashby",
-    "BambooHR": "bamboohr",
+    "ashbyhq": "ashby",           # OpenPostings uses "ashbyhq"
     "bamboohr": "bamboohr",
-    "iCIMS": "icims",
     "icims": "icims",
-    "Workday": "workday",
     "workday": "workday",
-    "Rippling": "rippling",
     "rippling": "rippling",
-    "Recruitee": "recruitee",
     "recruitee": "recruitee",
     "smartrecruiters": "smartrecruiters",
-    "SmartRecruiters": "smartrecruiters",
-    "Taleo": "taleo",
     "taleo": "taleo",
-    "Oracle Cloud": "oracle_cloud_hcm",
     "oracle cloud": "oracle_cloud_hcm",
-    "BrassRing": "brassring",
+    "oraclecloud": "oracle_cloud_hcm",
     "brassring": "brassring",
-    "Teamtailor": "teamtailor",
     "teamtailor": "teamtailor",
-    "SAP HR Cloud": "successfactors",
     "sap hr cloud": "successfactors",
+    "sap successfactors": "successfactors",
+    "successfactors": "successfactors",
+    "workable": "workable",
 }
+
+def _map_ats_name(name: str) -> str | None:
+    """Case-insensitive ATS name lookup."""
+    return _OPENPOSTINGS_ATS_MAP_RAW.get(name.lower().strip())
 
 # Slugs to skip
 SKIP_SLUGS = {
@@ -178,6 +174,11 @@ def _url_to_slug_rippling(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "rippling.com" in host:
+        # Pattern 1: ats.rippling.com/{company}/jobs (most common in OpenPostings)
+        parts = parsed.path.strip("/").split("/")
+        if parts and parts[0] and parts[0].lower() not in SKIP_SLUGS:
+            return parts[0]
+        # Pattern 2: {company}.rippling.com (subdomain-based)
         slug = host.replace(".rippling.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "ats"):
             return slug
@@ -211,11 +212,17 @@ def _url_to_slug_smartrecruiters(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "smartrecruiters.com" in host:
+        # Pattern: jobs.smartrecruiters.com/{CompanyName} or
+        # careers.smartrecruiters.com/{CompanyName}
         parts = parsed.path.strip("/").split("/")
         if parts and parts[0]:
             slug = parts[0]
-            if slug.lower() not in SKIP_SLUGS:
+            if slug.lower() not in SKIP_SLUGS and slug.lower() not in ("jobs", "careers", "posting"):
                 return slug
+        # Fallback: subdomain-based {company}.smartrecruiters.com
+        sub = host.replace(".smartrecruiters.com", "").lower()
+        if sub and sub not in SKIP_SLUGS and sub not in ("jobs", "careers", "www"):
+            return sub
     return None
 
 
@@ -237,9 +244,14 @@ def _url_to_slug_oracle_cloud(url: str) -> str | None:
     host = parsed.hostname or ""
     if "oraclecloud.com" in host:
         tenant = host.split(".")[0].lower()
+        if not tenant or tenant in SKIP_SLUGS:
+            return None
+        # Try to extract site from /sites/{id} in path
         site_match = re.search(r"/sites/([^/]+)", parsed.path)
-        if tenant and site_match:
+        if site_match:
             return f"{tenant}|{site_match.group(1)}"
+        # Fallback: use tenant alone (site can be discovered later)
+        return tenant
     return None
 
 
@@ -275,6 +287,7 @@ def _url_to_slug_successfactors(url: str) -> str | None:
     host = (parsed.hostname or "").lower()
     sf_domains = (".successfactors.com", ".successfactors.eu", ".sapsf.com")
     if any(host.endswith(d) for d in sf_domains):
+        # Try ?company= param first
         qs = parse_qs(parsed.query)
         company_key = None
         for k, v in qs.items():
@@ -282,6 +295,14 @@ def _url_to_slug_successfactors(url: str) -> str | None:
                 company_key = v[0]
         if company_key:
             return f"{host}|{company_key}"
+        # Fallback: extract subdomain as instance
+        instance = host.split(".")[0]
+        if instance and instance not in SKIP_SLUGS:
+            # Try extracting company from path
+            path_match = re.search(r"/career\?company=([^&]+)", url)
+            if path_match:
+                return f"{instance}|{path_match.group(1)}"
+            return instance
     return None
 
 
@@ -336,11 +357,13 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
         total = 0
         matched = 0
 
+        # Track conversion failures per ATS for debugging
+        conversion_failures: dict[str, list[str]] = {}
+
         for company_name, url_string, ats_name in cursor:
             total += 1
-            our_ats = OPENPOSTINGS_ATS_MAP.get(ats_name)
+            our_ats = _map_ats_name(ats_name)
             if not our_ats:
-                # Track unmapped ATSs for logging
                 skipped_ats[ats_name] = skipped_ats.get(ats_name, 0) + 1
                 continue
 
@@ -352,6 +375,12 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
             if slug:
                 slugs_by_ats[our_ats].add(slug)
                 matched += 1
+            else:
+                # Track failed conversions for debugging
+                if our_ats not in conversion_failures:
+                    conversion_failures[our_ats] = []
+                if len(conversion_failures[our_ats]) < 3:
+                    conversion_failures[our_ats].append(url_string)
 
         conn.close()
         log.info(f"OpenPostings: {total} total companies, "
@@ -362,10 +391,17 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
             top_skipped = sorted(skipped_ats.items(), key=lambda x: -x[1])[:10]
             log.info(f"Top unmapped ATSs: {', '.join(f'{k}({v})' for k, v in top_skipped)}")
 
-        for ats in SUPPORTED_ATS:
+        for ats in sorted(SUPPORTED_ATS):
             count = len(slugs_by_ats[ats])
             if count:
                 log.info(f"  {ats}: {count} companies")
+
+        # Log sample failing URLs for platforms with 0 matches
+        if conversion_failures:
+            log.info("URL conversion failures (sample URLs):")
+            for ats, samples in sorted(conversion_failures.items()):
+                if not slugs_by_ats.get(ats):
+                    log.info(f"  {ats}: {samples}")
 
     except Exception as e:
         log.error(f"Failed to parse OpenPostings DB: {e}")
