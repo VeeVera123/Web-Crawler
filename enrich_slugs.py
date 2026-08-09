@@ -7,15 +7,18 @@ into the Supabase slug_registry table.
 Sources:
   1. Feashliaa GitHub (50k+ slugs for 6 platforms — greenhouse,
      lever, ashby, bamboohr, icims, workday)
-  2. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
-  3. Common Crawl index (ongoing discovery for 15 platforms)
+  2. kalil0321/ats-scrapers (CSV inventories for 15 platforms —
+     incl. successfactors, smartrecruiters, workable)
+  3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
+  4. Common Crawl index (ongoing discovery for 15 platforms)
 
 Runs weekly (Sunday) via GitHub Actions. The daily scanner
 reads from Supabase slug_registry — no local .txt files needed.
 
 Usage:
-    python enrich_slugs.py                        # full enrichment (all 3)
+    python enrich_slugs.py                        # full enrichment (all 4)
     python enrich_slugs.py --source feashliaa     # Feashliaa only
+    python enrich_slugs.py --source kalil         # kalil0321 only
     python enrich_slugs.py --source openpostings  # OpenPostings only
     python enrich_slugs.py --source commoncrawl   # Common Crawl only
     python enrich_slugs.py --dry-run              # count without writing
@@ -63,6 +66,29 @@ FEASHLIAA_SOURCES = {
     "bamboohr":   f"{FEASHLIAA_BASE}/bamboohr_companies.json",
     "icims":      f"{FEASHLIAA_BASE}/icims_companies.json",
     "workday":    f"{FEASHLIAA_BASE}/workday_companies.json",
+}
+
+# kalil0321/ats-scrapers (CSV inventories for many platforms)
+KALIL_BASE = (
+    "https://raw.githubusercontent.com/kalil0321/"
+    "ats-scrapers/main/ats-companies"
+)
+KALIL_SOURCES = {
+    "greenhouse":      f"{KALIL_BASE}/greenhouse.csv",
+    "lever":           f"{KALIL_BASE}/lever.csv",
+    "ashby":           f"{KALIL_BASE}/ashby.csv",
+    "bamboohr":        f"{KALIL_BASE}/bamboohr.csv",
+    "icims":           f"{KALIL_BASE}/icims.csv",
+    "workday":         f"{KALIL_BASE}/workday.csv",
+    "rippling":        f"{KALIL_BASE}/rippling.csv",
+    "workable":        f"{KALIL_BASE}/workable.csv",
+    "recruitee":       f"{KALIL_BASE}/recruitee.csv",
+    "smartrecruiters": f"{KALIL_BASE}/smartrecruiters.csv",
+    "taleo":           f"{KALIL_BASE}/taleo.csv",
+    "teamtailor":      f"{KALIL_BASE}/teamtailor.csv",
+    "successfactors":  f"{KALIL_BASE}/successfactors.csv",
+    "breezyhr":        f"{KALIL_BASE}/breezy.csv",
+    "softgarden":      f"{KALIL_BASE}/softgarden.csv",
 }
 
 # Common Crawl
@@ -325,7 +351,7 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
 def _url_to_slug_successfactors(url: str) -> str | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    sf_domains = (".successfactors.com", ".successfactors.eu", ".sapsf.com")
+    sf_domains = (".successfactors.com", ".successfactors.eu", ".sapsf.com", ".sapsf.eu")
     if any(host.endswith(d) for d in sf_domains):
         # Try ?company= param first
         qs = parse_qs(parsed.query)
@@ -485,7 +511,91 @@ def fetch_feashliaa_slugs() -> dict[str, set[str]]:
 
 
 # ══════════════════════════════════════════════════════════
-# SOURCE 2: OpenPostings
+# SOURCE 2: kalil0321/ats-scrapers (CSV inventories)
+# ══════════════════════════════════════════════════════════
+
+def _parse_csv_line(line: str) -> tuple[str, str, str] | None:
+    """Parse a CSV line with possible quoted fields. Returns (name, slug, url)."""
+    line = line.strip()
+    if not line:
+        return None
+    # Handle quoted fields (some company names have commas)
+    parts = []
+    current = ""
+    in_quotes = False
+    for ch in line:
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == ',' and not in_quotes:
+            parts.append(current)
+            current = ""
+        else:
+            current += ch
+    parts.append(current)
+    if len(parts) >= 3:
+        return parts[0].strip(), parts[1].strip(), parts[2].strip()
+    return None
+
+
+def fetch_kalil_slugs() -> dict[str, set[str]]:
+    """Download CSV company lists from kalil0321/ats-scrapers repo.
+    CSVs have format: name,slug,url
+    Uses our URL_TO_SLUG converters on the URL column for accuracy.
+    Falls back to the slug column for platforms with simple slug formats."""
+    slugs_by_ats: dict[str, set[str]] = {}
+
+    # Platforms where the CSV slug column can be used directly
+    # (slug = what our scraper expects, no URL conversion needed)
+    DIRECT_SLUG_PLATFORMS = {
+        "greenhouse", "lever", "ashby", "workable", "recruitee",
+        "smartrecruiters", "teamtailor", "breezyhr", "softgarden",
+    }
+
+    for ats, csv_url in KALIL_SOURCES.items():
+        converter = URL_TO_SLUG.get(ats)
+        found: set[str] = set()
+
+        try:
+            r = requests.get(csv_url, timeout=60)
+            r.raise_for_status()
+            lines = r.text.strip().split("\n")
+
+            # Skip header line
+            for line in lines[1:]:
+                parsed = _parse_csv_line(line)
+                if not parsed:
+                    continue
+                name, raw_slug, url = parsed
+
+                # Try URL converter first (most reliable)
+                slug = None
+                if converter and url:
+                    slug = converter(url)
+
+                # Fallback: use raw slug column for simple-slug platforms
+                if not slug and ats in DIRECT_SLUG_PLATFORMS:
+                    if raw_slug and raw_slug.lower() not in SKIP_SLUGS:
+                        slug = raw_slug
+
+                if slug:
+                    found.add(slug)
+
+            slugs_by_ats[ats] = found
+            if found:
+                log.info(f"  {ats}: {len(found)} slugs from kalil0321")
+
+        except Exception as e:
+            log.error(f"  {ats}: failed to fetch from kalil0321: {e}")
+            slugs_by_ats[ats] = set()
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    log.info(f"kalil0321 total: {total} slugs across "
+             f"{sum(1 for s in slugs_by_ats.values() if s)} platforms")
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE 3: OpenPostings
 # ══════════════════════════════════════════════════════════
 
 def fetch_openpostings_slugs() -> dict[str, set[str]]:
@@ -571,7 +681,7 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
 
 
 # ══════════════════════════════════════════════════════════
-# SOURCE 3: Common Crawl (ongoing discovery)
+# SOURCE 4: Common Crawl (ongoing discovery)
 # ══════════════════════════════════════════════════════════
 
 CC_PLATFORM_PATTERNS = {
@@ -756,11 +866,11 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set[str]], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich Supabase slug_registry from Feashliaa + OpenPostings + Common Crawl"
+        description="Enrich Supabase slug_registry from 4 sources"
     )
     parser.add_argument(
         "--source",
-        choices=["feashliaa", "openpostings", "commoncrawl", "all"],
+        choices=["feashliaa", "kalil", "openpostings", "commoncrawl", "all"],
         default="all",
         help="Which source to pull from (default: all)",
     )
@@ -776,7 +886,7 @@ def main():
 
     log.info("=" * 60)
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
-    log.info("  Sources: Feashliaa + OpenPostings + Common Crawl")
+    log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("=" * 60)
 
     grand_total = 0
@@ -794,7 +904,20 @@ def main():
         else:
             grand_total += fa_total
 
-    # Source 2: OpenPostings (110k+ companies across 80+ ATSs)
+    # Source 2: kalil0321/ats-scrapers (15 platforms, CSV inventories)
+    if args.source in ("kalil", "all"):
+        log.info("\n--- KALIL0321 (15 platforms, CSV inventories) ---")
+        ka_slugs = fetch_kalil_slugs()
+        ka_total = sum(len(s) for s in ka_slugs.values())
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(ka_slugs, source="kalil",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ka_total
+
+    # Source 3: OpenPostings (110k+ companies across 80+ ATSs)
     if args.source in ("openpostings", "all"):
         log.info("\n--- OPENPOSTINGS (110k+ companies) ---")
         op_slugs = fetch_openpostings_slugs()
@@ -809,7 +932,7 @@ def main():
         else:
             grand_total += op_total
 
-    # Source 3: Common Crawl (ongoing discovery for 15 platforms)
+    # Source 4: Common Crawl (ongoing discovery for 15 platforms)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
         cc_slugs = fetch_commoncrawl_slugs(args.crawls)
