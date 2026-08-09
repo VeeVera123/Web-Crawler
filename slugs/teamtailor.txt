@@ -1,0 +1,12 @@
+# Teamtailor — slug is the company subdomain
+# Example: spotify → https://spotify.teamtailor.com/jobs
+spotify
+funnel
+northvolt
+sinch
+trustly
+bambora
+epidemic-sound
+pleo
+mentimeter
+bolt-com
