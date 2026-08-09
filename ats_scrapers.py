@@ -747,6 +747,548 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
     return all_jobs
 
 
+# ── Taleo (Oracle legacy) ────────────────────────────────
+
+def scrape_taleo(slug: str) -> list[dict]:
+    """Taleo career section scraper — HTML token extraction + REST API.
+    Slug format: 'company_name|section' (e.g. 'oracle|ORA_EXTERNAL_SITE')."""
+    parts = slug.split("|")
+    if len(parts) != 2:
+        log.debug(f"Invalid Taleo slug format: {slug} (expected 'company|section')")
+        return []
+
+    company, section = parts
+    base_url = f"https://{company}.taleo.net/careersection"
+    search_page_url = f"{base_url}/{section}/jobsearch.ftl"
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+
+    # Step 1: Fetch the search page to extract CSRF token and portal ID
+    r = _get(search_page_url, headers=headers)
+    if not r:
+        log.debug(f"Taleo: failed to fetch search page for {company}/{section}")
+        return []
+
+    page_html = r.text
+
+    # Extract CSRF token name and value
+    csrf_name_match = re.search(r'"csrfTokenName"\s*:\s*"([^"]+)"', page_html)
+    csrf_value_match = re.search(r'"csrfTokenValue"\s*:\s*"([^"]+)"', page_html)
+    if not csrf_name_match or not csrf_value_match:
+        log.debug(f"Taleo: could not extract CSRF tokens for {company}/{section}")
+        return []
+
+    csrf_name = csrf_name_match.group(1)
+    csrf_value = csrf_value_match.group(1)
+
+    # Extract portal ID
+    portal_match = re.search(r'"portal"\s*:\s*"?(\d+)"?', page_html)
+    if not portal_match:
+        # Try alternative pattern
+        portal_match = re.search(r'portal\s*=\s*(\d+)', page_html)
+    if not portal_match:
+        log.debug(f"Taleo: could not extract portal ID for {company}/{section}")
+        return []
+
+    portal = portal_match.group(1)
+
+    # Step 2: POST to the REST API to get job listings (paginated)
+    api_url = f"{base_url}/rest/jobboard/searchjobs?lang=en&portal={portal}"
+
+    post_headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Referer": search_page_url,
+        csrf_name: csrf_value,
+    }
+
+    # Carry cookies from the initial GET request
+    cookies = r.cookies
+
+    all_jobs = []
+    page_no = 1
+
+    while True:
+        payload = {
+            "multilineEnabled": False,
+            "sortingSelection": {
+                "sortBySelectionParam": "3",
+                "ascendingSortingOrder": "false",
+            },
+            "fieldData": {
+                "fields": {"KEYWORD": "", "LOCATION": "", "ORGANIZATION": ""},
+                "valid": True,
+            },
+            "filterSelectionParam": {"searchFilterSelections": []},
+            "advancedSearchFiltersSelectionParam": {"searchFilterSelections": []},
+            "pageNo": page_no,
+        }
+
+        try:
+            resp = requests.post(
+                api_url,
+                json=payload,
+                headers=post_headers,
+                cookies=cookies,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                log.debug(f"Taleo: API returned {resp.status_code} for {company}/{section} page {page_no}")
+                break
+            data = resp.json()
+        except Exception as e:
+            log.debug(f"Taleo: API request failed for {company}/{section}: {e}")
+            break
+
+        requisitions = data.get("requisitionList", [])
+        if not requisitions:
+            break
+
+        for req in requisitions:
+            contest_no = req.get("contestNo", "")
+            job_id = req.get("jobId", "")
+
+            # Column array contains title, location, etc.
+            columns = req.get("column", [])
+            title = columns[0] if len(columns) > 0 else ""
+            location = columns[1] if len(columns) > 1 else ""
+
+            # Try to extract country from location string
+            country = ""
+            if location:
+                loc_parts = [p.strip() for p in location.split(",")]
+                if len(loc_parts) >= 2:
+                    country = loc_parts[-1]
+
+            job_url = f"{base_url}/{section}/jobdetail.ftl?job={contest_no}"
+
+            all_jobs.append({
+                "title": str(title).strip(),
+                "url": job_url,
+                "company": company.replace("-", " ").replace("_", " ").title(),
+                "location": location or "Not specified",
+                "country": country,
+                "department": "",
+                "workplace_type": "",
+                "employment_type": "",
+                "salary": "",
+                "description_snippet": "",
+                "source_ats": "Taleo",
+                "slug": slug,
+            })
+
+        # Check if there are more pages
+        total_count = data.get("totalCount", 0)
+        if len(all_jobs) >= total_count or not requisitions:
+            break
+
+        page_no += 1
+        time.sleep(random.uniform(0.3, 1.0))
+
+    return all_jobs
+
+
+# ── Oracle Cloud HCM ────────────────────────────────────
+
+def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
+    """Oracle Cloud HCM Recruiting REST API.
+    Slug format: 'tenant|site_number' (e.g. 'eeho|CX_1')."""
+    parts = slug.split("|")
+    if len(parts) != 2:
+        log.debug(f"Invalid Oracle Cloud HCM slug format: {slug} (expected 'tenant|site_number')")
+        return []
+
+    tenant, site_number = parts
+    base_api = f"https://{tenant}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+    }
+
+    all_jobs = []
+    offset = 0
+    limit = 25
+
+    while True:
+        params = {
+            "onlyData": "true",
+            "expand": "requisitionList.secondaryLocations,flexFieldsFacet.values",
+            "finder": (
+                f"findReqs;siteNumber={site_number},"
+                f"facetsList=LOCATIONS%7CWORK_LOCATIONS%7CWORKPLACE_TYPES%7CTITLES"
+                f"%7CCATEGORIES%7CORGANIZATIONS%7CPOSTING_DATES%7CFLEX_FIELDS,"
+                f"limit={limit},sortBy=POSTING_DATES_DESC,offset={offset}"
+            ),
+        }
+
+        r = _get(base_api, params=params, headers=headers)
+        if not r:
+            log.debug(f"Oracle Cloud HCM: API request failed for {tenant}/{site_number} offset={offset}")
+            break
+
+        try:
+            data = r.json()
+        except Exception as e:
+            log.debug(f"Oracle Cloud HCM: JSON parse failed for {tenant}/{site_number}: {e}")
+            break
+
+        items = data.get("items", [])
+        if not items:
+            break
+
+        # The requisition list is nested inside the first item
+        first_item = items[0] if items else {}
+        req_list = first_item.get("requisitionList", [])
+
+        if not req_list:
+            break
+
+        for req in req_list:
+            title = req.get("Title", "")
+            job_id = req.get("Id", "")
+            primary_location = req.get("PrimaryLocation", "")
+            categories = req.get("CategoriesDisplay", "")
+            workplace_type = req.get("WorkplaceTypeDisplay", "")
+            description_html = req.get("ExternalDescriptionStr", "")
+
+            desc = _snippet(description_html)
+            salary = _extract_salary(desc)
+
+            # Build job URL
+            job_url = (
+                f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience"
+                f"/en/sites/{site_number}/job/{job_id}"
+            )
+
+            # Try to extract country from location
+            country = ""
+            if primary_location:
+                loc_parts = [p.strip() for p in primary_location.split(",")]
+                if len(loc_parts) >= 2:
+                    country = loc_parts[-1]
+
+            all_jobs.append({
+                "title": str(title).strip(),
+                "url": job_url,
+                "company": tenant.replace("-", " ").replace("_", " ").title(),
+                "location": primary_location or "Not specified",
+                "country": country,
+                "department": categories,
+                "workplace_type": workplace_type,
+                "employment_type": "",
+                "salary": salary,
+                "description_snippet": desc,
+                "source_ats": "Oracle Cloud HCM",
+                "slug": slug,
+            })
+
+        # Check pagination
+        has_more = first_item.get("hasMore", False)
+        total_count = first_item.get("totalCount", 0) or first_item.get("count", 0)
+
+        if not has_more and total_count and len(all_jobs) >= total_count:
+            break
+        if not has_more and not total_count:
+            # If no hasMore flag and no total, check if we got fewer than limit
+            if len(req_list) < limit:
+                break
+
+        offset += limit
+        time.sleep(random.uniform(0.3, 1.0))
+
+    return all_jobs
+
+
+# ── BrassRing (IBM/Infinite) ─────────────────────────────
+
+def scrape_brassring(slug: str) -> list[dict]:
+    """BrassRing search API scraper. Slug format: 'partner_id|site_id'."""
+    parts = slug.split("|")
+    if len(parts) != 2:
+        log.debug(f"Invalid BrassRing slug format: {slug} (expected 'partner_id|site_id')")
+        return []
+
+    partner_id, site_id = parts
+    search_url = "https://sjobs.brassring.com/TgNewUI/Search/Ajax/MatchedJobs"
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+
+    all_jobs = []
+    page = 1
+
+    while True:
+        form_data = (
+            f"partnerid={partner_id}&siteid={site_id}"
+            f"&keyword=&location=&pagenum={page}"
+            f"&sortBy=posteddate&SortType=desc"
+        )
+
+        try:
+            r = requests.post(
+                search_url,
+                data=form_data,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if r.status_code != 200:
+                log.debug(f"BrassRing: API returned {r.status_code} for {slug} page {page}")
+                break
+            data = r.json()
+        except Exception as e:
+            log.debug(f"BrassRing: request failed for {slug}: {e}")
+            break
+
+        jobs_array = data.get("Jobs", [])
+        if not jobs_array:
+            break
+
+        for job in jobs_array:
+            auto_req_id = job.get("AutoReqId", "")
+            title = job.get("JobTitle", "")
+            location = job.get("JobInfo1", "")
+            department = job.get("JobInfo3", "")
+            job_type = job.get("JobInfo2", "")
+            short_desc = _snippet(job.get("formattedShortDescription", ""))
+            salary = _extract_salary(short_desc)
+
+            # Try to extract country from location
+            country = ""
+            if location:
+                loc_parts = [p.strip() for p in location.split(",")]
+                if len(loc_parts) >= 2:
+                    country = loc_parts[-1]
+
+            job_url = (
+                f"https://sjobs.brassring.com/TgNewUI/Search/home/HomeWithPreLoad"
+                f"?partnerid={partner_id}&siteid={site_id}&jobid={auto_req_id}"
+            )
+
+            all_jobs.append({
+                "title": str(title).strip(),
+                "url": job_url,
+                "company": partner_id,
+                "location": location or "Not specified",
+                "country": country,
+                "department": department,
+                "workplace_type": "",
+                "employment_type": job_type,
+                "salary": salary,
+                "description_snippet": short_desc,
+                "source_ats": "BrassRing",
+                "slug": slug,
+            })
+
+        total_hits = data.get("TotalHits", 0)
+        fetched_so_far = page * 50
+        if fetched_so_far >= total_hits:
+            break
+
+        page += 1
+        time.sleep(random.uniform(0.3, 1.0))
+
+    return all_jobs
+
+
+# ── Teamtailor ───────────────────────────────────────────
+
+def scrape_teamtailor(slug: str) -> list[dict]:
+    """Teamtailor RSS feed scraper with HTML fallback.
+    Slug is the company subdomain (e.g. 'spotify')."""
+    company_name = slug.capitalize()
+    rss_url = f"https://{slug}.teamtailor.com/jobs.rss"
+
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    # ── Primary: RSS feed ──
+    r = _get(rss_url, headers=headers)
+    if r and r.status_code == 200:
+        try:
+            root = ET.fromstring(r.content)
+            jobs = []
+
+            for item in root.iter("item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                desc_el = item.find("description")
+                category_el = item.find("category")
+
+                title = (title_el.text or "").strip() if title_el is not None else ""
+                link = (link_el.text or "").strip() if link_el is not None else ""
+                desc_html = (desc_el.text or "") if desc_el is not None else ""
+                department = (category_el.text or "").strip() if category_el is not None else ""
+
+                desc = _snippet(desc_html)
+                salary = _extract_salary(desc)
+
+                jobs.append({
+                    "title": title,
+                    "url": link,
+                    "company": company_name,
+                    "location": "",
+                    "country": "",
+                    "department": department,
+                    "workplace_type": "",
+                    "employment_type": "",
+                    "salary": salary,
+                    "description_snippet": desc,
+                    "source_ats": "Teamtailor",
+                    "slug": slug,
+                })
+
+            if jobs:
+                return jobs
+        except ET.ParseError:
+            log.debug(f"Teamtailor: RSS XML parse failed for {slug}, trying HTML fallback")
+
+    # ── Fallback: HTML scrape ──
+    html_url = f"https://{slug}.teamtailor.com/jobs"
+    r = _get(html_url, headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+    # Job links follow pattern: /jobs/{id}-{slug-title}
+    for match in re.finditer(r'href=["\'](/jobs/(\d+)-[^"\']+)["\']', r.text):
+        path = match.group(1)
+        job_url = f"https://{slug}.teamtailor.com{path}"
+
+        # Derive title from the slug portion of the URL
+        slug_part = path.split("/jobs/")[-1] if "/jobs/" in path else ""
+        # Remove the numeric prefix: "12345-some-job-title" -> "some-job-title"
+        title_slug = re.sub(r"^\d+-", "", slug_part)
+        title = title_slug.replace("-", " ").strip().title()
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": company_name,
+            "location": "",
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "Teamtailor",
+            "slug": slug,
+        })
+
+    # Deduplicate by URL (HTML may have repeated links)
+    seen_urls = set()
+    unique_jobs = []
+    for j in jobs:
+        if j["url"] not in seen_urls:
+            seen_urls.add(j["url"])
+            unique_jobs.append(j)
+
+    return unique_jobs
+
+
+# ── SAP SuccessFactors ─────────────────────────────────
+
+def scrape_successfactors(slug: str) -> list[dict]:
+    """SAP SuccessFactors career site scraper.
+    Slug format: 'instance|company_key' (e.g. 'performancemanager5.successfactors.eu|companyKey').
+    Uses the career site JSON API at /xi/ui/pages/careersite/api/v1/jobs."""
+    parts = slug.split("|")
+    if len(parts) != 2:
+        log.debug(f"Invalid SuccessFactors slug format: {slug} (expected 'instance|company_key')")
+        return []
+
+    instance, company_key = parts
+    base_url = f"https://{instance}"
+    api_url = f"{base_url}/xi/ui/pages/careersite/api/v1/jobs"
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+    }
+
+    all_jobs = []
+    offset = 0
+    limit = 20
+
+    while True:
+        params = {
+            "company": company_key,
+            "offset": offset,
+            "limit": limit,
+        }
+
+        r = _get(api_url, params=params, headers=headers)
+        if not r:
+            log.debug(f"SuccessFactors: API request failed for {slug} offset={offset}")
+            break
+
+        try:
+            data = r.json()
+        except Exception as e:
+            log.debug(f"SuccessFactors: JSON parse failed for {slug}: {e}")
+            break
+
+        results = data.get("results", data.get("jobRequisitions", []))
+        if not results:
+            # Try alternate response shape
+            results = data.get("d", {}).get("results", [])
+        if not results:
+            break
+
+        for req in results:
+            title = req.get("jobTitle", req.get("externalTitle", ""))
+            job_id = req.get("jobReqId", req.get("id", ""))
+            location = req.get("location", req.get("primaryLocation", ""))
+            department = req.get("department", req.get("division", ""))
+            desc_html = req.get("jobDescription", req.get("externalDescription", ""))
+            employment_type = req.get("employmentType", req.get("scheduleType", ""))
+
+            desc = _snippet(desc_html) if desc_html else ""
+            salary = _extract_salary(desc) if desc else ""
+
+            # Build job URL
+            job_url = f"{base_url}/career?company={company_key}&career_job_req_id={job_id}&career_ns=job_listing_summary"
+
+            # Try to extract country from location
+            country = ""
+            if location:
+                loc_parts = [p.strip() for p in location.split(",")]
+                if len(loc_parts) >= 2:
+                    country = loc_parts[-1]
+
+            all_jobs.append({
+                "title": str(title).strip(),
+                "url": job_url,
+                "company": company_key.replace("-", " ").replace("_", " ").title(),
+                "location": location or "Not specified",
+                "country": country,
+                "department": department,
+                "workplace_type": "",
+                "employment_type": employment_type,
+                "salary": salary,
+                "description_snippet": desc,
+                "source_ats": "SAP SuccessFactors",
+                "slug": slug,
+            })
+
+        # Check pagination
+        total = data.get("total", data.get("totalCount", 0))
+        if total and len(all_jobs) >= total:
+            break
+        if len(results) < limit:
+            break
+
+        offset += limit
+        time.sleep(random.uniform(0.3, 1.0))
+
+    return all_jobs
+
+
 # ── Dispatcher ──────────────────────────────────────────
 
 SCRAPERS = {
@@ -760,6 +1302,11 @@ SCRAPERS = {
     "workable": scrape_workable,
     "recruitee": scrape_recruitee,
     "smartrecruiters": scrape_smartrecruiters,
+    "taleo": scrape_taleo,
+    "oracle_cloud_hcm": scrape_oracle_cloud_hcm,
+    "brassring": scrape_brassring,
+    "teamtailor": scrape_teamtailor,
+    "successfactors": scrape_successfactors,
 }
 
 
