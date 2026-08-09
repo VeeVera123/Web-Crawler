@@ -165,11 +165,11 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
 def get_all_slugs() -> list[tuple[str, str]]:
     """
     Fetch all (ats, slug) pairs from slug_registry.
-    Supabase returns paginated results so we loop until exhausted.
+    Supabase caps responses at 1000 rows, so we paginate with that limit.
     """
     pairs = []
     offset = 0
-    batch_size = 10000
+    batch_size = 1000  # Supabase default max per response
 
     while True:
         rows = _get(
@@ -195,7 +195,7 @@ def get_existing_urls() -> set[str]:
     """Pull all job URLs already in the database to avoid duplicates."""
     urls = set()
     offset = 0
-    batch_size = 10000
+    batch_size = 1000  # Supabase default max per response
 
     while True:
         rows = _get("jobs", f"select=job_url&offset={offset}", limit=batch_size)
