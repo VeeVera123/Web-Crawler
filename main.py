@@ -1,10 +1,11 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 20,000+ company boards across 15 ATS platforms:
+Scans 20,000+ company boards across 21 ATS platforms:
 Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
 Workable, Recruitee, SmartRecruiters, Taleo, Oracle Cloud HCM,
-BrassRing, Teamtailor, SAP SuccessFactors.
+BrassRing, Teamtailor, SAP SuccessFactors, BreezyHR, ApplyToJob,
+HRMDirect, Softgarden, Zoho Recruit, YCombinator.
 
 Reads slugs from Supabase slug_registry (single source of truth,
 enriched weekly by enrich_slugs.py from OpenPostings + Common Crawl).
@@ -50,6 +51,12 @@ PLATFORM_WORKERS = {
     "brassring": 8,
     "teamtailor": 10,
     "successfactors": 8,
+    "breezyhr": 10,
+    "applytojob": 10,
+    "hrmdirect": 8,
+    "softgarden": 10,
+    "zoho": 8,
+    "ycombinator": 10,
 }
 
 
@@ -233,7 +240,7 @@ def main():
             return
 
         # 3b. Enrich descriptions for platforms that lack them
-        log.info(f"\nFetching descriptions for iCIMS/Workday/SmartRecruiters/Taleo jobs...")
+        log.info(f"\nFetching descriptions for jobs missing them...")
         csm_jobs = enrich_descriptions(csm_jobs)
 
         # 4. Filter for Africa/Global locations
