@@ -5,18 +5,17 @@ Scans 20,000+ company boards across 15 ATS platforms:
 Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
 Workable, Recruitee, SmartRecruiters, Taleo, Oracle Cloud HCM,
 BrassRing, Teamtailor, SAP SuccessFactors.
+
+Reads slugs from Supabase slug_registry (single source of truth,
+enriched weekly by enrich_slugs.py from OpenPostings + Common Crawl).
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
-Backs up all slugs to Supabase slug_registry.
 """
 
-import os
-import json
 import logging
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config_anthropic import CONCURRENT_WORKERS, SLUGS_DIR
+from config_anthropic import CONCURRENT_WORKERS
 from ats_scrapers import scrape_board, enrich_descriptions
 from classifier_anthropic import (
     keyword_classify_role, ai_classify_roles,
@@ -24,7 +23,7 @@ from classifier_anthropic import (
 )
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
-    populate_slug_registry,
+    get_all_slugs,
 )
 
 logging.basicConfig(
@@ -33,17 +32,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-# GitHub repo with 20k+ company slugs (updated regularly via Common Crawl)
-SLUG_REPO_BASE = "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data"
-SLUG_SOURCES = {
-    "greenhouse": f"{SLUG_REPO_BASE}/greenhouse_companies.json",
-    "lever":      f"{SLUG_REPO_BASE}/lever_companies.json",
-    "ashby":      f"{SLUG_REPO_BASE}/ashby_companies.json",
-    "bamboohr":   f"{SLUG_REPO_BASE}/bamboohr_companies.json",
-    "icims":      f"{SLUG_REPO_BASE}/icims_companies.json",
-    "workday":    f"{SLUG_REPO_BASE}/workday_companies.json",
-}
 
 # Per-platform concurrency limits (respect rate limits)
 PLATFORM_WORKERS = {
@@ -65,85 +53,26 @@ PLATFORM_WORKERS = {
 }
 
 
-def _fetch_remote_slugs(ats: str, url: str) -> list[str]:
-    """Download a company slug list from the GitHub repo."""
-    try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        slugs = r.json()
-        if isinstance(slugs, list):
-            return slugs
-    except Exception as e:
-        log.warning(f"Failed to fetch {ats} slugs from GitHub: {e}")
-    return []
-
-
-def _load_local_slugs(ats: str) -> list[str]:
-    """Fallback: load from local slugs/ text files."""
-    filepath = os.path.join(SLUGS_DIR, f"{ats}.txt")
-    if not os.path.exists(filepath):
-        return []
-    slugs = []
-    with open(filepath, "r") as f:
-        for line in f:
-            slug = line.strip()
-            if slug and not slug.startswith("#"):
-                slugs.append(slug)
-    return slugs
-
-
 def load_slugs() -> list[tuple[str, str]]:
     """
-    Load (ats, slug) pairs — fetches from GitHub repo for each ATS,
-    falls back to local slugs/ text files if GitHub is unreachable.
-    Rippling, Workable, Recruitee, SmartRecruiters, Taleo,
-    Oracle Cloud HCM, BrassRing, Teamtailor, SuccessFactors are local-only.
-    Also backs up all slugs to Supabase slug_registry.
+    Load (ats, slug) pairs from Supabase slug_registry.
+    Supabase is the single source of truth — enriched weekly
+    by enrich_slugs.py (OpenPostings + Common Crawl).
     """
-    pairs = []
-    feashliaa_pairs = []
-    seed_pairs = []
+    pairs = get_all_slugs()
 
-    # Fetch from GitHub repo (Feashliaa)
-    for ats, url in SLUG_SOURCES.items():
-        slugs = _fetch_remote_slugs(ats, url)
-        source = "feashliaa"
-        if slugs:
-            log.info(f"  {ats}: {len(slugs)} companies (GitHub)")
-        else:
-            slugs = _load_local_slugs(ats)
-            source = "seed"
-            if slugs:
-                log.info(f"  {ats}: {len(slugs)} companies (local fallback)")
-        for slug in slugs:
-            pairs.append((ats, slug))
-            if source == "feashliaa":
-                feashliaa_pairs.append((ats, slug))
-            else:
-                seed_pairs.append((ats, slug))
+    if not pairs:
+        log.warning("No slugs found in Supabase slug_registry!")
+        log.warning("Run enrich_slugs.py first to populate the registry.")
+        return []
 
-    # Local-only platforms
-    for local_ats in ["rippling", "workable", "recruitee", "smartrecruiters",
-                       "taleo", "oracle_cloud_hcm", "brassring", "teamtailor",
-                       "successfactors"]:
-        local_slugs = _load_local_slugs(local_ats)
-        if local_slugs:
-            log.info(f"  {local_ats}: {len(local_slugs)} companies (local)")
-            for slug in local_slugs:
-                pairs.append((local_ats, slug))
-                seed_pairs.append((local_ats, slug))
-
-    ats_counts = {}
+    ats_counts: dict[str, int] = {}
     for ats, _ in pairs:
         ats_counts[ats] = ats_counts.get(ats, 0) + 1
-    log.info(f"Total: {len(pairs)} boards across {len(ats_counts)} ATS platforms")
 
-    # Back up to Supabase slug_registry
-    log.info("Backing up slugs to Supabase slug_registry...")
-    if feashliaa_pairs:
-        populate_slug_registry(feashliaa_pairs, source="feashliaa")
-    if seed_pairs:
-        populate_slug_registry(seed_pairs, source="seed")
+    for ats in sorted(ats_counts, key=lambda a: -ats_counts[a]):
+        log.info(f"  {ats}: {ats_counts[ats]} companies")
+    log.info(f"Total: {len(pairs)} boards across {len(ats_counts)} ATS platforms")
 
     return pairs
 
@@ -267,8 +196,8 @@ def main():
     report_id = start_scan_report()
 
     try:
-        # 1. Load slug lists + back up to Supabase
-        log.info("Loading company slugs...")
+        # 1. Load slugs from Supabase
+        log.info("Loading company slugs from Supabase...")
         boards = load_slugs()
         if not boards:
             log.error("No boards to scrape.")
