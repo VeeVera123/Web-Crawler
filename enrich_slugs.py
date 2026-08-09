@@ -52,12 +52,14 @@ OPENPOSTINGS_DB_URL = (
 CC_INDEX_URL = "https://index.commoncrawl.org"
 CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
 
-# ATS platforms we have scrapers for — only import these
+# ATS platforms we have scrapers for — only import these (21 total)
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
     "taleo", "oracle_cloud_hcm", "brassring", "teamtailor",
     "successfactors",
+    "breezyhr", "applytojob", "hrmdirect", "softgarden", "zoho",
+    "ycombinator",
 }
 
 # Map OpenPostings ATS names → our ATS keys
@@ -82,6 +84,20 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "sap successfactors": "successfactors",
     "successfactors": "successfactors",
     "workable": "workable",
+    # New 6 platforms
+    "breezyhr": "breezyhr",
+    "breezy": "breezyhr",
+    "breezy hr": "breezyhr",
+    "applytojob": "applytojob",
+    "apply to job": "applytojob",
+    "hrmdirect": "hrmdirect",
+    "hrm direct": "hrmdirect",
+    "softgarden": "softgarden",
+    "zoho": "zoho",
+    "zoho recruit": "zoho",
+    "ycombinator": "ycombinator",
+    "y combinator": "ycombinator",
+    "yc": "ycombinator",
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -306,6 +322,79 @@ def _url_to_slug_successfactors(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_breezyhr(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "breezy.hr" in host:
+        slug = host.replace(".breezy.hr", "").lower()
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
+    return None
+
+
+def _url_to_slug_applytojob(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "applytojob.com" in host:
+        slug = host.replace(".applytojob.com", "").lower()
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
+    return None
+
+
+def _url_to_slug_hrmdirect(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "hrmdirect.com" in host:
+        slug = host.replace(".hrmdirect.com", "").lower()
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
+    return None
+
+
+def _url_to_slug_softgarden(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "softgarden.io" in host:
+        slug = host.replace(".softgarden.io", "").lower()
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
+    # Also handle api.softgarden.io/api/.../jobboards/{channelId}
+    if "softgarden" in host:
+        path_match = re.search(r"/jobboards/([^/]+)", parsed.path)
+        if path_match:
+            return path_match.group(1)
+    return None
+
+
+def _url_to_slug_zoho(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "zohorecruit.com" in host:
+        slug = host.replace(".zohorecruit.com", "").lower()
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
+    return None
+
+
+def _url_to_slug_ycombinator(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "workatastartup.com" in host:
+        parts = parsed.path.strip("/").split("/")
+        # Pattern: /companies/{slug}
+        if len(parts) >= 2 and parts[0] == "companies":
+            slug = parts[1]
+            if slug and slug.lower() not in SKIP_SLUGS:
+                return slug
+        # Pattern: /{slug} (direct slug in path)
+        elif len(parts) >= 1 and parts[0]:
+            slug = parts[0]
+            if slug.lower() not in SKIP_SLUGS and slug not in ("jobs", "about", "faq"):
+                return slug
+    return None
+
+
 URL_TO_SLUG = {
     "greenhouse": _url_to_slug_greenhouse,
     "lever": _url_to_slug_lever,
@@ -322,6 +411,12 @@ URL_TO_SLUG = {
     "brassring": _url_to_slug_brassring,
     "teamtailor": _url_to_slug_teamtailor,
     "successfactors": _url_to_slug_successfactors,
+    "breezyhr": _url_to_slug_breezyhr,
+    "applytojob": _url_to_slug_applytojob,
+    "hrmdirect": _url_to_slug_hrmdirect,
+    "softgarden": _url_to_slug_softgarden,
+    "zoho": _url_to_slug_zoho,
+    "ycombinator": _url_to_slug_ycombinator,
 }
 
 
@@ -425,6 +520,13 @@ CC_PLATFORM_PATTERNS = {
     "brassring": ["sjobs.brassring.com/TgNewUI/Search/*", "sjobs.brassring.com/TGnewUI/Search/*"],
     "teamtailor": ["*.teamtailor.com/jobs*"],
     "successfactors": ["*.successfactors.com/career*", "*.successfactors.eu/career*", "*.sapsf.com/career*"],
+    # New 6 platforms
+    "breezyhr": ["*.breezy.hr/*"],
+    "applytojob": ["*.applytojob.com/*"],
+    "hrmdirect": ["*.hrmdirect.com/employment/*"],
+    "softgarden": ["*.softgarden.io/*"],
+    "zoho": ["*.zohorecruit.com/jobs/*"],
+    "ycombinator": ["www.workatastartup.com/companies/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -438,6 +540,12 @@ CC_EXTRACTORS = {
     "brassring": _url_to_slug_brassring,
     "teamtailor": _url_to_slug_teamtailor,
     "successfactors": _url_to_slug_successfactors,
+    "breezyhr": _url_to_slug_breezyhr,
+    "applytojob": _url_to_slug_applytojob,
+    "hrmdirect": _url_to_slug_hrmdirect,
+    "softgarden": _url_to_slug_softgarden,
+    "zoho": _url_to_slug_zoho,
+    "ycombinator": _url_to_slug_ycombinator,
 }
 
 
