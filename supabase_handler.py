@@ -9,7 +9,11 @@ from datetime import date, datetime, timezone
 
 import requests as http_requests
 
-from config import SUPABASE_URL, SUPABASE_KEY
+import os
+from dotenv import load_dotenv
+load_dotenv()
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 log = logging.getLogger(__name__)
 
