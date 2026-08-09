@@ -162,6 +162,33 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
     return total
 
 
+def get_all_slugs() -> list[tuple[str, str]]:
+    """
+    Fetch all (ats, slug) pairs from slug_registry.
+    Supabase returns paginated results so we loop until exhausted.
+    """
+    pairs = []
+    offset = 0
+    batch_size = 10000
+
+    while True:
+        rows = _get(
+            "slug_registry",
+            f"select=ats,slug&offset={offset}",
+            limit=batch_size,
+        )
+        if not rows:
+            break
+        for row in rows:
+            pairs.append((row["ats"], row["slug"]))
+        if len(rows) < batch_size:
+            break
+        offset += batch_size
+
+    log.info(f"Loaded {len(pairs)} slugs from Supabase slug_registry")
+    return pairs
+
+
 # ── Deduplication ────────────────────────────────────────
 
 def get_existing_urls() -> set[str]:
