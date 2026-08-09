@@ -516,3 +516,43 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
                         results[i + idx] = "no_match"
 
     return results
+
+
+# ── Visa Sponsorship Detection ──────────────────────────
+
+_VISA_YES_RE = re.compile(
+    r"visa\s*sponsor|sponsor.*visa|relocation\s*(support|assist|package)"
+    r"|work\s*permit\s*(support|assist|provid)"
+    r"|immigration\s*(support|assist)"
+    r"|we\s*sponsor"
+    r"|sponsorship\s*(available|offered|provided)",
+    re.I,
+)
+
+_VISA_NO_RE = re.compile(
+    r"(no|not|unable|cannot|can\'t|won\'t|will\s*not)\s*(provide\s*)?(visa\s*sponsor|sponsor.*visa|work\s*permit|immigration\s*sponsor)"
+    r"|must\s*(be\s*)?(authorized|eligible)\s*to\s*work"
+    r"|without\s*(visa\s*)?sponsor"
+    r"|visa\s*sponsorship\s*(is\s*)?(not|un)available"
+    r"|not\s*offer.*sponsorship",
+    re.I,
+)
+
+
+def detect_visa_sponsorship(job: dict) -> str:
+    """Scan description + title for visa sponsorship signals.
+    Returns 'yes', 'no', or 'unknown'."""
+    text = (
+        (job.get("description_snippet") or "")
+        + " " + (job.get("title") or "")
+        + " " + (job.get("location") or "")
+    )
+    if not text.strip():
+        return "unknown"
+
+    # Check "no" patterns first — they're more specific
+    if _VISA_NO_RE.search(text):
+        return "no"
+    if _VISA_YES_RE.search(text):
+        return "yes"
+    return "unknown"
