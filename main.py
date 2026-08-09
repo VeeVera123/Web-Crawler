@@ -19,6 +19,7 @@ from ats_scrapers import scrape_board, enrich_descriptions
 from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
+    detect_visa_sponsorship,
 )
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
@@ -258,11 +259,15 @@ def main():
                 )
             return
 
-        # 5. Push to Supabase
+        # 5. Detect visa sponsorship from descriptions (before discarding them)
+        for job in global_jobs:
+            job["visa_sponsorship"] = detect_visa_sponsorship(job)
+
+        # 6. Push to Supabase
         log.info(f"\nPushing {len(global_jobs)} jobs to Supabase...")
         added = add_jobs_batch(global_jobs, confidences)
 
-        # 6. Finalize report
+        # 7. Finalize report
         duplicates = len(global_jobs) - added
         if report_id:
             finish_scan_report(
