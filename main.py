@@ -8,7 +8,7 @@ BrassRing, Teamtailor, SAP SuccessFactors, BreezyHR, ApplyToJob,
 HRMDirect, Softgarden, Zoho Recruit, YCombinator.
 
 Reads slugs from Supabase slug_registry (single source of truth,
-enriched weekly by enrich_slugs.py from OpenPostings + Common Crawl).
+enriched weekly by enrich_slugs.py from Feashliaa + OpenPostings + Common Crawl).
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
 """
@@ -64,7 +64,7 @@ def load_slugs() -> list[tuple[str, str]]:
     """
     Load (ats, slug) pairs from Supabase slug_registry.
     Supabase is the single source of truth — enriched weekly
-    by enrich_slugs.py (OpenPostings + Common Crawl).
+    by enrich_slugs.py (Feashliaa + OpenPostings + Common Crawl).
     """
     pairs = get_all_slugs()
 
