@@ -12,9 +12,7 @@ import time
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote
 import requests
-# Scraper constants (same in both config variants — no backend import needed)
-REQUEST_TIMEOUT = 20
-MAX_RETRIES = 2
+from config import REQUEST_TIMEOUT, MAX_RETRIES
 
 log = logging.getLogger(__name__)
 

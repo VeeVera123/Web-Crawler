@@ -1,23 +1,22 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 20,000+ company boards across 21 ATS platforms:
-Greenhouse, Lever, Ashby, BambooHR, iCIMS, Workday, Rippling,
-Workable, Recruitee, SmartRecruiters, Taleo, Oracle Cloud HCM,
-BrassRing, Teamtailor, SAP SuccessFactors, BreezyHR, ApplyToJob,
-HRMDirect, Softgarden, Zoho Recruit, YCombinator.
+Scans 80,000+ company boards across 21 ATS platforms.
 
 Reads slugs from Supabase slug_registry (single source of truth,
 enriched weekly by enrich_slugs.py from Feashliaa + OpenPostings + Common Crawl).
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
+
+LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
 """
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config_groq import CONCURRENT_WORKERS
-from classifier_groq import (
+from config import CONCURRENT_WORKERS
+from ats_scrapers import scrape_board, enrich_descriptions
+from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
 )
@@ -111,8 +110,10 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
                     slug, jobs = future.result()
                     if jobs:
                         platform_jobs.extend(jobs)
-                except Exception:
+                except Exception as e:
                     platform_failed += 1
+                    if platform_failed <= 3:  # log first 3 errors per platform
+                        log.error(f"  {ats} scrape error: {e}")
 
         return len(slugs) - platform_failed, platform_failed, platform_jobs
 
