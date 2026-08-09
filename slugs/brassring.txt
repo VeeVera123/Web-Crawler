@@ -1,8 +1,0 @@
-# BrassRing (IBM/Infinite) — format: partner_id|site_id
-# Example: 25240|5014
-# Find IDs from: https://sjobs.brassring.com/TgNewUI/Search/home/HomeWithPreLoad?partnerid=X&siteid=Y
-25240|5014
-25240|5515
-16182|5131
-25983|5400
-26059|5168
