@@ -16,9 +16,8 @@ Pushes matches to Supabase (PostgreSQL).
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config_anthropic import CONCURRENT_WORKERS
-from ats_scrapers import scrape_board, enrich_descriptions
-from classifier_anthropic import (
+from config_groq import CONCURRENT_WORKERS
+from classifier_groq import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
 )
