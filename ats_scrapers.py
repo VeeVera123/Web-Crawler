@@ -12,7 +12,7 @@ import time
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote
 import requests
-from config import REQUEST_TIMEOUT, MAX_RETRIES
+from config_anthropic import REQUEST_TIMEOUT, MAX_RETRIES
 
 log = logging.getLogger(__name__)
 
@@ -1321,3 +1321,176 @@ def scrape_board(ats: str, slug: str) -> list[dict]:
     except Exception as e:
         log.error(f"Error scraping {ats}/{slug}: {e}")
         return []
+
+
+# ── Second-pass: fetch individual job descriptions ─────
+# These are called AFTER the role filter, so only a handful
+# of jobs need enrichment (not thousands).
+
+def _fetch_icims_description(job: dict) -> str:
+    """Fetch full description from an individual iCIMS job page."""
+    r = _get(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return ""
+    # iCIMS job pages have description in a specific div
+    # Try multiple patterns for different iCIMS templates
+    patterns = [
+        r'class="iCIMS_JobContent[^"]*"[^>]*>(.*?)</div>',
+        r'class="iCIMS_InfoMsg_Job[^"]*"[^>]*>(.*?)</div>',
+        r'<div\s+id="job-description"[^>]*>(.*?)</div>',
+        r'class="description"[^>]*>(.*?)</div>',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, r.text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return _snippet(match.group(1))
+    # Fallback: grab all text from the body between common markers
+    body_match = re.search(r'<main[^>]*>(.*?)</main>', r.text, re.DOTALL | re.IGNORECASE)
+    if body_match:
+        return _snippet(body_match.group(1))
+    return ""
+
+
+def _fetch_workday_description(job: dict) -> str:
+    """Fetch full description from a Workday job detail API.
+    Job URL format: https://{company}.wd{N}.myworkdayjobs.com/{site}{path}
+    Detail API: POST to /wday/cxs/{company}/{site}{path}"""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    # Parse the URL to build the API call
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    hostname = parsed.hostname or ""
+    if "myworkdayjobs.com" not in hostname:
+        return ""
+    company = hostname.split(".")[0]
+    # Path is like /{site_id}/job/{path}
+    path = parsed.path
+    api_url = f"https://{hostname}/wday/cxs{path}"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+    try:
+        r = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return ""
+        data = r.json()
+        posting = data.get("jobPostingInfo", {})
+        desc = posting.get("jobDescription", "")
+        if desc:
+            return _snippet(desc)
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_smartrecruiters_description(job: dict) -> str:
+    """Fetch full description from SmartRecruiters job detail API.
+    Detail endpoint: GET /v1/companies/{slug}/postings/{posting_id}"""
+    url = job.get("url", "")
+    slug = job.get("slug", "")
+    if not url or not slug:
+        return ""
+    # Extract posting ID from URL: /slug/posting_id
+    parts = url.rstrip("/").split("/")
+    if len(parts) < 2:
+        return ""
+    posting_id = parts[-1]
+    api_url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{posting_id}"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(api_url, headers=headers)
+    if not r:
+        return ""
+    try:
+        data = r.json()
+        # Description is in jobAd.sections.jobDescription.text
+        job_ad = data.get("jobAd", {})
+        sections = job_ad.get("sections", {})
+        desc_section = sections.get("jobDescription", {})
+        desc = desc_section.get("text", "")
+        if desc:
+            return _snippet(desc)
+        # Fallback: companyDescription
+        comp_desc = sections.get("companyDescription", {}).get("text", "")
+        if comp_desc:
+            return _snippet(comp_desc)
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_taleo_description(job: dict) -> str:
+    """Fetch full description from a Taleo job detail page."""
+    r = _get(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return ""
+    # Taleo pages have description in specific divs
+    patterns = [
+        r'class="[^"]*jobdescription[^"]*"[^>]*>(.*?)</div>',
+        r'id="[^"]*jobdescription[^"]*"[^>]*>(.*?)</div>',
+        r'class="[^"]*requisition[Dd]escription[^"]*"[^>]*>(.*?)</div>',
+        r'<div\s+class="contentlinepanel"[^>]*>(.*?)</div>',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, r.text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return _snippet(match.group(1))
+    return ""
+
+
+# Platforms that need description enrichment
+DESCRIPTION_FETCHERS = {
+    "iCIMS": _fetch_icims_description,
+    "Workday": _fetch_workday_description,
+    "SmartRecruiters": _fetch_smartrecruiters_description,
+    "Taleo": _fetch_taleo_description,
+}
+
+
+def enrich_descriptions(jobs: list[dict], max_workers: int = 5) -> list[dict]:
+    """Fetch individual job descriptions for platforms that don't
+    include them in the list API. Call this AFTER the role filter
+    so we only fetch details for the small subset of CSM/AM jobs.
+
+    Modifies jobs in place and returns the same list."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    to_enrich = [j for j in jobs if not j.get("description_snippet")
+                 and j.get("source_ats") in DESCRIPTION_FETCHERS]
+
+    if not to_enrich:
+        return jobs
+
+    log.info(f"Enriching descriptions for {len(to_enrich)} jobs "
+             f"across {len(set(j['source_ats'] for j in to_enrich))} platforms...")
+
+    def _fetch_one(job):
+        fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
+        try:
+            desc = fetcher(job)
+            if desc:
+                job["description_snippet"] = desc
+                salary = _extract_salary(desc)
+                if salary and not job.get("salary"):
+                    job["salary"] = salary
+        except Exception as e:
+            log.debug(f"Failed to enrich {job['url']}: {e}")
+        time.sleep(random.uniform(0.2, 0.5))
+        return job
+
+    enriched = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
+        for future in as_completed(futures):
+            try:
+                job = future.result()
+                if job.get("description_snippet"):
+                    enriched += 1
+            except Exception:
+                pass
+
+    log.info(f"Enriched {enriched}/{len(to_enrich)} jobs with descriptions")
+    return jobs
