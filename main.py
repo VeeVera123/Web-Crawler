@@ -4,7 +4,7 @@ ATS Global Scanner — Main Orchestrator
 Scans 80,000+ company boards across 21 ATS platforms.
 
 Reads slugs from Supabase slug_registry (single source of truth,
-enriched weekly by enrich_slugs.py from Feashliaa + OpenPostings + Common Crawl).
+enriched weekly by enrich_slugs.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl).
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
 
@@ -62,7 +62,7 @@ def load_slugs() -> list[tuple[str, str]]:
     """
     Load (ats, slug) pairs from Supabase slug_registry.
     Supabase is the single source of truth — enriched weekly
-    by enrich_slugs.py (Feashliaa + OpenPostings + Common Crawl).
+    by enrich_slugs.py (Feashliaa + kalil0321 + OpenPostings + Common Crawl).
     """
     pairs = get_all_slugs()
 
