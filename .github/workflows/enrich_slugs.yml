@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests python-dotenv
 
-      - name: Enrich slug registry
+      - name: Enrich slug registry (4 sources)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
