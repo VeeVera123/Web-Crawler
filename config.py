@@ -22,7 +22,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 # ── Provider-specific settings ────────────────────────────
 if LLM_PROVIDER == "cerebras":
     LLM_API_KEY = os.environ["CEREBRAS_API_KEY"]
-    LLM_MODEL = "llama-3.1-8b"    # $0.10/M tokens — 50M tokens on $5 credit
+    LLM_MODEL = "gpt-oss-120b"    # $0.35/M input — cheapest on Cerebras, 120B params
     LLM_BASE_URL = "https://api.cerebras.ai/v1"
 elif LLM_PROVIDER == "groq":
     LLM_API_KEY = os.environ["GROQ_API_KEY"]
