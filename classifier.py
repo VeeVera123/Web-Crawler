@@ -517,8 +517,8 @@ When there is NO description and NO restriction signal: say MATCH. \
 We'd rather include a questionable role than miss a global opportunity.
 
 Respond ONLY with lines like:
-1 MATCH (reason)
-2 NO_MATCH (reason)"""
+1 MATCH
+2 NO_MATCH"""
 
 
 def ai_classify_locations(jobs: list[dict]) -> list[str]:
