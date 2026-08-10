@@ -548,12 +548,21 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     # questionable role than drop a genuine global opportunity on rate limit
     results = ["uncertain"] * len(jobs)
 
+    # Cerebras free tier: 8K tokens (~30K chars). Reserve ~2K for system prompt + response.
+    # Dynamically cap description length so the batch always fits.
+    MAX_USER_CHARS = 28000
+    DESC_OVERHEAD = 120  # title + company + location metadata per job
+
     for i in range(0, len(jobs), AI_BATCH_SIZE):
         batch = jobs[i:i + AI_BATCH_SIZE]
+        max_desc = max(500, (MAX_USER_CHARS - len(batch) * DESC_OVERHEAD) // len(batch))
         numbered_lines = []
         for j, job in enumerate(batch):
             desc = job.get("description_snippet", "")
-            desc_note = desc if desc else "[No description available]"
+            if desc:
+                desc_note = desc[:max_desc] + ("…" if len(desc) > max_desc else "")
+            else:
+                desc_note = "[No description available]"
             numbered_lines.append(
                 f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
                 f"Location: {job.get('location', 'Remote')} | "
