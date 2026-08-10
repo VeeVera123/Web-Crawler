@@ -1,7 +1,7 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 100,000+ company boards across 21 ATS platforms.
+Scans 87,000+ company boards across 14 ATS platforms.
 
 Reads slugs from Supabase slug_registry (single source of truth,
 enriched weekly by enrich_slugs.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl).
@@ -44,17 +44,10 @@ PLATFORM_WORKERS = {
     "workable": 10,
     "recruitee": 10,
     "smartrecruiters": 10,
-    "taleo": 8,
-    "oracle_cloud_hcm": 8,
-    "brassring": 8,
     "teamtailor": 10,
-    "successfactors": 8,
     "breezyhr": 10,
     "applytojob": 10,
-    "hrmdirect": 8,
-    "softgarden": 10,
-    "zoho": 8,
-    "ycombinator": 10,
+    "personio": 10,
 }
 
 
