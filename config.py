@@ -38,5 +38,4 @@ else:
 # ── Scraper settings (shared, provider-independent) ──────
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 2
-CONCURRENT_WORKERS = 8        # legacy fallback; main.py uses per-platform limits
 AI_BATCH_SIZE = 3             # jobs per AI classification call (small to fit full JDs in context)
