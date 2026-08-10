@@ -34,4 +34,4 @@ else:
 # ── Scraper settings ──────────────────────────────────────
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 2
-AI_BATCH_SIZE = 1   # TEST: one job at a time so we see AI results immediately
+AI_BATCH_SIZE = 15  # 15 jobs per request (150 RPH × 15 = 2,250 classifications/hr)
