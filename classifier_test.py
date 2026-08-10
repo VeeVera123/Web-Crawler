@@ -17,9 +17,9 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 4
 RETRY_BASE_DELAY = 5  # seconds
 
-# TEST: No rate throttle — we're only scanning a handful of jobs
+# Cerebras free tier: ~5 req/min. Space calls 13s apart to avoid 429s.
 _last_call_time = 0.0
-_MIN_CALL_INTERVAL = 0.0
+_MIN_CALL_INTERVAL = 13.0
 
 if LLM_PROVIDER == "anthropic":
     import anthropic
