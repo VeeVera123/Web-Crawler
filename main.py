@@ -1,29 +1,28 @@
 """
-ATS Global Scanner — Main Orchestrator
-=======================================
-Scans 87,000+ company boards across 14 ATS platforms.
+main_test.py — Quick AI classification test
+=============================================
+Only scrapes Rippling (max 20 boards) to test AI classification quickly.
+Does NOT write to Supabase — just prints results.
 
-Reads slugs from Supabase slug_registry (single source of truth,
-enriched weekly by enrich_slugs.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl).
-Filters for CSM/Account Management roles hiring globally or in Africa.
-Pushes matches to Supabase (PostgreSQL).
+Changes from main.py:
+  1. Imports from classifier_test (no rate throttle, batch size 1)
+  2. Only scrapes 'rippling' platform, capped at 20 boards
+  3. Prints results to console instead of pushing to Supabase
+  4. No scan_report tracking
 
-LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
+Run:  python main_test.py
 """
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ats_scrapers import scrape_board, enrich_descriptions
-from classifier import (
+from classifier_test import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
     detect_visa_sponsorship,
 )
-from supabase_handler import (
-    add_jobs_batch, start_scan_report, finish_scan_report,
-    get_all_slugs,
-)
+from supabase_handler import get_all_slugs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,255 +31,136 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Per-platform concurrency limits (respect rate limits)
-PLATFORM_WORKERS = {
-    "greenhouse": 30,
-    "lever": 30,
-    "ashby": 5,
-    "bamboohr": 10,
-    "icims": 30,
-    "workday": 15,
-    "rippling": 8,
-    "workable": 10,
-    "recruitee": 10,
-    "smartrecruiters": 10,
-    "teamtailor": 10,
-    "breezyhr": 10,
-    "applytojob": 10,
-    "personio": 10,
-}
+MAX_TEST_BOARDS = 20  # Only scrape this many boards
 
 
-def load_slugs() -> list[tuple[str, str]]:
-    """
-    Load (ats, slug) pairs from Supabase slug_registry.
-    Supabase is the single source of truth — enriched weekly
-    by enrich_slugs.py (Feashliaa + kalil0321 + OpenPostings + Common Crawl).
-    """
-    pairs = get_all_slugs()
+def main():
+    log.info("=" * 60)
+    log.info("TEST MODE — Rippling only, 20 boards, no Supabase writes")
+    log.info("=" * 60)
 
-    if not pairs:
-        log.warning("No slugs found in Supabase slug_registry!")
-        log.warning("Run enrich_slugs.py first to populate the registry.")
-        return []
+    # 1. Load only Rippling slugs
+    log.info("Loading Rippling slugs from Supabase...")
+    all_pairs = get_all_slugs()
+    rippling_slugs = [slug for ats, slug in all_pairs if ats == "rippling"]
+    rippling_slugs = rippling_slugs[:MAX_TEST_BOARDS]
+    log.info(f"Testing with {len(rippling_slugs)} Rippling boards")
 
-    ats_counts: dict[str, int] = {}
-    for ats, _ in pairs:
-        ats_counts[ats] = ats_counts.get(ats, 0) + 1
+    if not rippling_slugs:
+        log.error("No Rippling slugs found!")
+        return
 
-    for ats in sorted(ats_counts, key=lambda a: -ats_counts[a]):
-        log.info(f"  {ats}: {ats_counts[ats]} companies")
-    log.info(f"Total: {len(pairs)} boards across {len(ats_counts)} ATS platforms")
-
-    return pairs
-
-
-def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
-    """Scrape all boards in parallel, grouped by ATS platform.
-    Returns (jobs, boards_ok, boards_failed)."""
+    # 2. Scrape
+    log.info(f"\nScraping {len(rippling_slugs)} Rippling boards...")
     all_jobs = []
-    total_ok = 0
-    total_failed = 0
+    failed = 0
 
-    # Group boards by ATS to apply per-platform concurrency
-    by_ats = {}
-    for ats, slug in boards:
-        by_ats.setdefault(ats, []).append(slug)
+    def _do_scrape(slug):
+        return slug, scrape_board("rippling", slug)
 
-    def _scrape_platform(ats: str, slugs: list[str]) -> tuple[int, int, list[dict]]:
-        """Scrape one ATS platform with appropriate concurrency."""
-        workers = PLATFORM_WORKERS.get(ats, 8)
-        platform_jobs = []
-        platform_failed = 0
-
-        def _do_scrape(slug):
-            return slug, scrape_board(ats, slug)
-
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_do_scrape, s): s for s in slugs}
-            for future in as_completed(futures):
-                try:
-                    slug, jobs = future.result()
-                    if jobs:
-                        platform_jobs.extend(jobs)
-                except Exception as e:
-                    platform_failed += 1
-                    if platform_failed <= 3:  # log first 3 errors per platform
-                        log.error(f"  {ats} scrape error: {e}")
-
-        return len(slugs) - platform_failed, platform_failed, platform_jobs
-
-    # Run all platforms concurrently — each has its own per-platform worker limit
-    with ThreadPoolExecutor(max_workers=len(by_ats)) as platform_pool:
-        platform_futures = {}
-        for ats, slugs in by_ats.items():
-            f = platform_pool.submit(_scrape_platform, ats, slugs)
-            platform_futures[f] = ats
-
-        for future in as_completed(platform_futures):
-            ats = platform_futures[future]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_do_scrape, s): s for s in rippling_slugs}
+        for future in as_completed(futures):
             try:
-                ok, bad, jobs = future.result()
-                all_jobs.extend(jobs)
-                total_ok += ok
-                total_failed += bad
-                log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
+                slug, jobs = future.result()
+                if jobs:
+                    all_jobs.extend(jobs)
             except Exception as e:
-                log.error(f"  {ats}: platform error: {e}")
+                failed += 1
+                log.error(f"  Scrape error: {e}")
 
-    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed)")
-    return all_jobs, total_ok, total_failed
+    log.info(f"Scraped {len(all_jobs)} raw jobs ({failed} boards failed)")
+    if not all_jobs:
+        log.info("No jobs found. Try increasing MAX_TEST_BOARDS.")
+        return
 
-
-def filter_roles(jobs: list[dict]) -> list[dict]:
-    """Stage 1+2: Keep only CSM/AM roles."""
+    # 3. Filter for CSM/AM roles
+    log.info(f"\nFiltering for CSM/AM roles...")
     included = []
     unsure = []
-
-    for job in jobs:
+    for job in all_jobs:
         result = keyword_classify_role(job["title"])
         if result == "include":
             included.append(job)
         elif result == "unsure":
             unsure.append(job)
 
-    log.info(f"Role filter: {len(included)} keyword match, {len(unsure)} unsure → sending to AI")
+    log.info(f"Role filter: {len(included)} keyword match, {len(unsure)} unsure")
 
     if unsure:
+        log.info(f"Sending {len(unsure)} unsure titles to AI...")
+        for j in unsure:
+            log.info(f"  [UNSURE] {j['title']} @ {j.get('company', '?')}")
         unsure_titles = [j["title"] for j in unsure]
         ai_results = ai_classify_roles(unsure_titles)
         for job in unsure:
-            if ai_results.get(job["title"], False):
+            verdict = ai_results.get(job["title"], False)
+            log.info(f"  [AI ROLE] {job['title']} → {'YES' if verdict else 'NO'}")
+            if verdict:
                 included.append(job)
 
-    log.info(f"After role filter: {len(included)} CSM/AM jobs")
-    return included
+    csm_jobs = included
+    log.info(f"After role filter: {len(csm_jobs)} CSM/AM jobs")
 
+    if not csm_jobs:
+        log.info("No CSM/AM roles found in test batch.")
+        return
 
-def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
-    """Stage 3+4: Keep only global/Africa-eligible jobs."""
+    # 3b. Enrich descriptions
+    log.info(f"\nFetching descriptions for jobs missing them...")
+    csm_jobs = enrich_descriptions(csm_jobs)
+
+    # 4. Filter locations
+    log.info(f"\nFiltering locations...")
     matched = []
     matched_confidences = []
     unsure_jobs = []
 
-    for job in jobs:
+    for job in csm_jobs:
         result = keyword_classify_location(job)
+        log.info(f"  [LOC KEYWORD] {job['title']} @ {job.get('company', '?')} | "
+                 f"loc='{job.get('location', '')}' → {result}")
         if result == "match":
             matched.append(job)
             matched_confidences.append("match")
         elif result == "unsure":
             unsure_jobs.append(job)
 
-    log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
-
     if unsure_jobs:
+        log.info(f"\nSending {len(unsure_jobs)} location-unsure jobs to AI...")
         ai_results = ai_classify_locations(unsure_jobs)
         for job, label in zip(unsure_jobs, ai_results):
+            log.info(f"  [AI LOC] {job['title']} @ {job.get('company', '?')} → {label}")
             if label == "match":
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            # "no_match" → drop; AI failure defaults to "uncertain" (included)
 
-    log.info(f"After location filter: {len(matched)} global/Africa jobs")
-    return matched, matched_confidences
+    # 5. Visa detection
+    for job in matched:
+        job["visa_sponsorship"] = detect_visa_sponsorship(job)
 
+    # 6. Print results
+    log.info(f"\n{'=' * 60}")
+    log.info(f"TEST RESULTS")
+    log.info(f"{'=' * 60}")
+    log.info(f"Raw jobs scraped: {len(all_jobs)}")
+    log.info(f"CSM/AM roles: {len(csm_jobs)}")
+    log.info(f"Global/Africa matches: {len(matched)}")
 
-def main():
-    log.info("=" * 60)
-    log.info("ATS GLOBAL SCANNER — starting")
-    log.info("=" * 60)
-
-    report_id = start_scan_report()
-
-    try:
-        # 1. Load slugs from Supabase
-        log.info("Loading company slugs from Supabase...")
-        boards = load_slugs()
-        if not boards:
-            log.error("No boards to scrape.")
-            if report_id:
-                finish_scan_report(report_id, status="failed")
-            return
-
-        # 2. Scrape all boards
-        log.info(f"\nScraping {len(boards)} boards across {len(set(a for a,_ in boards))} ATS platforms...")
-        all_jobs, boards_ok, boards_failed = scrape_all(boards)
-        if not all_jobs:
-            log.info("No jobs found across any board.")
-            if report_id:
-                finish_scan_report(
-                    report_id,
-                    boards_scanned=boards_ok,
-                    boards_failed=boards_failed,
-                )
-            return
-
-        # 3. Filter for CSM/AM roles
-        log.info(f"\nFiltering for CSM/AM roles...")
-        csm_jobs = filter_roles(all_jobs)
-        if not csm_jobs:
-            log.info("No CSM/AM roles found.")
-            if report_id:
-                finish_scan_report(
-                    report_id,
-                    boards_scanned=boards_ok,
-                    boards_failed=boards_failed,
-                    total_jobs_raw=len(all_jobs),
-                )
-            return
-
-        # 3b. Enrich descriptions for platforms that lack them
-        log.info(f"\nFetching descriptions for jobs missing them...")
-        csm_jobs = enrich_descriptions(csm_jobs)
-
-        # 4. Filter for Africa/Global locations
-        log.info(f"\nFiltering for Africa/Global eligibility...")
-        global_jobs, confidences = filter_locations(csm_jobs)
-        if not global_jobs:
-            log.info("No global/Africa-eligible CSM/AM roles found.")
-            if report_id:
-                finish_scan_report(
-                    report_id,
-                    boards_scanned=boards_ok,
-                    boards_failed=boards_failed,
-                    total_jobs_raw=len(all_jobs),
-                    csm_roles=len(csm_jobs),
-                )
-            return
-
-        # 5. Detect visa sponsorship from descriptions (before discarding them)
-        for job in global_jobs:
-            job["visa_sponsorship"] = detect_visa_sponsorship(job)
-
-        # 6. Push to Supabase
-        log.info(f"\nPushing {len(global_jobs)} jobs to Supabase...")
-        added = add_jobs_batch(global_jobs, confidences)
-
-        # 7. Finalize report
-        duplicates = len(global_jobs) - added
-        if report_id:
-            finish_scan_report(
-                report_id,
-                boards_scanned=boards_ok,
-                boards_failed=boards_failed,
-                total_jobs_raw=len(all_jobs),
-                csm_roles=len(csm_jobs),
-                global_jobs=len(global_jobs),
-                new_jobs_added=added,
-                duplicates=duplicates,
-            )
-
-        log.info(f"\nDone! {added} new jobs added to Supabase.")
-        log.info(f"   Pipeline: {len(all_jobs)} scraped -> {len(csm_jobs)} CSM/AM -> {len(global_jobs)} global/Africa -> {added} new")
-
-    except Exception as e:
-        log.error(f"Scanner failed: {e}")
-        if report_id:
-            finish_scan_report(report_id, status="failed")
-        raise
+    if matched:
+        log.info(f"\nMatched jobs:")
+        for i, job in enumerate(matched, 1):
+            log.info(f"  {i}. {job['title']} @ {job.get('company', '?')}")
+            log.info(f"     Location: {job.get('location', 'N/A')}")
+            log.info(f"     URL: {job.get('url', 'N/A')}")
+            log.info(f"     Visa: {job.get('visa_sponsorship', 'unknown')}")
+            log.info(f"     Confidence: {matched_confidences[i-1]}")
+    else:
+        log.info("\nNo matches found in test batch — this is normal with only 20 boards.")
+        log.info("The important thing is whether AI calls worked without errors above.")
 
 
 if __name__ == "__main__":
