@@ -18,8 +18,8 @@ from config import LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, AI_BATCH_SIZE
 log = logging.getLogger(__name__)
 
 # ── Provider-specific AI client setup ─────────────────────
-MAX_RETRIES = 2
-RETRY_BASE_DELAY = 3  # seconds
+MAX_RETRIES = 4
+RETRY_BASE_DELAY = 5  # seconds
 
 if LLM_PROVIDER == "anthropic":
     import anthropic
@@ -291,6 +291,8 @@ AFRICAN_COUNTRIES = {
     "uganda", "zambia", "zimbabwe",
 }
 
+# ── Immediate MATCH keywords (global/anywhere/Africa) ───
+
 GLOBAL_KEYWORDS = [
     r"\bremote\s*[\-–—/,]\s*global\b",
     r"\bremote\s*[\-–—/,]\s*worldwide\b",
@@ -302,169 +304,217 @@ GLOBAL_KEYWORDS = [
     r"\bhire\s*(globally|worldwide|anywhere)\b",
     r"\bopen\s*to\s*(all|any)\s*location",
     r"\blocation\s*[\-–—:]?\s*anywhere\b",
+    r"\blocation\s*[\-–—:]?\s*flexible\b",
+    r"\blocation\s*agnostic\b",
+    r"\b(fully\s*)?distributed\b",
+    r"\b(global|international)\s*team\b",
+    r"\bmultiple\s*(countries|locations|regions)\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
 STANDALONE_GLOBAL_RE = re.compile(
-    r"^\s*(global|worldwide|anywhere)\s*$", re.I
+    r"^\s*(global|worldwide|anywhere|international|remote\s*[\-–—/,]\s*global)\s*$", re.I
 )
 
-US_LOCATION_PATTERNS = [
-    r"\bnew\s*york\b", r"\bsan\s*francisco\b", r"\blos\s*angeles\b",
-    r"\bchicago\b", r"\bseattle\b", r"\bboston\b", r"\baustin\b",
-    r"\bdenver\b", r"\batlanta\b", r"\bportland\b", r"\bphoenix\b",
-    r"\bdallas\b", r"\bhouston\b", r"\bmiami\b", r"\bdc\b",
-    r"\bwashington\b", r"\bphiladelphia\b", r"\bminneapolis\b",
-    r"\braleigh\b", r"\bsalt\s*lake\b", r"\bdetroit\b", r"\btampa\b",
-    r"\bunited\s*states\b", r"\busa\b", r"\b\(us\)\b", r"\bus\s*only\b",
-    r"\busa\s*only\b", r"\bus\s*remote\b", r"\bremote\s*[\-–—,]?\s*us\b",
-    r"\bremote\s*[\-–—,]?\s*usa\b", r"\bremote\s*[\-–—,]?\s*united\s*states\b",
-    r"\bnorth\s*america\b", r"\bnorth\s*america\s*only\b",
-    r"\bus\s*based\b", r"\busa\s*based\b", r"\bbased\s*in\s*(the\s*)?us\b",
-    r"\bmust\s*be\s*(in|located\s*in)\s*(the\s*)?us\b",
-    r"\bcalifornia\b", r"\btexas\b", r"\bflorida\b", r"\billinois\b",
-    r"\bpennsylvania\b", r"\bgeorgia\b", r"\bmassachusetts\b",
-    r"\bcolorado\b", r"\bvirginia\b", r"\bmaryland\b", r"\boregon\b",
-    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b",
-]
-US_LOCATION_RE = [re.compile(p, re.I) for p in US_LOCATION_PATTERNS]
+# ── Immediate REJECT: country-restricted locations ──────
 
-UK_LOCATION_PATTERNS = [
-    r"\bunited\s*kingdom\b", r"\b\(uk\)\b", r"\buk\s*only\b",
-    r"\buk\s*remote\b", r"\bremote\s*[\-–—,]?\s*uk\b",
-    r"\buk\s*based\b", r"\bbased\s*in\s*(the\s*)?uk\b",
-    r"\blondon\b", r"\bmanchester\b", r"\bbirmingham\b", r"\bleeds\b",
-    r"\bbristol\b", r"\bedinburgh\b", r"\bglasgow\b", r"\bcardiff\b",
-    r"\bengland\b", r"\bscotland\b", r"\bwales\b",
-]
-UK_LOCATION_RE = [re.compile(p, re.I) for p in UK_LOCATION_PATTERNS]
-
-OTHER_NON_AFRICA_PATTERNS = [
-    r"\bcanada\b", r"\btoronto\b", r"\bvancouver\b",
-    r"\bgermany\b", r"\bberlin\b", r"\bmunich\b",
-    r"\bfrance\b", r"\bparis\b",
-    r"\baustralia\b", r"\bsydney\b", r"\bmelbourne\b",
-    r"\bjapan\b", r"\btokyo\b",
-    r"\bindia\b", r"\bbangalore\b", r"\bmumbai\b", r"\bhyderabad\b",
-    r"\bsingapore\b",
-    r"\bdublin\b", r"\bireland\b",
-    r"\bnetherlands\b", r"\bamsterdam\b",
-    r"\bspain\b", r"\bmadrid\b", r"\bbarcelona\b",
-    r"\bitaly\b", r"\bmilan\b",
-    r"\bsweden\b", r"\bstockholm\b",
-    r"\bdenmark\b", r"\bcopenhagen\b",
-    r"\bswitzerland\b", r"\bzurich\b",
-    r"\baustr(ia|alian)\b",
-    r"\bisrael\b", r"\btel\s*aviv\b",
-    r"\bchina\b", r"\bbeijing\b", r"\bshanghai\b",
-    r"\bbrazil\b", r"\bsao\s*paulo\b",
-    r"\bmexico\b", r"\bmexico\s*city\b",
-    r"\bargentina\b", r"\bbogota\b", r"\bcolombia\b",
-    r"\bkorea\b", r"\bseoul\b",
-    r"\bapac\b", r"\blatam\b",
-    r"\bseur\b", r"\bneur\b", r"\bdach\b", r"\banz\b",
-    r"\beurope\s*only\b", r"\beu\s*only\b",
-]
-OTHER_NON_AFRICA_RE = [re.compile(p, re.I) for p in OTHER_NON_AFRICA_PATTERNS]
-
+# "Remote - US", "Remote, UK", "Remote (Canada)", etc.
 REMOTE_COUNTRY_RE = re.compile(
-    r"\bremote\s*[\-–—/,]\s*(us|usa|united\s*states|uk|united\s*kingdom|canada|australia|germany|france|india|europe|apac|latam|dach|anz)\b",
+    r"\bremote\s*[\-–—/,(]\s*"
+    r"(us|usa|united\s*states|uk|united\s*kingdom|canada|australia|germany|"
+    r"france|india|europe|apac|latam|dach|anz|spain|italy|netherlands|"
+    r"sweden|denmark|switzerland|japan|singapore|brazil|mexico|korea|"
+    r"ireland|austria|belgium|norway|finland|poland|portugal|czech|"
+    r"israel|new\s*zealand|argentina|colombia|chile|philippines|"
+    r"thailand|vietnam|malaysia|indonesia|taiwan|hong\s*kong)"
+    r"\)?\b",
     re.I,
+)
+
+# Cities that signal a specific-location job when paired with "Remote"
+# "Boston, Remote" = remote in Boston area, NOT global remote
+MAJOR_CITIES = [
+    # US cities
+    r"new\s*york", r"san\s*francisco", r"los\s*angeles", r"chicago",
+    r"seattle", r"boston", r"austin", r"denver", r"atlanta", r"portland",
+    r"phoenix", r"dallas", r"houston", r"miami", r"washington",
+    r"philadelphia", r"minneapolis", r"raleigh", r"salt\s*lake",
+    r"detroit", r"tampa", r"san\s*diego", r"san\s*jose", r"nashville",
+    r"charlotte", r"columbus", r"indianapolis", r"pittsburgh",
+    # UK cities
+    r"london", r"manchester", r"birmingham", r"leeds", r"bristol",
+    r"edinburgh", r"glasgow", r"cardiff", r"liverpool", r"cambridge",
+    r"oxford",
+    # EU cities
+    r"berlin", r"munich", r"hamburg", r"paris", r"lyon", r"amsterdam",
+    r"rotterdam", r"madrid", r"barcelona", r"milan", r"rome",
+    r"stockholm", r"copenhagen", r"zurich", r"vienna", r"warsaw",
+    r"prague", r"brussels", r"lisbon", r"oslo", r"helsinki",
+    r"dublin",
+    # Other
+    r"toronto", r"vancouver", r"montreal", r"sydney", r"melbourne",
+    r"tokyo", r"singapore", r"bangalore", r"mumbai", r"hyderabad",
+    r"tel\s*aviv", r"beijing", r"shanghai", r"sao\s*paulo",
+    r"mexico\s*city", r"buenos\s*aires", r"bogota", r"seoul",
+]
+MAJOR_CITIES_RE = [re.compile(r"\b" + c + r"\b", re.I) for c in MAJOR_CITIES]
+
+# Country names (for onsite jobs or "Remote - [Country]" patterns)
+COUNTRY_NAMES = [
+    r"united\s*states", r"usa", r"\bus\b", r"united\s*kingdom", r"\buk\b",
+    r"canada", r"australia", r"germany", r"france", r"netherlands",
+    r"spain", r"italy", r"sweden", r"denmark", r"switzerland",
+    r"austria", r"belgium", r"norway", r"finland", r"poland",
+    r"portugal", r"czech", r"ireland", r"israel",
+    r"japan", r"singapore", r"india", r"china", r"south\s*korea",
+    r"brazil", r"mexico", r"argentina", r"colombia", r"chile",
+    r"new\s*zealand", r"philippines", r"thailand", r"vietnam",
+    r"malaysia", r"indonesia", r"taiwan", r"hong\s*kong",
+    r"england", r"scotland", r"wales",
+    r"california", r"texas", r"florida", r"illinois",
+    r"pennsylvania", r"massachusetts", r"colorado", r"virginia",
+    r"maryland", r"oregon", r"georgia", r"north\s*carolina",
+    r"new\s*jersey", r"ohio", r"michigan", r"arizona", r"washington",
+]
+COUNTRY_NAMES_RE = [re.compile(r"\b" + c + r"\b", re.I) for c in COUNTRY_NAMES]
+
+# Region abbreviations
+REGION_RE = re.compile(
+    r"\b(apac|latam|dach|anz|seur|neur|emea|mena|cee|nordics|"
+    r"north\s*america|south\s*america|latin\s*america|"
+    r"asia\s*pacific|middle\s*east)\b",
+    re.I,
+)
+
+# Explicit "only" restrictions in location field
+ONLY_RE = re.compile(
+    r"\b(us|usa|uk|canada|australia|europe|eu|"
+    r"united\s*states|united\s*kingdom|germany|france|india|"
+    r"north\s*america|apac|latam)\s*only\b"
+    r"|\bonly\s*in\s*(the\s*)?\w+"
+    r"|\b\w+\s*based\s*only\b",
+    re.I,
+)
+
+# US state abbreviations (2-letter, must be exact match)
+US_STATE_ABBR_RE = re.compile(
+    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|"
+    r"MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|"
+    r"SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b"
 )
 
 
 def keyword_classify_location(job: dict) -> str:
     """
-    Returns 'match' (Africa/global), 'no_match', or 'unsure'.
-    Strict: only matches explicit Africa or truly global roles.
-    Bare 'Remote' = no_match (most companies mean US remote).
+    Returns 'match', 'no_match', or 'unsure'.
+
+    Flow:
+      1. Global/Anywhere/Africa/EMEA in location → MATCH
+      2. Country-restricted Remote (Remote-US, Boston Remote) → REJECT
+      3. Onsite at specific city/country (no Remote) → REJECT
+      4. Bare "Remote" alone → UNSURE (send to AI)
+      5. No location → UNSURE (send to AI)
     """
     loc = (job.get("location", "") + " " + job.get("country", "")).lower()
     desc = job.get("description_snippet", "").lower()
+    has_remote = bool(re.search(r"\bremote\b", loc, re.I))
 
+    # ── 1. MATCH: Global / Anywhere / Africa / EMEA ─────
+    # These are always a yes regardless of anything else
     if "africa" in loc:
         return "match"
     for country in AFRICAN_COUNTRIES:
         if country in loc:
             return "match"
 
-    if "africa" in desc or "nigeria" in desc or "lagos" in desc or "nairobi" in desc:
-        for country in AFRICAN_COUNTRIES:
-            if country in desc:
-                return "match"
-
-    if any(rx.search(loc) for rx in US_LOCATION_RE):
-        return "no_match"
-
-    if any(rx.search(loc) for rx in UK_LOCATION_RE):
-        return "no_match"
-
-    if REMOTE_COUNTRY_RE.search(loc):
-        return "no_match"
-
     if any(rx.search(loc) for rx in GLOBAL_RE):
         return "match"
-
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
         return "match"
 
+    # EMEA covers Africa
     if re.search(r"\bemea\b", loc, re.I):
-        return "unsure"
+        return "match"
 
-    if any(rx.search(loc) for rx in OTHER_NON_AFRICA_RE):
+    # Africa signals in description
+    africa_desc_terms = ["africa", "nigeria", "lagos", "nairobi", "kenya",
+                         "south africa", "ghana", "accra", "cape town",
+                         "johannesburg"]
+    if any(term in desc for term in africa_desc_terms):
+        return "match"
+
+    # ── 2. REJECT: Country-restricted Remote ─────────────
+    # "Remote - US", "Remote (UK)", etc.
+    if REMOTE_COUNTRY_RE.search(loc):
         return "no_match"
 
-    if re.search(r"\bremote\b", loc, re.I):
-        global_desc_signals = [
-            r"open\s*to\s*(candidates\s*)?(globally|worldwide|anywhere)",
-            r"hire\s*(in\s*)?(\d+\+?\s*)?countries",
-            r"work\s*from\s*anywhere",
-            r"location[\s:]+anywhere",
-            r"distributed\s*team.*global",
-        ]
-        for pattern in global_desc_signals:
-            if re.search(pattern, desc, re.I):
-                return "match"
+    # "US only", "UK only", etc.
+    if ONLY_RE.search(loc):
+        return "no_match"
 
-        us_desc_signals = [
-            r"us\s*work\s*authorization",
-            r"united\s*states\s*work\s*authorization",
-            r"must\s*be\s*(authorized|eligible)\s*to\s*work\s*in\s*(the\s*)?u\.?s",
-            r"w-?2\s*(employee|employment)",
-            r"this\s*(role|position)\s*is\s*(based\s*in|located\s*in)\s*(the\s*)?(us|united\s*states|uk|united\s*kingdom)",
-        ]
-        for pattern in us_desc_signals:
-            if re.search(pattern, desc, re.I):
-                return "no_match"
+    # "Boston, Remote" / "Remote, New York" / "London (Remote)"
+    # = remote within that city/country, NOT global
+    if has_remote:
+        has_city = any(rx.search(loc) for rx in MAJOR_CITIES_RE)
+        has_country = any(rx.search(loc) for rx in COUNTRY_NAMES_RE)
+        has_state_abbr = US_STATE_ABBR_RE.search(loc)
 
+        if has_city or has_country or has_state_abbr:
+            return "no_match"
+
+        # "Remote" + region (APAC, LATAM, DACH, etc.) but NOT EMEA
+        if REGION_RE.search(loc) and not re.search(r"\bemea\b", loc, re.I):
+            return "no_match"
+
+        # ── 3. Bare "Remote" (no city/country) → UNSURE ──
         return "unsure"
 
+    # ── 4. REJECT: Onsite at specific location ───────────
+    # Location has text but no "Remote" keyword = onsite job
     if loc.strip():
         return "no_match"
 
+    # ── 5. No location at all → UNSURE ───────────────────
     return "unsure"
 
 
 LOCATION_SYSTEM_PROMPT = """\
-You are a strict job location classifier. For each job below, determine if \
-someone based in AFRICA (specifically Nigeria) could realistically apply.
+You are a job location classifier for a global remote job board. \
+For each job, determine if the role could realistically hire someone \
+working remotely from anywhere in the world.
 
-MATCH only if:
-- Location explicitly mentions an African country (Nigeria, Kenya, South Africa, etc.)
-- Location says "Global", "Worldwide", "Anywhere", "Work from anywhere"
-- Description explicitly says they hire globally or in Africa
-- Location says "Remote - Global" or similar compound global phrase
+These jobs all say "Remote" in the location field with no country qualifier. \
+Your job is to check the DESCRIPTION for hidden geographic restrictions.
+
+MATCH if:
+- Description has NO mention of country-specific work authorization
+- Description does NOT require residency in a specific country
+- Description does NOT say "must be authorized to work in [country]"
+- Description mentions distributed team, global, or international
+- No description available (benefit of the doubt — many ATS platforms \
+  like Workday and iCIMS don't include descriptions in the API)
+- Company appears to be from a developed country (US, UK, EU, etc.) \
+  and nothing restricts the role geographically
 
 NO_MATCH if:
-- Location is a specific US city/state (New York, California, etc.)
-- Location says just "Remote" with no global qualifier (this usually means US)
-- Location is UK, Canada, Europe, EMEA, APAC, Australia, India, etc.
-- Description says "US work authorization required" or similar
-- Any specific non-African country or region is mentioned
-- Description mentions US-only benefits (401k, H1B, etc.)
+- Description says "must be authorized/eligible to work in the US/UK/etc."
+- Description says "US/UK work authorization required"
+- Description mentions "W-2 employment", "W2 only"
+- Description says "no visa sponsorship", "cannot sponsor", \
+  "unable to sponsor", "will not sponsor"
+- Description says "must reside in [specific country/state]"
+- Description says "this role is based in [country]" without remote option
+- Application requires SSN, national ID, or country-specific documentation
+- Description mentions country-specific benefits as requirements \
+  (401k, PAYE, specific tax residency)
+- Description says "must be located in" a specific country/region
 
-When in doubt, say NO_MATCH. We only want roles a person in Africa can actually get.
+Be thorough — scan the ENTIRE description for any restriction signal. \
+Many companies bury "must be authorized to work in the US" deep in the text.
+
+When there is NO description and NO restriction signal: say MATCH. \
+We'd rather include a questionable role than miss a global opportunity.
 
 Respond ONLY with lines like:
 1 MATCH (reason)
@@ -473,30 +523,35 @@ Respond ONLY with lines like:
 
 def ai_classify_locations(jobs: list[dict]) -> list[str]:
     """
-    Send ambiguous jobs to AI for location classification.
+    Send ambiguous jobs (bare "Remote") to AI for location classification.
+    AI checks descriptions for hidden geographic restrictions.
     Returns list of 'match', 'no_match', or 'uncertain' in same order.
-    On failure: defaults to 'no_match' (exclude).
+    On rate limit/failure: defaults to 'uncertain' (include with flag).
     """
     if not jobs:
         return []
 
-    results = ["no_match"] * len(jobs)
+    # Default to 'uncertain' (include with flag) — better to include a
+    # questionable role than drop a genuine global opportunity on rate limit
+    results = ["uncertain"] * len(jobs)
 
     for i in range(0, len(jobs), AI_BATCH_SIZE):
         batch = jobs[i:i + AI_BATCH_SIZE]
         numbered_lines = []
         for j, job in enumerate(batch):
+            desc = job.get("description_snippet", "")
+            desc_note = desc[:500] if desc else "[No description available]"
             numbered_lines.append(
-                f"{j+1}. Title: {job['title']} | Location: {job['location']} | "
-                f"Country: {job.get('country', '')} | "
-                f"Description: {job.get('description_snippet', '')[:500]}"
+                f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
+                f"Location: {job.get('location', 'Remote')} | "
+                f"Description: {desc_note}"
             )
-        user_msg = f"Jobs:\n{chr(10).join(numbered_lines)}"
+        user_msg = f"Classify these {len(batch)} jobs:\n{chr(10).join(numbered_lines)}"
 
-        text = _ai_call(LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1000)
+        text = _ai_call(LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
 
         if text is None:
-            log.warning(f"AI location classification failed for batch of {len(batch)}, defaulting to exclude")
+            log.warning(f"AI location classification failed for batch of {len(batch)}, keeping as uncertain")
             continue
 
         for line in text.splitlines():
@@ -513,7 +568,17 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
                     elif label.startswith("NO_MATCH"):
                         results[i + idx] = "no_match"
                     else:
-                        results[i + idx] = "no_match"
+                        # Unparseable AI output → keep as uncertain
+                        pass
+
+        # Delay between batches to avoid rate limits
+        if i + AI_BATCH_SIZE < len(jobs):
+            time.sleep(2)
+
+    classified = sum(1 for r in results if r != "uncertain")
+    log.info(f"AI classified {classified}/{len(jobs)} locations "
+             f"({results.count('match')} match, {results.count('no_match')} no_match, "
+             f"{results.count('uncertain')} uncertain/unclassified)")
 
     return results
 
