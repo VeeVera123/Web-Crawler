@@ -30,4 +30,4 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           LLM_PROVIDER: cerebras   # Options: cerebras, groq, anthropic
-        run: python main.py
+        run: python main_test.py   # TEMP: testing AI classification — change back to main.py when done
