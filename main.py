@@ -14,7 +14,6 @@ LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config import CONCURRENT_WORKERS
 from ats_scrapers import scrape_board, enrich_descriptions
 from classifier import (
     keyword_classify_role, ai_classify_roles,
@@ -118,9 +117,8 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
 
         return len(slugs) - platform_failed, platform_failed, platform_jobs
 
-    # Run each platform concurrently (up to 8 platforms at once)
-    # Safe because each ATS has independent rate limits
-    with ThreadPoolExecutor(max_workers=8) as platform_pool:
+    # Run all platforms concurrently — each has its own per-platform worker limit
+    with ThreadPoolExecutor(max_workers=len(by_ats)) as platform_pool:
         platform_futures = {}
         for ats, slugs in by_ats.items():
             f = platform_pool.submit(_scrape_platform, ats, slugs)
