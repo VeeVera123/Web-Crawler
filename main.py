@@ -1,7 +1,7 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 80,000+ company boards across 21 ATS platforms.
+Scans 100,000+ company boards across 21 ATS platforms.
 
 Reads slugs from Supabase slug_registry (single source of truth,
 enriched weekly by enrich_slugs.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl).
@@ -190,7 +190,7 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             elif label == "uncertain":
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            # "no_match" → drop (this is now the default on AI failure too)
+            # "no_match" → drop; AI failure defaults to "uncertain" (included)
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
