@@ -448,12 +448,21 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
 
     results = ["uncertain"] * len(jobs)
 
+    # Cerebras free tier: 8K context. System prompt ~500 tokens (~2K chars).
+    # Budget ~24K chars for user message. Cap description per job so batch fits.
+    MAX_USER_CHARS = 24000
+    DESC_OVERHEAD = 120  # title + company + location metadata per job
+
     for i in range(0, len(jobs), AI_BATCH_SIZE):
         batch = jobs[i:i + AI_BATCH_SIZE]
+        max_desc = max(200, (MAX_USER_CHARS - len(batch) * DESC_OVERHEAD) // len(batch))
         numbered_lines = []
         for j, job in enumerate(batch):
             desc = job.get("description_snippet", "")
-            desc_note = desc if desc else "[No description available]"
+            if desc:
+                desc_note = desc[:max_desc] + ("…" if len(desc) > max_desc else "")
+            else:
+                desc_note = "[No description available]"
             numbered_lines.append(
                 f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
                 f"Location: {job.get('location', 'Remote')} | "
@@ -461,7 +470,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
             )
         user_msg = f"Classify these {len(batch)} jobs:\n{chr(10).join(numbered_lines)}"
 
-        log.info(f"  [AI] Sending job to LLM: {batch[0]['title']} @ {batch[0].get('company', '?')}")
+        log.info(f"  [AI] Sending batch of {len(batch)} to LLM (desc cap: {max_desc} chars)")
         text = _ai_call(LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
 
         if text is None:
