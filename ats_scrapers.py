@@ -2149,4 +2149,39 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 5) -> list[dict]:
                 pass
 
     log.info(f"Enriched {enriched}/{len(to_enrich)} jobs with descriptions")
+
+    # ── Fallback: fetch job URL directly for ANY job still missing a JD ──
+    # Some ATS APIs don't return descriptions, but the job page itself has one.
+    # This catches Workday, iCIMS, SuccessFactors, etc. where the API fetch failed.
+    still_missing = [j for j in jobs if not j.get("description_snippet")
+                     and j.get("url")]
+    if still_missing:
+        log.info(f"Fallback: fetching {len(still_missing)} job URLs directly for missing JDs...")
+        fallback_ok = 0
+
+        def _fetch_fallback(job):
+            try:
+                desc = _fetch_generic_description(job)
+                if desc:
+                    job["description_snippet"] = desc
+                    salary = _extract_salary(desc)
+                    if salary and not job.get("salary"):
+                        job["salary"] = salary
+            except Exception as e:
+                log.debug(f"Fallback fetch failed {job['url']}: {e}")
+            time.sleep(random.uniform(0.3, 0.8))
+            return job
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch_fallback, j): j for j in still_missing}
+            for future in as_completed(futures):
+                try:
+                    job = future.result()
+                    if job.get("description_snippet"):
+                        fallback_ok += 1
+                except Exception:
+                    pass
+
+        log.info(f"Fallback enriched {fallback_ok}/{len(still_missing)} jobs from job URLs")
+
     return jobs
