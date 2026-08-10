@@ -13,7 +13,7 @@ Then a separate location filter:
 import re
 import time
 import logging
-from config import LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, AI_BATCH_SIZE
+from config import LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL, AI_BATCH_SIZE
 
 log = logging.getLogger(__name__)
 
@@ -24,9 +24,10 @@ RETRY_BASE_DELAY = 5  # seconds
 if LLM_PROVIDER == "anthropic":
     import anthropic
     _client = anthropic.Anthropic(api_key=LLM_API_KEY)
-elif LLM_PROVIDER == "groq":
-    from groq import Groq
-    _client = Groq(api_key=LLM_API_KEY)
+else:
+    # Cerebras, Groq, and any OpenAI-compatible provider
+    from openai import OpenAI
+    _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 
 def _ai_call(system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
@@ -35,9 +36,8 @@ def _ai_call(system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | 
     Returns response text or None on failure."""
     if LLM_PROVIDER == "anthropic":
         return _ai_call_anthropic(system_prompt, user_msg, max_tokens)
-    elif LLM_PROVIDER == "groq":
-        return _ai_call_groq(system_prompt, user_msg, max_tokens)
-    return None
+    else:
+        return _ai_call_openai_compat(system_prompt, user_msg, max_tokens)
 
 
 def _ai_call_anthropic(system_prompt: str, user_msg: str, max_tokens: int) -> str | None:
@@ -79,14 +79,16 @@ def _ai_call_anthropic(system_prompt: str, user_msg: str, max_tokens: int) -> st
     return None
 
 
-def _ai_call_groq(system_prompt: str, user_msg: str, max_tokens: int) -> str | None:
-    """Groq with retry on rate limit."""
-    combined_prompt = f"{system_prompt}\n\n{user_msg}"
+def _ai_call_openai_compat(system_prompt: str, user_msg: str, max_tokens: int) -> str | None:
+    """OpenAI-compatible provider (Cerebras, Groq, etc.) with retry."""
     for attempt in range(MAX_RETRIES):
         try:
             resp = _client.chat.completions.create(
                 model=LLM_MODEL,
-                messages=[{"role": "user", "content": combined_prompt}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
                 temperature=0,
                 max_tokens=max_tokens,
             )
@@ -94,17 +96,17 @@ def _ai_call_groq(system_prompt: str, user_msg: str, max_tokens: int) -> str | N
         except Exception as e:
             error_str = str(e)
             is_rate_limit = "429" in error_str or "rate" in error_str.lower()
-            is_daily_limit = "tokens per day" in error_str.lower() or "tpd" in error_str.lower()
+            is_daily_limit = "tokens per day" in error_str.lower() or "daily" in error_str.lower()
 
             if is_daily_limit:
-                log.error("Groq daily token limit reached — skipping remaining AI calls")
+                log.error(f"{LLM_PROVIDER} daily token limit reached — skipping remaining AI calls")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
-                log.warning(f"Groq rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
+                log.warning(f"{LLM_PROVIDER} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
                 time.sleep(delay)
                 continue
-            log.error(f"Groq API error (attempt {attempt + 1}): {e}")
+            log.error(f"{LLM_PROVIDER} API error (attempt {attempt + 1}): {e}")
             return None
     return None
 
@@ -540,7 +542,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
         numbered_lines = []
         for j, job in enumerate(batch):
             desc = job.get("description_snippet", "")
-            desc_note = desc[:500] if desc else "[No description available]"
+            desc_note = desc if desc else "[No description available]"
             numbered_lines.append(
                 f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
                 f"Location: {job.get('location', 'Remote')} | "
