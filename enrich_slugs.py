@@ -84,26 +84,26 @@ KALIL_SOURCES = {
     "workable":        f"{KALIL_BASE}/workable.csv",
     "recruitee":       f"{KALIL_BASE}/recruitee.csv",
     "smartrecruiters": f"{KALIL_BASE}/smartrecruiters.csv",
-    "taleo":           f"{KALIL_BASE}/taleo.csv",
     "teamtailor":      f"{KALIL_BASE}/teamtailor.csv",
-    "successfactors":  f"{KALIL_BASE}/successfactors.csv",
     "breezyhr":        f"{KALIL_BASE}/breezy.csv",
-    "softgarden":      f"{KALIL_BASE}/softgarden.csv",
+    # Disabled (JS-rendered / auth-required / blocked):
+    # "taleo", "successfactors", "softgarden"
 }
 
 # Common Crawl
 CC_INDEX_URL = "https://index.commoncrawl.org"
 CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
 
-# ATS platforms we have scrapers for — only import these (21 total)
+# ATS platforms we have working scrapers for (14 active)
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
-    "taleo", "oracle_cloud_hcm", "brassring", "teamtailor",
-    "successfactors",
-    "breezyhr", "applytojob", "hrmdirect", "softgarden", "zoho",
-    "ycombinator",
+    "teamtailor", "breezyhr", "applytojob", "personio",
 }
+
+# BLACKLISTED — scrapers exist but don't work (JS-rendered / auth / blocked):
+# taleo, oracle_cloud_hcm, brassring, successfactors,
+# hrmdirect, softgarden, zoho, ycombinator
 
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
@@ -118,14 +118,7 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "rippling": "rippling",
     "recruitee": "recruitee",
     "smartrecruiters": "smartrecruiters",
-    "taleo": "taleo",
-    "oracle cloud": "oracle_cloud_hcm",
-    "oraclecloud": "oracle_cloud_hcm",
-    "brassring": "brassring",
     "teamtailor": "teamtailor",
-    "sap hr cloud": "successfactors",
-    "sap successfactors": "successfactors",
-    "successfactors": "successfactors",
     "workable": "workable",
     # New 6 platforms
     "breezyhr": "breezyhr",
@@ -133,14 +126,10 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "breezy hr": "breezyhr",
     "applytojob": "applytojob",
     "apply to job": "applytojob",
-    "hrmdirect": "hrmdirect",
-    "hrm direct": "hrmdirect",
-    "softgarden": "softgarden",
-    "zoho": "zoho",
-    "zoho recruit": "zoho",
-    "ycombinator": "ycombinator",
-    "y combinator": "ycombinator",
-    "yc": "ycombinator",
+    "personio": "personio",
+    # Disabled platforms (kept for reference):
+    # "zoho", "ycombinator", "taleo", "oracle_cloud_hcm",
+    # "brassring", "successfactors", "hrmdirect", "softgarden"
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -427,6 +416,17 @@ def _url_to_slug_zoho(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_personio(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    for suffix in (".jobs.personio.de", ".jobs.personio.com"):
+        if host.endswith(suffix):
+            slug = host.replace(suffix, "").lower()
+            if slug and slug not in SKIP_SLUGS and slug != "www":
+                return slug
+    return None
+
+
 def _url_to_slug_ycombinator(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -689,18 +689,10 @@ CC_PLATFORM_PATTERNS = {
     "recruitee": ["*.recruitee.com/api/offers*", "*.recruitee.com/o/*"],
     "smartrecruiters": ["jobs.smartrecruiters.com/*", "careers.smartrecruiters.com/*"],
     "rippling": ["*.rippling.com/careers*", "*.rippling.com/jobs*"],
-    "taleo": ["*.taleo.net/careersection/*/jobsearch*", "*.taleo.net/careersection/*/jobdetail*"],
-    "oracle_cloud_hcm": ["*.oraclecloud.com/hcmUI/CandidateExperience/*/sites/*"],
-    "brassring": ["sjobs.brassring.com/TgNewUI/Search/*", "sjobs.brassring.com/TGnewUI/Search/*"],
     "teamtailor": ["*.teamtailor.com/jobs*"],
-    "successfactors": ["*.successfactors.com/career*", "*.successfactors.eu/career*", "*.sapsf.com/career*"],
-    # New 6 platforms
     "breezyhr": ["*.breezy.hr/*"],
     "applytojob": ["*.applytojob.com/*"],
-    "hrmdirect": ["*.hrmdirect.com/employment/*"],
-    "softgarden": ["*.softgarden.io/*"],
-    "zoho": ["*.zohorecruit.com/jobs/*"],
-    "ycombinator": ["www.workatastartup.com/companies/*"],
+    "personio": ["*.jobs.personio.de/*", "*.jobs.personio.com/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -709,17 +701,10 @@ CC_EXTRACTORS = {
     "recruitee": _url_to_slug_recruitee,
     "smartrecruiters": _url_to_slug_smartrecruiters,
     "rippling": _url_to_slug_rippling,
-    "taleo": _url_to_slug_taleo,
-    "oracle_cloud_hcm": _url_to_slug_oracle_cloud,
-    "brassring": _url_to_slug_brassring,
     "teamtailor": _url_to_slug_teamtailor,
-    "successfactors": _url_to_slug_successfactors,
     "breezyhr": _url_to_slug_breezyhr,
     "applytojob": _url_to_slug_applytojob,
-    "hrmdirect": _url_to_slug_hrmdirect,
-    "softgarden": _url_to_slug_softgarden,
-    "zoho": _url_to_slug_zoho,
-    "ycombinator": _url_to_slug_ycombinator,
+    "personio": _url_to_slug_personio,
 }
 
 
