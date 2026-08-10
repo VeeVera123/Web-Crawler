@@ -22,7 +22,10 @@ from classifier_test import (
     keyword_classify_location, ai_classify_locations,
     detect_visa_sponsorship,
 )
-from supabase_handler import get_all_slugs
+from supabase_handler import (
+    add_jobs_batch, start_scan_report, finish_scan_report,
+    get_all_slugs,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -165,13 +168,23 @@ def main():
     for job in matched:
         job["visa_sponsorship"] = detect_visa_sponsorship(job)
 
-    # 6. Print results
+    # 6. Push to Supabase
+    if matched:
+        log.info(f"\nPushing {len(matched)} jobs to Supabase...")
+        added = add_jobs_batch(matched, matched_confidences)
+        duplicates = len(matched) - added
+        log.info(f"Added {added} new jobs ({duplicates} duplicates)")
+    else:
+        added = 0
+
+    # 7. Print results
     log.info(f"\n{'=' * 60}")
     log.info(f"TEST RESULTS")
     log.info(f"{'=' * 60}")
     log.info(f"Raw jobs scraped: {len(all_jobs)}")
     log.info(f"CSM/AM roles: {len(csm_jobs)}")
     log.info(f"Global/Africa matches: {len(matched)}")
+    log.info(f"New jobs added to Supabase: {added}")
 
     if matched:
         log.info(f"\nMatched jobs:")
