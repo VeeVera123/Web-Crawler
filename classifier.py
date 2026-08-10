@@ -548,9 +548,13 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     # questionable role than drop a genuine global opportunity on rate limit
     results = ["uncertain"] * len(jobs)
 
-    # Cerebras free tier: 8K tokens (~30K chars). Reserve ~2K for system prompt + response.
-    # Dynamically cap description length so the batch always fits.
-    MAX_USER_CHARS = 28000
+    # Cap description length per provider's context window.
+    # Cerebras free tier: 8K tokens (~30K chars) — needs truncation.
+    # Groq (128K) and Anthropic (200K) — virtually unlimited, pass full JDs.
+    if LLM_PROVIDER == "cerebras":
+        MAX_USER_CHARS = 28000
+    else:
+        MAX_USER_CHARS = 500000  # Groq/Anthropic: no practical limit
     DESC_OVERHEAD = 120  # title + company + location metadata per job
 
     for i in range(0, len(jobs), AI_BATCH_SIZE):
