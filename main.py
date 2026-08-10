@@ -118,8 +118,9 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
 
         return len(slugs) - platform_failed, platform_failed, platform_jobs
 
-    # Run each platform concurrently (up to 4 platforms at once)
-    with ThreadPoolExecutor(max_workers=4) as platform_pool:
+    # Run each platform concurrently (up to 8 platforms at once)
+    # Safe because each ATS has independent rate limits
+    with ThreadPoolExecutor(max_workers=8) as platform_pool:
         platform_futures = {}
         for ats, slugs in by_ats.items():
             f = platform_pool.submit(_scrape_platform, ats, slugs)
