@@ -41,7 +41,7 @@ def _get(url: str, **kwargs) -> requests.Response | None:
     return None
 
 
-def _snippet(html_or_text: str, max_chars: int = 2000) -> str:
+def _snippet(html_or_text: str, max_chars: int = 8000) -> str:
     """Strip HTML and truncate."""
     if not html_or_text:
         return ""
