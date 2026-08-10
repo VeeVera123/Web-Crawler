@@ -1305,9 +1305,9 @@ def scrape_breezyhr(slug: str) -> list[dict]:
     jobs = []
     seen_urls = set()
 
-    # Find all job links: /p/<hex_id>/<job-title-slug>
+    # Find all job links: /p/<hex_id>-<job-title-slug> or /p/<hex_id>/<job-title-slug>
     for match in re.finditer(
-        r'href=["\'](/p/([a-f0-9]+)/([^"\']+))["\']', r.text
+        r'href=["\'](/p/([a-f0-9]+)[-/]([^"\']+))["\']', r.text
     ):
         path = match.group(1)
         job_url = f"{base_url}{path}"
@@ -1887,7 +1887,129 @@ def scrape_ycombinator(slug: str) -> list[dict]:
     return jobs
 
 
+def scrape_personio(slug: str) -> list[dict]:
+    """Personio — public XML feed, no auth required.
+    Slug is the company subdomain (e.g. 'acme').
+    Tries both .de and .com domains."""
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    company_name = slug.replace("-", " ").title()
+
+    xml_text = None
+    for domain in ["jobs.personio.de", "jobs.personio.com"]:
+        url = f"https://{slug}.{domain}/xml?language=en"
+        r = _get(url, headers=headers)
+        if r and r.text.strip().startswith("<?xml"):
+            xml_text = r.text
+            break
+
+    if not xml_text:
+        return []
+
+    jobs = []
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception as e:
+        log.debug(f"Personio: XML parse failed for {slug}: {e}")
+        return []
+
+    for pos in root.iter("position"):
+        title = (pos.findtext("name") or "").strip()
+        if not title:
+            continue
+
+        job_id = pos.findtext("id") or ""
+        office = (pos.findtext("office") or "").strip()
+        department = (pos.findtext("department") or "").strip()
+        emp_type = (pos.findtext("employmentType") or "").strip()
+        company = (pos.findtext("subcompany") or company_name).strip()
+        schedule = (pos.findtext("schedule") or "").strip()
+
+        # Description blocks
+        desc_parts = []
+        for desc_elem in pos.iter("jobDescription"):
+            name = (desc_elem.findtext("name") or "").strip()
+            value = (desc_elem.findtext("value") or "").strip()
+            if value:
+                desc_parts.append(_snippet(value, max_chars=2000))
+        desc = " ".join(desc_parts)
+        salary = _extract_salary(desc) if desc else ""
+
+        # Build job URL
+        job_url = f"https://{slug}.jobs.personio.de/job/{job_id}" if job_id else ""
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": company,
+            "location": office,
+            "country": "",
+            "department": department,
+            "workplace_type": schedule,
+            "employment_type": emp_type,
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "Personio",
+            "slug": slug,
+        })
+
+    return jobs
+
+
 # ── Dispatcher ──────────────────────────────────────────
+
+def scrape_paylocity(slug: str) -> list[dict]:
+    """Paylocity — public JSON API feed, no auth required.
+    Slug is the company GUID (e.g. '96' or a UUID).
+    Endpoint: https://recruiting.paylocity.com/recruiting/api/feed/jobs/{guid}"""
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    url = f"https://recruiting.paylocity.com/recruiting/api/feed/jobs/{slug}"
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    jobs = []
+    for item in data:
+        title = (item.get("Title") or "").strip()
+        if not title:
+            continue
+
+        company = (item.get("CompanyName") or slug).strip()
+        apply_url = item.get("ApplyUrl") or item.get("DisplayUrl") or ""
+        desc_html = item.get("Description") or ""
+        reqs_html = item.get("Requirements") or ""
+        desc = _snippet(f"{desc_html} {reqs_html}".strip())
+
+        loc = item.get("JobLocation") or {}
+        loc_parts = [loc.get("City"), loc.get("State"), loc.get("Metro")]
+        location = ", ".join(p for p in loc_parts if p)
+        salary = item.get("SalaryDescription") or _extract_salary(desc) or ""
+        department = item.get("HiringDepartment") or ""
+
+        jobs.append({
+            "title": title,
+            "url": apply_url,
+            "company": company,
+            "location": location,
+            "country": "",
+            "department": department,
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": salary,
+            "description_snippet": desc,
+            "ats": "paylocity",
+            "board_slug": slug,
+        })
+
+    return jobs
+
 
 SCRAPERS = {
     "rippling": scrape_rippling,
@@ -1900,17 +2022,20 @@ SCRAPERS = {
     "workable": scrape_workable,
     "recruitee": scrape_recruitee,
     "smartrecruiters": scrape_smartrecruiters,
-    "taleo": scrape_taleo,
-    "oracle_cloud_hcm": scrape_oracle_cloud_hcm,
-    "brassring": scrape_brassring,
     "teamtailor": scrape_teamtailor,
-    "successfactors": scrape_successfactors,
     "breezyhr": scrape_breezyhr,
     "applytojob": scrape_applytojob,
-    "hrmdirect": scrape_hrmdirect,
-    "softgarden": scrape_softgarden,
-    "zoho": scrape_zoho,
-    "ycombinator": scrape_ycombinator,
+    "personio": scrape_personio,
+    "paylocity": scrape_paylocity,
+    # ── DISABLED (JS-rendered / auth-required / blocked) ──
+    # "taleo": scrape_taleo,
+    # "oracle_cloud_hcm": scrape_oracle_cloud_hcm,
+    # "brassring": scrape_brassring,
+    # "successfactors": scrape_successfactors,
+    # "hrmdirect": scrape_hrmdirect,
+    # "softgarden": scrape_softgarden,
+    # "zoho": scrape_zoho,
+    # "ycombinator": scrape_ycombinator,
 }
 
 
