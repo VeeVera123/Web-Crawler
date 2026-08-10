@@ -98,7 +98,7 @@ CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
-    "teamtailor", "breezyhr", "applytojob", "personio",
+    "teamtailor", "breezyhr", "applytojob", "personio", "paylocity",
 }
 
 # BLACKLISTED — scrapers exist but don't work (JS-rendered / auth / blocked):
@@ -127,6 +127,7 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "applytojob": "applytojob",
     "apply to job": "applytojob",
     "personio": "personio",
+    "paylocity": "paylocity",
     # Disabled platforms (kept for reference):
     # "zoho", "ycombinator", "taleo", "oracle_cloud_hcm",
     # "brassring", "successfactors", "hrmdirect", "softgarden"
@@ -416,6 +417,25 @@ def _url_to_slug_zoho(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_paylocity(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "paylocity.com" not in host:
+        return None
+    # Pattern: /recruiting/Jobs/List/{guid}/{company-slug}
+    # or: /recruiting/api/feed/jobs/{guid}
+    # or: /recruiting/Jobs/Details/{jobId}/{company-slug}/...
+    parts = parsed.path.strip("/").split("/")
+    # Look for the guid after "List" or "feed/jobs"
+    for i, part in enumerate(parts):
+        if part.lower() in ("list", "jobs") and i + 1 < len(parts):
+            candidate = parts[i + 1]
+            # GUID is numeric or a UUID-like string
+            if candidate and candidate not in SKIP_SLUGS:
+                return candidate
+    return None
+
+
 def _url_to_slug_personio(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -474,6 +494,8 @@ URL_TO_SLUG = {
     "softgarden": _url_to_slug_softgarden,
     "zoho": _url_to_slug_zoho,
     "ycombinator": _url_to_slug_ycombinator,
+    "personio": _url_to_slug_personio,
+    "paylocity": _url_to_slug_paylocity,
 }
 
 
@@ -693,6 +715,7 @@ CC_PLATFORM_PATTERNS = {
     "breezyhr": ["*.breezy.hr/*"],
     "applytojob": ["*.applytojob.com/*"],
     "personio": ["*.jobs.personio.de/*", "*.jobs.personio.com/*"],
+    "paylocity": ["recruiting.paylocity.com/recruiting/Jobs/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -705,6 +728,7 @@ CC_EXTRACTORS = {
     "breezyhr": _url_to_slug_breezyhr,
     "applytojob": _url_to_slug_applytojob,
     "personio": _url_to_slug_personio,
+    "paylocity": _url_to_slug_paylocity,
 }
 
 
