@@ -24,7 +24,12 @@ RETRY_BASE_DELAY = 5  # seconds
 
 # Proactive rate-limit throttle (Cerebras free tier: ~5 req/min)
 _last_call_time = 0.0
-_MIN_CALL_INTERVAL = 12.5 if LLM_PROVIDER == "cerebras" else 0.0  # 12.5s = ~5 req/min
+if LLM_PROVIDER == "cerebras":
+    _MIN_CALL_INTERVAL = 12.5   # 12.5s = ~5 req/min (free tier)
+elif LLM_PROVIDER == "openai":
+    _MIN_CALL_INTERVAL = 5.0    # 5s = ~12 req/min (Tier 1: 200K TPM)
+else:
+    _MIN_CALL_INTERVAL = 0.0
 
 if LLM_PROVIDER == "anthropic":
     import anthropic
