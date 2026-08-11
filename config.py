@@ -4,6 +4,7 @@ Switch provider by setting LLM_PROVIDER env var:
     LLM_PROVIDER=cerebras   →  Llama 3.3 70B on Cerebras (free tier, 1M tokens/day)
     LLM_PROVIDER=groq       →  Llama 3.3 70B on Groq (free tier)
     LLM_PROVIDER=anthropic  →  Claude Haiku 4.5 (with prompt caching)
+    LLM_PROVIDER=openai     →  GPT-4o mini (auto prompt caching, 128K context)
 """
 
 import os
@@ -32,8 +33,12 @@ elif LLM_PROVIDER == "anthropic":
     LLM_API_KEY = os.environ["ANTHROPIC_API_KEY"]
     LLM_MODEL = "claude-haiku-4-5-20251001"
     LLM_BASE_URL = None  # Anthropic uses its own SDK
+elif LLM_PROVIDER == "openai":
+    LLM_API_KEY = os.environ["OPENAI_API_KEY"]
+    LLM_MODEL = "gpt-4o-mini"       # $0.15/M input, 128K context, auto prompt caching
+    LLM_BASE_URL = "https://api.openai.com/v1"
 else:
-    raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}. Use 'cerebras', 'groq', or 'anthropic'.")
+    raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}. Use 'cerebras', 'groq', 'anthropic', or 'openai'.")
 
 # ── Scraper settings (shared, provider-independent) ──────
 REQUEST_TIMEOUT = 20
@@ -43,6 +48,9 @@ MAX_RETRIES = 2
 if LLM_PROVIDER == "cerebras":
     AI_BATCH_SIZE = 3          # 8K context — 3 full JDs per request
     AI_PARALLEL_REQUESTS = 1   # sequential (rate-limited to 30 RPM)
+elif LLM_PROVIDER == "openai":
+    AI_BATCH_SIZE = 30         # 128K context — 30 jobs per request
+    AI_PARALLEL_REQUESTS = 10  # 500 RPM limit — 10 concurrent is safe
 else:
     AI_BATCH_SIZE = 30         # 128K+ context — 30 jobs per request
-    AI_PARALLEL_REQUESTS = 3   # fire 3 requests concurrently
+    AI_PARALLEL_REQUESTS = 3   # fire 3 requests concurrently (Groq/Haiku)
