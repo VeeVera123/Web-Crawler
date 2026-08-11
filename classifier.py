@@ -30,7 +30,7 @@ if LLM_PROVIDER == "anthropic":
     import anthropic
     _client = anthropic.Anthropic(api_key=LLM_API_KEY)
 else:
-    # Cerebras, Groq, and any OpenAI-compatible provider
+    # Cerebras, Groq, OpenAI, and any OpenAI-compatible provider
     from openai import OpenAI
     _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
@@ -92,7 +92,7 @@ def _ai_call_anthropic(system_prompt: str, user_msg: str, max_tokens: int) -> st
 
 
 def _ai_call_openai_compat(system_prompt: str, user_msg: str, max_tokens: int) -> str | None:
-    """OpenAI-compatible provider (Cerebras, Groq, etc.) with retry."""
+    """OpenAI-compatible provider (Cerebras, Groq, OpenAI, etc.) with retry."""
     for attempt in range(MAX_RETRIES):
         try:
             resp = _client.chat.completions.create(
