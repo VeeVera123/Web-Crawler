@@ -34,4 +34,11 @@ else:
 # ── Scraper settings ──────────────────────────────────────
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 2
-AI_BATCH_SIZE = 15  # 15 jobs per request (150 RPH × 15 = 2,250 classifications/hr)
+
+# ── AI classification settings (provider-aware) ─────────
+if LLM_PROVIDER == "cerebras":
+    AI_BATCH_SIZE = 3
+    AI_PARALLEL_REQUESTS = 1
+else:
+    AI_BATCH_SIZE = 30
+    AI_PARALLEL_REQUESTS = 3
