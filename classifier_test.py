@@ -18,9 +18,13 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 4
 RETRY_BASE_DELAY = 5  # seconds
 
-# Cerebras free tier: ~5 req/min. Space calls 13s apart to avoid 429s.
 _last_call_time = 0.0
-_MIN_CALL_INTERVAL = 13.0
+if LLM_PROVIDER == "cerebras":
+    _MIN_CALL_INTERVAL = 13.0   # ~5 req/min (free tier)
+elif LLM_PROVIDER == "openai":
+    _MIN_CALL_INTERVAL = 5.0    # ~12 req/min (Tier 1: 200K TPM)
+else:
+    _MIN_CALL_INTERVAL = 0.0
 
 if LLM_PROVIDER == "anthropic":
     import anthropic
