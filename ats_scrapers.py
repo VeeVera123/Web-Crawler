@@ -2289,7 +2289,7 @@ DESCRIPTION_FETCHERS = {
 }
 
 
-def enrich_descriptions(jobs: list[dict], max_workers: int = 5) -> list[dict]:
+def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     """Fetch individual job descriptions for platforms that don't
     include them in the list API. Call this AFTER the role filter
     so we only fetch details for the small subset of CSM/AM jobs.
