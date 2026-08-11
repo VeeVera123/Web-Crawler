@@ -48,7 +48,7 @@ PLATFORM_WORKERS = {
     "breezyhr": 10,
     "applytojob": 10,
     "personio": 10,
-    "paylocity": 10,
+    "joincom": 5,  # JOIN.com pageSize max 5, needs slug→ID resolution
 }
 
 
