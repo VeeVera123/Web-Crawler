@@ -44,7 +44,7 @@ if LLM_PROVIDER == "cerebras":
     AI_BATCH_SIZE = 3
     AI_PARALLEL_REQUESTS = 1
 elif LLM_PROVIDER == "openai":
-    AI_BATCH_SIZE = 30
+    AI_BATCH_SIZE = 8
     AI_PARALLEL_REQUESTS = 10
 else:
     AI_BATCH_SIZE = 30
