@@ -9,7 +9,8 @@ Changes from classifier.py:
 import re
 import time
 import logging
-from config_test import LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL, AI_BATCH_SIZE
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from config_test import LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL, AI_BATCH_SIZE, AI_PARALLEL_REQUESTS
 
 log = logging.getLogger(__name__)
 
@@ -212,32 +213,49 @@ Respond ONLY with lines like:
 2 NO"""
 
 
+def _classify_role_batch(batch: list[str]) -> dict[str, bool]:
+    numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
+    user_msg = f"Titles:\n{numbered}"
+    text = _ai_call(ROLE_SYSTEM_PROMPT, user_msg, max_tokens=500)
+    results = {}
+    if text is None:
+        log.warning(f"AI role classification failed for batch of {len(batch)}, defaulting to exclude")
+        for t in batch:
+            results[t] = False
+        return results
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            try:
+                idx = int(parts[0]) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(batch):
+                results[batch[idx]] = parts[1].upper().startswith("YES")
+    for t in batch:
+        if t not in results:
+            results[t] = False
+    return results
+
+
 def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     if not titles:
         return {}
+    batches = [titles[i:i + AI_BATCH_SIZE] for i in range(0, len(titles), AI_BATCH_SIZE)]
     results = {}
-    for i in range(0, len(titles), AI_BATCH_SIZE):
-        batch = titles[i:i + AI_BATCH_SIZE]
-        numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
-        user_msg = f"Titles:\n{numbered}"
-        text = _ai_call(ROLE_SYSTEM_PROMPT, user_msg, max_tokens=500)
-        if text is None:
-            log.warning(f"AI role classification failed for batch of {len(batch)}, defaulting to exclude")
-            for t in batch:
-                results[t] = False
-            continue
-        for line in text.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2:
+    if AI_PARALLEL_REQUESTS <= 1:
+        for batch in batches:
+            results.update(_classify_role_batch(batch))
+    else:
+        with ThreadPoolExecutor(max_workers=AI_PARALLEL_REQUESTS) as pool:
+            futures = {pool.submit(_classify_role_batch, b): b for b in batches}
+            for future in as_completed(futures):
                 try:
-                    idx = int(parts[0]) - 1
-                except ValueError:
-                    continue
-                if 0 <= idx < len(batch):
-                    results[batch[idx]] = parts[1].upper().startswith("YES")
-        for t in batch:
-            if t not in results:
-                results[t] = False
+                    results.update(future.result())
+                except Exception as e:
+                    log.error(f"Parallel role classification error: {e}")
+                    for t in futures[future]:
+                        results[t] = False
     return results
 
 
@@ -442,56 +460,80 @@ Respond ONLY with lines like:
 2 NO_MATCH"""
 
 
+def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> list[str]:
+    DESC_OVERHEAD = 120
+    max_desc = max(500, (max_user_chars - len(batch_jobs) * DESC_OVERHEAD) // len(batch_jobs))
+    numbered_lines = []
+    for j, job in enumerate(batch_jobs):
+        desc = job.get("description_snippet", "")
+        if desc:
+            desc_note = desc[:max_desc] + ("…" if len(desc) > max_desc else "")
+        else:
+            desc_note = "[No description available]"
+        numbered_lines.append(
+            f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
+            f"Location: {job.get('location', 'Remote')} | "
+            f"Description: {desc_note}"
+        )
+    user_msg = f"Classify these {len(batch_jobs)} jobs:\n{chr(10).join(numbered_lines)}"
+
+    log.info(f"  [AI] Sending batch of {len(batch_jobs)} to LLM (desc cap: {max_desc} chars)")
+    text = _ai_call(LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
+
+    batch_results = ["uncertain"] * len(batch_jobs)
+    if text is None:
+        log.warning(f"AI location classification failed for batch of {len(batch_jobs)}, keeping as uncertain")
+        return batch_results
+
+    log.info(f"  [AI] Response: {text.strip()}")
+
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) >= 1:
+            try:
+                idx = int(parts[0].rstrip(".")) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(batch_jobs):
+                label = parts[1].upper() if len(parts) > 1 else ""
+                if label.startswith("MATCH"):
+                    batch_results[idx] = "match"
+                elif label.startswith("NO_MATCH"):
+                    batch_results[idx] = "no_match"
+    return batch_results
+
+
 def ai_classify_locations(jobs: list[dict]) -> list[str]:
     if not jobs:
         return []
 
+    if LLM_PROVIDER == "cerebras":
+        max_user_chars = 28000
+    else:
+        max_user_chars = 500000
+
+    batches = [(i, jobs[i:i + AI_BATCH_SIZE]) for i in range(0, len(jobs), AI_BATCH_SIZE)]
     results = ["uncertain"] * len(jobs)
 
-    # Cerebras free tier: 8K context. System prompt ~500 tokens (~2K chars).
-    # Budget ~24K chars for user message. Cap description per job so batch fits.
-    MAX_USER_CHARS = 24000
-    DESC_OVERHEAD = 120  # title + company + location metadata per job
-
-    for i in range(0, len(jobs), AI_BATCH_SIZE):
-        batch = jobs[i:i + AI_BATCH_SIZE]
-        max_desc = max(200, (MAX_USER_CHARS - len(batch) * DESC_OVERHEAD) // len(batch))
-        numbered_lines = []
-        for j, job in enumerate(batch):
-            desc = job.get("description_snippet", "")
-            if desc:
-                desc_note = desc[:max_desc] + ("…" if len(desc) > max_desc else "")
-            else:
-                desc_note = "[No description available]"
-            numbered_lines.append(
-                f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
-                f"Location: {job.get('location', 'Remote')} | "
-                f"Description: {desc_note}"
-            )
-        user_msg = f"Classify these {len(batch)} jobs:\n{chr(10).join(numbered_lines)}"
-
-        log.info(f"  [AI] Sending batch of {len(batch)} to LLM (desc cap: {max_desc} chars)")
-        text = _ai_call(LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
-
-        if text is None:
-            log.warning(f"AI location classification failed for batch of {len(batch)}, keeping as uncertain")
-            continue
-
-        log.info(f"  [AI] Response: {text.strip()}")
-
-        for line in text.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) >= 1:
+    if AI_PARALLEL_REQUESTS <= 1:
+        for start_idx, batch in batches:
+            batch_results = _classify_location_batch(batch, max_user_chars)
+            for j, label in enumerate(batch_results):
+                results[start_idx + j] = label
+    else:
+        with ThreadPoolExecutor(max_workers=AI_PARALLEL_REQUESTS) as pool:
+            future_to_idx = {
+                pool.submit(_classify_location_batch, batch, max_user_chars): start_idx
+                for start_idx, batch in batches
+            }
+            for future in as_completed(future_to_idx):
+                start_idx = future_to_idx[future]
                 try:
-                    idx = int(parts[0].rstrip(".")) - 1
-                except ValueError:
-                    continue
-                if 0 <= idx < len(batch):
-                    label = parts[1].upper() if len(parts) > 1 else ""
-                    if label.startswith("MATCH"):
-                        results[i + idx] = "match"
-                    elif label.startswith("NO_MATCH"):
-                        results[i + idx] = "no_match"
+                    batch_results = future.result()
+                    for j, label in enumerate(batch_results):
+                        results[start_idx + j] = label
+                except Exception as e:
+                    log.error(f"Parallel location classification error: {e}")
 
     classified = sum(1 for r in results if r != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
