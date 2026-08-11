@@ -49,8 +49,8 @@ if LLM_PROVIDER == "cerebras":
     AI_BATCH_SIZE = 3          # 8K context — 3 full JDs per request
     AI_PARALLEL_REQUESTS = 1   # sequential (rate-limited to 30 RPM)
 elif LLM_PROVIDER == "openai":
-    AI_BATCH_SIZE = 30         # 1M context — 30 jobs per request, no accuracy loss
-    AI_PARALLEL_REQUESTS = 10  # 500 RPM limit — 10 concurrent is safe
+    AI_BATCH_SIZE = 10         # Tier 1: 200K TPM — 10 jobs ≈ 17K tokens, fits ~12 req/min
+    AI_PARALLEL_REQUESTS = 1   # sequential — TPM is the bottleneck, not RPM
 else:
     AI_BATCH_SIZE = 30         # 128K+ context — 30 jobs per request
     AI_PARALLEL_REQUESTS = 3   # fire 3 requests concurrently (Groq/Haiku)
