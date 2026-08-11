@@ -30,7 +30,7 @@ elif LLM_PROVIDER == "anthropic":
     LLM_BASE_URL = None
 elif LLM_PROVIDER == "openai":
     LLM_API_KEY = os.environ["OPENAI_API_KEY"]
-    LLM_MODEL = "gpt-4o-mini"
+    LLM_MODEL = "gpt-4.1-nano"
     LLM_BASE_URL = "https://api.openai.com/v1"
 else:
     raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}. Use 'cerebras', 'groq', 'anthropic', or 'openai'.")
@@ -44,7 +44,7 @@ if LLM_PROVIDER == "cerebras":
     AI_BATCH_SIZE = 3
     AI_PARALLEL_REQUESTS = 1
 elif LLM_PROVIDER == "openai":
-    AI_BATCH_SIZE = 8
+    AI_BATCH_SIZE = 30
     AI_PARALLEL_REQUESTS = 10
 else:
     AI_BATCH_SIZE = 30
