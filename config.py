@@ -35,7 +35,7 @@ elif LLM_PROVIDER == "anthropic":
     LLM_BASE_URL = None  # Anthropic uses its own SDK
 elif LLM_PROVIDER == "openai":
     LLM_API_KEY = os.environ["OPENAI_API_KEY"]
-    LLM_MODEL = "gpt-4o-mini"       # $0.15/M input, 128K context, auto prompt caching
+    LLM_MODEL = "gpt-4.1-nano"      # $0.10/M input, 1M context, auto prompt caching
     LLM_BASE_URL = "https://api.openai.com/v1"
 else:
     raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}. Use 'cerebras', 'groq', 'anthropic', or 'openai'.")
@@ -49,7 +49,7 @@ if LLM_PROVIDER == "cerebras":
     AI_BATCH_SIZE = 3          # 8K context — 3 full JDs per request
     AI_PARALLEL_REQUESTS = 1   # sequential (rate-limited to 30 RPM)
 elif LLM_PROVIDER == "openai":
-    AI_BATCH_SIZE = 8          # 128K context — capped at 8 for zero accuracy loss
+    AI_BATCH_SIZE = 30         # 1M context — 30 jobs per request, no accuracy loss
     AI_PARALLEL_REQUESTS = 10  # 500 RPM limit — 10 concurrent is safe
 else:
     AI_BATCH_SIZE = 30         # 128K+ context — 30 jobs per request
