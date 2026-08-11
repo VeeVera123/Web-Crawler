@@ -38,4 +38,11 @@ else:
 # ── Scraper settings (shared, provider-independent) ──────
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 2
-AI_BATCH_SIZE = 3             # jobs per AI classification call (small to fit full JDs in context)
+
+# ── AI classification settings (provider-aware) ─────────
+if LLM_PROVIDER == "cerebras":
+    AI_BATCH_SIZE = 3          # 8K context — 3 full JDs per request
+    AI_PARALLEL_REQUESTS = 1   # sequential (rate-limited to 30 RPM)
+else:
+    AI_BATCH_SIZE = 30         # 128K+ context — 30 jobs per request
+    AI_PARALLEL_REQUESTS = 3   # fire 3 requests concurrently
