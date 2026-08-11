@@ -1957,58 +1957,104 @@ def scrape_personio(slug: str) -> list[dict]:
 
 # ── Dispatcher ──────────────────────────────────────────
 
-def scrape_paylocity(slug: str) -> list[dict]:
-    """Paylocity — public JSON API feed, no auth required.
-    Slug is the company GUID (e.g. '96' or a UUID).
-    Endpoint: https://recruiting.paylocity.com/recruiting/api/feed/jobs/{guid}"""
-    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
-    url = f"https://recruiting.paylocity.com/recruiting/api/feed/jobs/{slug}"
-    r = _get(url, headers=headers)
-    if not r:
+def scrape_joincom(slug: str) -> list[dict]:
+    """JOIN.com — public REST API, no auth required.
+    Slug is the company slug (e.g. 'marswalk').
+    Two-step: resolve slug → company_id via __NEXT_DATA__, then paginate the jobs API.
+    pageSize max is 5 (server rejects >= 6 with HTTP 422)."""
+    import json as _json
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html"}
+
+    # Step 1: Resolve slug → numeric company_id
+    page_r = _get(f"https://join.com/companies/{slug}", headers=headers)
+    if not page_r:
+        return []
+
+    nd_match = re.search(
+        r'<script\s+id="__NEXT_DATA__"[^>]*>([^<]+)</script>',
+        page_r.text, re.I,
+    )
+    if not nd_match:
+        log.debug(f"JOIN: no __NEXT_DATA__ for {slug}")
         return []
 
     try:
-        data = r.json()
-    except Exception:
+        nd = _json.loads(nd_match.group(1))
+        company_id = nd["props"]["pageProps"]["initialState"]["company"]["id"]
+        company_name = nd["props"]["pageProps"]["initialState"]["company"].get("name", slug.replace("-", " ").title())
+    except (KeyError, _json.JSONDecodeError) as e:
+        log.debug(f"JOIN: failed to extract company_id for {slug}: {e}")
         return []
 
-    if not isinstance(data, list):
-        return []
+    # Step 2: Paginate the public jobs API (pageSize max 5)
+    api_base = f"https://join.com/api/public/companies/{company_id}/jobs"
+    all_jobs = []
+    page = 1
 
-    jobs = []
-    for item in data:
-        title = (item.get("Title") or "").strip()
-        if not title:
-            continue
+    while True:
+        r = _get(api_base, params={"locale": "en-us", "page": page, "pageSize": 5},
+                 headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+        if not r:
+            break
+        try:
+            data = r.json()
+        except Exception:
+            break
 
-        company = (item.get("CompanyName") or slug).strip()
-        apply_url = item.get("ApplyUrl") or item.get("DisplayUrl") or ""
-        desc_html = item.get("Description") or ""
-        reqs_html = item.get("Requirements") or ""
-        desc = _snippet(f"{desc_html} {reqs_html}".strip())
+        items = data.get("items", [])
+        pagination = data.get("pagination", {})
+        if not items:
+            break
 
-        loc = item.get("JobLocation") or {}
-        loc_parts = [loc.get("City"), loc.get("State"), loc.get("Metro")]
-        location = ", ".join(p for p in loc_parts if p)
-        salary = item.get("SalaryDescription") or _extract_salary(desc) or ""
-        department = item.get("HiringDepartment") or ""
+        for item in items:
+            city_obj = item.get("city") or {}
+            city = city_obj.get("cityName", "") if isinstance(city_obj, dict) else ""
+            region = city_obj.get("regionName", "") if isinstance(city_obj, dict) else ""
+            country = city_obj.get("countryName", "") if isinstance(city_obj, dict) else ""
+            location = ", ".join(filter(None, [city, region, country]))
 
-        jobs.append({
-            "title": title,
-            "url": apply_url,
-            "company": company,
-            "location": location,
-            "country": "",
-            "department": department,
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": salary,
-            "description_snippet": desc,
-            "ats": "paylocity",
-            "board_slug": slug,
-        })
+            # Salary in cents → dollars/euros
+            sal_from_obj = item.get("salaryAmountFrom") or {}
+            sal_to_obj = item.get("salaryAmountTo") or {}
+            salary_str = ""
+            if isinstance(sal_from_obj, dict) and isinstance(sal_to_obj, dict):
+                amt_from = sal_from_obj.get("amount", 0)
+                amt_to = sal_to_obj.get("amount", 0)
+                currency = sal_from_obj.get("currency", "EUR")
+                if amt_from and amt_to:
+                    salary_str = f"{currency} {amt_from / 100:,.0f}-{amt_to / 100:,.0f}"
 
-    return jobs
+            cat = item.get("category") or {}
+            dept = cat.get("name", "") if isinstance(cat, dict) else ""
+            emp_obj = item.get("employmentType") or {}
+            emp_type = emp_obj.get("name", "") if isinstance(emp_obj, dict) else ""
+            wt = item.get("workplaceType", "")  # ONSITE, REMOTE, HYBRID
+
+            id_param = item.get("idParam", "")
+            job_url = f"https://join.com/companies/{slug}/jobs/{id_param}" if id_param else ""
+
+            all_jobs.append({
+                "title": (item.get("title") or "").strip(),
+                "url": job_url,
+                "company": company_name,
+                "location": location or "Not specified",
+                "country": country,
+                "department": dept,
+                "workplace_type": wt,
+                "employment_type": emp_type,
+                "salary": salary_str,
+                "description_snippet": "",  # Need per-job fetch for full description
+                "source_ats": "JOIN",
+                "slug": slug,
+            })
+
+        page_count = pagination.get("pageCount", 1)
+        if page >= page_count:
+            break
+        page += 1
+        time.sleep(random.uniform(0.2, 0.5))
+
+    return all_jobs
 
 
 SCRAPERS = {
@@ -2026,7 +2072,7 @@ SCRAPERS = {
     "breezyhr": scrape_breezyhr,
     "applytojob": scrape_applytojob,
     "personio": scrape_personio,
-    "paylocity": scrape_paylocity,
+    "joincom": scrape_joincom,
     # ── DISABLED (JS-rendered / auth-required / blocked) ──
     # "taleo": scrape_taleo,
     # "oracle_cloud_hcm": scrape_oracle_cloud_hcm,
@@ -2219,6 +2265,17 @@ def _fetch_generic_description(job: dict) -> str:
     return ""
 
 
+def _fetch_joincom_description(job: dict) -> str:
+    """Fetch full description from JOIN.com job detail API."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    # Extract job ID from URL: /companies/{slug}/jobs/{idParam}
+    # We need the numeric ID, which requires an extra lookup
+    # Try the generic fetcher on the job page (has JSON-LD)
+    return _fetch_generic_description(job)
+
+
 # Platforms that need description enrichment
 DESCRIPTION_FETCHERS = {
     "iCIMS": _fetch_icims_description,
@@ -2228,6 +2285,7 @@ DESCRIPTION_FETCHERS = {
     "BreezyHR": _fetch_generic_description,
     "ApplyToJob": _fetch_generic_description,
     "HRMDirect": _fetch_generic_description,
+    "JOIN": _fetch_joincom_description,
 }
 
 
