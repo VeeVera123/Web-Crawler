@@ -136,7 +136,7 @@ def scrape_himalayas() -> list[dict]:
             jobs.append({
                 "title": item.get("title", ""),
                 "company": item.get("companyName", ""),
-                "location": item.get("locationRestrictions") or "Remote",
+                "location": ", ".join(item.get("locationRestrictions") or []) or "Remote",
                 "url": job_url,
                 "source_ats": "himalayas",
                 "source_type": "job_board",
