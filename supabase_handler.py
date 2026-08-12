@@ -5,7 +5,7 @@ Handles deduplication by job URL, populates slug_registry, and logs scan reports
 
 import re
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
 
@@ -219,54 +219,135 @@ def get_existing_urls() -> set[str]:
     return urls
 
 
-# ── Job insertion ────────────────────────────────────────
+# ── Helpers for safe string extraction ──────────────────
 
-def add_job(job: dict, location_confidence: str = "Match") -> bool:
-    """Insert a single job. Returns True on success."""
+def _safe_str(val, max_len: int = 500) -> str:
+    """Coerce value to string, join lists, truncate."""
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        val = ", ".join(str(x) for x in val)
+    return str(val)[:max_len]
+
+
+def _build_row(job: dict, location_confidence: str) -> dict:
+    """Build a Supabase row dict from a job dict."""
     priority = _compute_location_priority(job)
-
-    row = {
-        "title": (job.get("title") or "")[:500],
+    today = date.today().isoformat()
+    return {
+        "title": _safe_str(job.get("title"), 500),
         "job_url": job.get("url", ""),
-        "company_name": (job.get("company") or "")[:300],
+        "company_name": _safe_str(job.get("company"), 300),
         "ats": job.get("source_ats", "unknown"),
-        "location": (job.get("location") or "")[:500],
-        "country": (job.get("country") or "")[:100],
-        "department": (job.get("department") or "")[:200],
-        "workplace_type": (job.get("workplace_type") or "")[:100],
-        "employment_type": (job.get("employment_type") or "")[:100],
-        "salary": (job.get("salary") or "")[:200],
-        "visa_sponsorship": (job.get("visa_sponsorship") or "unknown")[:50],
+        "location": _safe_str(job.get("location"), 500),
+        "country": _safe_str(job.get("country"), 100),
+        "department": _safe_str(job.get("department"), 200),
+        "workplace_type": _safe_str(job.get("workplace_type"), 100),
+        "employment_type": _safe_str(job.get("employment_type"), 100),
+        "salary": _safe_str(job.get("salary"), 200),
+        "visa_sponsorship": _safe_str(job.get("visa_sponsorship") or "unknown", 50),
         "location_confidence": location_confidence.capitalize(),
         "location_priority": priority,
-        "date_added": date.today().isoformat(),
+        "date_added": today,
+        "last_seen": today,
+        "is_active": True,
     }
 
-    result = _post("jobs", row)
-    return result is not None
 
+# ── Job insertion ────────────────────────────────────────
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
     """
-    Add multiple jobs with deduplication.
-    Returns count of successfully added jobs.
+    Upsert jobs in bulk. New jobs are inserted; existing jobs get
+    last_seen and is_active updated.  Returns count of new jobs added.
     """
     existing = get_existing_urls()
-    added = 0
-    skipped = 0
+    today = date.today().isoformat()
+
+    new_rows = []
+    seen_urls = []
 
     for job, confidence in zip(jobs, location_confidences):
         url = job.get("url", "")
-        if not url or url in existing:
-            skipped += 1
+        if not url:
             continue
+        if url in existing:
+            seen_urls.append(url)
+        else:
+            new_rows.append(_build_row(job, confidence))
+            existing.add(url)  # prevent dupes within this batch
 
-        if add_job(job, confidence):
-            added += 1
-            existing.add(url)
+    # ── Bulk insert new jobs (chunks of 100) ──────────────
+    added = 0
+    for i in range(0, len(new_rows), 100):
+        chunk = new_rows[i:i + 100]
+        result = _post("jobs", chunk)
+        if result is not None:
+            added += len(chunk)
 
-    log.info(f"Added {added} new jobs to Supabase ({skipped} duplicates skipped)")
+    # ── Touch last_seen for existing jobs still active ────
+    if seen_urls:
+        _touch_last_seen(seen_urls, today)
+
+    log.info(f"Added {added} new jobs to Supabase "
+             f"({len(seen_urls)} existing touched, "
+             f"{len(jobs) - len(new_rows) - len(seen_urls)} no-url skipped)")
     return added
+
+
+def _touch_last_seen(urls: list[str], today: str):
+    """Update last_seen and is_active for jobs we saw again this scan."""
+    # Supabase PATCH with IN filter — chunks of 200 URLs at a time
+    for i in range(0, len(urls), 200):
+        chunk = urls[i:i + 200]
+        # Build the IN filter: job_url=in.(url1,url2,...)
+        encoded = ",".join(f'"{u}"' for u in chunk)
+        filters = f"job_url=in.({encoded})"
+        _patch("jobs", filters, {
+            "last_seen": today,
+            "is_active": True,
+        })
+    log.info(f"Updated last_seen for {len(urls)} existing jobs")
+
+
+# ── Stale job cleanup ───────────────────────────────────
+
+def cleanup_stale_jobs(inactive_days: int = 30, delete_days: int = 60):
+    """
+    Mark jobs inactive if not seen in `inactive_days`.
+    Hard-delete jobs not seen in `delete_days`.
+    Call AFTER new jobs are inserted so last_seen is current.
+    """
+    today = date.today()
+
+    # 1. Backfill: set last_seen = date_added for old rows that have no last_seen
+    _patch(
+        "jobs",
+        "last_seen=is.null",
+        {"last_seen": today.isoformat()},
+    )
+
+    # 2. Mark inactive: last_seen older than inactive_days
+    inactive_cutoff = (today - timedelta(days=inactive_days)).isoformat()
+    ok = _patch(
+        "jobs",
+        f"last_seen=lt.{inactive_cutoff}&is_active=eq.true",
+        {"is_active": False},
+    )
+    if ok:
+        log.info(f"Marked jobs not seen since {inactive_cutoff} as inactive")
+
+    # 3. Hard-delete: last_seen older than delete_days
+    delete_cutoff = (today - timedelta(days=delete_days)).isoformat()
+    try:
+        r = http_requests.delete(
+            f"{REST}/jobs?last_seen=lt.{delete_cutoff}",
+            headers=HEADERS, timeout=30,
+        )
+        r.raise_for_status()
+        log.info(f"Deleted jobs not seen since {delete_cutoff}")
+    except Exception as e:
+        log.error(f"Failed to delete stale jobs: {e}")
 
 
 # ── Scan reports ─────────────────────────────────────────
