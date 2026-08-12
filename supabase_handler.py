@@ -3,7 +3,6 @@ Supabase handler — writes filtered jobs to PostgreSQL via REST API.
 Handles deduplication by job URL, populates slug_registry, and logs scan reports.
 """
 
-import re
 import logging
 from datetime import date, datetime, timedelta, timezone
 
@@ -67,60 +66,6 @@ def _get(table: str, params: str = "", limit: int = 10000) -> list[dict]:
     except Exception as e:
         log.error(f"Supabase GET {table} failed: {e}")
         return []
-
-
-# ── Location Priority ────────────────────────────────────
-
-def _compute_location_priority(job: dict) -> int:
-    """
-    Compute location priority for sorting:
-    1 = Global / Anywhere / International / Worldwide
-    2 = EMEA
-    3 = Africa-wide
-    4 = Nigeria specifically
-    5 = Other African countries
-    """
-    raw_loc = job.get("location", "")
-    raw_country = job.get("country", "")
-    if isinstance(raw_loc, list):
-        raw_loc = ", ".join(str(x) for x in raw_loc)
-    if isinstance(raw_country, list):
-        raw_country = ", ".join(str(x) for x in raw_country)
-    loc = (raw_loc + " " + raw_country).lower()
-
-    # Priority 4: Nigeria
-    if "nigeria" in loc or "lagos" in loc or "abuja" in loc:
-        return 4
-
-    # Priority 3: Africa-wide
-    if "africa" in loc:
-        return 3
-
-    # Priority 2: EMEA
-    if "emea" in loc:
-        return 2
-
-    # Priority 1: Global / Anywhere / Worldwide / International
-    global_patterns = [
-        r"\bglobal\b", r"\bworldwide\b", r"\banywhere\b",
-        r"\binternational\b", r"\bwork\s*from\s*anywhere\b",
-    ]
-    for pattern in global_patterns:
-        if re.search(pattern, loc, re.I):
-            return 1
-
-    # Priority 5: Other African countries
-    african_countries = {
-        "kenya", "south africa", "ghana", "egypt", "morocco", "tunisia",
-        "ethiopia", "tanzania", "uganda", "rwanda", "senegal", "cameroon",
-        "angola", "mozambique", "zimbabwe", "zambia", "botswana", "namibia",
-    }
-    for country in african_countries:
-        if country in loc:
-            return 5
-
-    # Default: treat as global-ish (it passed the location filter)
-    return 1
 
 
 # ── Slug Registry ────────────────────────────────────────
@@ -232,7 +177,6 @@ def _safe_str(val, max_len: int = 500) -> str:
 
 def _build_row(job: dict, location_confidence: str) -> dict:
     """Build a Supabase row dict from a job dict."""
-    priority = _compute_location_priority(job)
     today = date.today().isoformat()
     return {
         "title": _safe_str(job.get("title"), 500),
@@ -247,7 +191,6 @@ def _build_row(job: dict, location_confidence: str) -> dict:
         "salary": _safe_str(job.get("salary"), 200),
         "visa_sponsorship": _safe_str(job.get("visa_sponsorship") or "unknown", 50),
         "location_confidence": location_confidence.capitalize(),
-        "location_priority": priority,
         "date_added": today,
         "last_seen": today,
         "is_active": True,
