@@ -2102,13 +2102,62 @@ def scrape_board(ats: str, slug: str) -> list[dict]:
 # These are called AFTER the role filter, so only a handful
 # of jobs need enrichment (not thousands).
 
+def _extract_icims_location(html: str) -> str:
+    """Extract location from iCIMS job page HTML.
+    Tries multiple patterns since iCIMS templates vary."""
+    # Pattern 1: iCIMS format "US-XX-CityName" or "XX-XX-City"
+    m = re.search(r'\b([A-Z]{2}-[A-Z]{2}-[\w\s\-\.]+?)(?:<|"|\'|\s*\n|\s*<)', html)
+    if m:
+        return m.group(1).strip()
+
+    # Pattern 2: Page title "Job Title in City, State | ..."
+    m = re.search(r'<title>[^<]*?\bin\s+([^|<]+?)(?:\s*\|)', html, re.I)
+    if m:
+        loc = m.group(1).strip().rstrip(' .')
+        if loc and len(loc) < 100:
+            return loc
+
+    # Pattern 3: iCIMS-specific location CSS classes
+    for pat in [
+        r'class="[^"]*iCIMS_JobHeader(?:Location|Field)[^"]*"[^>]*>\s*(.*?)\s*<',
+        r'class="[^"]*header-location[^"]*"[^>]*>\s*(.*?)\s*<',
+        r'class="[^"]*location[^"]*"[^>]*>\s*([^<]+?)\s*<',
+    ]:
+        m = re.search(pat, html, re.I | re.DOTALL)
+        if m:
+            loc = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if loc and len(loc) < 200:
+                return loc
+
+    # Pattern 4: JSON-LD structured data
+    m = re.search(r'"addressLocality"\s*:\s*"([^"]+)"', html)
+    if m:
+        region = ""
+        mr = re.search(r'"addressRegion"\s*:\s*"([^"]+)"', html)
+        if mr:
+            region = mr.group(1).strip()
+        loc = m.group(1).strip()
+        return f"{loc}, {region}" if region else loc
+
+    return ""
+
+
 def _fetch_icims_description(job: dict) -> str:
-    """Fetch full description from an individual iCIMS job page."""
+    """Fetch full description and location from an individual iCIMS job page.
+    Also extracts location as a side-effect (updates job dict in place)."""
     r = _get(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return ""
-    # iCIMS job pages have description in a specific div
-    # Try multiple patterns for different iCIMS templates
+
+    html = r.text
+
+    # ── Extract location if missing (side-effect) ──────────
+    if not job.get("location"):
+        loc = _extract_icims_location(html)
+        if loc:
+            job["location"] = loc
+
+    # ── Extract description ────────────────────────────────
     patterns = [
         r'class="iCIMS_JobContent[^"]*"[^>]*>(.*?)</div>',
         r'class="iCIMS_InfoMsg_Job[^"]*"[^>]*>(.*?)</div>',
@@ -2116,11 +2165,11 @@ def _fetch_icims_description(job: dict) -> str:
         r'class="description"[^>]*>(.*?)</div>',
     ]
     for pattern in patterns:
-        match = re.search(pattern, r.text, re.DOTALL | re.IGNORECASE)
+        match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
         if match:
             return _snippet(match.group(1))
     # Fallback: grab all text from the body between common markers
-    body_match = re.search(r'<main[^>]*>(.*?)</main>', r.text, re.DOTALL | re.IGNORECASE)
+    body_match = re.search(r'<main[^>]*>(.*?)</main>', html, re.DOTALL | re.IGNORECASE)
     if body_match:
         return _snippet(body_match.group(1))
     return ""
