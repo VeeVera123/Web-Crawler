@@ -80,7 +80,13 @@ def _compute_location_priority(job: dict) -> int:
     4 = Nigeria specifically
     5 = Other African countries
     """
-    loc = (job.get("location", "") + " " + job.get("country", "")).lower()
+    raw_loc = job.get("location", "")
+    raw_country = job.get("country", "")
+    if isinstance(raw_loc, list):
+        raw_loc = ", ".join(str(x) for x in raw_loc)
+    if isinstance(raw_country, list):
+        raw_country = ", ".join(str(x) for x in raw_country)
+    loc = (raw_loc + " " + raw_country).lower()
 
     # Priority 4: Nigeria
     if "nigeria" in loc or "lagos" in loc or "abuja" in loc:
