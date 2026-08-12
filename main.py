@@ -1,10 +1,12 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 87,000+ company boards across 15 ATS platforms.
+Scans 87,000+ company boards across 15 ATS platforms,
+plus 5 remote job boards (RemoteOK, Remotive, Himalayas, Arbeitnow, Jobicy).
 
 Reads slugs from Supabase slug_registry (single source of truth,
 enriched weekly by enrich_slugs.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl).
+Job boards are scraped directly via free public JSON APIs (no slugs needed).
 Filters for CSM/Account Management roles hiring globally or in Africa.
 Pushes matches to Supabase (PostgreSQL).
 
@@ -15,6 +17,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ats_scrapers import scrape_board, enrich_descriptions
+from job_board_scrapers import scrape_all_job_boards
 from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
@@ -206,11 +209,17 @@ def main():
                 finish_scan_report(report_id, status="failed")
             return
 
-        # 2. Scrape all boards
+        # 2. Scrape all ATS boards
         log.info(f"\nScraping {len(boards)} boards across {len(set(a for a,_ in boards))} ATS platforms...")
         all_jobs, boards_ok, boards_failed = scrape_all(boards)
+
+        # 2b. Scrape job boards (RemoteOK, Remotive, Himalayas, Arbeitnow, Jobicy)
+        log.info(f"\nScraping remote job boards...")
+        board_jobs = scrape_all_job_boards()
+        all_jobs.extend(board_jobs)
+
         if not all_jobs:
-            log.info("No jobs found across any board.")
+            log.info("No jobs found across any source.")
             if report_id:
                 finish_scan_report(
                     report_id,
