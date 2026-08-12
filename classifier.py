@@ -313,46 +313,51 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
 
 
 # ═══════════════════════════════════════════════════════
-# STAGE 3 & 4: LOCATION FILTER (Africa / Global)
+# STAGE 3 & 4: LOCATION FILTER (Global hiring only)
 # ═══════════════════════════════════════════════════════
 
-AFRICAN_COUNTRIES = {
-    "algeria", "angola", "benin", "botswana", "burkina faso", "burundi",
-    "cabo verde", "cape verde", "cameroon", "central african republic", "chad",
-    "comoros", "congo", "cote d'ivoire", "ivory coast", "djibouti", "egypt",
-    "equatorial guinea", "eritrea", "eswatini", "swaziland", "ethiopia",
-    "gabon", "gambia", "ghana", "guinea", "guinea-bissau", "kenya", "lesotho",
-    "liberia", "libya", "madagascar", "malawi", "mali", "mauritania",
-    "mauritius", "morocco", "mozambique", "namibia", "niger", "nigeria",
-    "rwanda", "sao tome", "senegal", "seychelles", "sierra leone", "somalia",
-    "south africa", "south sudan", "sudan", "tanzania", "togo", "tunisia",
-    "uganda", "zambia", "zimbabwe",
-}
-
-# ── Immediate MATCH keywords (global/anywhere/Africa) ───
+# ── Immediate MATCH keywords (global/worldwide hiring signals only) ──
 
 GLOBAL_KEYWORDS = [
+    # Remote + global qualifier
     r"\bremote\s*[\-–—/,]\s*global\b",
     r"\bremote\s*[\-–—/,]\s*worldwide\b",
     r"\bremote\s*[\-–—/,]\s*anywhere\b",
     r"\bremote\s*[\-–—/,]\s*international\b",
+    r"\bremote\s*[\-–—/,]\s*wfa\b",
+    r"\bremote\s*[\-–—/,]\s*everywhere\b",
+    # Qualifier + remote
     r"\bglobal\s*[\-–—/,]?\s*remote\b",
     r"\bworldwide\s*[\-–—/,]?\s*remote\b",
+    r"\binternational\s*[\-–—/,]?\s*remote\b",
+    # Explicit phrases
     r"\bwork\s*from\s*anywhere\b",
+    r"\bwfa\b",
     r"\bhire\s*(globally|worldwide|anywhere)\b",
+    r"\bhiring\s*(globally|worldwide|anywhere)\b",
     r"\bopen\s*to\s*(all|any)\s*location",
+    r"\bopen\s*to\s*(all|any)\s*countr",
     r"\blocation\s*[\-–—:]?\s*anywhere\b",
     r"\blocation\s*[\-–—:]?\s*flexible\b",
     r"\blocation\s*agnostic\b",
+    r"\blocation\s*independent\b",
+    r"\bgeo[\-\s]*flexible\b",
+    r"\bgeo[\-\s]*agnostic\b",
+    r"\bborderless\b",
     r"\b(fully\s*)?distributed\b",
     r"\b(global|international)\s*team\b",
     r"\bmultiple\s*(countries|locations|regions)\b",
+    r"\ball\s*geograph",
+    r"\bany\s*country\b",
+    r"\bno\s*location\s*(requirement|restriction|preference)\b",
+    r"\bno\s*geographic\s*restriction\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
 STANDALONE_GLOBAL_RE = re.compile(
-    r"^\s*(global|worldwide|anywhere|international|remote\s*[\-–—/,]\s*global)\s*$", re.I
+    r"^\s*(global|worldwide|anywhere|international|wfa|earth|"
+    r"remote\s*[\-–—/,]\s*(global|worldwide|anywhere|international|wfa))\s*$", re.I
 )
 
 # ── Immediate REJECT: country-restricted locations ──────
@@ -447,52 +452,51 @@ def keyword_classify_location(job: dict) -> str:
     """
     Returns 'match', 'no_match', or 'unsure'.
 
+    MATCH = only truly global hiring signals (anywhere, worldwide,
+    international, WFA, EMEA). No country-specific matching at all.
+
     Flow:
-      1. Global/Anywhere/Africa/EMEA in location → MATCH
-      2. Country-restricted Remote (Remote-US, Boston Remote) → REJECT
-      3. Onsite at specific city/country (no Remote) → REJECT
-      4. Bare "Remote" alone → UNSURE (send to AI)
-      5. No location → UNSURE (send to AI)
+      1. Global/Anywhere/EMEA in location → MATCH
+      2. Hybrid / onsite → REJECT
+      3. Country-restricted Remote (Remote-US, Boston Remote) → REJECT
+      4. Onsite at specific city/country (no Remote) → REJECT
+      5. Bare "Remote" alone → UNSURE (send to AI)
+      6. No location → UNSURE (send to AI)
     """
-    loc = (job.get("location", "") + " " + job.get("country", "")).lower()
-    desc = job.get("description_snippet", "").lower()
+    raw_loc = job.get("location", "")
+    raw_country = job.get("country", "")
+    # Ensure both are strings (some APIs return lists)
+    if isinstance(raw_loc, list):
+        raw_loc = ", ".join(str(x) for x in raw_loc)
+    if isinstance(raw_country, list):
+        raw_country = ", ".join(str(x) for x in raw_country)
+    loc = (raw_loc + " " + raw_country).lower()
     has_remote = bool(re.search(r"\bremote\b", loc, re.I))
 
-    # ── 1. MATCH: Global / Anywhere / Africa / EMEA ─────
-    # These are always a yes regardless of anything else
-    if "africa" in loc:
-        return "match"
-    for country in AFRICAN_COUNTRIES:
-        if country in loc:
-            return "match"
-
+    # ── 1. MATCH: Global / Anywhere / Worldwide / EMEA ──
     if any(rx.search(loc) for rx in GLOBAL_RE):
         return "match"
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
         return "match"
-
     # EMEA covers Africa
     if re.search(r"\bemea\b", loc, re.I):
         return "match"
 
-    # Africa signals in description
-    africa_desc_terms = ["africa", "nigeria", "lagos", "nairobi", "kenya",
-                         "south africa", "ghana", "accra", "cape town",
-                         "johannesburg"]
-    if any(term in desc for term in africa_desc_terms):
-        return "match"
-
-    # ── 2. REJECT: Country-restricted Remote ─────────────
-    # "Remote - US", "Remote (UK)", etc.
-    if REMOTE_COUNTRY_RE.search(loc):
+    # ── 2. REJECT: Hybrid / Onsite ──────────────────────
+    if re.search(r"\bhybrid\b", loc, re.I):
+        return "no_match"
+    if re.search(r"\bon[\-\s]*site\b", loc, re.I):
+        return "no_match"
+    if re.search(r"\bin[\-\s]*person\b", loc, re.I):
         return "no_match"
 
-    # "US only", "UK only", etc.
+    # ── 3. REJECT: Country-restricted Remote ─────────────
+    if REMOTE_COUNTRY_RE.search(loc):
+        return "no_match"
     if ONLY_RE.search(loc):
         return "no_match"
 
     # "Boston, Remote" / "Remote, New York" / "London (Remote)"
-    # = remote within that city/country, NOT global
     if has_remote:
         has_city = any(rx.search(loc) for rx in MAJOR_CITIES_RE)
         has_country = any(rx.search(loc) for rx in COUNTRY_NAMES_RE)
@@ -505,58 +509,55 @@ def keyword_classify_location(job: dict) -> str:
         if REGION_RE.search(loc) and not re.search(r"\bemea\b", loc, re.I):
             return "no_match"
 
-        # ── 3. Bare "Remote" (no city/country) → UNSURE ──
+        # ── 4. Bare "Remote" (no city/country) → UNSURE ──
         return "unsure"
 
-    # ── 4. REJECT: Onsite at specific location ───────────
-    # Location has text but no "Remote" keyword = onsite job
+    # ── 5. REJECT: Onsite at specific location ───────────
     if loc.strip():
         return "no_match"
 
-    # ── 5. No location at all → UNSURE ───────────────────
+    # ── 6. No location at all → UNSURE ───────────────────
     return "unsure"
 
 
 LOCATION_SYSTEM_PROMPT = """\
-You are a job location classifier for a global remote job board. \
-For each job, determine if the role could realistically hire someone \
-working remotely from anywhere in the world.
+You classify whether a job is open to candidates working remotely \
+from ANYWHERE in the world (truly global hiring, not country-specific).
 
-These jobs all say "Remote" in the location field with no country qualifier. \
-Your job is to check the DESCRIPTION for hidden geographic restrictions.
+These jobs say "Remote" with no country qualifier. Your task: \
+check the DESCRIPTION for evidence of global hiring OR geographic restrictions.
 
-MATCH if:
-- Description has NO mention of country-specific work authorization
-- Description does NOT require residency in a specific country
-- Description does NOT say "must be authorized to work in [country]"
-- Description mentions distributed team, global, or international
-- No description available (benefit of the doubt — many ATS platforms \
-  like Workday and iCIMS don't include descriptions in the API)
-- Company appears to be from a developed country (US, UK, EU, etc.) \
-  and nothing restricts the role geographically
+MATCH — positive evidence the role is genuinely global:
+- Description explicitly says "global", "worldwide", "anywhere", \
+  "international", "work from anywhere", "distributed team"
+- Hiring across multiple continents or many countries
+- No geographic restrictions AND the role/company context clearly \
+  suggests global openness (e.g. "our team spans 30+ countries")
 
-NO_MATCH if:
-- Description says "must be authorized/eligible to work in the US/UK/etc."
-- Description says "US/UK work authorization required"
-- Description mentions "W-2 employment", "W2 only"
-- Description says "no visa sponsorship", "cannot sponsor", \
-  "unable to sponsor", "will not sponsor"
-- Description says "must reside in [specific country/state]"
-- Description says "this role is based in [country]" without remote option
-- Application requires SSN, national ID, or country-specific documentation
-- Description mentions country-specific benefits as requirements \
-  (401k, PAYE, specific tax residency)
-- Description says "must be located in" a specific country/region
+NO_MATCH — evidence of country or region restriction:
+- "must be authorized/eligible to work in [country]"
+- "US/UK/EU work authorization required"
+- "W-2 employment", "W2 only", "must have SSN"
+- "no visa sponsorship", "cannot sponsor", "will not sponsor"
+- "must reside in [state/country]", "must be located in [place]"
+- "this role is based in [country]" without global remote option
+- Country-specific benefits as requirements (401k, PAYE, tax residency)
+- Description context makes it obvious the role is for one country \
+  (e.g. references to US-specific regulations, UK employment law)
 
-Be thorough — scan the ENTIRE description for any restriction signal. \
-Many companies bury "must be authorized to work in the US" deep in the text.
+UNCERTAIN — cannot determine either way:
+- No description available
+- Description does not mention location requirements at all
+- Ambiguous or conflicting signals
 
-When there is NO description and NO restriction signal: say MATCH. \
-We'd rather include a questionable role than miss a global opportunity.
+IMPORTANT: When there is no description or no clear signal, say UNCERTAIN. \
+Do NOT default to MATCH. Only say MATCH when you see positive evidence \
+of global/worldwide hiring. When in doubt, UNCERTAIN.
 
 Respond ONLY with lines like:
 1 MATCH
-2 NO_MATCH"""
+2 NO_MATCH
+3 UNCERTAIN"""
 
 
 def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> list[str]:
@@ -593,10 +594,12 @@ def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> lis
                 continue
             if 0 <= idx < len(batch_jobs):
                 label = parts[1].upper() if len(parts) > 1 else ""
-                if label.startswith("MATCH"):
-                    batch_results[idx] = "match"
-                elif label.startswith("NO_MATCH"):
+                if label.startswith("NO_MATCH"):
                     batch_results[idx] = "no_match"
+                elif label.startswith("MATCH"):
+                    batch_results[idx] = "match"
+                elif label.startswith("UNCERTAIN"):
+                    batch_results[idx] = "uncertain"
 
     return batch_results
 
