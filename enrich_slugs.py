@@ -556,15 +556,13 @@ def _parse_csv_line(line: str) -> tuple[str, str, str] | None:
     return None
 
 
-def fetch_kalil_slugs() -> dict[str, set[str]]:
+def fetch_kalil_slugs() -> dict[str, dict[str, str]]:
     """Download CSV company lists from kalil0321/ats-scrapers repo.
     CSVs have format: name,slug,url
-    Uses our URL_TO_SLUG converters on the URL column for accuracy.
-    Falls back to the slug column for platforms with simple slug formats."""
-    slugs_by_ats: dict[str, set[str]] = {}
+    Returns {ats: {slug: company_name}}."""
+    slugs_by_ats: dict[str, dict[str, str]] = {}
 
     # Platforms where the CSV slug column can be used directly
-    # (slug = what our scraper expects, no URL conversion needed)
     DIRECT_SLUG_PLATFORMS = {
         "greenhouse", "lever", "ashby", "workable", "recruitee",
         "smartrecruiters", "teamtailor", "breezyhr", "softgarden",
@@ -572,32 +570,29 @@ def fetch_kalil_slugs() -> dict[str, set[str]]:
 
     for ats, csv_url in KALIL_SOURCES.items():
         converter = URL_TO_SLUG.get(ats)
-        found: set[str] = set()
+        found: dict[str, str] = {}
 
         try:
             r = requests.get(csv_url, timeout=60)
             r.raise_for_status()
             lines = r.text.strip().split("\n")
 
-            # Skip header line
             for line in lines[1:]:
                 parsed = _parse_csv_line(line)
                 if not parsed:
                     continue
                 name, raw_slug, url = parsed
 
-                # Try URL converter first (most reliable)
                 slug = None
                 if converter and url:
                     slug = converter(url)
 
-                # Fallback: use raw slug column for simple-slug platforms
                 if not slug and ats in DIRECT_SLUG_PLATFORMS:
                     if raw_slug and raw_slug.lower() not in SKIP_SLUGS:
                         slug = raw_slug
 
                 if slug:
-                    found.add(slug)
+                    found[slug] = name.strip() if name else ""
 
             slugs_by_ats[ats] = found
             if found:
@@ -605,7 +600,7 @@ def fetch_kalil_slugs() -> dict[str, set[str]]:
 
         except Exception as e:
             log.error(f"  {ats}: failed to fetch from kalil0321: {e}")
-            slugs_by_ats[ats] = set()
+            slugs_by_ats[ats] = {}
 
     total = sum(len(s) for s in slugs_by_ats.values())
     log.info(f"kalil0321 total: {total} slugs across "
@@ -617,11 +612,11 @@ def fetch_kalil_slugs() -> dict[str, set[str]]:
 # SOURCE 3: OpenPostings
 # ══════════════════════════════════════════════════════════
 
-def fetch_openpostings_slugs() -> dict[str, set[str]]:
+def fetch_openpostings_slugs() -> dict[str, dict[str, str]]:
     """Download OpenPostings jobs.db and extract company slugs
-    for platforms we support."""
+    for platforms we support. Returns {ats: {slug: company_name}}."""
     log.info("Downloading OpenPostings jobs.db...")
-    slugs_by_ats: dict[str, set[str]] = {ats: set() for ats in SUPPORTED_ATS}
+    slugs_by_ats: dict[str, dict[str, str]] = {ats: {} for ats in SUPPORTED_ATS}
     skipped_ats = {}
 
     try:
@@ -661,7 +656,9 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
 
             slug = converter(url_string)
             if slug:
-                slugs_by_ats[our_ats].add(slug)
+                # Keep company name (first one wins if duplicates)
+                if slug not in slugs_by_ats[our_ats]:
+                    slugs_by_ats[our_ats][slug] = (company_name or "").strip()
                 matched += 1
             else:
                 # Track failed conversions for debugging
@@ -680,7 +677,7 @@ def fetch_openpostings_slugs() -> dict[str, set[str]]:
             log.info(f"Top unmapped ATSs: {', '.join(f'{k}({v})' for k, v in top_skipped)}")
 
         for ats in sorted(SUPPORTED_ATS):
-            count = len(slugs_by_ats[ats])
+            count = len(slugs_by_ats.get(ats, {}))
             if count:
                 log.info(f"  {ats}: {count} companies")
 
@@ -814,9 +811,14 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
-def upsert_to_supabase(slugs_by_ats: dict[str, set[str]], source: str,
+def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                         dry_run: bool = False) -> int:
-    """Upsert slugs to Supabase slug_registry. Returns total upserted."""
+    """Upsert slugs to Supabase slug_registry. Returns total upserted.
+
+    slugs_by_ats values can be:
+      - set[str]          → slugs only (no company name)
+      - dict[str, str]    → {slug: company_name}
+    """
     if not SUPABASE_URL or not SUPABASE_KEY:
         log.error("SUPABASE_URL or SUPABASE_KEY not set")
         return 0
@@ -835,12 +837,23 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set[str]], source: str,
         if not slugs:
             continue
 
-        slug_list = list(slugs)
+        # Normalize: set → dict with empty names, dict stays as-is
+        if isinstance(slugs, set):
+            slug_dict = {s: "" for s in slugs}
+        else:
+            slug_dict = slugs
+
+        items = list(slug_dict.items())
         ats_total = 0
 
-        for i in range(0, len(slug_list), chunk_size):
-            chunk = slug_list[i:i + chunk_size]
-            rows = [{"ats": ats, "slug": s, "source": source} for s in chunk]
+        for i in range(0, len(items), chunk_size):
+            chunk = items[i:i + chunk_size]
+            rows = []
+            for slug, name in chunk:
+                row = {"ats": ats, "slug": slug, "source": source}
+                if name:
+                    row["name"] = name[:300]
+                rows.append(row)
 
             if dry_run:
                 ats_total += len(chunk)
