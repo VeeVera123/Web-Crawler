@@ -311,19 +311,24 @@ def _url_to_slug_taleo(url: str) -> str | None:
 
 
 def _url_to_slug_oracle_cloud(url: str) -> str | None:
+    """Extract slug from Oracle Cloud HCM URLs.
+    URL format: {tenant}.fa.{region}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{site}/...
+    Slug format: '{host_prefix}|{site_number}' where host_prefix is everything before .oraclecloud.com
+    e.g. 'eeho.fa.us2|CX_1'"""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if "oraclecloud.com" in host:
-        tenant = host.split(".")[0].lower()
-        if not tenant or tenant in SKIP_SLUGS:
-            return None
-        # Try to extract site from /sites/{id} in path
-        site_match = re.search(r"/sites/([^/]+)", parsed.path)
-        if site_match:
-            return f"{tenant}|{site_match.group(1)}"
-        # Fallback: use tenant alone (site can be discovered later)
-        return tenant
-    return None
+    if "oraclecloud.com" not in host:
+        return None
+    # Extract full host prefix (e.g. 'eeho.fa.us2' from 'eeho.fa.us2.oraclecloud.com')
+    host_prefix = host.replace(".oraclecloud.com", "").lower()
+    if not host_prefix or host_prefix in SKIP_SLUGS:
+        return None
+    # Extract site from /sites/{id} in path
+    site_match = re.search(r"/sites/([^/]+)", parsed.path)
+    if site_match:
+        return f"{host_prefix}|{site_match.group(1)}"
+    # Fallback: host prefix only (site can be discovered later)
+    return host_prefix
 
 
 def _url_to_slug_brassring(url: str) -> str | None:
