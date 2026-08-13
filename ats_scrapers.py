@@ -750,63 +750,18 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
 # ── Taleo (Oracle legacy) ────────────────────────────────
 
 def scrape_taleo(slug: str) -> list[dict]:
-    """Taleo career section scraper — HTML token extraction + REST API.
-    Slug format: 'company_name|section' (e.g. 'oracle|ORA_EXTERNAL_SITE')."""
+    """Taleo REST API scraper — direct POST, no session/CSRF needed.
+    Slug format: 'company|section|portal_id' (e.g. 'hdr|ex|101430233').
+    Portal ID must be pre-discovered from the career page."""
+    import json as _json
     parts = slug.split("|")
-    if len(parts) != 2:
-        log.debug(f"Invalid Taleo slug format: {slug} (expected 'company|section')")
+    if len(parts) != 3:
+        log.debug(f"Invalid Taleo slug format: {slug} (expected 'company|section|portal_id')")
         return []
 
-    company, section = parts
+    company, section, portal_id = parts
     base_url = f"https://{company}.taleo.net/careersection"
-    search_page_url = f"{base_url}/{section}/jobsearch.ftl"
-
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-    }
-
-    # Step 1: Fetch the search page to extract CSRF token and portal ID
-    r = _get(search_page_url, headers=headers)
-    if not r:
-        log.debug(f"Taleo: failed to fetch search page for {company}/{section}")
-        return []
-
-    page_html = r.text
-
-    # Extract CSRF token name and value
-    csrf_name_match = re.search(r'"csrfTokenName"\s*:\s*"([^"]+)"', page_html)
-    csrf_value_match = re.search(r'"csrfTokenValue"\s*:\s*"([^"]+)"', page_html)
-    if not csrf_name_match or not csrf_value_match:
-        log.debug(f"Taleo: could not extract CSRF tokens for {company}/{section}")
-        return []
-
-    csrf_name = csrf_name_match.group(1)
-    csrf_value = csrf_value_match.group(1)
-
-    # Extract portal ID
-    portal_match = re.search(r'"portal"\s*:\s*"?(\d+)"?', page_html)
-    if not portal_match:
-        # Try alternative pattern
-        portal_match = re.search(r'portal\s*=\s*(\d+)', page_html)
-    if not portal_match:
-        log.debug(f"Taleo: could not extract portal ID for {company}/{section}")
-        return []
-
-    portal = portal_match.group(1)
-
-    # Step 2: POST to the REST API to get job listings (paginated)
-    api_url = f"{base_url}/rest/jobboard/searchjobs?lang=en&portal={portal}"
-
-    post_headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Referer": search_page_url,
-        csrf_name: csrf_value,
-    }
-
-    # Carry cookies from the initial GET request
-    cookies = r.cookies
+    api_url = f"{base_url}/rest/jobboard/searchjobs"
 
     all_jobs = []
     page_no = 1
@@ -815,32 +770,53 @@ def scrape_taleo(slug: str) -> list[dict]:
         payload = {
             "multilineEnabled": False,
             "sortingSelection": {
-                "sortBySelectionParam": "3",
+                "sortBySelectionParam": "1",
                 "ascendingSortingOrder": "false",
             },
             "fieldData": {
-                "fields": {"KEYWORD": "", "LOCATION": "", "ORGANIZATION": ""},
+                "fields": {"KEYWORD": "", "LOCATION": ""},
                 "valid": True,
             },
-            "filterSelectionParam": {"searchFilterSelections": []},
-            "advancedSearchFiltersSelectionParam": {"searchFilterSelections": []},
+            "filterSelectionParam": {
+                "searchFilterSelections": [
+                    {"id": "POSTING_DATE", "selectedValues": []},
+                    {"id": "LOCATION", "selectedValues": []},
+                    {"id": "JOB_FIELD", "selectedValues": []},
+                    {"id": "JOB_TYPE", "selectedValues": []},
+                    {"id": "JOB_SCHEDULE", "selectedValues": []},
+                ]
+            },
+            "advancedSearchFiltersSelectionParam": {
+                "searchFilterSelections": [
+                    {"id": "LOCATION", "selectedValues": []},
+                    {"id": "JOB_FIELD", "selectedValues": []},
+                    {"id": "JOB_NUMBER", "selectedValues": []},
+                    {"id": "ORGANIZATION", "selectedValues": []},
+                ]
+            },
             "pageNo": page_no,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "tz": "GMT-05:00",
+            "User-Agent": random.choice(USER_AGENTS),
         }
 
         try:
             resp = requests.post(
                 api_url,
-                json=payload,
-                headers=post_headers,
-                cookies=cookies,
+                params={"lang": "en", "portal": portal_id},
+                headers=headers,
+                data=_json.dumps(payload),
                 timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code != 200:
-                log.debug(f"Taleo: API returned {resp.status_code} for {company}/{section} page {page_no}")
+                log.debug(f"Taleo: API returned {resp.status_code} for {company}")
                 break
             data = resp.json()
         except Exception as e:
-            log.debug(f"Taleo: API request failed for {company}/{section}: {e}")
+            log.debug(f"Taleo: API request failed for {company}: {e}")
             break
 
         requisitions = data.get("requisitionList", [])
@@ -849,19 +825,26 @@ def scrape_taleo(slug: str) -> list[dict]:
 
         for req in requisitions:
             contest_no = req.get("contestNo", "")
-            job_id = req.get("jobId", "")
 
-            # Column array contains title, location, etc.
+            # Column array: [title, location_json, posted_date]
             columns = req.get("column", [])
             title = columns[0] if len(columns) > 0 else ""
-            location = columns[1] if len(columns) > 1 else ""
+            location_raw = columns[1] if len(columns) > 1 else ""
 
-            # Try to extract country from location string
+            # Location comes as JSON string: '["United States-Iowa-Des Moines"]'
+            location = location_raw
             country = ""
-            if location:
-                loc_parts = [p.strip() for p in location.split(",")]
-                if len(loc_parts) >= 2:
-                    country = loc_parts[-1]
+            try:
+                loc_list = _json.loads(location_raw) if location_raw.startswith("[") else []
+                if loc_list:
+                    location = "; ".join(loc_list[:3])
+                    # Extract country from first entry: "Country-State-City"
+                    first_loc = loc_list[0]
+                    loc_parts = first_loc.split("-")
+                    if loc_parts:
+                        country = loc_parts[0].strip()
+            except Exception:
+                pass
 
             job_url = f"{base_url}/{section}/jobdetail.ftl?job={contest_no}"
 
@@ -880,8 +863,9 @@ def scrape_taleo(slug: str) -> list[dict]:
                 "slug": slug,
             })
 
-        # Check if there are more pages
-        total_count = data.get("totalCount", 0)
+        # Pagination
+        paging = data.get("pagingData", {})
+        total_count = paging.get("totalCount", 0)
         if len(all_jobs) >= total_count or not requisitions:
             break
 
@@ -904,9 +888,13 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     tenant, site_number = parts
     base_api = f"https://{tenant}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
 
+    import uuid as _uuid
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json",
+        "ora-irc-cx-userid": str(_uuid.uuid4()),
+        "ora-irc-language": "en",
+        "content-type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8",
     }
 
     all_jobs = []
@@ -916,13 +904,8 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     while True:
         params = {
             "onlyData": "true",
-            "expand": "requisitionList.secondaryLocations,flexFieldsFacet.values",
-            "finder": (
-                f"findReqs;siteNumber={site_number},"
-                f"facetsList=LOCATIONS%7CWORK_LOCATIONS%7CWORKPLACE_TYPES%7CTITLES"
-                f"%7CCATEGORIES%7CORGANIZATIONS%7CPOSTING_DATES%7CFLEX_FIELDS,"
-                f"limit={limit},sortBy=POSTING_DATES_DESC,offset={offset}"
-            ),
+            "expand": "requisitionList.workLocation",
+            "finder": f"findReqs;siteNumber={site_number},limit={limit},offset={offset}",
         }
 
         r = _get(base_api, params=params, headers=headers)
@@ -2097,6 +2080,71 @@ def scrape_joincom(slug: str) -> list[dict]:
     return all_jobs
 
 
+# ── Paylocity ──────────────────────────────────────────
+
+def scrape_paylocity(slug: str) -> list[dict]:
+    """Paylocity — embedded window.pageData JSON in career page HTML.
+    Slug format: 'company_id|company_name' (e.g. '9b6dbe18-.../The-Guidance-Center')."""
+    import json as _json
+    parts = slug.split("|", 1)
+    if len(parts) != 2:
+        log.debug(f"Invalid Paylocity slug format: {slug} (expected 'company_id|company_name')")
+        return []
+
+    company_id, company_name_slug = parts
+    url = f"https://recruiting.paylocity.com/recruiting/jobs/All/{company_id}/{company_name_slug}"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+
+    # Extract window.pageData JSON
+    pd_match = re.search(r'window\.pageData\s*=\s*(\{.*?\});\s*</script>', r.text, re.DOTALL)
+    if not pd_match:
+        log.debug(f"Paylocity: no window.pageData found for {company_name_slug}")
+        return []
+
+    try:
+        page_data = _json.loads(pd_match.group(1))
+    except _json.JSONDecodeError as e:
+        log.debug(f"Paylocity: JSON parse failed for {company_name_slug}: {e}")
+        return []
+
+    company_name = page_data.get("companyName", company_name_slug.replace("-", " ").title())
+    jobs_list = page_data.get("jobs", page_data.get("Jobs", []))
+    if not isinstance(jobs_list, list):
+        return []
+
+    jobs = []
+    for item in jobs_list:
+        title = item.get("JobTitle", item.get("Title", ""))
+        job_id = item.get("JobId", item.get("Id", ""))
+        location = item.get("LocationName", item.get("Location", ""))
+        department = item.get("Department", "")
+        desc = _snippet(item.get("Description", item.get("JobDescription", "")))
+        salary = _extract_salary(desc)
+
+        job_url = f"https://recruiting.paylocity.com/recruiting/jobs/Details/{company_id}/{job_id}/{company_name_slug}"
+
+        jobs.append({
+            "title": str(title).strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": location or "Not specified",
+            "country": "",
+            "department": department,
+            "workplace_type": "",
+            "employment_type": item.get("EmploymentType", ""),
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "Paylocity",
+            "slug": slug,
+        })
+
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -2113,14 +2161,16 @@ SCRAPERS = {
     "applytojob": scrape_applytojob,
     "personio": scrape_personio,
     "joincom": scrape_joincom,
+    # ── Newly enabled (confirmed working) ──
+    "taleo": scrape_taleo,
+    "oracle_cloud_hcm": scrape_oracle_cloud_hcm,
+    "paylocity": scrape_paylocity,
+    "hrmdirect": scrape_hrmdirect,
+    "zoho": scrape_zoho,
     # ── DISABLED (JS-rendered / auth-required / blocked) ──
-    # "taleo": scrape_taleo,
-    # "oracle_cloud_hcm": scrape_oracle_cloud_hcm,
     # "brassring": scrape_brassring,
     # "successfactors": scrape_successfactors,
-    # "hrmdirect": scrape_hrmdirect,
     # "softgarden": scrape_softgarden,
-    # "zoho": scrape_zoho,
     # "ycombinator": scrape_ycombinator,
 }
 
@@ -2629,6 +2679,8 @@ DESCRIPTION_FETCHERS = {
     "BreezyHR": _fetch_generic_description,
     "ApplyToJob": _fetch_generic_description,
     "HRMDirect": _fetch_generic_description,
+    "Paylocity": _fetch_generic_description,
+    "Oracle Cloud HCM": _fetch_generic_description,
     "JOIN": _fetch_joincom_description,
     "Teamtailor": _fetch_teamtailor_location,
 }
