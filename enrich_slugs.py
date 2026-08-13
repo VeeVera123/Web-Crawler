@@ -432,6 +432,24 @@ def _url_to_slug_zoho(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_paylocity(url: str) -> str | None:
+    """Extract slug from Paylocity URLs.
+    Pattern: recruiting.paylocity.com/recruiting/jobs/All/{company_id}/{company_name}"""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "paylocity.com" not in host:
+        return None
+    # Path: /recruiting/jobs/All/{uuid}/{CompanyName}
+    parts = parsed.path.strip("/").split("/")
+    # Need at least: recruiting/jobs/All/{id}/{name}
+    if len(parts) >= 5 and parts[0] == "recruiting" and parts[1] == "jobs":
+        company_id = parts[3]
+        company_name = parts[4]
+        if company_id and company_name:
+            return f"{company_id}|{company_name}"
+    return None
+
+
 def _url_to_slug_joincom(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -723,6 +741,12 @@ CC_PLATFORM_PATTERNS = {
     "applytojob": ["*.applytojob.com/*"],
     "personio": ["*.jobs.personio.de/*", "*.jobs.personio.com/*"],
     "joincom": ["join.com/companies/*/jobs*", "join.com/companies/*"],
+    # Newly enabled platforms:
+    "taleo": ["*.taleo.net/careersection/*/jobsearch.ftl*"],
+    "oracle_cloud_hcm": ["*.oraclecloud.com/hcmUI/CandidateExperience/*"],
+    "paylocity": ["recruiting.paylocity.com/recruiting/jobs/*"],
+    "hrmdirect": ["*.hrmdirect.com/employment/*"],
+    "zoho": ["*.zohorecruit.com/jobs/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -736,6 +760,12 @@ CC_EXTRACTORS = {
     "applytojob": _url_to_slug_applytojob,
     "personio": _url_to_slug_personio,
     "joincom": _url_to_slug_joincom,
+    # Newly enabled platforms:
+    "taleo": _url_to_slug_taleo,
+    "oracle_cloud_hcm": _url_to_slug_oracle_cloud,
+    "paylocity": _url_to_slug_paylocity,
+    "hrmdirect": _url_to_slug_hrmdirect,
+    "zoho": _url_to_slug_zoho,
 }
 
 
