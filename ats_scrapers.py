@@ -751,15 +751,28 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
 
 def scrape_taleo(slug: str) -> list[dict]:
     """Taleo REST API scraper — direct POST, no session/CSRF needed.
-    Slug format: 'company|section|portal_id' (e.g. 'hdr|ex|101430233').
-    Portal ID must be pre-discovered from the career page."""
+    Slug format: 'company|section|portal_id' or 'company|section' (portal auto-discovered)."""
     import json as _json
     parts = slug.split("|")
-    if len(parts) != 3:
-        log.debug(f"Invalid Taleo slug format: {slug} (expected 'company|section|portal_id')")
+    if len(parts) == 3:
+        company, section, portal_id = parts
+    elif len(parts) == 2:
+        company, section = parts
+        # Auto-discover portal ID from career page
+        career_url = f"https://{company}.taleo.net/careersection/{section}/jobsearch.ftl"
+        r = _get(career_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        if not r:
+            log.debug(f"Taleo: could not fetch career page for {company}/{section}")
+            return []
+        portal_match = re.search(r'portal\s*=\s*["\']?(\d+)', r.text, re.I)
+        if not portal_match:
+            log.debug(f"Taleo: could not extract portal ID for {company}/{section}")
+            return []
+        portal_id = portal_match.group(1)
+        log.debug(f"Taleo: auto-discovered portal={portal_id} for {company}/{section}")
+    else:
+        log.debug(f"Invalid Taleo slug format: {slug}")
         return []
-
-    company, section, portal_id = parts
     base_url = f"https://{company}.taleo.net/careersection"
     api_url = f"{base_url}/rest/jobboard/searchjobs"
 
