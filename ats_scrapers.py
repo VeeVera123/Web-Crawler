@@ -914,32 +914,59 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     }
 
     # Build API URL — host_prefix can be 'eeho.fa.us2' (new) or 'eeho' (legacy)
-    # For legacy slugs without .fa. region, try to discover the correct domain
     if ".fa." in host_prefix or "." in host_prefix:
         # Full host prefix like 'eeho.fa.us2' or 'idcs-xxx.identity'
         base_api = f"https://{host_prefix}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
         tenant = host_prefix.split(".")[0]
     else:
-        # Legacy short tenant — try common region patterns
+        # Legacy short tenant — discover full domain via career page redirect
         tenant = host_prefix
         base_api = None
-        for region in ("fa.us2", "fa.us6", "fa.em2", "fa.em3", "fa.ap1", "fa.us1"):
-            test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+
+        # Method 1: Hit career page, follow redirects, extract real domain
+        for try_site in (site_number or "CX_1", "CX_1", "CX", "CX_2"):
             try:
-                test_r = requests.get(test_url,
-                    params={"onlyData": "true", "finder": "findReqs;siteNumber=CX_1,limit=1,offset=0"},
-                    headers=headers, timeout=10)
-                if test_r.status_code == 200:
-                    data = test_r.json()
-                    items = data.get("items", [])
-                    if items and items[0].get("requisitionList"):
-                        base_api = test_url
-                        log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
-                        break
+                probe_url = f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{try_site}/requisitions"
+                probe_r = requests.get(probe_url, headers={
+                    "User-Agent": random.choice(USER_AGENTS)}, timeout=15, allow_redirects=True)
+                # Check if we got redirected to a URL with .fa.{region}
+                final_host = probe_r.url.split("/")[2] if probe_r.url else ""
+                if ".fa." in final_host and "oraclecloud.com" in final_host:
+                    real_prefix = final_host.replace(".oraclecloud.com", "")
+                    base_api = f"https://{real_prefix}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                    if not site_number:
+                        site_number = try_site
+                    log.debug(f"Oracle Cloud HCM: discovered domain={real_prefix} via redirect for {tenant}")
+                    break
             except Exception:
                 continue
+
+        # Method 2: Brute-force common regions via API
         if not base_api:
-            log.debug(f"Oracle Cloud HCM: could not discover region for {tenant}")
+            for region in ("fa.us2", "fa.us6", "fa.us1", "fa.em2", "fa.em3", "fa.em4",
+                           "fa.ap1", "fa.ap2", "fa.ca1", "fa.sa1", "fa.me1"):
+                test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                try:
+                    test_r = requests.get(test_url,
+                        params={"onlyData": "true", "finder": f"findReqs;siteNumber={site_number or 'CX_1'},limit=1,offset=0"},
+                        headers=headers, timeout=8)
+                    if test_r.status_code == 200:
+                        try:
+                            data = test_r.json()
+                            items = data.get("items", [])
+                            if items and items[0].get("requisitionList"):
+                                base_api = test_url
+                                if not site_number:
+                                    site_number = "CX_1"
+                                log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+        if not base_api:
+            log.debug(f"Oracle Cloud HCM: could not discover domain for {tenant}")
             return []
 
     # Auto-discover site number for tenant-only slugs
