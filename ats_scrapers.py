@@ -894,11 +894,15 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     """Oracle Cloud HCM Recruiting REST API.
     Slug format: 'tenant|site_number' (e.g. 'eeho|CX_1')."""
     parts = slug.split("|")
-    if len(parts) != 2:
-        log.debug(f"Invalid Oracle Cloud HCM slug format: {slug} (expected 'tenant|site_number')")
+    if len(parts) == 2:
+        tenant, site_number = parts
+    elif len(parts) == 1:
+        # Tenant-only slug — try common site numbers
+        tenant = parts[0]
+        site_number = None
+    else:
+        log.debug(f"Invalid Oracle Cloud HCM slug format: {slug}")
         return []
-
-    tenant, site_number = parts
     base_api = f"https://{tenant}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
 
     import uuid as _uuid
@@ -909,6 +913,28 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         "ora-irc-language": "en",
         "content-type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8",
     }
+
+    # Auto-discover site number for tenant-only slugs
+    if not site_number:
+        for try_site in ("CX_1", "CX", "CX_2", "CX_3"):
+            test_params = {
+                "onlyData": "true",
+                "finder": f"findReqs;siteNumber={try_site},limit=1,offset=0",
+            }
+            test_r = _get(base_api, params=test_params, headers=headers)
+            if test_r and test_r.status_code == 200:
+                try:
+                    test_data = test_r.json()
+                    test_items = test_data.get("items", [])
+                    if test_items and test_items[0].get("requisitionList"):
+                        site_number = try_site
+                        log.debug(f"Oracle Cloud HCM: auto-discovered site={site_number} for {tenant}")
+                        break
+                except Exception:
+                    continue
+        if not site_number:
+            log.debug(f"Oracle Cloud HCM: could not discover site number for {tenant}")
+            return []
 
     all_jobs = []
     offset = 0
@@ -1503,7 +1529,7 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
     Slug is the company subdomain (e.g. 'acme').
     Parses table rows with reqitem, posTitle, cities, state, departments."""
     company_name = slug.replace("-", " ").title()
-    url = f"https://{slug}.hrmdirect.com/employment/job-openings.php"
+    url = f"https://{slug}.hrmdirect.com/employment/openings.php"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
     r = _get(url, headers=headers)
@@ -1703,11 +1729,23 @@ def scrape_zoho(slug: str) -> list[dict]:
 
     jobs = []
 
-    # Primary: Parse hidden input#jobs JSON
-    jobs_input = re.search(
-        r'<input[^>]*id=["\']jobs["\'][^>]*value=["\']([^"\']+)["\']',
-        r.text, re.I
-    )
+    # Primary: Parse hidden input with jobs JSON
+    # Try id="jobs" and name="jobs", both attribute orders
+    jobs_input = None
+    for attr in ('id', 'name'):
+        if jobs_input:
+            break
+        # attr before value
+        jobs_input = re.search(
+            rf'<input[^>]*{attr}=["\']jobs["\'][^>]*value=["\']([^"\']+)["\']',
+            r.text, re.I
+        )
+        if not jobs_input:
+            # value before attr
+            jobs_input = re.search(
+                rf'<input[^>]*value=["\']([^"\']+)["\'][^>]*{attr}=["\']jobs["\']',
+                r.text, re.I
+            )
     if jobs_input:
         import json
         try:
@@ -2124,8 +2162,10 @@ def scrape_paylocity(slug: str) -> list[dict]:
         log.debug(f"Paylocity: JSON parse failed for {company_name_slug}: {e}")
         return []
 
-    company_name = page_data.get("companyName", company_name_slug.replace("-", " ").title())
-    jobs_list = page_data.get("jobs", page_data.get("Jobs", []))
+    company_name = (page_data.get("companyName")
+                    or page_data.get("ModuleTitle")
+                    or company_name_slug.replace("-", " ").title())
+    jobs_list = page_data.get("Jobs", page_data.get("jobs", []))
     if not isinstance(jobs_list, list):
         return []
 
@@ -2134,7 +2174,7 @@ def scrape_paylocity(slug: str) -> list[dict]:
         title = item.get("JobTitle", item.get("Title", ""))
         job_id = item.get("JobId", item.get("Id", ""))
         location = item.get("LocationName", item.get("Location", ""))
-        department = item.get("Department", "")
+        department = item.get("HiringDepartment", item.get("Department", ""))
         desc = _snippet(item.get("Description", item.get("JobDescription", "")))
         salary = _extract_salary(desc)
 
