@@ -296,11 +296,119 @@ def debug_hrmdirect():
         log.info(body_text[:1500])
 
 
+# ═══════════════════════════════════════════════════════════════
+# 5. YCOMBINATOR — Debug Algolia API
+# ═══════════════════════════════════════════════════════════════
+def debug_ycombinator():
+    log.info("\n" + "="*70)
+    log.info("YCOMBINATOR DEBUG (Algolia)")
+    log.info("="*70)
+
+    # First get the Algolia credentials from the page
+    url = "https://www.workatastartup.com/companies"
+    r = requests.get(url, timeout=15, headers=HEADERS)
+    log.info(f"Page: {len(r.text)} chars")
+
+    # Extract Algolia config
+    algolia_match = re.search(r'AlgoliaOpts\s*=\s*(\{[^}]+\})', r.text)
+    if algolia_match:
+        log.info(f"\nAlgolia config: {algolia_match.group(1)[:200]}")
+        try:
+            config = json.loads(algolia_match.group(1))
+            app_id = config.get("app", "")
+            api_key = config.get("key", "")
+            log.info(f"  App ID: {app_id}")
+            log.info(f"  Key (first 40): {api_key[:40]}...")
+
+            if app_id and api_key:
+                # Try Algolia search API directly
+                # Algolia REST API: POST https://{app_id}-dsn.algolia.net/1/indexes/*/queries
+                algolia_url = f"https://{app_id}-dsn.algolia.net/1/indexes/*/queries"
+                algolia_headers = {
+                    "X-Algolia-Application-Id": app_id,
+                    "X-Algolia-API-Key": api_key,
+                    "Content-Type": "application/json",
+                }
+
+                # Search for jobs with "customer success" in all YC companies
+                search_payload = {
+                    "requests": [
+                        {
+                            "indexName": "WaaSJobs_production",
+                            "params": "query=customer+success&hitsPerPage=5"
+                        }
+                    ]
+                }
+
+                r2 = requests.post(algolia_url, json=search_payload, headers=algolia_headers, timeout=15)
+                log.info(f"\nAlgolia search: status={r2.status_code}")
+
+                if r2.status_code == 200:
+                    data = r2.json()
+                    results = data.get("results", [])
+                    if results:
+                        hits = results[0].get("hits", [])
+                        total = results[0].get("nbHits", 0)
+                        log.info(f"  Total hits: {total}")
+                        log.info(f"  Hits returned: {len(hits)}")
+                        for h in hits[:3]:
+                            log.info(f"  Job: {h.get('title', 'N/A')}")
+                            log.info(f"    Company: {h.get('company_name', 'N/A')}")
+                            log.info(f"    Location: {h.get('locations', 'N/A')}")
+                            log.info(f"    URL: {h.get('url', 'N/A')}")
+                            log.info(f"    Keys: {list(h.keys())[:15]}")
+                    else:
+                        log.info(f"  No results. Response keys: {list(data.keys())}")
+                else:
+                    log.info(f"  Error: {r2.text[:300]}")
+
+                # Also try index for companies
+                search_payload2 = {
+                    "requests": [
+                        {
+                            "indexName": "WaaSCompanies_production",
+                            "params": "query=&hitsPerPage=3"
+                        }
+                    ]
+                }
+                r3 = requests.post(algolia_url, json=search_payload2, headers=algolia_headers, timeout=10)
+                log.info(f"\nAlgolia companies: status={r3.status_code}")
+                if r3.status_code == 200:
+                    data3 = r3.json()
+                    results3 = data3.get("results", [])
+                    if results3:
+                        hits3 = results3[0].get("hits", [])
+                        total3 = results3[0].get("nbHits", 0)
+                        log.info(f"  Total companies: {total3}")
+                        for h in hits3[:2]:
+                            log.info(f"  Company: {h.get('name', 'N/A')}")
+                            log.info(f"    Keys: {list(h.keys())[:15]}")
+                elif r3.status_code != 200:
+                    log.info(f"  Error: {r3.text[:200]}")
+
+        except json.JSONDecodeError:
+            log.info("  Could not parse Algolia config as JSON")
+    else:
+        log.info("  No AlgoliaOpts found in page")
+
+    # Also check for other embedded data
+    log.info("\n--- Other data sources ---")
+    for pat_name, pat in [
+        ("RAILS_ENV", r'window\.RAILS_ENV\s*=\s*["\']([^"\']+)'),
+        ("currentUser", r'window\.currentUser\s*=\s*(\{[^}]+\})'),
+        ("gon", r'gon\.(\w+)\s*='),
+    ]:
+        m = re.search(pat, r.text)
+        if m:
+            log.info(f"  {pat_name}: {m.group(1)[:80]}")
+
+
 def main():
     debug_taleo()
     debug_brassring()
     debug_zoho()
     debug_hrmdirect()
+    debug_ycombinator()
 
 
 if __name__ == "__main__":
