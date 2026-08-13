@@ -1,7 +1,7 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 87,000+ company boards across 15 ATS platforms,
+Scans 87,000+ company boards across 20 ATS platforms,
 plus 5 remote job boards (RemoteOK, Remotive, Himalayas, Arbeitnow, Jobicy).
 
 Reads slugs from Supabase slug_registry (single source of truth,
@@ -25,7 +25,7 @@ from classifier import (
 )
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
-    get_all_slugs,
+    get_all_slugs, cleanup_stale_jobs,
 )
 
 logging.basicConfig(
@@ -52,6 +52,12 @@ PLATFORM_WORKERS = {
     "applytojob": 10,
     "personio": 10,
     "joincom": 5,  # JOIN.com pageSize max 5, needs slug→ID resolution
+    # Newly enabled platforms:
+    "taleo": 10,
+    "oracle_cloud_hcm": 10,
+    "paylocity": 15,
+    "hrmdirect": 15,
+    "zoho": 5,  # 1.7MB pages, keep low
 }
 
 
@@ -284,7 +290,11 @@ def main():
             )
 
         log.info(f"\nDone! {added} new jobs added to Supabase.")
-        log.info(f"   Pipeline: {len(all_jobs)} scraped -> {len(csm_jobs)} CSM/AM -> {len(global_jobs)} global/Africa -> {added} new")
+        log.info(f"   Pipeline: {len(all_jobs)} scraped -> {len(csm_jobs)} CSM/AM -> {len(global_jobs)} global -> {added} new")
+
+        # 8. Cleanup stale jobs (inactive after 30 days, delete after 60)
+        log.info(f"\nCleaning up stale jobs...")
+        cleanup_stale_jobs(inactive_days=30, delete_days=60)
 
     except Exception as e:
         log.error(f"Scanner failed: {e}")
