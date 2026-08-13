@@ -94,7 +94,9 @@ def test_oracle_region_discovery():
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
+        "ora-irc-cx-userid": str(uuid.uuid4()),
         "ora-irc-language": "en",
+        "content-type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8",
     }
 
     found_region = None
