@@ -172,55 +172,24 @@ def test_zoho_recruit():
 
 
 # =====================================================================
-# 4. TALEO -- REST API with portal + CSRF token
+# 4. TALEO -- REST API (direct POST, no session needed)
 # =====================================================================
 def test_taleo():
     log.info("\n=== 4. TALEO ===")
 
+    # (company, section, portal_id) — portal IDs from career page inspection
     companies = [
-        ("hdr", "ex"),
-        ("capps", "479"),
+        ("hdr", "ex", "101430233"),
+        ("capps", "479", "43610020121"),
     ]
 
-    for company, section in companies:
+    for company, section, portal_id in companies:
         base = f"https://{company}.taleo.net"
-        careers_url = f"{base}/careersection/{section}/jobsearch.ftl?lang=en"
-        log.info(f"  Trying {company}.taleo.net section={section}...")
+        api_url = f"{base}/careersection/rest/jobboard/searchjobs"
+        log.info(f"  Trying {company}.taleo.net portal={portal_id}...")
 
         try:
-            session = requests.Session()
-            session.headers.update(HEADERS)
-            r1 = session.get(careers_url, timeout=15, allow_redirects=True)
-            log.info(f"    Career page: status={r1.status_code}, length={len(r1.text)}")
-
-            if r1.status_code != 200 or len(r1.text) < 1000:
-                continue
-
-            # Extract portal ID
-            portal_id = None
-            for pat in [
-                r'portal\s*=\s*["\']?(\d+)',
-                r'portalId\s*[:=]\s*["\']?(\d+)',
-                r'ftlcompanyid\s*=\s*["\']?(\d+)',
-            ]:
-                m = re.search(pat, r1.text, re.I)
-                if m:
-                    portal_id = m.group(1)
-                    break
-
-            # Extract CSRF token
-            csrf = None
-            m = re.search(r'csrfToken\s*[:=]\s*["\']([^"\']+)', r1.text, re.I)
-            if m:
-                csrf = m.group(1)
-
-            log.info(f"    Portal: {portal_id}, CSRF: {csrf[:20] if csrf else 'None'}...")
-
-            # REST API call — must include X-Requested-With and Referer
-            api_url = f"{base}/careersection/rest/jobboard/searchjobs?lang=en"
-            if portal_id:
-                api_url += f"&portal={portal_id}"
-
+            # Payload matching the working scraper pattern (thayton gist)
             payload = {
                 "multilineEnabled": False,
                 "sortingSelection": {
@@ -230,37 +199,52 @@ def test_taleo():
                 "fieldData": {
                     "fields": {
                         "KEYWORD": "",
-                        "LOCATION": "",
-                        "CATEGORY": ""
+                        "LOCATION": ""
                     },
                     "valid": True
                 },
-                "pageNo": 1,
+                "filterSelectionParam": {
+                    "searchFilterSelections": [
+                        {"id": "POSTING_DATE", "selectedValues": []},
+                        {"id": "LOCATION", "selectedValues": []},
+                        {"id": "JOB_FIELD", "selectedValues": []},
+                        {"id": "JOB_TYPE", "selectedValues": []},
+                        {"id": "JOB_SCHEDULE", "selectedValues": []}
+                    ]
+                },
+                "advancedSearchFiltersSelectionParam": {
+                    "searchFilterSelections": [
+                        {"id": "LOCATION", "selectedValues": []},
+                        {"id": "JOB_FIELD", "selectedValues": []},
+                        {"id": "JOB_NUMBER", "selectedValues": []},
+                        {"id": "JOB_TYPE", "selectedValues": []},
+                        {"id": "ORGANIZATION", "selectedValues": []}
+                    ]
+                },
+                "pageNo": 1
             }
 
-            post_headers = {
+            headers = {
                 "Content-Type": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Referer": careers_url,
+                "tz": "GMT-05:00",
             }
-            if csrf:
-                post_headers["X-CSRF-Token"] = csrf
 
-            # Debug: log cookies from career page
-            log.info(f"    Session cookies: {dict(session.cookies)}")
+            r = requests.post(
+                api_url,
+                params={"lang": "en", "portal": portal_id},
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=15
+            )
+            log.info(f"    REST API: status={r.status_code}, length={len(r.text)}")
+            log.info(f"    Content-Type: {r.headers.get('content-type', '')}")
+            log.info(f"    Response body: {r.text[:300]}")
 
-            r2 = session.post(api_url, json=payload, timeout=15, headers=post_headers)
-            log.info(f"    REST API: status={r2.status_code}, length={len(r2.text)}")
-            log.info(f"    Content-Type: {r2.headers.get('content-type', '')}")
-            log.info(f"    Response body: {r2.text[:200]}")
-
-            if r2.status_code == 200 and len(r2.text) > 50:
-                # Check if response is JSON
-                ct = r2.headers.get('content-type', '')
-                if 'json' in ct or r2.text.strip().startswith('{'):
+            if r.status_code == 200 and len(r.text) > 50:
+                ct = r.headers.get('content-type', '')
+                if 'json' in ct or r.text.strip().startswith('{'):
                     try:
-                        data = r2.json()
+                        data = r.json()
                         jobs = data.get("requisitionList", [])
                         total = data.get("pagingData", {}).get("totalCount", len(jobs))
                         log.info(f"    JSON keys: {list(data.keys())}")
@@ -272,18 +256,15 @@ def test_taleo():
                             title = cols[0] if len(cols) > 0 else ""
                             location = cols[1] if len(cols) > 1 else ""
                             contest_no = j.get("contestNo", "")
-                            log.info(f"    Job keys: {list(j.keys())}")
-                            log.info(f"    First job: title={title}, loc={location}, id={contest_no}")
+                            log.info(f"    First job: title={title[:60]}, id={contest_no}")
                             test_result("Taleo", True, total, title, location,
                                        f"REST API works ({company})")
                             return
                         elif total > 0:
-                            test_result("Taleo", True, total, notes=f"API returned total={total} but empty list ({company})")
+                            test_result("Taleo", True, total, notes=f"total={total} but empty page ({company})")
                             return
                     except json.JSONDecodeError:
-                        log.info(f"    Not valid JSON. First 300: {r2.text[:300]}")
-                else:
-                    log.info(f"    Response is HTML/other. First 300: {r2.text[:300]}")
+                        log.info(f"    Not valid JSON")
 
         except Exception as e:
             log.info(f"    Error: {str(e)[:120]}")
