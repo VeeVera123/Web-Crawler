@@ -30,11 +30,8 @@ from classifier import keyword_classify_role, keyword_classify_location
 # Pick a mix of known iCIMS and Teamtailor companies
 
 ICIMS_SLUGS = [
-    "careers-cotiviti",      # the one that was broken (US Nationwide Remote)
-    "jobs-adp",              # large employer
-    "careers-jnj",           # Johnson & Johnson
-    "northropgrumman",       # defense (should be US-only)
-    "careers-unitedhealth",  # healthcare
+    "careers-cotiviti",          # US roles (US Nationwide Remote)
+    "globalcareers-cotiviti",    # Global roles (India, etc.)
 ]
 
 TEAMTAILOR_SLUGS = [
