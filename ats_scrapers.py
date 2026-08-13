@@ -1470,9 +1470,9 @@ def scrape_breezyhr(slug: str) -> list[dict]:
 # ── ApplyToJob ──────────────────────────────────────────
 
 def scrape_applytojob(slug: str) -> list[dict]:
-    """ApplyToJob — HTML scrape, parses job listings.
+    """ApplyToJob (JazzHR) — HTML scrape, parses job listings.
     Slug is the company subdomain (e.g. 'acme').
-    Supports newer 'list-group-item-heading' and legacy 'resumator-job-title-link'."""
+    Extracts location from fa-map-marker icons. Deduplicates by title."""
     company_name = slug.replace("-", " ").title()
     base_url = f"https://{slug}.applytojob.com"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
@@ -1483,24 +1483,51 @@ def scrape_applytojob(slug: str) -> list[dict]:
 
     jobs = []
     seen_urls = set()
+    seen_titles = set()  # deduplicate by title (companies post same job many times)
 
-    # Pattern 1: Newer layout — list-group-item-heading with links
-    for match in re.finditer(
-        r'class="list-group-item-heading"[^>]*>.*?'
-        r'<a\s+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+    # Pattern 1: Newer layout — list-group-item with heading + location icon
+    # HTML: <li class="list-group-item">
+    #         <h3 class="list-group-item-heading"><a href="...">Title</a></h3>
+    #         <ul class="list-group-item-text">
+    #           <li><i class="fa fa-map-marker"></i>Location</li>
+    #         </ul>
+    #       </li>
+    for item_match in re.finditer(
+        r'<li[^>]*class="list-group-item"[^>]*>(.*?)</li>\s*(?=<li[^>]*class="list-group-item"|</ul>|$)',
         r.text, re.I | re.DOTALL
     ):
-        url = match.group(1).strip()
-        title = match.group(2).strip()
+        item_html = item_match.group(1)
+
+        # Extract title + URL from heading
+        link_match = re.search(
+            r'class="list-group-item-heading"[^>]*>.*?'
+            r'<a\s+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+            item_html, re.I | re.DOTALL
+        )
+        if not link_match:
+            continue
+
+        url = link_match.group(1).strip()
+        title = link_match.group(2).strip()
         if not url.startswith("http"):
             url = base_url + url
-        if url not in seen_urls:
+
+        # Extract location from fa-map-marker icon
+        loc_match = re.search(
+            r'fa-map-marker["\'][^>]*></i>\s*([^<]+)',
+            item_html, re.I
+        )
+        location = loc_match.group(1).strip() if loc_match else ""
+
+        title_key = title.lower().strip()
+        if url not in seen_urls and title_key not in seen_titles:
             seen_urls.add(url)
+            seen_titles.add(title_key)
             jobs.append({
                 "title": title,
                 "url": url,
                 "company": company_name,
-                "location": "",
+                "location": location,
                 "country": "",
                 "department": "",
                 "workplace_type": "",
@@ -1521,8 +1548,10 @@ def scrape_applytojob(slug: str) -> list[dict]:
             title = match.group(2).strip()
             if not url.startswith("http"):
                 url = base_url + url
-            if url not in seen_urls:
+            title_key = title.lower().strip()
+            if url not in seen_urls and title_key not in seen_titles:
                 seen_urls.add(url)
+                seen_titles.add(title_key)
                 jobs.append({
                     "title": title,
                     "url": url,
@@ -1549,8 +1578,10 @@ def scrape_applytojob(slug: str) -> list[dict]:
             title = match.group(2).strip()
             if not url.startswith("http"):
                 url = base_url + url
-            if url not in seen_urls and len(title) > 3:
+            title_key = title.lower().strip()
+            if url not in seen_urls and title_key not in seen_titles and len(title) > 3:
                 seen_urls.add(url)
+                seen_titles.add(title_key)
                 jobs.append({
                     "title": title,
                     "url": url,
@@ -2256,7 +2287,16 @@ def scrape_paylocity(slug: str) -> list[dict]:
         return []
 
     jobs = []
+    seen_titles = set()
     for item in jobs_list:
+        # Skip inactive / expired jobs
+        status = str(item.get("Status", item.get("PostingStatus", ""))).lower()
+        is_active = item.get("IsActive", item.get("isActive", None))
+        if status in ("closed", "inactive", "expired", "draft", "archived"):
+            continue
+        if is_active is False or str(is_active).lower() == "false":
+            continue
+
         title = item.get("JobTitle", item.get("Title", ""))
         job_id = item.get("JobId", item.get("Id", ""))
         location = item.get("LocationName", item.get("Location", ""))
@@ -2264,13 +2304,19 @@ def scrape_paylocity(slug: str) -> list[dict]:
         desc = _snippet(item.get("Description", item.get("JobDescription", "")))
         salary = _extract_salary(desc)
 
+        # Deduplicate by title (same company may list same role multiple times)
+        title_key = str(title).lower().strip()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
         job_url = f"https://recruiting.paylocity.com/recruiting/jobs/Details/{company_id}/{job_id}/{company_name_slug}"
 
         jobs.append({
             "title": str(title).strip(),
             "url": job_url,
             "company": company_name,
-            "location": location or "Not specified",
+            "location": location or "",
             "country": "",
             "department": department,
             "workplace_type": "",
@@ -2904,38 +2950,14 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
 
         log.info(f"Fallback enriched {fallback_ok}/{len(still_missing)} jobs from job URLs")
 
-    # ── Location-only pass: fetch location for jobs that still have none ──
-    # After description enrichment (which may have extracted location as a
-    # side-effect), some jobs may still lack location. Fetch their pages
-    # and extract location from JSON-LD / HTML patterns.
-    no_location = [j for j in jobs if not j.get("location") and j.get("url")]
+    # NOTE: Location-only pass removed — it was redundant.
+    # _fetch_generic_description (used by both primary and fallback enrichment)
+    # already extracts location as a side-effect via _extract_location_from_html.
+    # The separate location pass re-fetched the same pages with the same method,
+    # achieving only ~0.2% success rate (1/616). Jobs still missing location
+    # simply don't have parseable location data on their pages.
+    no_location = sum(1 for j in jobs if not j.get("location"))
     if no_location:
-        log.info(f"Location pass: fetching {len(no_location)} job pages for missing locations...")
-        loc_ok = 0
-
-        def _fetch_location_only(job):
-            try:
-                headers = {"User-Agent": random.choice(USER_AGENTS)}
-                r = _get(job["url"], headers=headers)
-                if r:
-                    loc = _extract_location_from_html(r.text)
-                    if loc:
-                        job["location"] = loc
-            except Exception as e:
-                log.debug(f"Location fetch failed {job['url']}: {e}")
-            time.sleep(random.uniform(0.3, 0.8))
-            return job
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_fetch_location_only, j): j for j in no_location}
-            for future in as_completed(futures):
-                try:
-                    job = future.result()
-                    if job.get("location"):
-                        loc_ok += 1
-                except Exception:
-                    pass
-
-        log.info(f"Location pass: extracted location for {loc_ok}/{len(no_location)} jobs")
+        log.info(f"Note: {no_location} jobs still have no location (pages lack structured location data)")
 
     return jobs
