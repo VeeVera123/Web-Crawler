@@ -319,17 +319,19 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
 # ── Immediate MATCH keywords (global/worldwide hiring signals only) ──
 
 GLOBAL_KEYWORDS = [
-    # Remote + global qualifier
-    r"\bremote\s*[\-–—/,]\s*global\b",
-    r"\bremote\s*[\-–—/,]\s*worldwide\b",
-    r"\bremote\s*[\-–—/,]\s*anywhere\b",
-    r"\bremote\s*[\-–—/,]\s*international\b",
-    r"\bremote\s*[\-–—/,]\s*wfa\b",
-    r"\bremote\s*[\-–—/,]\s*everywhere\b",
-    # Qualifier + remote
-    r"\bglobal\s*[\-–—/,]?\s*remote\b",
-    r"\bworldwide\s*[\-–—/,]?\s*remote\b",
-    r"\binternational\s*[\-–—/,]?\s*remote\b",
+    # Remote + global qualifier (separator OPTIONAL — catches "Remote Global",
+    # "Remote - Global", "Remote/Worldwide", "Remote (Anywhere)", etc.)
+    r"\bremote\s*[\-–—/,()]?\s*global\b",
+    r"\bremote\s*[\-–—/,()]?\s*worldwide\b",
+    r"\bremote\s*[\-–—/,()]?\s*anywhere\b",
+    r"\bremote\s*[\-–—/,()]?\s*international\b",
+    r"\bremote\s*[\-–—/,()]?\s*wfa\b",
+    r"\bremote\s*[\-–—/,()]?\s*everywhere\b",
+    # Qualifier + remote (handles "Global (Remote)", "Worldwide - Remote", etc.)
+    r"\bglobal\s*[\-–—/,()]?\s*remote\b",
+    r"\bworldwide\s*[\-–—/,()]?\s*remote\b",
+    r"\binternational\s*[\-–—/,()]?\s*remote\b",
+    r"\banywhere\s*[\-–—/,()]?\s*remote\b",
     # Explicit phrases
     r"\bwork\s*from\s*anywhere\b",
     r"\bwfa\b",
@@ -357,108 +359,37 @@ GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
 STANDALONE_GLOBAL_RE = re.compile(
     r"^\s*(global|worldwide|anywhere|international|wfa|earth|"
-    r"remote\s*[\-–—/,]\s*(global|worldwide|anywhere|international|wfa))\s*$", re.I
+    r"remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international|wfa))\s*$", re.I
 )
 
-# ── Immediate REJECT: country-restricted locations ──────
+# ── Non-geographic words in location fields ──────────
+# Instead of enumerating every country/city/region (fragile, always
+# misses some), we strip non-geographic filler from the location string.
+# If anything remains after stripping "remote" + these words, it's a
+# geographic qualifier → no_match.  This catches UAE, Americas, etc.
+# without maintaining country/city lists.
 
-# "Remote - US", "Remote, UK", "Remote (Canada)", etc.
-REMOTE_COUNTRY_RE = re.compile(
-    r"\bremote\s*[\-–—/,(]\s*"
-    r"(us|usa|united\s*states|uk|united\s*kingdom|canada|australia|germany|"
-    r"france|india|europe|apac|latam|dach|anz|spain|italy|netherlands|"
-    r"sweden|denmark|switzerland|japan|singapore|brazil|mexico|korea|"
-    r"ireland|austria|belgium|norway|finland|poland|portugal|czech|"
-    r"israel|new\s*zealand|argentina|colombia|chile|philippines|"
-    r"thailand|vietnam|malaysia|indonesia|taiwan|hong\s*kong)"
-    r"\)?\b",
+NON_GEO_WORDS_RE = re.compile(
+    r"\b("
+    r"remote|fully|completely|"                             # remote modifiers
+    r"full[\-\s]*time|part[\-\s]*time|"                     # employment types
+    r"contract(?:or|ual)?|permanent|temporary|temp|"
+    r"freelance|intern(?:ship)?|hourly|salaried|"
+    r"direct[\-\s]*hire|regular|casual|seasonal|"
+    r"fte|pte|"                                             # abbreviations
+    r"worker|job|position|role|opening|opportunity|"        # job words
+    r"n/?a|not\s*specified|unspecified|tbd|"                # placeholders
+    r"flexible|open|based"                                  # generic qualifiers
+    r")\b",
     re.I,
 )
 
-# Cities that signal a specific-location job when paired with "Remote"
-# "Boston, Remote" = remote in Boston area, NOT global remote
-MAJOR_CITIES = [
-    # US cities
-    r"new\s*york", r"san\s*francisco", r"los\s*angeles", r"chicago",
-    r"seattle", r"boston", r"austin", r"denver", r"atlanta", r"portland",
-    r"phoenix", r"dallas", r"houston", r"miami", r"washington",
-    r"philadelphia", r"minneapolis", r"raleigh", r"salt\s*lake",
-    r"detroit", r"tampa", r"san\s*diego", r"san\s*jose", r"nashville",
-    r"charlotte", r"columbus", r"indianapolis", r"pittsburgh",
-    # UK cities
-    r"london", r"manchester", r"birmingham", r"leeds", r"bristol",
-    r"edinburgh", r"glasgow", r"cardiff", r"liverpool", r"cambridge",
-    r"oxford",
-    # EU cities
-    r"berlin", r"munich", r"hamburg", r"paris", r"lyon", r"amsterdam",
-    r"rotterdam", r"madrid", r"barcelona", r"milan", r"rome",
-    r"stockholm", r"copenhagen", r"zurich", r"vienna", r"warsaw",
-    r"prague", r"brussels", r"lisbon", r"oslo", r"helsinki",
-    r"dublin",
-    # Other
-    r"toronto", r"vancouver", r"montreal", r"sydney", r"melbourne",
-    r"tokyo", r"singapore", r"bangalore", r"mumbai", r"hyderabad",
-    r"tel\s*aviv", r"beijing", r"shanghai", r"sao\s*paulo",
-    r"mexico\s*city", r"buenos\s*aires", r"bogota", r"seoul",
-]
-MAJOR_CITIES_RE = [re.compile(r"\b" + c + r"\b", re.I) for c in MAJOR_CITIES]
-
-# Country names (for onsite jobs or "Remote - [Country]" patterns)
-COUNTRY_NAMES = [
-    r"united\s*states", r"usa", r"\bus\b", r"united\s*kingdom", r"\buk\b",
-    r"canada", r"australia", r"germany", r"france", r"netherlands",
-    r"spain", r"italy", r"sweden", r"denmark", r"switzerland",
-    r"austria", r"belgium", r"norway", r"finland", r"poland",
-    r"portugal", r"czech", r"ireland", r"israel",
-    r"japan", r"singapore", r"india", r"china", r"south\s*korea",
-    r"brazil", r"mexico", r"argentina", r"colombia", r"chile",
-    r"new\s*zealand", r"philippines", r"thailand", r"vietnam",
-    r"malaysia", r"indonesia", r"taiwan", r"hong\s*kong",
-    r"england", r"scotland", r"wales",
-    # ISO-3 country codes (iCIMS uses these: "IND Nationwide Remote")
-    r"\bIND\b", r"\bAUS\b", r"\bGBR\b", r"\bCAN\b", r"\bDEU\b",
-    r"\bFRA\b", r"\bNLD\b", r"\bESP\b", r"\bITA\b", r"\bJPN\b",
-    r"\bBRA\b", r"\bMEX\b", r"\bCHN\b", r"\bSGP\b", r"\bCHE\b",
-    r"\bSWE\b", r"\bDNK\b", r"\bNOR\b", r"\bFIN\b", r"\bPOL\b",
-    r"\bPRT\b", r"\bCZE\b", r"\bIRL\b", r"\bISR\b", r"\bNZL\b",
-    r"\bKOR\b", r"\bARG\b", r"\bCOL\b", r"\bCHL\b", r"\bPHL\b",
-    r"\bTHA\b", r"\bVNM\b", r"\bMYS\b", r"\bIDN\b", r"\bTWN\b",
-    r"\bHKG\b", r"\bAUT\b", r"\bBEL\b",
-    # iCIMS-style location codes: "IN-PB-Mohali", "US-NY-New York"
-    r"\bUS-[A-Z]{2}\b", r"\bCA-[A-Z]{2}\b", r"\bGB-[A-Z]{2,3}\b",
-    r"\bIN-[A-Z]{2}\b", r"\bAU-[A-Z]{2,3}\b", r"\bDE-[A-Z]{2}\b",
-    r"\bFR-[A-Z]{2}\b",
-    # US states
-    r"california", r"texas", r"florida", r"illinois",
-    r"pennsylvania", r"massachusetts", r"colorado", r"virginia",
-    r"maryland", r"oregon", r"georgia", r"north\s*carolina",
-    r"new\s*jersey", r"ohio", r"michigan", r"arizona", r"washington",
-]
-COUNTRY_NAMES_RE = [re.compile(r"\b" + c + r"\b", re.I) for c in COUNTRY_NAMES]
-
-# Region abbreviations
-REGION_RE = re.compile(
-    r"\b(apac|latam|dach|anz|seur|neur|emea|mena|cee|nordics|"
-    r"north\s*america|south\s*america|latin\s*america|"
-    r"asia\s*pacific|middle\s*east)\b",
+# Placeholder values that mean "no location given"
+PLACEHOLDER_LOC_RE = re.compile(
+    r"^\s*(not\s*specified|n/?a|tbd|to\s*be\s*determined|"
+    r"unspecified|see\s*description|see\s*below|"
+    r"[—\-–\.]+)\s*$",
     re.I,
-)
-
-# Explicit "only" restrictions in location field
-ONLY_RE = re.compile(
-    r"\b(us|usa|uk|canada|australia|europe|eu|"
-    r"united\s*states|united\s*kingdom|germany|france|india|"
-    r"north\s*america|apac|latam)\s*only\b"
-    r"|\bonly\s*in\s*(the\s*)?\w+"
-    r"|\b\w+\s*based\s*only\b",
-    re.I,
-)
-
-# US state abbreviations (2-letter, must be exact match)
-US_STATE_ABBR_RE = re.compile(
-    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|"
-    r"MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|"
-    r"SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b"
 )
 
 
@@ -466,16 +397,16 @@ def keyword_classify_location(job: dict) -> str:
     """
     Returns 'match', 'no_match', or 'unsure'.
 
-    MATCH = only truly global hiring signals (anywhere, worldwide,
-    international, WFA, EMEA). No country-specific matching at all.
+    MATCH = truly global hiring signals (anywhere, worldwide,
+    international, WFA, EMEA, South Africa).
 
     Flow:
-      1. Global/Anywhere/EMEA in location → MATCH
-      2. Hybrid / onsite → REJECT
-      3. Country-restricted Remote (Remote-US, Boston Remote) → REJECT
-      4. Onsite at specific city/country (no Remote) → REJECT
-      5. Bare "Remote" alone → UNSURE (send to AI)
-      6. No location → UNSURE (send to AI)
+      1. Empty / placeholder location → UNSURE (send to AI)
+      2. Global/Anywhere/EMEA/South Africa → MATCH
+      3. Hybrid / onsite → REJECT
+      4. Has "remote" → strip non-geo words; if anything geographic
+         remains → REJECT, else bare "remote" → UNSURE
+      5. Has location text but no "remote" → REJECT (onsite)
     """
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
@@ -484,54 +415,53 @@ def keyword_classify_location(job: dict) -> str:
         raw_loc = ", ".join(str(x) for x in raw_loc)
     if isinstance(raw_country, list):
         raw_country = ", ".join(str(x) for x in raw_country)
-    loc = (raw_loc + " " + raw_country).lower()
-    has_remote = bool(re.search(r"\bremote\b", loc, re.I))
+    loc = (raw_loc + " " + raw_country).strip()
+    loc_lower = loc.lower()
 
-    # ── 1. MATCH: Global / Anywhere / Worldwide / EMEA ──
-    if any(rx.search(loc) for rx in GLOBAL_RE):
+    # ── 1. Empty / placeholder → UNSURE ──────────────────
+    if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
+        return "unsure"
+
+    has_remote = bool(re.search(r"\bremote\b", loc_lower))
+
+    # ── 2. MATCH: Global / Anywhere / Worldwide / EMEA / Africa ──
+    if any(rx.search(loc_lower) for rx in GLOBAL_RE):
         return "match"
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
         return "match"
     # EMEA covers Africa
-    if re.search(r"\bemea\b", loc, re.I):
+    if re.search(r"\bemea\b", loc_lower):
+        return "match"
+    # South Africa / Africa explicitly mentioned
+    if re.search(r"\bafrica\b", loc_lower):
         return "match"
 
-    # ── 2. REJECT: Hybrid / Onsite ──────────────────────
-    if re.search(r"\bhybrid\b", loc, re.I):
+    # ── 3. REJECT: Hybrid / Onsite ──────────────────────
+    if re.search(r"\bhybrid\b", loc_lower):
         return "no_match"
-    if re.search(r"\bon[\-\s]*site\b", loc, re.I):
+    if re.search(r"\bon[\-\s]*site\b", loc_lower):
         return "no_match"
-    if re.search(r"\bin[\-\s]*person\b", loc, re.I):
-        return "no_match"
-
-    # ── 3. REJECT: Country-restricted Remote ─────────────
-    if REMOTE_COUNTRY_RE.search(loc):
-        return "no_match"
-    if ONLY_RE.search(loc):
+    if re.search(r"\bin[\-\s]*person\b", loc_lower):
         return "no_match"
 
-    # "Boston, Remote" / "Remote, New York" / "London (Remote)"
+    # ── 4. Remote + qualifier check ─────────────────────
+    # This replaces the old country/city enumeration approach.
+    # Strip "remote" and non-geographic filler words. If anything
+    # remains, it's a geographic qualifier (country, city, region,
+    # state code, etc.) → no_match.
     if has_remote:
-        has_city = any(rx.search(loc) for rx in MAJOR_CITIES_RE)
-        has_country = any(rx.search(loc) for rx in COUNTRY_NAMES_RE)
-        has_state_abbr = US_STATE_ABBR_RE.search(loc)
+        stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
+        # Strip separators, digits (like "00-Remote Worker-N/A"), punctuation
+        stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
 
-        if has_city or has_country or has_state_abbr:
-            return "no_match"
-
-        # "Remote" + region (APAC, LATAM, DACH, etc.) but NOT EMEA
-        if REGION_RE.search(loc) and not re.search(r"\bemea\b", loc, re.I):
-            return "no_match"
-
-        # ── 4. Bare "Remote" (no city/country) → UNSURE ──
-        return "unsure"
-
-    # ── 5. REJECT: Onsite at specific location ───────────
-    if loc.strip():
+        if not stripped:
+            # Bare "Remote" / "Remote / Full-Time" / "Remote Worker - N/A"
+            return "unsure"
+        # Has geographic content → country-restricted remote
         return "no_match"
 
-    # ── 6. No location at all → UNSURE ───────────────────
-    return "unsure"
+    # ── 5. REJECT: Has location text but no "remote" → onsite ──
+    return "no_match"
 
 
 LOCATION_SYSTEM_PROMPT = """\
@@ -620,13 +550,19 @@ def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> lis
 
 def _build_dynamic_batches(jobs: list[dict], max_user_chars: int) -> list[tuple[int, list[dict]]]:
     """Build batches dynamically based on description length.
-    Packs more short-description jobs per batch, fewer long ones.
-    Targets ~80% of max_user_chars per batch to leave room for prompts.
-    Min 2 jobs per batch, max 40 to maintain AI quality."""
-    OVERHEAD_PER_JOB = 120  # title, company, location formatting
+
+    Rules:
+      - Total batch ≤ 400k characters (80% of 500k budget)
+      - Max 50 roles per batch, even if character space remains
+      - Max 8k characters per individual role description (truncated)
+      - Smaller JDs → more roles packed in (up to 50)
+      - Min 2 roles per batch
+    """
+    OVERHEAD_PER_JOB = 120   # title, company, location formatting
+    MAX_DESC_CHARS = 8000    # truncate individual JDs beyond 8k
     MIN_BATCH = 2
-    MAX_BATCH = min(40, AI_BATCH_SIZE * 2)  # never exceed 2x static size
-    TARGET_CHARS = int(max_user_chars * 0.8)
+    MAX_BATCH = 50           # hard cap: 50 roles per batch
+    TARGET_CHARS = int(max_user_chars * 0.8)  # 400k chars
 
     batches = []
     current_batch = []
@@ -634,7 +570,12 @@ def _build_dynamic_batches(jobs: list[dict], max_user_chars: int) -> list[tuple[
     start_idx = 0
 
     for i, job in enumerate(jobs):
-        desc_len = len(job.get("description_snippet") or "")
+        desc = job.get("description_snippet") or ""
+        # Truncate oversized descriptions to 8k chars
+        if len(desc) > MAX_DESC_CHARS:
+            job["description_snippet"] = desc[:MAX_DESC_CHARS]
+            desc = job["description_snippet"]
+        desc_len = len(desc)
         job_chars = desc_len + OVERHEAD_PER_JOB
 
         # Would this job push us over budget? (but always allow MIN_BATCH)
