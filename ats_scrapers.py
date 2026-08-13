@@ -410,7 +410,7 @@ def scrape_bamboohr(slug: str) -> list[dict]:
 def scrape_icims(slug: str) -> list[dict]:
     """iCIMS sitemap scraper — parses sitemap.xml for job URLs.
     Title is extracted from URL path. No description/location from sitemap."""
-    sitemap_url = f"https://careers-{slug}.icims.com/sitemap.xml"
+    sitemap_url = f"https://{slug}.icims.com/sitemap.xml"
     headers = {
         "Accept": "application/xml",
         "User-Agent": random.choice(USER_AGENTS),
