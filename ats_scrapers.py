@@ -2102,6 +2102,88 @@ def scrape_board(ats: str, slug: str) -> list[dict]:
 # These are called AFTER the role filter, so only a handful
 # of jobs need enrichment (not thousands).
 
+def _extract_location_from_html(html: str) -> str:
+    """Universal location extractor — works for any ATS job page.
+    Tries JSON-LD JobPosting schema first (most reliable), then
+    common meta tags, then typical HTML patterns."""
+    import json as _json
+
+    # ── 1. JSON-LD structured data (most reliable) ─────────
+    for ld_match in re.finditer(
+        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+        html, re.I | re.DOTALL
+    ):
+        try:
+            ld = _json.loads(ld_match.group(1))
+            # Handle @graph arrays
+            if isinstance(ld, dict) and "@graph" in ld:
+                ld = ld["@graph"]
+            if isinstance(ld, list):
+                for item in ld:
+                    if isinstance(item, dict) and item.get("@type") in ("JobPosting", "jobPosting"):
+                        ld = item
+                        break
+                else:
+                    continue
+            if not isinstance(ld, dict):
+                continue
+            if ld.get("@type") not in ("JobPosting", "jobPosting"):
+                continue
+
+            # Extract jobLocation
+            job_loc = ld.get("jobLocation")
+            if not job_loc:
+                continue
+            locs = job_loc if isinstance(job_loc, list) else [job_loc]
+            parts = []
+            for loc in locs:
+                if isinstance(loc, str):
+                    parts.append(loc)
+                    continue
+                addr = loc.get("address") or loc
+                if isinstance(addr, str):
+                    parts.append(addr)
+                    continue
+                city = addr.get("addressLocality", "")
+                region = addr.get("addressRegion", "")
+                country = addr.get("addressCountry", "")
+                if isinstance(country, dict):
+                    country = country.get("name", "") or country.get("@id", "")
+                loc_str = ", ".join(p for p in [city, region, country] if p)
+                if loc_str:
+                    parts.append(loc_str)
+            if parts:
+                return "; ".join(parts[:3])  # cap at 3 locations
+        except Exception:
+            continue
+
+    # ── 2. Open Graph / meta tags ──────────────────────────
+    for pat in [
+        r'<meta[^>]*property=["\']og:locality["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*name=["\']geo\.placename["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*name=["\']location["\'][^>]*content=["\']([^"\']+)["\']',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m:
+            loc = m.group(1).strip()
+            if loc and len(loc) < 200:
+                return loc
+
+    # ── 3. Common HTML patterns ────────────────────────────
+    for pat in [
+        r'class="[^"]*(?:job-location|jobLocation|location-name|posting-location)[^"]*"[^>]*>\s*([^<]+?)\s*<',
+        r'data-automation=["\']job-location["\'][^>]*>\s*([^<]+?)\s*<',
+        r'itemprop=["\']jobLocation["\'][^>]*>\s*([^<]+?)\s*<',
+    ]:
+        m = re.search(pat, html, re.I | re.DOTALL)
+        if m:
+            loc = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if loc and len(loc) < 200:
+                return loc
+
+    return ""
+
+
 def _extract_icims_location(html: str) -> str:
     """Extract location from iCIMS job page HTML.
     Tries multiple patterns since iCIMS templates vary."""
@@ -2129,17 +2211,8 @@ def _extract_icims_location(html: str) -> str:
             if loc and len(loc) < 200:
                 return loc
 
-    # Pattern 4: JSON-LD structured data
-    m = re.search(r'"addressLocality"\s*:\s*"([^"]+)"', html)
-    if m:
-        region = ""
-        mr = re.search(r'"addressRegion"\s*:\s*"([^"]+)"', html)
-        if mr:
-            region = mr.group(1).strip()
-        loc = m.group(1).strip()
-        return f"{loc}, {region}" if region else loc
-
-    return ""
+    # Pattern 4: Fall back to the universal extractor (JSON-LD, meta tags, etc.)
+    return _extract_location_from_html(html)
 
 
 def _fetch_icims_description(job: dict) -> str:
@@ -2267,7 +2340,8 @@ def _fetch_taleo_description(job: dict) -> str:
 
 def _fetch_generic_description(job: dict) -> str:
     """Generic description fetcher — loads the job URL and extracts
-    text from common HTML patterns (JSON-LD, meta description, body text)."""
+    text from common HTML patterns (JSON-LD, meta description, body text).
+    Also extracts location as a side-effect if job has no location."""
     url = job.get("url", "")
     if not url:
         return ""
@@ -2276,10 +2350,18 @@ def _fetch_generic_description(job: dict) -> str:
     if not r:
         return ""
 
+    html = r.text
+
+    # ── Extract location if missing (side-effect) ──────────
+    if not job.get("location"):
+        loc = _extract_location_from_html(html)
+        if loc:
+            job["location"] = loc
+
     # Try JSON-LD first
     ld_match = re.search(
         r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
-        r.text, re.I
+        html, re.I
     )
     if ld_match:
         try:
@@ -2293,7 +2375,7 @@ def _fetch_generic_description(job: dict) -> str:
     # Try meta description
     meta_match = re.search(
         r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
-        r.text, re.I
+        html, re.I
     )
     if meta_match:
         desc = meta_match.group(1).strip()
@@ -2305,7 +2387,7 @@ def _fetch_generic_description(job: dict) -> str:
         r'class="[^"]*(?:job-description|job_description|description|posting-content|job-details)[^"]*"[^>]*>(.*?)</(?:div|section)',
         r'<article[^>]*>(.*?)</article>',
     ]:
-        match = re.search(pattern, r.text, re.DOTALL | re.I)
+        match = re.search(pattern, html, re.DOTALL | re.I)
         if match:
             text = _snippet(match.group(1))
             if len(text) > 50:
@@ -2325,6 +2407,49 @@ def _fetch_joincom_description(job: dict) -> str:
     return _fetch_generic_description(job)
 
 
+def _fetch_teamtailor_location(job: dict) -> str:
+    """Fetch location from a Teamtailor job page.
+    The RSS feed has no location, but individual job pages have JSON-LD.
+    Returns existing description if already set (we only need location)."""
+    url = job.get("url", "")
+    if not url:
+        return job.get("description_snippet", "")
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(url, headers=headers)
+    if not r:
+        return job.get("description_snippet", "")
+
+    html = r.text
+
+    # ── Extract location (primary purpose) ─────────────────
+    if not job.get("location"):
+        loc = _extract_location_from_html(html)
+        if loc:
+            job["location"] = loc
+
+    # ── Also grab a better description if current one is weak ──
+    existing_desc = job.get("description_snippet", "")
+    if len(existing_desc) < 100:
+        desc = ""
+        # Try JSON-LD description
+        import json as _json
+        for ld_match in re.finditer(
+            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+            html, re.I | re.DOTALL
+        ):
+            try:
+                ld = _json.loads(ld_match.group(1))
+                if isinstance(ld, dict) and ld.get("description"):
+                    desc = _snippet(ld["description"])
+                    break
+            except Exception:
+                continue
+        if desc:
+            return desc
+
+    return existing_desc
+
+
 # Platforms that need description enrichment
 DESCRIPTION_FETCHERS = {
     "iCIMS": _fetch_icims_description,
@@ -2335,6 +2460,7 @@ DESCRIPTION_FETCHERS = {
     "ApplyToJob": _fetch_generic_description,
     "HRMDirect": _fetch_generic_description,
     "JOIN": _fetch_joincom_description,
+    "Teamtailor": _fetch_teamtailor_location,
 }
 
 
@@ -2346,13 +2472,14 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     Modifies jobs in place and returns the same list."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    to_enrich = [j for j in jobs if not j.get("description_snippet")
-                 and j.get("source_ats") in DESCRIPTION_FETCHERS]
+    to_enrich = [j for j in jobs
+                 if j.get("source_ats") in DESCRIPTION_FETCHERS
+                 and (not j.get("description_snippet") or not j.get("location"))]
 
     if not to_enrich:
         return jobs
 
-    log.info(f"Enriching descriptions for {len(to_enrich)} jobs "
+    log.info(f"Enriching {len(to_enrich)} jobs (missing description or location) "
              f"across {len(set(j['source_ats'] for j in to_enrich))} platforms...")
 
     def _fetch_one(job):
@@ -2415,5 +2542,39 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
                     pass
 
         log.info(f"Fallback enriched {fallback_ok}/{len(still_missing)} jobs from job URLs")
+
+    # ── Location-only pass: fetch location for jobs that still have none ──
+    # After description enrichment (which may have extracted location as a
+    # side-effect), some jobs may still lack location. Fetch their pages
+    # and extract location from JSON-LD / HTML patterns.
+    no_location = [j for j in jobs if not j.get("location") and j.get("url")]
+    if no_location:
+        log.info(f"Location pass: fetching {len(no_location)} job pages for missing locations...")
+        loc_ok = 0
+
+        def _fetch_location_only(job):
+            try:
+                headers = {"User-Agent": random.choice(USER_AGENTS)}
+                r = _get(job["url"], headers=headers)
+                if r:
+                    loc = _extract_location_from_html(r.text)
+                    if loc:
+                        job["location"] = loc
+            except Exception as e:
+                log.debug(f"Location fetch failed {job['url']}: {e}")
+            time.sleep(random.uniform(0.3, 0.8))
+            return job
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch_location_only, j): j for j in no_location}
+            for future in as_completed(futures):
+                try:
+                    job = future.result()
+                    if job.get("location"):
+                        loc_ok += 1
+                except Exception:
+                    pass
+
+        log.info(f"Location pass: extracted location for {loc_ok}/{len(no_location)} jobs")
 
     return jobs
