@@ -379,7 +379,13 @@ NON_GEO_WORDS_RE = re.compile(
     r"fte|pte|"                                             # abbreviations
     r"worker|job|position|role|opening|opportunity|"        # job words
     r"n/?a|not\s*specified|unspecified|tbd|"                # placeholders
-    r"flexible|open|based"                                  # generic qualifiers
+    r"flexible|open|based|"                                 # generic qualifiers
+    r"monday|tuesday|wednesday|thursday|friday|"            # schedule words
+    r"saturday|sunday|weekday|weekend|"
+    r"shift|schedule|day|night|evening|morning|"
+    r"hours|hrs|am|pm|to|and|or|the|a|an|in|at|for|of|"   # connectors/articles
+    r"immediate|urgent|asap|new|multiple|"                  # posting qualifiers
+    r"available|hiring|now|apply"                            # action words
     r")\b",
     re.I,
 )
