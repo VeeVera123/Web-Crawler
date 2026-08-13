@@ -904,6 +904,15 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         log.debug(f"Invalid Oracle Cloud HCM slug format: {slug}")
         return []
 
+    import uuid as _uuid
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+        "ora-irc-cx-userid": str(_uuid.uuid4()),
+        "ora-irc-language": "en",
+        "content-type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8",
+    }
+
     # Build API URL — host_prefix can be 'eeho.fa.us2' (new) or 'eeho' (legacy)
     # For legacy slugs without .fa. region, try to discover the correct domain
     if ".fa." in host_prefix or "." in host_prefix:
@@ -917,27 +926,21 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         for region in ("fa.us2", "fa.us6", "fa.em2", "fa.em3", "fa.ap1", "fa.us1"):
             test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
             try:
-                test_r = requests.get(test_url, params={"onlyData": "true", "finder": "findReqs;siteNumber=CX_1,limit=1,offset=0"},
-                    headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json",
-                             "ora-irc-language": "en"}, timeout=10)
+                test_r = requests.get(test_url,
+                    params={"onlyData": "true", "finder": "findReqs;siteNumber=CX_1,limit=1,offset=0"},
+                    headers=headers, timeout=10)
                 if test_r.status_code == 200:
-                    base_api = test_url
-                    log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
-                    break
+                    data = test_r.json()
+                    items = data.get("items", [])
+                    if items and items[0].get("requisitionList"):
+                        base_api = test_url
+                        log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
+                        break
             except Exception:
                 continue
         if not base_api:
             log.debug(f"Oracle Cloud HCM: could not discover region for {tenant}")
             return []
-
-    import uuid as _uuid
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-        "ora-irc-cx-userid": str(_uuid.uuid4()),
-        "ora-irc-language": "en",
-        "content-type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8",
-    }
 
     # Auto-discover site number for tenant-only slugs
     if not site_number:
