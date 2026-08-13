@@ -604,6 +604,42 @@ def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> lis
     return batch_results
 
 
+def _build_dynamic_batches(jobs: list[dict], max_user_chars: int) -> list[tuple[int, list[dict]]]:
+    """Build batches dynamically based on description length.
+    Packs more short-description jobs per batch, fewer long ones.
+    Targets ~80% of max_user_chars per batch to leave room for prompts.
+    Min 2 jobs per batch, max 40 to maintain AI quality."""
+    OVERHEAD_PER_JOB = 120  # title, company, location formatting
+    MIN_BATCH = 2
+    MAX_BATCH = min(40, AI_BATCH_SIZE * 2)  # never exceed 2x static size
+    TARGET_CHARS = int(max_user_chars * 0.8)
+
+    batches = []
+    current_batch = []
+    current_chars = 0
+    start_idx = 0
+
+    for i, job in enumerate(jobs):
+        desc_len = len(job.get("description_snippet") or "")
+        job_chars = desc_len + OVERHEAD_PER_JOB
+
+        # Would this job push us over budget? (but always allow MIN_BATCH)
+        if current_batch and (current_chars + job_chars > TARGET_CHARS
+                              or len(current_batch) >= MAX_BATCH):
+            batches.append((start_idx, current_batch))
+            start_idx = i
+            current_batch = []
+            current_chars = 0
+
+        current_batch.append(job)
+        current_chars += job_chars
+
+    if current_batch:
+        batches.append((start_idx, current_batch))
+
+    return batches
+
+
 def ai_classify_locations(jobs: list[dict]) -> list[str]:
     """
     Send ambiguous jobs (bare "Remote") to AI for location classification.
@@ -611,6 +647,9 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     Uses AI_PARALLEL_REQUESTS concurrent calls for Groq/Haiku.
     Returns list of 'match', 'no_match', or 'uncertain' in same order.
     On rate limit/failure: defaults to 'uncertain' (include with flag).
+
+    Batch size is DYNAMIC — more short-description jobs per request,
+    fewer long ones. This saves tokens while maintaining quality.
     """
     if not jobs:
         return []
@@ -621,8 +660,10 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     else:
         max_user_chars = 500000  # Groq/Anthropic: no practical limit
 
-    # Split into batches
-    batches = [(i, jobs[i:i + AI_BATCH_SIZE]) for i in range(0, len(jobs), AI_BATCH_SIZE)]
+    # Build dynamic batches based on actual content size
+    batches = _build_dynamic_batches(jobs, max_user_chars)
+    log.info(f"Dynamic batching: {len(jobs)} jobs → {len(batches)} batches "
+             f"(sizes: {[len(b) for _, b in batches]})")
     results = ["uncertain"] * len(jobs)
 
     if AI_PARALLEL_REQUESTS <= 1:
