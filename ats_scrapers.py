@@ -892,18 +892,43 @@ def scrape_taleo(slug: str) -> list[dict]:
 
 def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     """Oracle Cloud HCM Recruiting REST API.
-    Slug format: 'tenant|site_number' (e.g. 'eeho|CX_1')."""
+    Slug format: 'host_prefix|site_number' (e.g. 'eeho.fa.us2|CX_1')
+    or legacy 'tenant|site_number' (e.g. 'eeho|CX_1') or tenant-only."""
     parts = slug.split("|")
     if len(parts) == 2:
-        tenant, site_number = parts
+        host_prefix, site_number = parts
     elif len(parts) == 1:
-        # Tenant-only slug — try common site numbers
-        tenant = parts[0]
+        host_prefix = parts[0]
         site_number = None
     else:
         log.debug(f"Invalid Oracle Cloud HCM slug format: {slug}")
         return []
-    base_api = f"https://{tenant}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+
+    # Build API URL — host_prefix can be 'eeho.fa.us2' (new) or 'eeho' (legacy)
+    # For legacy slugs without .fa. region, try to discover the correct domain
+    if ".fa." in host_prefix or "." in host_prefix:
+        # Full host prefix like 'eeho.fa.us2' or 'idcs-xxx.identity'
+        base_api = f"https://{host_prefix}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+        tenant = host_prefix.split(".")[0]
+    else:
+        # Legacy short tenant — try common region patterns
+        tenant = host_prefix
+        base_api = None
+        for region in ("fa.us2", "fa.us6", "fa.em2", "fa.em3", "fa.ap1", "fa.us1"):
+            test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+            try:
+                test_r = requests.get(test_url, params={"onlyData": "true", "finder": "findReqs;siteNumber=CX_1,limit=1,offset=0"},
+                    headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json",
+                             "ora-irc-language": "en"}, timeout=10)
+                if test_r.status_code == 200:
+                    base_api = test_url
+                    log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
+                    break
+            except Exception:
+                continue
+        if not base_api:
+            log.debug(f"Oracle Cloud HCM: could not discover region for {tenant}")
+            return []
 
     import uuid as _uuid
     headers = {
@@ -980,9 +1005,10 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
             desc = _snippet(description_html)
             salary = _extract_salary(desc)
 
-            # Build job URL
+            # Build job URL — extract host from base_api
+            api_host = base_api.split("/hcmRestApi")[0]
             job_url = (
-                f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience"
+                f"{api_host}/hcmUI/CandidateExperience"
                 f"/en/sites/{site_number}/job/{job_id}"
             )
 
@@ -1525,11 +1551,11 @@ def scrape_applytojob(slug: str) -> list[dict]:
 # ── HRMDirect ───────────────────────────────────────────
 
 def scrape_hrmdirect(slug: str) -> list[dict]:
-    """HRMDirect — HTML scrape of job openings table.
-    Slug is the company subdomain (e.g. 'acme').
-    Parses table rows with reqitem, posTitle, cities, state, departments."""
+    """HRMDirect / ClearCompany — HTML scrape of job openings table.
+    Slug is the company subdomain (e.g. 'novabio').
+    Uses ?search=true to force all jobs to display (not just filter dropdowns)."""
     company_name = slug.replace("-", " ").title()
-    url = f"https://{slug}.hrmdirect.com/employment/openings.php"
+    url = f"https://{slug}.hrmdirect.com/employment/openings.php?search=true"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
     r = _get(url, headers=headers)
@@ -1539,15 +1565,21 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
     jobs = []
     seen_urls = set()
 
-    # Parse job rows — HRMDirect uses table with job links
-    # Pattern: link to job-opening.php?req=XXXX with title
-    for match in re.finditer(
-        r'<a\s+[^>]*href=["\']([^"\']*job-opening\.php\?req=\d+[^"\']*)["\'][^>]*>'
-        r'\s*([^<]+)</a>',
-        r.text, re.I
-    ):
-        job_path = match.group(1).strip()
-        title = match.group(2).strip()
+    # Parse table rows — each <tr> contains <td> cells with job link, city, state, country
+    # Split by <tr to process row by row
+    rows = re.split(r'<tr[^>]*>', r.text, flags=re.I)
+    for row_html in rows:
+        # Find job link in this row
+        link_match = re.search(
+            r'<a\s+[^>]*href=["\']([^"\']*job-opening\.php\?req=\d+[^"\']*)["\'][^>]*>'
+            r'\s*([^<]+)</a>',
+            row_html, re.I
+        )
+        if not link_match:
+            continue
+
+        job_path = link_match.group(1).strip()
+        title = link_match.group(2).strip()
 
         if not job_path.startswith("http"):
             job_url = f"https://{slug}.hrmdirect.com/employment/{job_path}"
@@ -1558,30 +1590,54 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
             continue
         seen_urls.add(job_url)
 
-        # Try to find location/department in the same table row
-        row_pattern = re.escape(match.group(0))
-        row_match = re.search(
-            row_pattern + r'(.*?)</tr>',
-            r.text, re.I | re.DOTALL
-        )
+        # Extract ALL <td> cell contents from this row
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.I | re.DOTALL)
+        # Strip HTML tags from cells
+        clean_cells = []
+        for cell in cells:
+            text = re.sub(r'<[^>]+>', '', cell).strip()
+            clean_cells.append(text)
 
-        location = ""
+        # HRMDirect tables vary but commonly:
+        # [department?, title, city, state, country?] or [title, city, state]
+        # Find the cell index that contains the title to know the layout
+        title_idx = -1
+        for i, c in enumerate(clean_cells):
+            if title in c:
+                title_idx = i
+                break
+
+        city = ""
+        state = ""
+        country = ""
         department = ""
-        if row_match:
-            row_html = row_match.group(1)
-            # Extract td cells after the title
-            cells = re.findall(r'<td[^>]*>\s*([^<]+?)\s*</td>', row_html, re.I)
-            if len(cells) >= 1:
-                location = cells[0].strip()
-            if len(cells) >= 2:
-                department = cells[-1].strip()
+
+        if title_idx >= 0:
+            remaining = clean_cells[title_idx + 1:]
+            if len(remaining) >= 1:
+                city = remaining[0]
+            if len(remaining) >= 2:
+                state = remaining[1]
+            if len(remaining) >= 3:
+                country = remaining[2]
+            # Department is usually before the title
+            if title_idx >= 1:
+                department = clean_cells[title_idx - 1]
+
+        location = city
+        if state and city:
+            location = f"{city}, {state}"
+        elif state:
+            location = state
+        if country and country not in location:
+            location = f"{location}, {country}" if location else country
 
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company_name,
             "location": location,
-            "country": "",
+            "country": country,
             "department": department,
             "workplace_type": "",
             "employment_type": "",
