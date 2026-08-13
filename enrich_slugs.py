@@ -434,7 +434,8 @@ def _url_to_slug_zoho(url: str) -> str | None:
 
 def _url_to_slug_paylocity(url: str) -> str | None:
     """Extract slug from Paylocity URLs.
-    Pattern: recruiting.paylocity.com/recruiting/jobs/All/{company_id}/{company_name}"""
+    Pattern: recruiting.paylocity.com/recruiting/jobs/All/{uuid}/{company_name}
+    Only accepts UUID-format IDs (numeric IDs are deprecated and return 404)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "paylocity.com" not in host:
@@ -445,7 +446,12 @@ def _url_to_slug_paylocity(url: str) -> str | None:
     if len(parts) >= 5 and parts[0] == "recruiting" and parts[1] == "jobs":
         company_id = parts[3]
         company_name = parts[4]
-        if company_id and company_name:
+        # Only accept UUID-format IDs (8-4-4-4-12 hex pattern)
+        # Numeric IDs are deprecated and return 404
+        if company_id and company_name and re.match(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+            company_id, re.I
+        ):
             return f"{company_id}|{company_name}"
     return None
 
@@ -521,6 +527,7 @@ URL_TO_SLUG = {
     "hrmdirect": _url_to_slug_hrmdirect,
     "softgarden": _url_to_slug_softgarden,
     "zoho": _url_to_slug_zoho,
+    "paylocity": _url_to_slug_paylocity,
     "ycombinator": _url_to_slug_ycombinator,
     "personio": _url_to_slug_personio,
     "joincom": _url_to_slug_joincom,
