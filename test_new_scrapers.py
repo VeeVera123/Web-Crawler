@@ -88,35 +88,49 @@ def test_oracle_cloud_hcm():
 
 
 def test_oracle_region_discovery():
-    """Test that legacy tenant-only slugs can discover region."""
-    import uuid
+    """Test that legacy tenant-only slugs can discover region via redirect."""
     tenant = "eeho"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "ora-irc-cx-userid": str(uuid.uuid4()),
-        "ora-irc-language": "en",
-        "content-type": "application/vnd.oracle.adf.resourceitem+json;charset=utf-8",
-    }
 
-    found_region = None
-    for region in ("fa.us2", "fa.us6", "fa.em2", "fa.em3", "fa.ap1", "fa.us1"):
-        test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+    # Method 1: Career page redirect discovery
+    found_domain = None
+    for try_site in ("CX_1", "CX", "CX_2"):
         try:
-            r = requests.get(test_url,
-                params={"onlyData": "true", "finder": "findReqs;siteNumber=CX_1,limit=1,offset=0"},
-                headers=headers, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                items = data.get("items", [])
-                if items and items[0].get("requisitionList"):
-                    found_region = region
-                    break
+            probe_url = f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{try_site}/requisitions"
+            r = requests.get(probe_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15, allow_redirects=True)
+            final_host = r.url.split("/")[2] if r.url else ""
+            if ".fa." in final_host and "oraclecloud.com" in final_host:
+                found_domain = final_host.replace(".oraclecloud.com", "")
+                break
         except Exception:
             continue
 
-    assert found_region, f"Could not discover region for {tenant}"
-    return f"tenant={tenant}, discovered region={found_region}"
+    # Method 2: Brute-force API
+    if not found_domain:
+        import uuid
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "ora-irc-cx-userid": str(uuid.uuid4()),
+            "ora-irc-language": "en",
+        }
+        for region in ("fa.us2", "fa.us6", "fa.us1", "fa.em2", "fa.em3", "fa.em4",
+                       "fa.ap1", "fa.ap2", "fa.ca1", "fa.sa1", "fa.me1"):
+            test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+            try:
+                r = requests.get(test_url,
+                    params={"onlyData": "true", "finder": "findReqs;siteNumber=CX_1,limit=1,offset=0"},
+                    headers=headers, timeout=8)
+                if r.status_code == 200:
+                    data = r.json()
+                    items = data.get("items", [])
+                    if items and items[0].get("requisitionList"):
+                        found_domain = f"{tenant}.{region}"
+                        break
+            except Exception:
+                continue
+
+    assert found_domain, f"Could not discover domain for {tenant}"
+    return f"tenant={tenant}, discovered domain={found_domain}"
 
 
 # ── 3. Taleo ──────────────────────────────────────────────
