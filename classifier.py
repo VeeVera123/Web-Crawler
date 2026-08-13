@@ -415,6 +415,20 @@ COUNTRY_NAMES = [
     r"new\s*zealand", r"philippines", r"thailand", r"vietnam",
     r"malaysia", r"indonesia", r"taiwan", r"hong\s*kong",
     r"england", r"scotland", r"wales",
+    # ISO-3 country codes (iCIMS uses these: "IND Nationwide Remote")
+    r"\bIND\b", r"\bAUS\b", r"\bGBR\b", r"\bCAN\b", r"\bDEU\b",
+    r"\bFRA\b", r"\bNLD\b", r"\bESP\b", r"\bITA\b", r"\bJPN\b",
+    r"\bBRA\b", r"\bMEX\b", r"\bCHN\b", r"\bSGP\b", r"\bCHE\b",
+    r"\bSWE\b", r"\bDNK\b", r"\bNOR\b", r"\bFIN\b", r"\bPOL\b",
+    r"\bPRT\b", r"\bCZE\b", r"\bIRL\b", r"\bISR\b", r"\bNZL\b",
+    r"\bKOR\b", r"\bARG\b", r"\bCOL\b", r"\bCHL\b", r"\bPHL\b",
+    r"\bTHA\b", r"\bVNM\b", r"\bMYS\b", r"\bIDN\b", r"\bTWN\b",
+    r"\bHKG\b", r"\bAUT\b", r"\bBEL\b",
+    # iCIMS-style location codes: "IN-PB-Mohali", "US-NY-New York"
+    r"\bUS-[A-Z]{2}\b", r"\bCA-[A-Z]{2}\b", r"\bGB-[A-Z]{2,3}\b",
+    r"\bIN-[A-Z]{2}\b", r"\bAU-[A-Z]{2,3}\b", r"\bDE-[A-Z]{2}\b",
+    r"\bFR-[A-Z]{2}\b",
+    # US states
     r"california", r"texas", r"florida", r"illinois",
     r"pennsylvania", r"massachusetts", r"colorado", r"virginia",
     r"maryland", r"oregon", r"georgia", r"north\s*carolina",
