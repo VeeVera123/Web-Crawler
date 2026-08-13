@@ -247,9 +247,13 @@ def test_taleo():
             if csrf:
                 post_headers["X-CSRF-Token"] = csrf
 
+            # Debug: log cookies from career page
+            log.info(f"    Session cookies: {dict(session.cookies)}")
+
             r2 = session.post(api_url, json=payload, timeout=15, headers=post_headers)
             log.info(f"    REST API: status={r2.status_code}, length={len(r2.text)}")
             log.info(f"    Content-Type: {r2.headers.get('content-type', '')}")
+            log.info(f"    Response body: {r2.text[:200]}")
 
             if r2.status_code == 200 and len(r2.text) > 50:
                 # Check if response is JSON
