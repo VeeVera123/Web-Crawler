@@ -13,4 +13,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests beautifulsoup4
-      - run: python test_blacklisted_debug.py
+      - run: test_blacklisted_ats.py
