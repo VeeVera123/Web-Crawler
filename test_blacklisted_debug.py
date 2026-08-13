@@ -74,8 +74,9 @@ def debug_taleo():
     # Try REST API with different approaches
     log.info("\n--- REST API attempts ---")
 
-    # Attempt 1: with cookies only (no portal param)
-    api_url = f"{base}/careersection/rest/jobboard/searchjobs?lang=en"
+    # Attempt 1: with portal from page
+    portal_id = found.get("portal", "0")
+    api_url = f"{base}/careersection/rest/jobboard/searchjobs?lang=en&portal={portal_id}"
     payload = {
         "multilineEnabled": False,
         "sortingSelection": {"sortBySelectionParam": "3", "ascendingSortingOrder": "false"},
@@ -88,7 +89,23 @@ def debug_taleo():
     r2 = session.post(api_url, json=payload, timeout=15,
                      headers={"Content-Type": "application/json"})
     log.info(f"  Attempt 1 (no portal): status={r2.status_code}")
-    if r2.status_code != 200:
+    log.info(f"    Content-Type: {r2.headers.get('content-type', '')}")
+    log.info(f"    Response length: {len(r2.text)}")
+    if r2.status_code == 200 and len(r2.text) > 10:
+        log.info(f"    First 500: {r2.text[:500]}")
+        try:
+            data = r2.json()
+            jobs = data.get("requisitionList", [])
+            total = data.get("pagingData", {}).get("totalCount", 0)
+            log.info(f"    JSON keys: {list(data.keys())}")
+            log.info(f"    Jobs: {len(jobs)}, Total: {total}")
+            if jobs:
+                j = jobs[0]
+                log.info(f"    First job keys: {list(j.keys())}")
+                log.info(f"    First job: {j}")
+        except Exception as e:
+            log.info(f"    Not JSON: {str(e)[:100]}")
+    else:
         log.info(f"    Response: {r2.text[:300]}")
 
     # Attempt 2: with section in URL
@@ -155,7 +172,7 @@ def debug_brassring():
     # Look for the actual job results in the initial page load
     log.info("\n--- Job content in initial page ---")
     job_elements = re.findall(r'class=["\']([^"\']*(?:job|position|title|listing)[^"\']*)["\']', r1.text, re.I)
-    for cls in set(job_elements)[:20]:
+    for cls in sorted(set(job_elements))[:20]:
         log.info(f"  Class: {cls}")
 
     # Try AJAX with the 500 error — what does it actually say?
