@@ -2346,10 +2346,30 @@ def _fetch_icims_description(job: dict) -> str:
             job["location"] = loc
 
     # ── Extract description ────────────────────────────────
-    # iCIMS pages are mostly JS-rendered — the actual JD content is in
-    # og:description meta tag, NOT in HTML body divs. Try meta tags FIRST.
+    # iCIMS embeds the FULL JD as JSON-LD in a <script> tag.
+    # The meta tags (og:description) only have a ~400 char summary.
+    # Try JSON-LD FIRST to get the complete description.
 
-    # 1. og:description has the REAL JD (name="description" is often a generic blurb)
+    import json as _json
+
+    # 1. JSON-LD — has the FULL JD (thousands of chars)
+    #    Match any script tag containing JSON-LD (some iCIMS sites
+    #    omit the type attribute but still embed valid JSON-LD)
+    for ld_match in re.finditer(
+        r'<script[^>]*>(.*?)</script>',
+        html, re.I | re.DOTALL
+    ):
+        content = ld_match.group(1).strip()
+        if not content.startswith("{"):
+            continue
+        try:
+            ld = _json.loads(content)
+            if isinstance(ld, dict) and ld.get("@type") == "JobPosting" and ld.get("description"):
+                return _snippet(ld["description"])
+        except Exception:
+            continue
+
+    # 2. og:description — truncated (~400 chars) but better than nothing
     for meta_pat in [
         r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']',
         r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:description["\']',
@@ -2361,7 +2381,7 @@ def _fetch_icims_description(job: dict) -> str:
             if len(desc) > 100:
                 return _snippet(desc)
 
-    # 2. name="description" — sometimes has the JD, sometimes a generic blurb
+    # 3. name="description" — sometimes the JD, sometimes a generic blurb
     for meta_pat in [
         r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
         r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']description["\']',
@@ -2370,38 +2390,22 @@ def _fetch_icims_description(job: dict) -> str:
         if meta_match:
             desc = meta_match.group(1).strip()
             desc = desc.replace("&nbsp;", " ").replace("&#160;", " ")
-            # Skip generic iCIMS blurbs like "X is now hiring a Y. Review all..."
             if len(desc) > 100 and "review all of the job details" not in desc.lower():
                 return _snippet(desc)
 
-    # 3. JSON-LD description
-    import json as _json
-    for ld_match in re.finditer(
-        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
-        html, re.I | re.DOTALL
-    ):
-        try:
-            ld = _json.loads(ld_match.group(1))
-            if isinstance(ld, dict) and ld.get("description"):
-                return _snippet(ld["description"])
-        except Exception:
-            continue
-
-    # 4. iCIMS-specific content containers (rare — most sites are JS-rendered)
-    #    Only accept matches longer than 100 chars to avoid catching title-only divs
-    patterns = [
+    # 4. iCIMS CSS containers (rare — most sites are JS-rendered)
+    for pattern in [
         r'class="iCIMS_JobContent[^"]*"[^>]*>(.*?)</div>',
         r'class="iCIMS_InfoMsg_Job[^"]*"[^>]*>(.*?)</div>',
         r'<div\s+id="job-description"[^>]*>(.*?)</div>',
-    ]
-    for pattern in patterns:
+    ]:
         match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
         if match:
             text = _snippet(match.group(1))
             if len(text) > 100:
                 return text
 
-    # 5. Fallback: grab from main element
+    # 5. Fallback: main element
     body_match = re.search(r'<main[^>]*>(.*?)</main>', html, re.DOTALL | re.IGNORECASE)
     if body_match:
         text = _snippet(body_match.group(1))
