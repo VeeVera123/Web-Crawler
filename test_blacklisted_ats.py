@@ -216,7 +216,7 @@ def test_taleo():
 
             log.info(f"    Portal: {portal_id}, CSRF: {csrf[:20] if csrf else 'None'}...")
 
-            # REST API call
+            # REST API call — must include X-Requested-With and Referer
             api_url = f"{base}/careersection/rest/jobboard/searchjobs?lang=en"
             if portal_id:
                 api_url += f"&portal={portal_id}"
@@ -224,22 +224,26 @@ def test_taleo():
             payload = {
                 "multilineEnabled": False,
                 "sortingSelection": {
-                    "sortBySelectionParam": "3",
+                    "sortBySelectionParam": "1",
                     "ascendingSortingOrder": "false"
                 },
                 "fieldData": {
                     "fields": {
-                        "KEYWORD": "", "LOCATION": "",
-                        "ORGANIZATION": "", "JOB_NUMBER": ""
+                        "KEYWORD": "",
+                        "LOCATION": "",
+                        "CATEGORY": ""
                     },
                     "valid": True
                 },
-                "filterSelectionParam": {"searchFilterSelections": []},
-                "advancedSearchFiltersSelectionParam": {"searchFilterSelections": []},
                 "pageNo": 1,
             }
 
-            post_headers = {"Content-Type": "application/json"}
+            post_headers = {
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": careers_url,
+            }
             if csrf:
                 post_headers["X-CSRF-Token"] = csrf
 
