@@ -2197,17 +2197,23 @@ def _extract_location_from_html(html: str) -> str:
         except Exception:
             continue
 
-    # ── 2. Open Graph / meta tags ──────────────────────────
-    for pat in [
-        r'<meta[^>]*property=["\']og:locality["\'][^>]*content=["\']([^"\']+)["\']',
-        r'<meta[^>]*name=["\']geo\.placename["\'][^>]*content=["\']([^"\']+)["\']',
-        r'<meta[^>]*name=["\']location["\'][^>]*content=["\']([^"\']+)["\']',
-    ]:
-        m = re.search(pat, html, re.I)
-        if m:
-            loc = m.group(1).strip()
-            if loc and len(loc) < 200:
-                return loc
+    # ── 2. Open Graph / meta tags (handle both attribute orders) ──
+    meta_loc_tags = [
+        ("property", "og:locality"),
+        ("name", "geo.placename"),
+        ("name", "location"),
+    ]
+    for attr, val in meta_loc_tags:
+        escaped_val = re.escape(val)
+        for pat in [
+            rf'<meta[^>]*{attr}=["\']{ escaped_val}["\'][^>]*content=["\']([^"\']+)["\']',
+            rf'<meta[^>]*content=["\']([^"\']+)["\'][^>]*{attr}=["\']{ escaped_val}["\']',
+        ]:
+            m = re.search(pat, html, re.I)
+            if m:
+                loc = m.group(1).strip()
+                if loc and len(loc) < 200:
+                    return loc
 
     # ── 3. Common HTML patterns ────────────────────────────
     for pat in [
@@ -2353,14 +2359,20 @@ def _fetch_icims_description(job: dict) -> str:
             return _snippet(match.group(1))
 
     # Try meta description (iframe pages often have good meta descriptions)
-    meta_match = re.search(
+    # Handle both attribute orders: name before content AND content before name
+    for meta_pat in [
         r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
-        html, re.I
-    )
-    if meta_match:
-        desc = meta_match.group(1).strip()
-        if len(desc) > 50:
-            return _snippet(desc)
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']description["\']',
+        r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:description["\']',
+    ]:
+        meta_match = re.search(meta_pat, html, re.I)
+        if meta_match:
+            desc = meta_match.group(1).strip()
+            # Clean up &nbsp; entities
+            desc = desc.replace("&nbsp;", " ").replace("&#160;", " ")
+            if len(desc) > 50:
+                return _snippet(desc)
 
     # Try JSON-LD description
     import json as _json
@@ -2506,15 +2518,19 @@ def _fetch_generic_description(job: dict) -> str:
         except Exception:
             pass
 
-    # Try meta description
-    meta_match = re.search(
+    # Try meta description (handle both attribute orders)
+    for meta_pat in [
         r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
-        html, re.I
-    )
-    if meta_match:
-        desc = meta_match.group(1).strip()
-        if len(desc) > 50:
-            return _snippet(desc)
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']description["\']',
+        r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:description["\']',
+    ]:
+        meta_match = re.search(meta_pat, html, re.I)
+        if meta_match:
+            desc = meta_match.group(1).strip()
+            desc = desc.replace("&nbsp;", " ").replace("&#160;", " ")
+            if len(desc) > 50:
+                return _snippet(desc)
 
     # Try common job description containers
     for pattern in [
