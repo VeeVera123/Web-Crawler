@@ -1100,11 +1100,18 @@ def scrape_brassring(slug: str) -> list[dict]:
 
 def scrape_teamtailor(slug: str) -> list[dict]:
     """Teamtailor RSS feed scraper with HTML fallback.
-    Slug is the company subdomain (e.g. 'spotify')."""
+    Slug is the company subdomain (e.g. 'spotify').
+    RSS feed includes tt: namespace with structured location data."""
     company_name = slug.capitalize()
     rss_url = f"https://{slug}.teamtailor.com/jobs.rss"
 
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/rss+xml, application/xml, text/xml",
+    }
+
+    # Teamtailor XML namespace for structured location/department data
+    TT_NS = {"tt": "https://teamtailor.com/locations"}
 
     # ── Primary: RSS feed ──
     r = _get(rss_url, headers=headers)
@@ -1122,7 +1129,40 @@ def scrape_teamtailor(slug: str) -> list[dict]:
                 title = (title_el.text or "").strip() if title_el is not None else ""
                 link = (link_el.text or "").strip() if link_el is not None else ""
                 desc_html = (desc_el.text or "") if desc_el is not None else ""
-                department = (category_el.text or "").strip() if category_el is not None else ""
+
+                # ── Department: prefer tt:department, fallback to <category> ──
+                tt_dept = item.findtext("tt:department", default=None, namespaces=TT_NS)
+                department = (tt_dept or "").strip() if tt_dept else ""
+                if not department:
+                    department = (category_el.text or "").strip() if category_el is not None else ""
+
+                # ── Location: parse tt:locations namespace ──
+                location_parts = []
+                country = ""
+                remote_status = (item.findtext("remoteStatus") or "").strip()
+                for loc_el in item.findall("tt:locations/tt:location", TT_NS):
+                    # Prefer tt:name (pre-formatted), fallback to city+country
+                    loc_name = (loc_el.findtext("tt:name", namespaces=TT_NS) or "").strip()
+                    if loc_name:
+                        location_parts.append(loc_name)
+                    else:
+                        city = (loc_el.findtext("tt:city", namespaces=TT_NS) or "").strip()
+                        ctry = (loc_el.findtext("tt:country", namespaces=TT_NS) or "").strip()
+                        combined = ", ".join(p for p in [city, ctry] if p)
+                        if combined:
+                            location_parts.append(combined)
+                    # Capture country from first location
+                    if not country:
+                        country = (loc_el.findtext("tt:country", namespaces=TT_NS) or "").strip()
+
+                location = "; ".join(location_parts[:3]) if location_parts else ""
+
+                # If remote_status is set, append it
+                if remote_status and remote_status.lower() != "none":
+                    if location:
+                        location = f"{location} ({remote_status})"
+                    else:
+                        location = remote_status.capitalize()
 
                 desc = _snippet(desc_html)
                 salary = _extract_salary(desc)
@@ -1131,10 +1171,10 @@ def scrape_teamtailor(slug: str) -> list[dict]:
                     "title": title,
                     "url": link,
                     "company": company_name,
-                    "location": "",
-                    "country": "",
+                    "location": location,
+                    "country": country,
                     "department": department,
-                    "workplace_type": "",
+                    "workplace_type": remote_status if remote_status and remote_status.lower() != "none" else "",
                     "employment_type": "",
                     "salary": salary,
                     "description_snippet": desc,
@@ -2192,14 +2232,34 @@ def _extract_icims_location(html: str) -> str:
     if m:
         return m.group(1).strip()
 
-    # Pattern 2: Page title "Job Title in City, State | ..."
+    # Pattern 2: Page title "Job Title in Location | Careers at Location"
+    #   e.g. "Sr Consultant in Remote | Careers at US Nationwide Remote"
+    #   Extract the "Careers at [Location]" part (more specific than the first part)
+    m = re.search(r'Careers\s+at\s+([^|<"]+)', html, re.I)
+    if m:
+        loc = m.group(1).strip().rstrip(' .')
+        if loc and len(loc) < 100:
+            return loc
+
+    # Pattern 2b: Fallback — "Job Title in [Location] |"
     m = re.search(r'<title>[^<]*?\bin\s+([^|<]+?)(?:\s*\|)', html, re.I)
     if m:
         loc = m.group(1).strip().rstrip(' .')
         if loc and len(loc) < 100:
             return loc
 
-    # Pattern 3: iCIMS-specific location CSS classes
+    # Pattern 3: og:title meta tag — "Job Title in Location | Careers at Location"
+    m = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+    if m:
+        og_title = m.group(1)
+        # Try "Careers at [Location]" from og:title
+        m2 = re.search(r'Careers\s+at\s+(.+)', og_title, re.I)
+        if m2:
+            loc = m2.group(1).strip()
+            if loc and len(loc) < 100:
+                return loc
+
+    # Pattern 4: iCIMS-specific location CSS classes
     for pat in [
         r'class="[^"]*iCIMS_JobHeader(?:Location|Field)[^"]*"[^>]*>\s*(.*?)\s*<',
         r'class="[^"]*header-location[^"]*"[^>]*>\s*(.*?)\s*<',
@@ -2211,18 +2271,67 @@ def _extract_icims_location(html: str) -> str:
             if loc and len(loc) < 200:
                 return loc
 
-    # Pattern 4: Fall back to the universal extractor (JSON-LD, meta tags, etc.)
+    # Pattern 5: Fall back to the universal extractor (JSON-LD, meta tags, etc.)
     return _extract_location_from_html(html)
+
+
+def _fetch_icims_content(url: str) -> str:
+    """Fetch iCIMS job page HTML, handling the iframe wrapper problem.
+    Many iCIMS career sites wrap the actual job content in an iframe.
+    The real content is at the same URL with ?in_iframe=1.
+    Returns the HTML with actual job content, or empty string."""
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    # Strategy 1: Try ?in_iframe=1 first — this gets the ACTUAL content
+    #   (bypasses the wrapper page that loads content via iframe)
+    iframe_url = url + ("&" if "?" in url else "?") + "in_iframe=1"
+    r = _get(iframe_url, headers=headers)
+    if r and r.text:
+        # Verify we got real iCIMS content (not a redirect/error page)
+        text = r.text
+        has_icims_content = any(marker in text for marker in [
+            "iCIMS_", "icims", "job-description", "JobContent",
+            "addressLocality", "JobPosting", "jobLocation",
+        ])
+        has_real_title = "<title>" in text and "in_iframe" not in text.lower()
+        if has_icims_content or has_real_title:
+            return text
+
+    # Strategy 2: Try the original URL (some iCIMS sites don't use iframe)
+    r = _get(url, headers=headers)
+    if r and r.text:
+        text = r.text
+        # Check if it's a wrapper page (has iframe src pointing to itself)
+        has_iframe = re.search(r'<iframe[^>]*src=["\'][^"\']*in_iframe', text, re.I)
+        if has_iframe:
+            # It's a wrapper — try extracting iframe src and fetch that
+            iframe_match = re.search(r'<iframe[^>]*src=["\']([^"\']+)["\']', text, re.I)
+            if iframe_match:
+                iframe_src = iframe_match.group(1)
+                if not iframe_src.startswith("http"):
+                    from urllib.parse import urljoin
+                    iframe_src = urljoin(url, iframe_src)
+                r2 = _get(iframe_src, headers=headers)
+                if r2 and r2.text:
+                    return r2.text
+        return text
+
+    # Strategy 3: Try mobile version (cleaner, no iframe)
+    mobile_url = url + ("&" if "?" in url else "?") + "mobile=true&needsRedirect=false"
+    r = _get(mobile_url, headers=headers)
+    if r and r.text:
+        return r.text
+
+    return ""
 
 
 def _fetch_icims_description(job: dict) -> str:
     """Fetch full description and location from an individual iCIMS job page.
-    Also extracts location as a side-effect (updates job dict in place)."""
-    r = _get(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
-    if not r:
+    Also extracts location as a side-effect (updates job dict in place).
+    Handles iframe wrapper pages by trying multiple URL variants."""
+    html = _fetch_icims_content(job["url"])
+    if not html:
         return ""
-
-    html = r.text
 
     # ── Extract location if missing (side-effect) ──────────
     if not job.get("location"):
@@ -2231,6 +2340,7 @@ def _fetch_icims_description(job: dict) -> str:
             job["location"] = loc
 
     # ── Extract description ────────────────────────────────
+    # Try iCIMS-specific content containers
     patterns = [
         r'class="iCIMS_JobContent[^"]*"[^>]*>(.*?)</div>',
         r'class="iCIMS_InfoMsg_Job[^"]*"[^>]*>(.*?)</div>',
@@ -2241,7 +2351,31 @@ def _fetch_icims_description(job: dict) -> str:
         match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
         if match:
             return _snippet(match.group(1))
-    # Fallback: grab all text from the body between common markers
+
+    # Try meta description (iframe pages often have good meta descriptions)
+    meta_match = re.search(
+        r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
+        html, re.I
+    )
+    if meta_match:
+        desc = meta_match.group(1).strip()
+        if len(desc) > 50:
+            return _snippet(desc)
+
+    # Try JSON-LD description
+    import json as _json
+    for ld_match in re.finditer(
+        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+        html, re.I | re.DOTALL
+    ):
+        try:
+            ld = _json.loads(ld_match.group(1))
+            if isinstance(ld, dict) and ld.get("description"):
+                return _snippet(ld["description"])
+        except Exception:
+            continue
+
+    # Fallback: grab from main element
     body_match = re.search(r'<main[^>]*>(.*?)</main>', html, re.DOTALL | re.IGNORECASE)
     if body_match:
         return _snippet(body_match.group(1))
