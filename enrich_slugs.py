@@ -94,16 +94,17 @@ KALIL_SOURCES = {
 CC_INDEX_URL = "https://index.commoncrawl.org"
 CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
 
-# ATS platforms we have working scrapers for (14 active)
+# ATS platforms we have working scrapers for (20 active)
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
     "teamtailor", "breezyhr", "applytojob", "personio", "joincom",
+    # Newly enabled (confirmed working via test_blacklisted_ats.py):
+    "taleo", "oracle_cloud_hcm", "paylocity", "hrmdirect", "zoho",
 }
 
 # BLACKLISTED — scrapers exist but don't work (JS-rendered / auth / blocked):
-# taleo, oracle_cloud_hcm, brassring, successfactors,
-# hrmdirect, softgarden, zoho, ycombinator
+# brassring, successfactors, softgarden, ycombinator
 
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
@@ -130,8 +131,20 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "joincom": "joincom",
     "join": "joincom",
     "join.com": "joincom",
+    # Newly enabled platforms:
+    "taleo": "taleo",
+    "oracle taleo": "taleo",
+    "oraclecloud": "oracle_cloud_hcm",
+    "oracle cloud": "oracle_cloud_hcm",
+    "oracle cloud hcm": "oracle_cloud_hcm",
+    "paylocity": "paylocity",
+    "hrmdirect": "hrmdirect",
+    "clearcompany": "hrmdirect",
+    "zoho": "zoho",
+    "zoho recruit": "zoho",
+    "zohorecruit": "zoho",
     # Disabled platforms (kept for reference):
-    # "zoho", "ycombinator", "taleo", "oracle_cloud_hcm",
+    # "ycombinator", "brassring", "successfactors", "softgarden",
     # "brassring", "successfactors", "hrmdirect", "softgarden"
 }
 
