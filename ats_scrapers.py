@@ -8,6 +8,7 @@ Each returns a list of job dicts with standardised keys:
 import re
 import logging
 import random
+import threading
 import time
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote
@@ -15,6 +16,27 @@ import requests
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 
 log = logging.getLogger(__name__)
+
+# ── Connection pooling via thread-local sessions ──────────
+# Each thread reuses a single requests.Session, avoiding TLS
+# re-negotiation on every request. Huge win for paginated scrapers
+# (Workday, Oracle, Taleo, SmartRecruiters, etc.).
+_thread_local = threading.local()
+
+
+def _get_session() -> requests.Session:
+    """Return the current thread's reusable HTTP session."""
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = requests.Session()
+        # Set default retry adapter with connection pooling
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=10,
+            max_retries=0,  # We handle retries in _get()
+        )
+        _thread_local.session.mount("https://", adapter)
+        _thread_local.session.mount("http://", adapter)
+    return _thread_local.session
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
@@ -25,11 +47,11 @@ USER_AGENTS = [
 
 
 def _get(url: str, **kwargs) -> requests.Response | None:
+    session = _get_session()
     for attempt in range(MAX_RETRIES + 1):
         try:
-            r = requests.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
+            r = session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
             if r.status_code == 429:
-                import time
                 time.sleep(2 ** attempt)
                 continue
             r.raise_for_status()
@@ -181,13 +203,25 @@ def scrape_greenhouse(slug: str) -> list[dict]:
         depts = post.get("departments") or []
         dept = depts[0].get("name", "") if depts else ""
 
-        # Extract country from metadata if available
+        # Extract country and enriched location from metadata
         country = ""
+        metadata_location = ""
         metadata = post.get("metadata") or []
         if isinstance(metadata, list):
             for m in metadata:
-                if isinstance(m, dict) and m.get("name", "").lower() in ("country", "location_country"):
-                    country = str(m.get("value", ""))
+                if not isinstance(m, dict):
+                    continue
+                meta_name = m.get("name", "").lower()
+                meta_val = str(m.get("value") or "")
+                if meta_name in ("country", "location_country") and meta_val:
+                    country = meta_val
+                elif meta_name == "location" and meta_val:
+                    metadata_location = meta_val
+
+        # If location is bare "Remote" but metadata has a richer value
+        # (e.g. "United States (Remote)"), use the metadata value instead
+        if metadata_location and loc.strip().lower() in ("remote", ""):
+            loc = metadata_location
 
         # Extract salary from description content
         content = post.get("content", "")
@@ -322,13 +356,36 @@ def scrape_ashby(slug: str) -> list[dict]:
                         parts.append(f"{currency} {low}-{high}")
             salary_str = "; ".join(parts)
 
-        # Country from location string
-        country = ""
-        if loc:
-            # Common patterns: "City, Country" or "Remote - Country"
+        # Enrich location from address.postalAddress if location is bare
+        # Ashby's `location` field is often just "Remote" or "Hybrid",
+        # while `address.postalAddress` has the real geographic data
+        address = post.get("address") or {}
+        postal = address.get("postalAddress") or {}
+        addr_country = postal.get("addressCountry", "") or ""
+        addr_region = postal.get("addressRegion", "") or ""
+        addr_city = postal.get("addressLocality", "") or ""
+
+        if loc.strip().lower() in ("remote", "hybrid", "on-site", "onsite", ""):
+            # Build location from postal address
+            addr_parts = filter(None, [addr_city, addr_region, addr_country])
+            addr_loc = ", ".join(addr_parts)
+            if addr_loc:
+                workplace_type = loc.strip() if loc.strip() else (post.get("workplaceType") or "")
+                if workplace_type.lower() == "remote" and addr_loc:
+                    loc = f"Remote, {addr_loc}"
+                elif addr_loc:
+                    loc = addr_loc
+
+        # Country from address or location string
+        country = addr_country
+        if not country and loc:
+            # Fallback: "City, Country" or "Remote - Country"
             parts = [p.strip() for p in loc.replace(" - ", ", ").split(",")]
             if len(parts) >= 2:
                 country = parts[-1]
+
+        # Workplace type from workplaceType field (more reliable than employmentType)
+        wt = post.get("workplaceType", "") or post.get("employmentType", "")
 
         jobs.append({
             "title": post.get("title", "").strip(),
@@ -337,7 +394,7 @@ def scrape_ashby(slug: str) -> list[dict]:
             "location": loc,
             "country": country,
             "department": dept,
-            "workplace_type": post.get("employmentType", ""),
+            "workplace_type": wt,
             "employment_type": "",
             "salary": salary_str,
             "description_snippet": _snippet(post.get("descriptionHtml", "") or post.get("descriptionPlain", "")),
@@ -358,7 +415,7 @@ def scrape_bamboohr(slug: str) -> list[dict]:
         "User-Agent": random.choice(USER_AGENTS),
     }
     try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
+        r = _get_session().get(url, timeout=REQUEST_TIMEOUT, headers=headers)
         if r.status_code != 200:
             return []
         if "application/json" not in r.headers.get("Content-Type", ""):
@@ -426,7 +483,7 @@ def scrape_icims(slug: str) -> list[dict]:
         "User-Agent": random.choice(USER_AGENTS),
     }
     try:
-        r = requests.get(sitemap_url, timeout=REQUEST_TIMEOUT, headers=headers)
+        r = _get_session().get(sitemap_url, timeout=REQUEST_TIMEOUT, headers=headers)
         if r.status_code != 200:
             return []
         root = ET.fromstring(r.content)
@@ -505,7 +562,7 @@ def scrape_workday(slug: str) -> list[dict]:
         }
 
         try:
-            r = requests.post(
+            r = _get_session().post(
                 api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
@@ -846,7 +903,7 @@ def scrape_taleo(slug: str) -> list[dict]:
         }
 
         try:
-            resp = requests.post(
+            resp = _get_session().post(
                 api_url,
                 params={"lang": "en", "portal": portal_id},
                 headers=headers,
@@ -956,7 +1013,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         for try_site in (site_number or "CX_1", "CX_1", "CX", "CX_2"):
             try:
                 probe_url = f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{try_site}/requisitions"
-                probe_r = requests.get(probe_url, headers={
+                probe_r = _get_session().get(probe_url, headers={
                     "User-Agent": random.choice(USER_AGENTS)}, timeout=15, allow_redirects=True)
                 # Check if we got redirected to a URL with .fa.{region}
                 final_host = probe_r.url.split("/")[2] if probe_r.url else ""
@@ -976,7 +1033,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
                            "fa.ap1", "fa.ap2", "fa.ca1", "fa.sa1", "fa.me1"):
                 test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
                 try:
-                    test_r = requests.get(test_url,
+                    test_r = _get_session().get(test_url,
                         params={"onlyData": "true", "finder": f"findReqs;siteNumber={site_number or 'CX_1'},limit=1,offset=0"},
                         headers=headers, timeout=8)
                     if test_r.status_code == 200:
@@ -1138,7 +1195,7 @@ def scrape_brassring(slug: str) -> list[dict]:
         )
 
         try:
-            r = requests.post(
+            r = _get_session().post(
                 search_url,
                 data=form_data,
                 headers=headers,
@@ -1504,12 +1561,19 @@ def scrape_breezyhr(slug: str) -> list[dict]:
             emp_type = re.sub(r'<[^>]+>', ' ', type_match.group(1)).strip()
             emp_type = re.sub(r'\s+', ' ', emp_type).strip()
 
+        # Try to extract country from location (e.g. "Berlin, Germany")
+        country = ""
+        if location:
+            loc_parts = [p.strip() for p in location.split(",")]
+            if len(loc_parts) >= 2:
+                country = loc_parts[-1]
+
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company_name,
             "location": location,
-            "country": "",
+            "country": country,
             "department": "",
             "workplace_type": "",
             "employment_type": emp_type,
@@ -2202,12 +2266,19 @@ def scrape_personio(slug: str) -> list[dict]:
         # Build job URL
         job_url = f"https://{slug}.jobs.personio.de/job/{job_id}" if job_id else ""
 
+        # Try to extract country from office field (e.g. "Munich, Germany")
+        country = ""
+        if office:
+            office_parts = [p.strip() for p in office.split(",")]
+            if len(office_parts) >= 2:
+                country = office_parts[-1]
+
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company,
             "location": office,
-            "country": "",
+            "country": country,
             "department": department,
             "workplace_type": schedule,
             "employment_type": emp_type,
@@ -2746,7 +2817,7 @@ def _fetch_workday_description(job: dict) -> str:
         "User-Agent": random.choice(USER_AGENTS),
     }
     try:
-        r = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        r = _get_session().get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
         if r.status_code != 200:
             return ""
         data = r.json()
@@ -3034,4 +3105,162 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     if no_location:
         log.info(f"Note: {no_location} jobs still have no location (pages lack structured location data)")
 
+    return jobs
+
+
+# ── Application Question Enrichment ─────────────────────
+# Greenhouse and Ashby expose application questions via their APIs.
+# Questions about work authorization / visa sponsorship are strong
+# signals that a job is NOT globally open. We extract these and
+# append them to description_snippet so the AI location classifier
+# can see them.
+
+_WORK_AUTH_RE = re.compile(
+    r"(authorized?\s*to\s*work|work\s*authoriz|visa\s*sponsor|"
+    r"immigration\s*sponsor|right\s*to\s*work|work\s*permit|"
+    r"employment\s*eligib|legally\s*authorized|"
+    r"require.*\bsponsorship\b|"
+    r"do\s*you\s*now\s*or\s*in\s*the\s*future\s*require)",
+    re.I,
+)
+
+
+def _fetch_greenhouse_questions(job: dict) -> str:
+    """Fetch application questions from Greenhouse job API.
+    Returns a string of work-authorization-related questions, or empty."""
+    url = job.get("url", "")
+    # Extract board slug and job ID from URL
+    # https://job-boards.greenhouse.io/SLUG/jobs/JOBID
+    m = re.search(r"greenhouse\.io/([^/]+)/jobs/(\d+)", url)
+    if not m:
+        return ""
+    slug, job_id = m.group(1), m.group(2)
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{job_id}?questions=true"
+    r = _get(api_url)
+    if not r:
+        return ""
+    try:
+        data = r.json()
+    except Exception:
+        return ""
+
+    questions = data.get("questions") or []
+    auth_questions = []
+    for q in questions:
+        label = q.get("label", "")
+        if _WORK_AUTH_RE.search(label):
+            auth_questions.append(f"Application Question: {label}")
+
+    # Also check metadata for location hints (e.g. "United States (Remote)")
+    metadata = data.get("metadata") or []
+    for md in metadata:
+        if isinstance(md, dict):
+            name = md.get("name", "").lower()
+            val = str(md.get("value", ""))
+            if name in ("location", "location_country") and val:
+                auth_questions.append(f"Metadata Location: {val}")
+
+    return "\n".join(auth_questions)
+
+
+def _fetch_ashby_questions(job: dict) -> str:
+    """Fetch application form from Ashby posting API.
+    Returns work-authorization-related form fields, or empty."""
+    url = job.get("url", "")
+    # https://jobs.ashbyhq.com/SLUG/JOBID
+    m = re.search(r"ashbyhq\.com/([^/]+)/([a-f0-9-]+)", url)
+    if not m:
+        return ""
+    slug, job_id = m.group(1), m.group(2)
+
+    # Ashby's posting-api/posting endpoint returns form fields
+    api_url = f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}"
+    r = _get(api_url)
+    if not r:
+        return ""
+    try:
+        data = r.json()
+    except Exception:
+        return ""
+
+    auth_questions = []
+    # Check applicationFormDefinition for work auth questions
+    form_def = data.get("applicationFormDefinition") or data.get("formDefinition") or {}
+    sections = form_def.get("sections") or []
+    for section in sections:
+        fields = section.get("fields") or section.get("fieldEntries") or []
+        for field in fields:
+            # field might be nested: {field: {title: ...}} or {title: ...}
+            f = field.get("field", field) if isinstance(field, dict) else field
+            if not isinstance(f, dict):
+                continue
+            title = f.get("title", "") or f.get("label", "") or f.get("name", "")
+            if _WORK_AUTH_RE.search(title):
+                auth_questions.append(f"Application Question: {title}")
+
+    # Also check surveyQuestions
+    survey = data.get("surveyQuestions") or []
+    for sq in survey:
+        label = sq.get("label", "") or sq.get("title", "") or sq.get("question", "")
+        if _WORK_AUTH_RE.search(label):
+            auth_questions.append(f"Application Question: {label}")
+
+    return "\n".join(auth_questions)
+
+
+def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
+    """Fetch application questions for Greenhouse/Ashby jobs with bare 'Remote' location.
+
+    Work authorization questions (visa sponsorship, authorized to work, etc.)
+    are appended to description_snippet so the AI location classifier can use
+    them as signals. Only fetches for jobs likely to be sent to AI (bare Remote).
+
+    Call this AFTER enrich_descriptions and BEFORE filter_locations."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    bare_remote_re = re.compile(
+        r"^\s*(remote|fully\s*remote|remote\s*worker|remote\s*job)?\s*$", re.I
+    )
+
+    to_enrich = [
+        j for j in jobs
+        if j.get("source_ats") in ("Greenhouse", "Ashby")
+        and bare_remote_re.match(j.get("location", ""))
+    ]
+
+    if not to_enrich:
+        return jobs
+
+    log.info(f"Fetching application questions for {len(to_enrich)} "
+             f"Greenhouse/Ashby jobs with bare 'Remote' location...")
+
+    fetchers = {
+        "Greenhouse": _fetch_greenhouse_questions,
+        "Ashby": _fetch_ashby_questions,
+    }
+
+    def _fetch_one(job):
+        fetcher = fetchers[job["source_ats"]]
+        try:
+            questions = fetcher(job)
+            if questions:
+                existing = job.get("description_snippet", "") or ""
+                job["description_snippet"] = existing + "\n\n" + questions
+        except Exception as e:
+            log.debug(f"Failed to fetch questions for {job['url']}: {e}")
+        time.sleep(random.uniform(0.2, 0.5))
+        return job
+
+    enriched = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
+        for future in as_completed(futures):
+            try:
+                job = future.result()
+                if "Application Question:" in (job.get("description_snippet") or ""):
+                    enriched += 1
+            except Exception:
+                pass
+
+    log.info(f"Found work-auth questions for {enriched}/{len(to_enrich)} jobs")
     return jobs
