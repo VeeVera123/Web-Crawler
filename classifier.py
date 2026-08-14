@@ -1,8 +1,8 @@
 """
 Two-stage classifier — multi-provider architecture.
 
-Role classification:  Cerebras + Groq + Gemini (free tiers, concurrent)
-Location classification: OpenAI GPT-4.1 nano (paid, smartest, 1M context)
+Role classification:  Cerebras + Groq (free tiers, concurrent)
+Location classification: Gemini + OpenAI GPT-4.1 nano (concurrent)
 
 Falls back to single-provider mode if only LLM_PROVIDER is set.
 
@@ -18,7 +18,7 @@ import re
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import ROLE_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
+from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
 
 log = logging.getLogger(__name__)
 
@@ -41,17 +41,17 @@ for _p in ROLE_PROVIDERS:
     except Exception as e:
         log.warning(f"Failed to create client for {_p['name']}: {e}")
 
-_location_client = None
-if LOCATION_PROVIDER:
+_location_clients = {}
+for _p in LOCATION_PROVIDERS:
     try:
-        _location_client = _make_client(LOCATION_PROVIDER)
+        _location_clients[_p["name"]] = _make_client(_p)
     except Exception as e:
-        log.warning(f"Failed to create location client ({LOCATION_PROVIDER['name']}): {e}")
+        log.warning(f"Failed to create location client ({_p['name']}): {e}")
 
 # Per-provider rate limiting (thread-safe via dict — each provider has its own timestamp)
 _last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
-if LOCATION_PROVIDER:
-    _last_call_times[LOCATION_PROVIDER["name"]] = 0.0
+for _p in LOCATION_PROVIDERS:
+    _last_call_times[_p["name"]] = 0.0
 
 
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
@@ -626,8 +626,8 @@ Respond ONLY with lines like:
 3 UNCERTAIN"""
 
 
-def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> list[str]:
-    """Classify a single batch of jobs by location using the LOCATION_PROVIDER (OpenAI)."""
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client, max_user_chars: int) -> list[str]:
+    """Classify a single batch of jobs by location using a specific provider."""
     DESC_OVERHEAD = 120
     max_desc = max(500, (max_user_chars - len(batch_jobs) * DESC_OVERHEAD) // len(batch_jobs))
     numbered_lines = []
@@ -644,11 +644,12 @@ def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> lis
         )
     user_msg = f"Classify these {len(batch_jobs)} jobs:\n{chr(10).join(numbered_lines)}"
 
-    text = _ai_call(LOCATION_PROVIDER, _location_client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
+    text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
 
     batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
-        log.warning(f"AI location classification failed for batch of {len(batch_jobs)}, keeping as uncertain")
+        log.warning(f"AI location classification failed ({provider['name']}) "
+                     f"for batch of {len(batch_jobs)}, keeping as uncertain")
         return batch_results
 
     for line in text.splitlines():
@@ -708,8 +709,11 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
 
 def ai_classify_locations(jobs: list[dict]) -> list[str]:
     """
-    Send ambiguous jobs (bare "Remote") to OpenAI for location classification.
-    Uses LOCATION_PROVIDER (GPT-4.1 nano, 1M context, smartest for this task).
+    Send ambiguous jobs (bare "Remote") to AI for location classification.
+    Uses LOCATION_PROVIDERS (Gemini + OpenAI) concurrently.
+
+    Jobs are round-robin split across providers, batched per provider's
+    context window, and all batches run concurrently.
 
     Returns list of 'match', 'no_match', or 'uncertain' in same order.
     On rate limit/failure: defaults to 'uncertain' (include with flag).
@@ -717,22 +721,61 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     if not jobs:
         return []
 
-    provider = LOCATION_PROVIDER
-    max_batch_chars = provider["max_batch_chars"]
+    providers = LOCATION_PROVIDERS
     max_user_chars = 500_000
 
-    batches = _build_dynamic_batches(jobs, max_batch_chars)
-    log.info(f"Location classification ({provider['name']}): {len(jobs)} jobs → {len(batches)} batches "
-             f"(sizes: {[len(b) for _, b in batches]})")
+    # ── Round-robin assign jobs to providers (tracking original indices) ──
+    provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
+    for i, job in enumerate(jobs):
+        p = providers[i % len(providers)]
+        provider_assignments[p["name"]].append((i, job))
+
+    # ── Build batches per provider ──
+    all_work = []  # (provider, client, [(orig_idx, job)...])
+    for p in providers:
+        assigned = provider_assignments[p["name"]]
+        if not assigned:
+            continue
+        client = _location_clients.get(p["name"])
+        if not client:
+            try:
+                client = _make_client(p)
+                _location_clients[p["name"]] = client
+            except Exception as e:
+                log.error(f"Cannot create location client for {p['name']}: {e}")
+                continue
+        # Build batches from assigned jobs
+        assigned_jobs = [job for _, job in assigned]
+        assigned_indices = [idx for idx, _ in assigned]
+        batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"])
+        for start_idx, batch in batches:
+            # Map batch start_idx back to original indices
+            batch_orig_indices = assigned_indices[start_idx:start_idx + len(batch)]
+            all_work.append((p, client, batch, batch_orig_indices))
+
+    provider_summary = ", ".join(
+        f"{p['name']}:{len(provider_assignments[p['name']])}" for p in providers
+    )
+    log.info(f"Location classification: {len(jobs)} jobs → {len(all_work)} batches "
+             f"across {len(providers)} providers ({provider_summary})")
+
     results = ["uncertain"] * len(jobs)
 
-    # Location uses single provider — run batches sequentially
-    for start_idx, batch in batches:
-        batch_results = _classify_location_batch(batch, max_user_chars)
-        for j, label in enumerate(batch_results):
-            results[start_idx + j] = label
-        if len(batches) > 1:
-            time.sleep(2)
+    # Run all batches concurrently
+    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+        future_map = {}
+        for provider, client, batch, orig_indices in all_work:
+            f = pool.submit(_classify_location_batch, batch, provider, client, max_user_chars)
+            future_map[f] = (provider["name"], batch, orig_indices)
+
+        for future in as_completed(future_map):
+            pname, batch, orig_indices = future_map[future]
+            try:
+                batch_results = future.result()
+                for j, label in enumerate(batch_results):
+                    results[orig_indices[j]] = label
+            except Exception as e:
+                log.error(f"Location classification error ({pname}): {e}")
 
     classified = sum(1 for r in results if r != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
