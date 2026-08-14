@@ -379,13 +379,22 @@ NON_GEO_WORDS_RE = re.compile(
     r"fte|pte|"                                             # abbreviations
     r"worker|job|position|role|opening|opportunity|"        # job words
     r"n/?a|not\s*specified|unspecified|tbd|"                # placeholders
-    r"flexible|open|based|"                                 # generic qualifiers
+    r"flexible|open|based|home|general|"                    # generic qualifiers
     r"monday|tuesday|wednesday|thursday|friday|"            # schedule words
     r"saturday|sunday|weekday|weekend|"
     r"shift|schedule|day|night|evening|morning|"
-    r"hours|hrs|am|pm|to|and|or|the|a|an|in|at|for|of|"   # connectors/articles
+    r"hours|hrs|am|pm|to|and|or|the|a|an|at|for|of|"       # connectors/articles (NOT "in" — it's a US state code)
     r"immediate|urgent|asap|new|multiple|"                  # posting qualifiers
     r"available|hiring|now|apply"                            # action words
+    r")\b",
+    re.I,
+)
+
+# Words to strip ONLY in global-keyword residue check (not for remote qualifier check)
+GLOBAL_STRIP_RE = re.compile(
+    r"\b("
+    r"global|worldwide|international|anywhere|everywhere|"  # global keywords
+    r"wfa|distributed|borderless|work|from"                 # global modifiers
     r")\b",
     re.I,
 )
@@ -394,9 +403,78 @@ NON_GEO_WORDS_RE = re.compile(
 PLACEHOLDER_LOC_RE = re.compile(
     r"^\s*(not\s*specified|n/?a|tbd|to\s*be\s*determined|"
     r"unspecified|see\s*description|see\s*below|"
+    r"multiple\s*locations?|various\s*locations?|"
     r"[—\-–\.]+)\s*$",
     re.I,
 )
+
+
+# ── Title-based location enrichment ───────────────────
+# Patterns in job titles that indicate geographic restriction
+# These are checked when the location field is empty or just "Remote"
+_TITLE_LOCATION_RE = re.compile(
+    r"(?:"
+    # "USA-Remote", "US Remote", "UK - Remote", "US-Based"
+    r"\b(US|USA|UK|EU|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|PL|CZ|RO|BG|HU|IE|ES|IT|PT|SE|NO|DK|FI|CH|AT|BE|NZ)"
+    r"\s*[\-–—/]?\s*(?:remote|based|only)"
+    r"|"
+    # "Remote - US", "Remote (USA)", "Remote, United States"
+    r"(?:remote)\s*[\-–—/,()]*\s*"
+    r"(US|USA|UK|EU|India|United\s+States|United\s+Kingdom|Canada|Australia|Germany|France|Netherlands)"
+    r"|"
+    # "(US)", "(UK)", "(USA)" at end of title
+    r"\(\s*(US|USA|UK|EU|India|Canada|Australia)\s*\)\s*$"
+    r"|"
+    # "New York", "San Francisco", "London", state names in title
+    r"\b(New\s+York|San\s+Francisco|Los\s+Angeles|Chicago|Boston|Seattle|Austin|Denver|Atlanta|Dallas|Miami|"
+    r"London|Berlin|Paris|Amsterdam|Toronto|Sydney|Singapore|Dubai|Mumbai|Bangalore|"
+    r"California|Texas|Florida|Virginia|Pennsylvania|Illinois|Ohio|Georgia|"
+    r"North\s+Carolina|New\s+Jersey|Massachusetts|Maryland|Colorado|Washington|Oregon|Arizona|Michigan|Minnesota)"
+    r"\b"
+    r")",
+    re.I,
+)
+
+
+def _enrich_location_from_title(loc: str, title: str) -> str:
+    """If location is bare 'Remote' or empty, extract geographic hints from title.
+    This catches patterns like 'USA-Remote', 'UK Remote', city/state names.
+    Returns enriched location string."""
+    if not title:
+        return loc
+
+    loc_stripped = loc.strip().lower()
+    # Only enrich if location is empty, placeholder, or bare "remote"
+    is_bare = (
+        not loc_stripped
+        or loc_stripped in ("remote", "remote worker", "remote job", "fully remote")
+        or PLACEHOLDER_LOC_RE.match(loc)
+    )
+    if not is_bare:
+        return loc
+
+    # Also check for global signals in title (EMEA, Global, Worldwide, Africa)
+    _title_global = re.search(
+        r"\b(EMEA|Global\s*Remote|Remote\s*Global|Worldwide|International|Africa)\b",
+        title, re.I
+    )
+    if _title_global:
+        geo = _title_global.group(1).strip()
+        if loc_stripped and "remote" in loc_stripped:
+            return f"Remote, {geo}"
+        return geo
+
+    match = _TITLE_LOCATION_RE.search(title)
+    if match:
+        # Get the matched group (whichever one matched)
+        geo = next((g for g in match.groups() if g), None)
+        if geo:
+            geo = geo.strip()
+            if loc_stripped and "remote" in loc_stripped:
+                return f"Remote, {geo}"
+            return geo
+
+    return loc
 
 
 def keyword_classify_location(job: dict) -> str:
@@ -404,11 +482,11 @@ def keyword_classify_location(job: dict) -> str:
     Returns 'match', 'no_match', or 'unsure'.
 
     MATCH = truly global hiring signals (anywhere, worldwide,
-    international, WFA, EMEA, South Africa).
+    international, WFA, EMEA alone, Africa as continent).
 
     Flow:
       1. Empty / placeholder location → UNSURE (send to AI)
-      2. Global/Anywhere/EMEA/South Africa → MATCH
+      2. Global/Anywhere/EMEA/Africa(continent) → MATCH
       3. Hybrid / onsite → REJECT
       4. Has "remote" → strip non-geo words; if anything geographic
          remains → REJECT, else bare "remote" → UNSURE
@@ -422,6 +500,13 @@ def keyword_classify_location(job: dict) -> str:
     if isinstance(raw_country, list):
         raw_country = ", ".join(str(x) for x in raw_country)
     loc = (raw_loc + " " + raw_country).strip()
+
+    # ── 0. Enrich location from title if location is bare/empty ──
+    # Many ATS set location="Remote" but the title contains the real
+    # qualifier: "USA-Remote", "UK Remote", "EMEA", etc.
+    title = job.get("title", "")
+    loc = _enrich_location_from_title(loc, title)
+
     loc_lower = loc.lower()
 
     # ── 1. Empty / placeholder → UNSURE ──────────────────
@@ -430,17 +515,37 @@ def keyword_classify_location(job: dict) -> str:
 
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
-    # ── 2. MATCH: Global / Anywhere / Worldwide / EMEA / Africa ──
-    if any(rx.search(loc_lower) for rx in GLOBAL_RE):
-        return "match"
-    if STANDALONE_GLOBAL_RE.search(loc.strip()):
-        return "match"
-    # EMEA covers Africa
-    if re.search(r"\bemea\b", loc_lower):
-        return "match"
-    # South Africa / Africa explicitly mentioned
+    # ── 2a. South Africa is a COUNTRY → always reject ──
+    # Must check before Africa-continent check (South Africa contains "Africa")
+    if re.search(r"\bsouth\s+africa\b", loc_lower):
+        return "no_match"
+
+    # ── 2b. Africa (the continent) → always MATCH ──
+    # This is what we're scanning for. If Africa is explicitly mentioned,
+    # the job is Africa-eligible regardless of other qualifiers.
     if re.search(r"\bafrica\b", loc_lower):
         return "match"
+
+    # ── 2c. EMEA → match only if no country/city qualifier ──
+    if re.search(r"\bemea\b", loc_lower):
+        check = re.sub(r"\bemea\b", "", loc_lower)
+        check = NON_GEO_WORDS_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
+        if not check:
+            return "match"
+        return "no_match"
+
+    # ── 2d. Global/Worldwide/International/WFA/Anywhere ──
+    # Match only if no geographic qualifier (country, city, OR continent/region)
+    has_global = any(rx.search(loc_lower) for rx in GLOBAL_RE) or STANDALONE_GLOBAL_RE.search(loc.strip())
+    if has_global:
+        check = GLOBAL_STRIP_RE.sub("", loc_lower)
+        check = NON_GEO_WORDS_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
+        if not check:
+            return "match"
+        # Has geographic qualifier → no_match (e.g. "WFA-India", "Anywhere (Europe)")
+        return "no_match"
 
     # ── 3. REJECT: Hybrid / Onsite ──────────────────────
     if re.search(r"\bhybrid\b", loc_lower):
