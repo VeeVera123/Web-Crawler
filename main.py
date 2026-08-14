@@ -16,9 +16,9 @@ LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config import LLM_PROVIDER, LOCATION_PROVIDER
+from config import LLM_PROVIDER, LOCATION_PROVIDERS
 from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions
-from job_board_scrapers import scrape_all_job_boards
+from job_board_scrapers import scrape_all_job_boards, get_discovered_slugs
 from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
@@ -26,7 +26,7 @@ from classifier import (
 )
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
-    get_all_slugs, cleanup_stale_jobs,
+    get_all_slugs, cleanup_stale_jobs, populate_slug_registry,
 )
 
 logging.basicConfig(
@@ -187,13 +187,15 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
-        for job, label in zip(unsure_jobs, ai_results):
+        for i, (job, label) in enumerate(zip(unsure_jobs, ai_results)):
+            # Determine which provider classified this job (round-robin assignment)
+            provider_name = LOCATION_PROVIDERS[i % len(LOCATION_PROVIDERS)]["name"]
             if label == "match":
-                job["clearance"] = LOCATION_PROVIDER["name"]
+                job["clearance"] = provider_name
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
-                job["clearance"] = LOCATION_PROVIDER["name"]
+                job["clearance"] = provider_name
                 matched.append(job)
                 matched_confidences.append("uncertain")
             # "no_match" → drop; AI failure defaults to "uncertain" (included)
@@ -223,10 +225,17 @@ def main():
         log.info(f"\nScraping {len(boards)} boards across {len(set(a for a,_ in boards))} ATS platforms...")
         all_jobs, boards_ok, boards_failed = scrape_all(boards)
 
-        # 2b. Scrape job boards (RemoteOK, Remotive, Himalayas, Arbeitnow, Jobicy)
+        # 2b. Scrape job boards (9 boards: RemoteOK, Remotive, Himalayas, Arbeitnow,
+        #     Jobicy, WeWorkRemotely, Working Nomads, FreeHire, Jooble)
         log.info(f"\nScraping remote job boards...")
         board_jobs = scrape_all_job_boards()
         all_jobs.extend(board_jobs)
+
+        # 2c. Save any new company slugs discovered from aggregator job URLs
+        discovered = get_discovered_slugs()
+        if discovered:
+            log.info(f"\nDiscovered {len(discovered)} new slugs from job board URLs → saving to slug_registry")
+            populate_slug_registry(discovered, source="job_board_discovery")
 
         if not all_jobs:
             log.info("No jobs found across any source.")
