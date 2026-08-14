@@ -1,20 +1,24 @@
 """
-Two-stage classifier — unified for all LLM providers.
-Provider is selected via LLM_PROVIDER in config.py / env.
+Two-stage classifier — multi-provider architecture.
+
+Role classification:  Cerebras + Groq + Gemini (free tiers, concurrent)
+Location classification: OpenAI GPT-4.1 nano (paid, smartest, 1M context)
+
+Falls back to single-provider mode if only LLM_PROVIDER is set.
 
   Stage 1 — keyword filter for CSM/AM role titles (fast, no API)
-  Stage 2 — AI for ambiguous titles (batched)
+  Stage 2 — AI for ambiguous titles (batched, multi-provider concurrent)
 
 Then a separate location filter:
   Stage 3 — keyword check for Africa/Global locations
-  Stage 4 — AI for ambiguous locations + description scanning
+  Stage 4 — AI for ambiguous locations (OpenAI only)
 """
 
 import re
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL, AI_BATCH_SIZE, AI_PARALLEL_REQUESTS
+from config import ROLE_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
 
 log = logging.getLogger(__name__)
 
@@ -22,86 +26,50 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 4
 RETRY_BASE_DELAY = 5  # seconds
 
-# Proactive rate-limit throttle (Cerebras free tier: ~5 req/min)
-_last_call_time = 0.0
-if LLM_PROVIDER == "cerebras":
-    _MIN_CALL_INTERVAL = 12.5   # 12.5s = ~5 req/min (free tier)
-elif LLM_PROVIDER == "openai":
-    _MIN_CALL_INTERVAL = 5.0    # 5s = ~12 req/min (Tier 1: 200K TPM)
-else:
-    _MIN_CALL_INTERVAL = 0.0
 
-if LLM_PROVIDER == "anthropic":
-    import anthropic
-    _client = anthropic.Anthropic(api_key=LLM_API_KEY)
-else:
-    # Cerebras, Groq, OpenAI, and any OpenAI-compatible provider
+def _make_client(provider: dict):
+    """Create an OpenAI-compatible client for a provider config dict."""
     from openai import OpenAI
-    _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"])
 
 
-def _ai_call(system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
-    """Call the configured LLM with retry on rate limit.
-    Anthropic uses prompt caching (5 min TTL).
+# Pre-create clients for all configured providers
+_role_clients = {}
+for _p in ROLE_PROVIDERS:
+    try:
+        _role_clients[_p["name"]] = _make_client(_p)
+    except Exception as e:
+        log.warning(f"Failed to create client for {_p['name']}: {e}")
+
+_location_client = None
+if LOCATION_PROVIDER:
+    try:
+        _location_client = _make_client(LOCATION_PROVIDER)
+    except Exception as e:
+        log.warning(f"Failed to create location client ({LOCATION_PROVIDER['name']}): {e}")
+
+# Per-provider rate limiting (thread-safe via dict — each provider has its own timestamp)
+_last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
+if LOCATION_PROVIDER:
+    _last_call_times[LOCATION_PROVIDER["name"]] = 0.0
+
+
+def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
+    """Call an OpenAI-compatible provider with retry on rate limit.
     Returns response text or None on failure."""
-    global _last_call_time
-    if _MIN_CALL_INTERVAL > 0:
-        elapsed = time.time() - _last_call_time
-        if elapsed < _MIN_CALL_INTERVAL:
-            time.sleep(_MIN_CALL_INTERVAL - elapsed)
-    _last_call_time = time.time()
+    name = provider["name"]
+    interval = provider.get("min_call_interval", 0.0)
 
-    if LLM_PROVIDER == "anthropic":
-        return _ai_call_anthropic(system_prompt, user_msg, max_tokens)
-    else:
-        return _ai_call_openai_compat(system_prompt, user_msg, max_tokens)
+    if interval > 0:
+        elapsed = time.time() - _last_call_times.get(name, 0.0)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+    _last_call_times[name] = time.time()
 
-
-def _ai_call_anthropic(system_prompt: str, user_msg: str, max_tokens: int) -> str | None:
-    """Anthropic Claude with prompt caching + retry."""
     for attempt in range(MAX_RETRIES):
         try:
-            resp = _client.messages.create(
-                model=LLM_MODEL,
-                max_tokens=max_tokens,
-                system=[{
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }],
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            usage = resp.usage
-            cached = getattr(usage, "cache_read_input_tokens", 0) or 0
-            created = getattr(usage, "cache_creation_input_tokens", 0) or 0
-            if cached > 0:
-                log.debug(f"Cache hit: {cached} tokens read from cache")
-            elif created > 0:
-                log.debug(f"Cache write: {created} tokens written to cache")
-            return resp.content[0].text.strip()
-        except anthropic.RateLimitError as e:
-            if attempt < MAX_RETRIES - 1:
-                delay = RETRY_BASE_DELAY * (attempt + 1)
-                log.warning(f"Anthropic rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
-                time.sleep(delay)
-                continue
-            log.error(f"Anthropic rate limit exhausted: {e}")
-            return None
-        except anthropic.APIError as e:
-            log.error(f"Anthropic API error (attempt {attempt + 1}): {e}")
-            return None
-        except Exception as e:
-            log.error(f"Anthropic unexpected error (attempt {attempt + 1}): {e}")
-            return None
-    return None
-
-
-def _ai_call_openai_compat(system_prompt: str, user_msg: str, max_tokens: int) -> str | None:
-    """OpenAI-compatible provider (Cerebras, Groq, OpenAI, etc.) with retry."""
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = _client.chat.completions.create(
-                model=LLM_MODEL,
+            resp = client.chat.completions.create(
+                model=provider["model"],
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
@@ -116,14 +84,14 @@ def _ai_call_openai_compat(system_prompt: str, user_msg: str, max_tokens: int) -
             is_daily_limit = "tokens per day" in error_str.lower() or "daily" in error_str.lower()
 
             if is_daily_limit:
-                log.error(f"{LLM_PROVIDER} daily token limit reached — skipping remaining AI calls")
+                log.error(f"{name} daily token limit reached — skipping remaining AI calls")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
-                log.warning(f"{LLM_PROVIDER} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
+                log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
                 time.sleep(delay)
                 continue
-            log.error(f"{LLM_PROVIDER} API error (attempt {attempt + 1}): {e}")
+            log.error(f"{name} API error (attempt {attempt + 1}): {e}")
             return None
     return None
 
@@ -256,15 +224,16 @@ Respond ONLY with lines like:
 2 NO"""
 
 
-def _classify_role_batch(batch: list[str]) -> dict[str, bool]:
-    """Classify a single batch of titles. Returns {title: is_relevant}."""
+def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, bool]:
+    """Classify a single batch of titles using a specific provider."""
     numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
     user_msg = f"Titles:\n{numbered}"
-    text = _ai_call(ROLE_SYSTEM_PROMPT, user_msg, max_tokens=500)
+    max_tokens = max(500, len(batch) * 4)
+    text = _ai_call(provider, client, ROLE_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
     results = {}
     if text is None:
-        log.warning(f"AI role classification failed for batch of {len(batch)}, defaulting to exclude")
+        log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, defaulting to exclude")
         for t in batch:
             results[t] = False
         return results
@@ -285,29 +254,106 @@ def _classify_role_batch(batch: list[str]) -> dict[str, bool]:
     return results
 
 
+def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[list[str]]:
+    """Build role classification batches based on character limits.
+
+    No fixed role cap — batches are purely character-budget driven.
+    Each title is counted as its length + overhead for numbering/formatting.
+    """
+    OVERHEAD_PER_TITLE = 20   # "NNN. " + newline + buffer
+    batches = []
+    current_batch = []
+    current_chars = 0
+
+    for title in titles:
+        title_chars = len(title) + OVERHEAD_PER_TITLE
+        if current_batch and current_chars + title_chars > max_chars:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+        current_batch.append(title)
+        current_chars += title_chars
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
 def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
-    """Send ambiguous titles to AI. Returns {title: is_relevant}.
-    Uses AI_PARALLEL_REQUESTS concurrent calls for Groq/Haiku.
-    On failure: defaults to False (exclude)."""
+    """Send ambiguous titles to AI for role classification.
+
+    Multi-provider mode: splits titles across Cerebras/Groq/Gemini,
+    batches per provider's context window, runs all concurrently.
+
+    Single-provider fallback: uses whichever provider is configured.
+
+    Returns {title: is_relevant}. On failure: defaults to False (exclude).
+    """
     if not titles:
         return {}
 
-    batches = [titles[i:i + AI_BATCH_SIZE] for i in range(0, len(titles), AI_BATCH_SIZE)]
+    providers = ROLE_PROVIDERS
+    if not providers:
+        # Legacy single-provider fallback
+        from config import LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
+        providers = [{
+            "name": LLM_PROVIDER,
+            "api_key": LLM_API_KEY,
+            "model": LLM_MODEL,
+            "base_url": LLM_BASE_URL,
+            "max_batch_chars": 6_000 if LLM_PROVIDER == "cerebras" else 400_000,
+            "min_call_interval": 12.5 if LLM_PROVIDER == "cerebras" else 0.0,
+        }]
+
+    # ── Split titles round-robin across providers ──
+    provider_titles = {p["name"]: [] for p in providers}
+    for i, title in enumerate(titles):
+        p = providers[i % len(providers)]
+        provider_titles[p["name"]].append(title)
+
+    # ── Build batches per provider (respecting each provider's context limits) ──
+    all_work = []  # list of (provider, client, batch)
+    for p in providers:
+        p_titles = provider_titles[p["name"]]
+        if not p_titles:
+            continue
+        client = _role_clients.get(p["name"])
+        if not client:
+            try:
+                client = _make_client(p)
+                _role_clients[p["name"]] = client
+            except Exception as e:
+                log.error(f"Cannot create client for {p['name']}: {e}")
+                continue
+        batches = _build_role_batches(p_titles, max_chars=p["max_batch_chars"])
+        for batch in batches:
+            all_work.append((p, client, batch))
+
+    provider_summary = ", ".join(
+        f"{p['name']}:{len(provider_titles[p['name']])}" for p in providers
+    )
+    log.info(f"Role classification: {len(titles)} titles → {len(all_work)} batches "
+             f"across {len(providers)} providers ({provider_summary})")
+
     results = {}
 
-    if AI_PARALLEL_REQUESTS <= 1:
-        for batch in batches:
-            results.update(_classify_role_batch(batch))
-    else:
-        with ThreadPoolExecutor(max_workers=AI_PARALLEL_REQUESTS) as pool:
-            futures = {pool.submit(_classify_role_batch, b): b for b in batches}
-            for future in as_completed(futures):
-                try:
-                    results.update(future.result())
-                except Exception as e:
-                    log.error(f"Parallel role classification error: {e}")
-                    for t in futures[future]:
-                        results[t] = False
+    # Run ALL batches concurrently (each provider's batches interleave)
+    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+        future_map = {}
+        for provider, client, batch in all_work:
+            f = pool.submit(_classify_role_batch, batch, provider, client)
+            future_map[f] = (provider["name"], batch)
+
+        for future in as_completed(future_map):
+            pname, batch = future_map[future]
+            try:
+                batch_results = future.result()
+                results.update(batch_results)
+            except Exception as e:
+                log.error(f"Role classification error ({pname}): {e}")
+                for t in batch:
+                    results[t] = False
 
     return results
 
@@ -363,12 +409,6 @@ STANDALONE_GLOBAL_RE = re.compile(
 )
 
 # ── Non-geographic words in location fields ──────────
-# Instead of enumerating every country/city/region (fragile, always
-# misses some), we strip non-geographic filler from the location string.
-# If anything remains after stripping "remote" + these words, it's a
-# geographic qualifier → no_match.  This catches UAE, Americas, etc.
-# without maintaining country/city lists.
-
 NON_GEO_WORDS_RE = re.compile(
     r"\b("
     r"remote|fully|completely|"                             # remote modifiers
@@ -383,14 +423,14 @@ NON_GEO_WORDS_RE = re.compile(
     r"monday|tuesday|wednesday|thursday|friday|"            # schedule words
     r"saturday|sunday|weekday|weekend|"
     r"shift|schedule|day|night|evening|morning|"
-    r"hours|hrs|am|pm|to|and|or|the|a|an|at|for|of|"       # connectors/articles (NOT "in" — it's a US state code)
+    r"hours|hrs|am|pm|to|and|or|the|a|an|at|for|of|"       # connectors/articles
     r"immediate|urgent|asap|new|multiple|"                  # posting qualifiers
     r"available|hiring|now|apply"                            # action words
     r")\b",
     re.I,
 )
 
-# Words to strip ONLY in global-keyword residue check (not for remote qualifier check)
+# Words to strip ONLY in global-keyword residue check
 GLOBAL_STRIP_RE = re.compile(
     r"\b("
     r"global|worldwide|international|anywhere|everywhere|"  # global keywords
@@ -410,22 +450,16 @@ PLACEHOLDER_LOC_RE = re.compile(
 
 
 # ── Title-based location enrichment ───────────────────
-# Patterns in job titles that indicate geographic restriction
-# These are checked when the location field is empty or just "Remote"
 _TITLE_LOCATION_RE = re.compile(
     r"(?:"
-    # "USA-Remote", "US Remote", "UK - Remote", "US-Based"
     r"\b(US|USA|UK|EU|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|PL|CZ|RO|BG|HU|IE|ES|IT|PT|SE|NO|DK|FI|CH|AT|BE|NZ)"
     r"\s*[\-–—/]?\s*(?:remote|based|only)"
     r"|"
-    # "Remote - US", "Remote (USA)", "Remote, United States"
     r"(?:remote)\s*[\-–—/,()]*\s*"
     r"(US|USA|UK|EU|India|United\s+States|United\s+Kingdom|Canada|Australia|Germany|France|Netherlands)"
     r"|"
-    # "(US)", "(UK)", "(USA)" at end of title
     r"\(\s*(US|USA|UK|EU|India|Canada|Australia)\s*\)\s*$"
     r"|"
-    # "New York", "San Francisco", "London", state names in title
     r"\b(New\s+York|San\s+Francisco|Los\s+Angeles|Chicago|Boston|Seattle|Austin|Denver|Atlanta|Dallas|Miami|"
     r"London|Berlin|Paris|Amsterdam|Toronto|Sydney|Singapore|Dubai|Mumbai|Bangalore|"
     r"California|Texas|Florida|Virginia|Pennsylvania|Illinois|Ohio|Georgia|"
@@ -437,14 +471,11 @@ _TITLE_LOCATION_RE = re.compile(
 
 
 def _enrich_location_from_title(loc: str, title: str) -> str:
-    """If location is bare 'Remote' or empty, extract geographic hints from title.
-    This catches patterns like 'USA-Remote', 'UK Remote', city/state names.
-    Returns enriched location string."""
+    """If location is bare 'Remote' or empty, extract geographic hints from title."""
     if not title:
         return loc
 
     loc_stripped = loc.strip().lower()
-    # Only enrich if location is empty, placeholder, or bare "remote"
     is_bare = (
         not loc_stripped
         or loc_stripped in ("remote", "remote worker", "remote job", "fully remote")
@@ -453,7 +484,6 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
     if not is_bare:
         return loc
 
-    # Also check for global signals in title (EMEA, Global, Worldwide, Africa)
     _title_global = re.search(
         r"\b(EMEA|Global\s*Remote|Remote\s*Global|Worldwide|International|Africa)\b",
         title, re.I
@@ -466,7 +496,6 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
 
     match = _TITLE_LOCATION_RE.search(title)
     if match:
-        # Get the matched group (whichever one matched)
         geo = next((g for g in match.groups() if g), None)
         if geo:
             geo = geo.strip()
@@ -483,30 +512,17 @@ def keyword_classify_location(job: dict) -> str:
 
     MATCH = truly global hiring signals (anywhere, worldwide,
     international, WFA, EMEA alone, Africa as continent).
-
-    Flow:
-      1. Empty / placeholder location → UNSURE (send to AI)
-      2. Global/Anywhere/EMEA/Africa(continent) → MATCH
-      3. Hybrid / onsite → REJECT
-      4. Has "remote" → strip non-geo words; if anything geographic
-         remains → REJECT, else bare "remote" → UNSURE
-      5. Has location text but no "remote" → REJECT (onsite)
     """
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
-    # Ensure both are strings (some APIs return lists)
     if isinstance(raw_loc, list):
         raw_loc = ", ".join(str(x) for x in raw_loc)
     if isinstance(raw_country, list):
         raw_country = ", ".join(str(x) for x in raw_country)
     loc = (raw_loc + " " + raw_country).strip()
 
-    # ── 0. Enrich location from title if location is bare/empty ──
-    # Many ATS set location="Remote" but the title contains the real
-    # qualifier: "USA-Remote", "UK Remote", "EMEA", etc.
     title = job.get("title", "")
     loc = _enrich_location_from_title(loc, title)
-
     loc_lower = loc.lower()
 
     # ── 1. Empty / placeholder → UNSURE ──────────────────
@@ -516,13 +532,10 @@ def keyword_classify_location(job: dict) -> str:
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
     # ── 2a. South Africa is a COUNTRY → always reject ──
-    # Must check before Africa-continent check (South Africa contains "Africa")
     if re.search(r"\bsouth\s+africa\b", loc_lower):
         return "no_match"
 
     # ── 2b. Africa (the continent) → always MATCH ──
-    # This is what we're scanning for. If Africa is explicitly mentioned,
-    # the job is Africa-eligible regardless of other qualifiers.
     if re.search(r"\bafrica\b", loc_lower):
         return "match"
 
@@ -536,7 +549,6 @@ def keyword_classify_location(job: dict) -> str:
         return "no_match"
 
     # ── 2d. Global/Worldwide/International/WFA/Anywhere ──
-    # Match only if no geographic qualifier (country, city, OR continent/region)
     has_global = any(rx.search(loc_lower) for rx in GLOBAL_RE) or STANDALONE_GLOBAL_RE.search(loc.strip())
     if has_global:
         check = GLOBAL_STRIP_RE.sub("", loc_lower)
@@ -544,7 +556,6 @@ def keyword_classify_location(job: dict) -> str:
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
         if not check:
             return "match"
-        # Has geographic qualifier → no_match (e.g. "WFA-India", "Anywhere (Europe)")
         return "no_match"
 
     # ── 3. REJECT: Hybrid / Onsite ──────────────────────
@@ -556,19 +567,12 @@ def keyword_classify_location(job: dict) -> str:
         return "no_match"
 
     # ── 4. Remote + qualifier check ─────────────────────
-    # This replaces the old country/city enumeration approach.
-    # Strip "remote" and non-geographic filler words. If anything
-    # remains, it's a geographic qualifier (country, city, region,
-    # state code, etc.) → no_match.
     if has_remote:
         stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
-        # Strip separators, digits (like "00-Remote Worker-N/A"), punctuation
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
 
         if not stripped:
-            # Bare "Remote" / "Remote / Full-Time" / "Remote Worker - N/A"
             return "unsure"
-        # Has geographic content → country-restricted remote
         return "no_match"
 
     # ── 5. REJECT: Has location text but no "remote" → onsite ──
@@ -616,7 +620,7 @@ Respond ONLY with lines like:
 
 
 def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> list[str]:
-    """Classify a single batch of jobs by location. Returns list of labels."""
+    """Classify a single batch of jobs by location using the LOCATION_PROVIDER (OpenAI)."""
     DESC_OVERHEAD = 120
     max_desc = max(500, (max_user_chars - len(batch_jobs) * DESC_OVERHEAD) // len(batch_jobs))
     numbered_lines = []
@@ -633,7 +637,7 @@ def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> lis
         )
     user_msg = f"Classify these {len(batch_jobs)} jobs:\n{chr(10).join(numbered_lines)}"
 
-    text = _ai_call(LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
+    text = _ai_call(LOCATION_PROVIDER, _location_client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
 
     batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
@@ -659,21 +663,13 @@ def _classify_location_batch(batch_jobs: list[dict], max_user_chars: int) -> lis
     return batch_results
 
 
-def _build_dynamic_batches(jobs: list[dict], max_user_chars: int) -> list[tuple[int, list[dict]]]:
+def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
     """Build batches dynamically based on description length.
 
-    Rules:
-      - Total batch ≤ 400k characters (80% of 500k budget)
-      - Max 50 roles per batch, even if character space remains
-      - Max 8k characters per individual role description (truncated)
-      - Smaller JDs → more roles packed in (up to 50)
-      - Min 2 roles per batch
+    No fixed role cap — batches are purely character-budget driven.
     """
-    OVERHEAD_PER_JOB = 120   # title, company, location formatting
-    MAX_DESC_CHARS = 8000    # truncate individual JDs beyond 8k
-    MIN_BATCH = 2
-    MAX_BATCH = 50           # hard cap: 50 roles per batch
-    TARGET_CHARS = int(max_user_chars * 0.8)  # 400k chars
+    OVERHEAD_PER_JOB = 120
+    MAX_DESC_CHARS = 8000
 
     batches = []
     current_batch = []
@@ -682,16 +678,13 @@ def _build_dynamic_batches(jobs: list[dict], max_user_chars: int) -> list[tuple[
 
     for i, job in enumerate(jobs):
         desc = job.get("description_snippet") or ""
-        # Truncate oversized descriptions to 8k chars
         if len(desc) > MAX_DESC_CHARS:
             job["description_snippet"] = desc[:MAX_DESC_CHARS]
             desc = job["description_snippet"]
         desc_len = len(desc)
         job_chars = desc_len + OVERHEAD_PER_JOB
 
-        # Would this job push us over budget? (but always allow MIN_BATCH)
-        if current_batch and (current_chars + job_chars > TARGET_CHARS
-                              or len(current_batch) >= MAX_BATCH):
+        if current_batch and current_chars + job_chars > max_batch_chars:
             batches.append((start_idx, current_batch))
             start_idx = i
             current_batch = []
@@ -708,51 +701,31 @@ def _build_dynamic_batches(jobs: list[dict], max_user_chars: int) -> list[tuple[
 
 def ai_classify_locations(jobs: list[dict]) -> list[str]:
     """
-    Send ambiguous jobs (bare "Remote") to AI for location classification.
-    AI checks descriptions for hidden geographic restrictions.
-    Uses AI_PARALLEL_REQUESTS concurrent calls for Groq/Haiku.
+    Send ambiguous jobs (bare "Remote") to OpenAI for location classification.
+    Uses LOCATION_PROVIDER (GPT-4.1 nano, 1M context, smartest for this task).
+
     Returns list of 'match', 'no_match', or 'uncertain' in same order.
     On rate limit/failure: defaults to 'uncertain' (include with flag).
-
-    Batch size is DYNAMIC — more short-description jobs per request,
-    fewer long ones. This saves tokens while maintaining quality.
     """
     if not jobs:
         return []
 
-    # Cap description length per provider's context window.
-    if LLM_PROVIDER == "cerebras":
-        max_user_chars = 28000
-    else:
-        max_user_chars = 500000  # Groq/Anthropic: no practical limit
+    provider = LOCATION_PROVIDER
+    max_batch_chars = provider["max_batch_chars"]
+    max_user_chars = 500_000
 
-    # Build dynamic batches based on actual content size
-    batches = _build_dynamic_batches(jobs, max_user_chars)
-    log.info(f"Dynamic batching: {len(jobs)} jobs → {len(batches)} batches "
+    batches = _build_dynamic_batches(jobs, max_batch_chars)
+    log.info(f"Location classification ({provider['name']}): {len(jobs)} jobs → {len(batches)} batches "
              f"(sizes: {[len(b) for _, b in batches]})")
     results = ["uncertain"] * len(jobs)
 
-    if AI_PARALLEL_REQUESTS <= 1:
-        for start_idx, batch in batches:
-            batch_results = _classify_location_batch(batch, max_user_chars)
-            for j, label in enumerate(batch_results):
-                results[start_idx + j] = label
-            if start_idx + AI_BATCH_SIZE < len(jobs):
-                time.sleep(2)
-    else:
-        with ThreadPoolExecutor(max_workers=AI_PARALLEL_REQUESTS) as pool:
-            future_to_idx = {
-                pool.submit(_classify_location_batch, batch, max_user_chars): start_idx
-                for start_idx, batch in batches
-            }
-            for future in as_completed(future_to_idx):
-                start_idx = future_to_idx[future]
-                try:
-                    batch_results = future.result()
-                    for j, label in enumerate(batch_results):
-                        results[start_idx + j] = label
-                except Exception as e:
-                    log.error(f"Parallel location classification error: {e}")
+    # Location uses single provider — run batches sequentially
+    for start_idx, batch in batches:
+        batch_results = _classify_location_batch(batch, max_user_chars)
+        for j, label in enumerate(batch_results):
+            results[start_idx + j] = label
+        if len(batches) > 1:
+            time.sleep(2)
 
     classified = sum(1 for r in results if r != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
@@ -794,7 +767,6 @@ def detect_visa_sponsorship(job: dict) -> str:
     if not text.strip():
         return "unknown"
 
-    # Check "no" patterns first — they're more specific
     if _VISA_NO_RE.search(text):
         return "no"
     if _VISA_YES_RE.search(text):
