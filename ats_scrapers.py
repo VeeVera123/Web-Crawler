@@ -373,15 +373,25 @@ def scrape_bamboohr(slug: str) -> list[dict]:
 
     jobs = []
     for job in jobs_list:
+        # BambooHR has two location objects:
+        #   "location": {"city": ..., "state": ...}
+        #   "atsLocation": {"country": ..., "state": ..., "province": ..., "city": ...}
         loc = job.get("location") or {}
+        ats_loc = job.get("atsLocation") or {}
         if isinstance(loc, dict):
-            city = loc.get("city", "")
-            state = loc.get("state", "")
-            country = loc.get("country", "")
-            location = ", ".join(filter(None, [city, state, country]))
+            city = loc.get("city", "") or ""
+            state = loc.get("state", "") or ""
+            country = loc.get("country", "") or ""
         else:
-            location = str(loc) if loc else ""
-            country = ""
+            city, state, country = (str(loc) if loc else ""), "", ""
+
+        # Fallback to atsLocation if primary location is empty
+        if not city and not state and not country and isinstance(ats_loc, dict):
+            city = ats_loc.get("city", "") or ats_loc.get("province", "") or ""
+            state = ats_loc.get("state", "") or ""
+            country = ats_loc.get("country", "") or ""
+
+        location = ", ".join(filter(None, [city, state, country]))
 
         dept = job.get("departmentLabel", "") or ""
         desc = _snippet(job.get("description", "") or "")
@@ -391,7 +401,7 @@ def scrape_bamboohr(slug: str) -> list[dict]:
             "title": (job.get("jobOpeningName") or "").strip(),
             "url": f"https://{slug}.bamboohr.com/careers/{job.get('id', '')}",
             "company": slug.replace("-", " ").title(),
-            "location": location or "Not specified",
+            "location": location,
             "country": country,
             "department": dept,
             "workplace_type": "",
@@ -512,21 +522,40 @@ def scrape_workday(slug: str) -> list[dict]:
 
         for post in postings:
             job_path = post.get("externalPath", "")
-            location = (post.get("locationsText") or "")[:200]
+
+            # Skip stale postings (30+ days old)
+            posted_on = post.get("postedOn", "") or ""
+            if "30+" in posted_on:
+                continue
+
+            # Location: try locationsText first, then bulletFields
+            location = (post.get("locationsText") or "").strip()
+            if not location:
+                # bulletFields = [cities, states/regions, jobID]
+                bf = post.get("bulletFields") or []
+                if len(bf) >= 2:
+                    cities = bf[0] if bf[0] else ""
+                    states = bf[1] if bf[1] else ""
+                    location = f"{cities}, {states}" if cities and states else (cities or states)
+            location = location[:200]
+
+            # Remote type from API
+            remote_type = post.get("remoteType", "") or ""
 
             all_jobs.append({
                 "title": (post.get("title") or "").strip(),
                 "url": f"{base_url}/{site_id}{job_path}",
                 "company": company.replace("-", " ").title(),
-                "location": location or "Not specified",
+                "location": location,
                 "country": "",
                 "department": "",
-                "workplace_type": "",
+                "workplace_type": remote_type,
                 "employment_type": "",
                 "salary": "",
                 "description_snippet": "",  # Would need per-job fetch, too slow
                 "source_ats": "Workday",
                 "slug": slug,
+                "posted_on": posted_on,
             })
 
         offset += limit
@@ -576,7 +605,7 @@ def scrape_workable(slug: str) -> list[dict]:
             "title": (post.get("title") or "").strip(),
             "url": post.get("url") or post.get("shortlink") or "",
             "company": company_name,
-            "location": location or "Not specified",
+            "location": location,
             "country": country,
             "department": post.get("department", ""),
             "workplace_type": workplace,
@@ -651,7 +680,7 @@ def scrape_recruitee(slug: str) -> list[dict]:
             "title": (offer.get("title") or "").strip(),
             "url": offer.get("careers_url") or offer.get("url") or f"https://{slug}.recruitee.com/o/{offer.get('slug', '')}",
             "company": offer.get("company_name", slug.replace("-", " ").title()),
-            "location": location or "Not specified",
+            "location": location,
             "country": country,
             "department": offer.get("department", ""),
             "workplace_type": workplace,
@@ -726,7 +755,7 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
                 "title": (post.get("name") or "").strip(),
                 "url": job_url,
                 "company": company_name,
-                "location": location or "Not specified",
+                "location": location,
                 "country": country,
                 "department": department,
                 "workplace_type": workplace,
@@ -865,7 +894,7 @@ def scrape_taleo(slug: str) -> list[dict]:
                 "title": str(title).strip(),
                 "url": job_url,
                 "company": company.replace("-", " ").replace("_", " ").title(),
-                "location": location or "Not specified",
+                "location": location,
                 "country": country,
                 "department": "",
                 "workplace_type": "",
@@ -1053,7 +1082,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
                 "title": str(title).strip(),
                 "url": job_url,
                 "company": tenant.replace("-", " ").replace("_", " ").title(),
-                "location": primary_location or "Not specified",
+                "location": primary_location,
                 "country": country,
                 "department": categories,
                 "workplace_type": workplace_type,
@@ -1152,7 +1181,7 @@ def scrape_brassring(slug: str) -> list[dict]:
                 "title": str(title).strip(),
                 "url": job_url,
                 "company": partner_id,
-                "location": location or "Not specified",
+                "location": location,
                 "country": country,
                 "department": department,
                 "workplace_type": "",
@@ -1383,7 +1412,7 @@ def scrape_successfactors(slug: str) -> list[dict]:
                 "title": str(title).strip(),
                 "url": job_url,
                 "company": company_key.replace("-", " ").replace("_", " ").title(),
-                "location": location or "Not specified",
+                "location": location,
                 "country": country,
                 "department": department,
                 "workplace_type": "",
@@ -1410,8 +1439,9 @@ def scrape_successfactors(slug: str) -> list[dict]:
 # ── BreezyHR ────────────────────────────────────────────
 
 def scrape_breezyhr(slug: str) -> list[dict]:
-    """BreezyHR — HTML scrape, parses /p/<job_id> links.
-    Slug is the company subdomain (e.g. 'acme')."""
+    """BreezyHR — HTML scrape, parses position list items.
+    Slug is the company subdomain (e.g. 'acme').
+    Extracts location from <li class="location"> and title from <h2>."""
     company_name = slug.replace("-", " ").title()
     base_url = f"https://{slug}.breezy.hr"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
@@ -1423,46 +1453,90 @@ def scrape_breezyhr(slug: str) -> list[dict]:
     jobs = []
     seen_urls = set()
 
-    # Find all job links: /p/<hex_id>-<job-title-slug> or /p/<hex_id>/<job-title-slug>
-    for match in re.finditer(
-        r'href=["\'](/p/([a-f0-9]+)[-/]([^"\']+))["\']', r.text
+    # BreezyHR HTML structure:
+    # <li class="position transition">
+    #   <a href="/p/<id>-<slug>"><h2>Title</h2>
+    #     <ul class="meta">
+    #       <li class="location"><span class="polygot">Location</span></li>
+    #       <li class="type"><span class="polygot">Full-Time</span></li>
+    #     </ul>
+    #   </a>
+    # </li>
+    # Match each position block
+    for pos_match in re.finditer(
+        r'<li[^>]*class="[^"]*position[^"]*"[^>]*>(.*?)</li>\s*(?=<li[^>]*class="[^"]*position|</ul>|$)',
+        r.text, re.I | re.DOTALL
     ):
-        path = match.group(1)
-        job_url = f"{base_url}{path}"
+        block = pos_match.group(1)
 
+        # Extract URL
+        href_match = re.search(r'href=["\'](/p/[a-f0-9]+[-/][^"\']+)["\']', block)
+        if not href_match:
+            continue
+        job_url = f"{base_url}{href_match.group(1)}"
         if job_url in seen_urls:
             continue
         seen_urls.add(job_url)
 
-        # Title from the slug part of the URL
-        title_slug = match.group(3).rstrip("/")
-        title = title_slug.replace("-", " ").strip().title()
+        # Extract title from <h2>
+        title_match = re.search(r'<h2[^>]*>(.*?)</h2>', block, re.I | re.DOTALL)
+        title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip() if title_match else ""
+
+        # Extract location from <li class="location">
+        loc_match = re.search(
+            r'<li[^>]*class="[^"]*location[^"]*"[^>]*>(.*?)</li>',
+            block, re.I | re.DOTALL
+        )
+        location = ""
+        if loc_match:
+            # Strip HTML tags, get text content
+            loc_text = re.sub(r'<[^>]+>', ' ', loc_match.group(1)).strip()
+            # Clean up multiple spaces
+            location = re.sub(r'\s+', ' ', loc_text).strip()
+
+        # Extract employment type
+        type_match = re.search(
+            r'<li[^>]*class="[^"]*type[^"]*"[^>]*>(.*?)</li>',
+            block, re.I | re.DOTALL
+        )
+        emp_type = ""
+        if type_match:
+            emp_type = re.sub(r'<[^>]+>', ' ', type_match.group(1)).strip()
+            emp_type = re.sub(r'\s+', ' ', emp_type).strip()
 
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company_name,
-            "location": "",
+            "location": location,
             "country": "",
             "department": "",
             "workplace_type": "",
-            "employment_type": "",
+            "employment_type": emp_type,
             "salary": "",
             "description_snippet": "",
             "source_ats": "BreezyHR",
             "slug": slug,
         })
 
-    # Try to enrich from nearby HTML context
-    for job in jobs:
-        # Look for location near the job link
-        pattern = re.escape(job["url"].replace(base_url, ""))
-        context_match = re.search(
-            pattern + r'[^<]*</a>.*?(?:location|loc)["\s:>]*([^<]{3,60})',
-            r.text, re.I | re.DOTALL
-        )
-        if context_match:
-            job["location"] = context_match.group(1).strip()
+    # Fallback: if no position blocks found, try simple link extraction
+    if not jobs:
+        for match in re.finditer(
+            r'href=["\'](/p/([a-f0-9]+)[-/]([^"\']+))["\']', r.text
+        ):
+            path = match.group(1)
+            job_url = f"{base_url}{path}"
+            if job_url in seen_urls:
+                continue
+            seen_urls.add(job_url)
+            title_slug = match.group(3).rstrip("/")
+            title = title_slug.replace("-", " ").strip().title()
+            jobs.append({
+                "title": title, "url": job_url, "company": company_name,
+                "location": "", "country": "", "department": "",
+                "workplace_type": "", "employment_type": "", "salary": "",
+                "description_snippet": "", "source_ats": "BreezyHR", "slug": slug,
+            })
 
     return jobs
 
@@ -2228,7 +2302,7 @@ def scrape_joincom(slug: str) -> list[dict]:
                 "title": (item.get("title") or "").strip(),
                 "url": job_url,
                 "company": company_name,
-                "location": location or "Not specified",
+                "location": location,
                 "country": country,
                 "department": dept,
                 "workplace_type": wt,
