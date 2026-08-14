@@ -59,6 +59,13 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=30.0,      # 2 req/min to stay under 8K TPM
     ),
+]
+
+ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
+
+# ── Location classification providers (concurrent) ──
+# Location needs the smartest models — Gemini (1M context, free) + OpenAI (paid).
+_LOCATION_PROVIDER_DEFS = [
     # Gemini: 1M context, 15 RPM / 1M TPD free tier
     _make_provider(
         "gemini",
@@ -67,19 +74,21 @@ _ROLE_PROVIDER_DEFS = [
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         max_batch_chars=400_000,     # 1M context
     ),
+    # OpenAI: GPT-4.1 nano, paid, smartest for classification
+    _make_provider(
+        "openai",
+        "OPENAI_API_KEY",
+        "gpt-4.1-nano",
+        "https://api.openai.com/v1",
+        max_batch_chars=300_000,     # 400K - 100K breathing space
+        min_call_interval=5.0,       # Tier 1: ~12 req/min
+    ),
 ]
 
-ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
+LOCATION_PROVIDERS = [p for p in _LOCATION_PROVIDER_DEFS if p is not None]
 
-# ── Location classification provider (paid, smartest) ──
-LOCATION_PROVIDER = _make_provider(
-    "openai",
-    "OPENAI_API_KEY",
-    "gpt-4.1-nano",
-    "https://api.openai.com/v1",
-    max_batch_chars=300_000,         # 400K - 100K breathing space
-    min_call_interval=5.0,           # Tier 1: ~12 req/min
-)
+# Backward compat: single LOCATION_PROVIDER for code that expects one
+LOCATION_PROVIDER = LOCATION_PROVIDERS[0] if LOCATION_PROVIDERS else None
 
 # ── Legacy single-provider fallback ──────────────────────
 # If no role providers are configured, fall back to LLM_PROVIDER
@@ -111,8 +120,8 @@ else:
     LLM_MODEL = ROLE_PROVIDERS[0]["model"]
     LLM_BASE_URL = ROLE_PROVIDERS[0]["base_url"]
 
-if not LOCATION_PROVIDER:
-    # No OpenAI key for location — fall back to legacy provider for everything
+if not LOCATION_PROVIDERS:
+    # No Gemini/OpenAI keys for location — fall back to legacy provider
     LOCATION_PROVIDER = {
         "name": LLM_PROVIDER,
         "api_key": LLM_API_KEY,
@@ -121,6 +130,7 @@ if not LOCATION_PROVIDER:
         "max_batch_chars": 300_000 if LLM_PROVIDER != "cerebras" else 6_000,
         "min_call_interval": 0.0,
     }
+    LOCATION_PROVIDERS = [LOCATION_PROVIDER]
 
 # AI_PARALLEL_REQUESTS — kept for backward compat but not used in multi-provider mode
 AI_PARALLEL_REQUESTS = 1
