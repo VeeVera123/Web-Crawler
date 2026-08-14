@@ -191,6 +191,7 @@ def _build_row(job: dict, location_confidence: str) -> dict:
         "salary": _safe_str(job.get("salary"), 200),
         "visa_sponsorship": _safe_str(job.get("visa_sponsorship") or "unknown", 50),
         "location_confidence": location_confidence.capitalize(),
+        "clearance": job.get("clearance", ""),
         "date_added": today,
         "last_seen": today,
         "is_active": True,
