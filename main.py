@@ -176,6 +176,7 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     for job in jobs:
         result = keyword_classify_location(job)
         if result == "match":
+            job["clearance"] = "regex"
             matched.append(job)
             matched_confidences.append("match")
         elif result == "unsure":
@@ -187,9 +188,11 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
         ai_results = ai_classify_locations(unsure_jobs)
         for job, label in zip(unsure_jobs, ai_results):
             if label == "match":
+                job["clearance"] = "llm"
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
+                job["clearance"] = "llm"
                 matched.append(job)
                 matched_confidences.append("uncertain")
             # "no_match" → drop; AI failure defaults to "uncertain" (included)
