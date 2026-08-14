@@ -77,10 +77,17 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 temperature=0,
                 max_tokens=max_tokens,
             )
-            return resp.choices[0].message.content.strip()
+            content = resp.choices[0].message.content
+            if content is None:
+                log.warning(f"{name} returned null content (attempt {attempt + 1})")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BASE_DELAY)
+                    continue
+                return None
+            return content.strip()
         except Exception as e:
             error_str = str(e)
-            is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_str.lower()
             is_daily_limit = "tokens per day" in error_str.lower() or "daily" in error_str.lower()
 
             if is_daily_limit:
