@@ -50,13 +50,14 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=50_000,      # 65K context on free tier
         min_call_interval=12.5,      # ~5 req/min free tier
     ),
-    # Groq: GPT OSS 120B, 131K context on free tier
+    # Groq: GPT OSS 120B, free tier 8K TPM — need small batches + throttle
     _make_provider(
         "groq",
         "GROQ_API_KEY",
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
-        max_batch_chars=100_000,     # 131K context, ~100K safe
+        max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
+        min_call_interval=30.0,      # 2 req/min to stay under 8K TPM
     ),
     # Gemini: 1M context, 15 RPM / 1M TPD free tier
     _make_provider(
