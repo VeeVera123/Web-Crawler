@@ -41,22 +41,22 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 
 # ── Role classification providers (free tiers, concurrent) ──
 _ROLE_PROVIDER_DEFS = [
-    # Cerebras: fast inference, 1M tokens/day free, 8K context
+    # Cerebras: GPT OSS 120B, ~3000 tok/s, 65K context on free tier
     _make_provider(
         "cerebras",
         "CEREBRAS_API_KEY",
-        "llama-3.3-70b",
+        "gpt-oss-120b",
         "https://api.cerebras.ai/v1",
-        max_batch_chars=6_000,       # 8K context — keep small
+        max_batch_chars=50_000,      # 65K context on free tier
         min_call_interval=12.5,      # ~5 req/min free tier
     ),
-    # Groq: Llama 3.3 70B, 128K context, 6K TPM free tier
+    # Groq: GPT OSS 120B, 131K context on free tier
     _make_provider(
         "groq",
         "GROQ_API_KEY",
-        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
-        max_batch_chars=100_000,     # 128K context, ~100K safe
+        max_batch_chars=100_000,     # 131K context, ~100K safe
     ),
     # Gemini: 1M context, 15 RPM / 1M TPD free tier
     _make_provider(
@@ -88,11 +88,11 @@ if not ROLE_PROVIDERS:
     # No multi-provider keys set — use legacy single provider
     if LLM_PROVIDER == "cerebras":
         LLM_API_KEY = os.environ["CEREBRAS_API_KEY"]
-        LLM_MODEL = "llama-3.3-70b"
+        LLM_MODEL = "gpt-oss-120b"
         LLM_BASE_URL = "https://api.cerebras.ai/v1"
     elif LLM_PROVIDER == "groq":
         LLM_API_KEY = os.environ["GROQ_API_KEY"]
-        LLM_MODEL = "llama-3.3-70b-versatile"
+        LLM_MODEL = "openai/gpt-oss-120b"
         LLM_BASE_URL = "https://api.groq.com/openai/v1"
     elif LLM_PROVIDER == "anthropic":
         LLM_API_KEY = os.environ["ANTHROPIC_API_KEY"]
