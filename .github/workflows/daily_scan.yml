@@ -1,4 +1,5 @@
-name: ATS scrapper
+name: ATS Srapper
+
 on:
   schedule:
     - cron: "0 6 * * *"   # 6:00 UTC = 7:00 AM WAT
@@ -30,5 +31,6 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
           LLM_PROVIDER: cerebras   # Legacy fallback (multi-provider mode used when keys are set)
         run: python main.py
