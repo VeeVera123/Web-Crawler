@@ -16,7 +16,8 @@ LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ats_scrapers import scrape_board, enrich_descriptions
+from config import LLM_PROVIDER, LOCATION_PROVIDER
+from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions
 from job_board_scrapers import scrape_all_job_boards
 from classifier import (
     keyword_classify_role, ai_classify_roles,
@@ -188,11 +189,11 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
         ai_results = ai_classify_locations(unsure_jobs)
         for job, label in zip(unsure_jobs, ai_results):
             if label == "match":
-                job["clearance"] = "llm"
+                job["clearance"] = LOCATION_PROVIDER["name"]
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
-                job["clearance"] = "llm"
+                job["clearance"] = LOCATION_PROVIDER["name"]
                 matched.append(job)
                 matched_confidences.append("uncertain")
             # "no_match" → drop; AI failure defaults to "uncertain" (included)
@@ -254,6 +255,11 @@ def main():
         # 3b. Enrich descriptions for platforms that lack them
         log.info(f"\nFetching descriptions for jobs missing them...")
         csm_jobs = enrich_descriptions(csm_jobs)
+
+        # 3c. Fetch application questions for Greenhouse/Ashby bare-Remote jobs
+        # Work authorization questions help the AI detect country-restricted roles
+        log.info(f"\nEnriching Greenhouse/Ashby application questions...")
+        csm_jobs = enrich_application_questions(csm_jobs)
 
         # 4. Filter for Africa/Global locations
         log.info(f"\nFiltering for Africa/Global eligibility...")
