@@ -647,7 +647,12 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client, max
         )
     user_msg = f"Classify these {len(batch_jobs)} jobs:\n{chr(10).join(numbered_lines)}"
 
-    text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=1500)
+    # Output tokens must scale with batch size — one response line per job
+    # (e.g. "47 NO_MATCH"). A fixed cap here silently truncates the response
+    # once a batch has more jobs than the cap can cover, and every job past
+    # the cutoff keeps its default "uncertain" label. ~8 tokens/line + buffer.
+    max_tokens = max(1500, len(batch_jobs) * 8 + 200)
+    text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
     batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
@@ -677,10 +682,16 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client, max
 def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
     """Build batches dynamically based on description length.
 
-    No fixed role cap — batches are purely character-budget driven.
+    Char-budget driven, BUT also capped by job count. Many jobs have no
+    description ("[No description available]" is only ~30 chars), so a
+    pure char-budget batch can silently balloon to hundreds/thousands of
+    jobs. The model's response is one line per job, and output tokens are
+    scaled to job count (see _classify_location_batch) — so job count,
+    not character count, is what actually bounds a safely-sized response.
     """
     OVERHEAD_PER_JOB = 120
     MAX_DESC_CHARS = 8000
+    MAX_JOBS_PER_BATCH = 120  # keeps AI response comfortably within token limits
 
     batches = []
     current_batch = []
@@ -695,7 +706,10 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
         desc_len = len(desc)
         job_chars = desc_len + OVERHEAD_PER_JOB
 
-        if current_batch and current_chars + job_chars > max_batch_chars:
+        if current_batch and (
+            current_chars + job_chars > max_batch_chars
+            or len(current_batch) >= MAX_JOBS_PER_BATCH
+        ):
             batches.append((start_idx, current_batch))
             start_idx = i
             current_batch = []
