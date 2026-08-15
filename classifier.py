@@ -839,3 +839,24 @@ def detect_visa_sponsorship(job: dict) -> str:
     if _VISA_YES_RE.search(text):
         return "yes"
     return "unknown"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# APPLICATION-QUESTION ENRICHMENT FOR ROLE-UNCERTAIN JOBS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def enrich_unsure_roles_with_application_questions(
+    jobs: list[dict],
+    max_workers: int = 8,
+    use_browser: bool = True,
+) -> list[dict]:
+    """Fetch application questions for every role still classified as unsure.
+
+    This is intentionally lazy-imported so normal title/location classification
+    does not require Playwright unless this enrichment stage is actually used.
+    """
+    from unsure_role_application_pipeline import fetch_questions_for_unsure_roles
+    return fetch_questions_for_unsure_roles(
+        jobs,
+        max_workers=max_workers,
+        use_browser=use_browser,
+    )
