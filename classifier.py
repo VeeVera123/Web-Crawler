@@ -1,7 +1,7 @@
 """
 Two-stage classifier — multi-provider architecture.
 
-Role classification:  Cerebras + Groq (free tiers, concurrent)
+Role classification:  Gemini + Groq (free tiers, concurrent)
 Location classification: Gemini + OpenAI GPT-4.1 nano (concurrent)
 
 Falls back to single-provider mode if only LLM_PROVIDER is set.
@@ -290,7 +290,7 @@ def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[lis
 def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     """Send ambiguous titles to AI for role classification.
 
-    Multi-provider mode: splits titles across Cerebras/Groq/Gemini,
+    Multi-provider mode: splits titles across Gemini/Groq,
     batches per provider's context window, runs all concurrently.
 
     Single-provider fallback: uses whichever provider is configured.
@@ -608,6 +608,9 @@ NO_MATCH — evidence of country or region restriction:
 - "must reside in [state/country]", "must be located in [place]"
 - "this role is based in [country]" without global remote option
 - Country-specific benefits as requirements (401k, PAYE, tax residency)
+- Time zone requirements that exclude most of the world \
+  (e.g. "PST/EST hours required", "US business hours only")
+- Says "remote" but then lists specific countries you must be located in
 - Description context makes it obvious the role is for one country \
   (e.g. references to US-specific regulations, UK employment law)
 
