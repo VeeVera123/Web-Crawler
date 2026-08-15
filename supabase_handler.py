@@ -5,7 +5,6 @@ Handles deduplication by job URL, populates slug_registry, and logs scan reports
 
 import logging
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import quote
 
 import requests as http_requests
 
@@ -246,39 +245,45 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
 
 
 def _touch_last_seen(urls: list[str], today: str):
-    """Update last_seen and is_active for jobs we saw again this scan."""
-    # Supabase/Kong caps request URL length (~8KB). A fixed count-based
-    # chunk size (e.g. 200 URLs) can blow past that once job URLs run long,
-    # producing a 400 Bad Request. Chunk by encoded character budget instead,
-    # and percent-encode each URL so any special characters (", comma) in a
-    # job URL can't corrupt the `in.(...)` filter syntax.
-    MAX_FILTER_CHARS = 6000  # safety margin under typical 8KB gateway limit
+    """Update last_seen and is_active for jobs we saw again this scan.
 
-    def _flush(chunk: list[str]):
-        if not chunk:
-            return
-        encoded = ",".join(f'"{quote(u, safe=":/?&=%")}"' for u in chunk)
-        filters = f"job_url=in.({encoded})"
-        ok = _patch("jobs", filters, {
-            "last_seen": today,
-            "is_active": True,
-        })
-        if not ok:
-            log.warning(f"Failed to touch last_seen for a chunk of {len(chunk)} urls")
+    Uses a bulk upsert (POST + Prefer: resolution=merge-duplicates, keyed on
+    job_url's unique constraint) instead of a PATCH with a job_url IN(...)
+    filter. Building that filter by hand embeds raw URLs into the request's
+    query string — which is fragile two ways: it can exceed the ~8KB URL
+    length Supabase/Kong allows once enough URLs are chunked together, and
+    any URL containing a percent-encoded reserved character (e.g. "%22" for
+    a literal quote, "%2C" for a comma) gets decoded by the HTTP layer and
+    can corrupt the `in.(...)` filter syntax outright (PGRST100 parse
+    errors). Sending URLs as normal JSON body values sidesteps both — JSON
+    handles escaping correctly by construction.
+    """
+    CHUNK = 500
+    headers = {
+        **HEADERS,
+        "Prefer": "return=minimal,resolution=merge-duplicates",
+    }
 
-    chunk: list[str] = []
-    chunk_len = 0
-    for u in urls:
-        u_len = len(u) + 3  # quotes + trailing comma
-        if chunk and chunk_len + u_len > MAX_FILTER_CHARS:
-            _flush(chunk)
-            chunk = []
-            chunk_len = 0
-        chunk.append(u)
-        chunk_len += u_len
-    _flush(chunk)
+    touched = 0
+    for i in range(0, len(urls), CHUNK):
+        chunk = urls[i:i + CHUNK]
+        rows = [{"job_url": u, "last_seen": today, "is_active": True} for u in chunk]
+        try:
+            r = http_requests.post(
+                f"{REST}/jobs",
+                headers=headers, json=rows, timeout=60,
+                params={"on_conflict": "job_url"},
+            )
+            r.raise_for_status()
+            touched += len(chunk)
+        except Exception as e:
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f" | body: {resp.text[:500]}"
+            log.error(f"Supabase touch-upsert (jobs) failed for chunk of {len(chunk)}: {e}{detail}")
 
-    log.info(f"Updated last_seen for {len(urls)} existing jobs")
+    log.info(f"Updated last_seen for {touched}/{len(urls)} existing jobs")
 
 
 # ── Stale job cleanup ───────────────────────────────────
