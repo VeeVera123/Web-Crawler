@@ -1,8 +1,8 @@
 """
 Configuration — multi-provider architecture.
 
-Role classification:  Cerebras + Groq + Gemini running concurrently (all free tiers)
-Location classification: OpenAI GPT-4.1 nano (paid, smartest, 1M context)
+Role classification:  Gemini + Groq running concurrently (both free tiers)
+Location classification: Gemini + OpenAI running concurrently (Gemini free, OpenAI paid)
 
 Legacy single-provider mode still works via LLM_PROVIDER env var.
 """
@@ -41,14 +41,14 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 
 # ── Role classification providers (free tiers, concurrent) ──
 _ROLE_PROVIDER_DEFS = [
-    # Cerebras: GPT OSS 120B, ~3000 tok/s, 65K context on free tier
+    # Gemini: 3.5 Flash, 1M context, 15 RPM / 1M TPD free tier
+    # Shared with location — role batches are tiny (titles only), so minimal impact
     _make_provider(
-        "cerebras",
-        "CEREBRAS_API_KEY",
-        "gpt-oss-120b",
-        "https://api.cerebras.ai/v1",
-        max_batch_chars=50_000,      # 65K context on free tier
-        min_call_interval=12.5,      # ~5 req/min free tier
+        "gemini",
+        "GEMINI_API_KEY",
+        "gemini-3.5-flash",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        max_batch_chars=400_000,     # 1M context
     ),
     # Groq: GPT OSS 120B, free tier 8K TPM — need small batches + throttle
     _make_provider(
@@ -70,7 +70,7 @@ _LOCATION_PROVIDER_DEFS = [
     _make_provider(
         "gemini",
         "GEMINI_API_KEY",
-        "gemini-2.0-flash",
+        "gemini-3.5-flash",
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         max_batch_chars=400_000,     # 1M context
     ),
