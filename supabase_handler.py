@@ -5,6 +5,7 @@ Handles deduplication by job URL, populates slug_registry, and logs scan reports
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests as http_requests
 
@@ -52,7 +53,11 @@ def _patch(table: str, filters: str, data: dict) -> bool:
         r.raise_for_status()
         return True
     except Exception as e:
-        log.error(f"Supabase PATCH {table} failed: {e}")
+        detail = ""
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            detail = f" | body: {resp.text[:500]}"
+        log.error(f"Supabase PATCH {table} failed: {e}{detail}")
         return False
 
 
@@ -242,16 +247,37 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
 
 def _touch_last_seen(urls: list[str], today: str):
     """Update last_seen and is_active for jobs we saw again this scan."""
-    # Supabase PATCH with IN filter — chunks of 200 URLs at a time
-    for i in range(0, len(urls), 200):
-        chunk = urls[i:i + 200]
-        # Build the IN filter: job_url=in.(url1,url2,...)
-        encoded = ",".join(f'"{u}"' for u in chunk)
+    # Supabase/Kong caps request URL length (~8KB). A fixed count-based
+    # chunk size (e.g. 200 URLs) can blow past that once job URLs run long,
+    # producing a 400 Bad Request. Chunk by encoded character budget instead,
+    # and percent-encode each URL so any special characters (", comma) in a
+    # job URL can't corrupt the `in.(...)` filter syntax.
+    MAX_FILTER_CHARS = 6000  # safety margin under typical 8KB gateway limit
+
+    def _flush(chunk: list[str]):
+        if not chunk:
+            return
+        encoded = ",".join(f'"{quote(u, safe=":/?&=%")}"' for u in chunk)
         filters = f"job_url=in.({encoded})"
-        _patch("jobs", filters, {
+        ok = _patch("jobs", filters, {
             "last_seen": today,
             "is_active": True,
         })
+        if not ok:
+            log.warning(f"Failed to touch last_seen for a chunk of {len(chunk)} urls")
+
+    chunk: list[str] = []
+    chunk_len = 0
+    for u in urls:
+        u_len = len(u) + 3  # quotes + trailing comma
+        if chunk and chunk_len + u_len > MAX_FILTER_CHARS:
+            _flush(chunk)
+            chunk = []
+            chunk_len = 0
+        chunk.append(u)
+        chunk_len += u_len
+    _flush(chunk)
+
     log.info(f"Updated last_seen for {len(urls)} existing jobs")
 
 
