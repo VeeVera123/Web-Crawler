@@ -117,6 +117,54 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
     return total
 
 
+def resolve_oracle_slug(old_slug: str, new_slug: str) -> bool:
+    """
+    Cache a discovered Oracle Cloud HCM domain/site by replacing a legacy
+    short-tenant slug (e.g. 'eeho' or 'eeho|CX_1') with its resolved form
+    (e.g. 'eeho.fa.us2|CX_1') in slug_registry.
+
+    scrape_oracle_cloud_hcm() has to brute-force up to 11 regions to find a
+    legacy tenant's real domain — expensive and slow. Once discovered, the
+    result is stable (companies don't move Oracle regions), so we persist it
+    here and every future run hits the direct API instead of re-discovering.
+
+    Best-effort: any failure is logged and swallowed so a Supabase hiccup
+    never breaks the actual scrape that's already in progress.
+    """
+    if not old_slug or not new_slug or old_slug == new_slug:
+        return False
+    try:
+        # Upsert the resolved slug first...
+        r = http_requests.post(
+            f"{REST}/slug_registry",
+            headers={**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"},
+            json=[{
+                "ats": "oracle_cloud_hcm",
+                "slug": new_slug,
+                "source": "resolved",
+                "last_seen": datetime.now(timezone.utc).isoformat(),
+            }],
+            timeout=30,
+            params={"on_conflict": "ats,slug"},
+        )
+        r.raise_for_status()
+
+        # ...then delete the legacy slug so it isn't scraped (and
+        # re-discovered) again on the next run.
+        r2 = http_requests.delete(
+            f"{REST}/slug_registry",
+            headers=HEADERS,
+            timeout=30,
+            params={"ats": "eq.oracle_cloud_hcm", "slug": f"eq.{old_slug}"},
+        )
+        r2.raise_for_status()
+        log.info(f"Oracle Cloud HCM: cached resolved slug {old_slug!r} -> {new_slug!r}")
+        return True
+    except Exception as e:
+        log.debug(f"Oracle Cloud HCM: failed to cache resolved slug {old_slug!r} -> {new_slug!r}: {e}")
+        return False
+
+
 def get_all_slugs() -> list[tuple[str, str]]:
     """
     Fetch all (ats, slug) pairs from slug_registry.
