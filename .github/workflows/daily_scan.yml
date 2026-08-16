@@ -1,36 +1,106 @@
-name: ATS Scrapper
+name: ATS Global Scanner
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 6:00 UTC = 7:00 AM WAT
-  workflow_dispatch:       # manual trigger
+    - cron: "0 6 * * *"       # 6:00 UTC daily (Mon-Sat + Sun for enrichment)
+  workflow_dispatch:
 
 jobs:
-  scan:
+  # ── SHARDED ATS SCRAPING (parallel runners, one IP each) ──
+  scrape:
+    strategy:
+      fail-fast: false          # don't cancel other shards if one fails
+      matrix:
+        shard: [0, 1, 2, 3]    # 4 parallel runners = 4 distinct IPs
     runs-on: ubuntu-latest
-    timeout-minutes: 300    # 5 hours for 100k+ companies
+    timeout-minutes: 180        # 3 hours per shard (was 5 for full run)
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Run scanner
+      - name: Scrape ATS boards (shard ${{ matrix.shard }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          LLM_PROVIDER: cerebras
+        run: python main.py --shard ${{ matrix.shard }} --total-shards 4
+
+  # ── JOB BOARD AGGREGATORS (single runner, not sharded) ──
+  job-boards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Scrape job board aggregators
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
-          LLM_PROVIDER: cerebras   # Legacy fallback (multi-provider mode used when keys are set)
-        run: python main.py
+          LLM_PROVIDER: cerebras
+        run: python main.py --job-boards-only
+
+  # ── FINALIZE (cleanup + report, runs AFTER all shards finish) ──
+  finalize:
+    needs: [scrape, job-boards]   # ← waits for ALL 4 shards + job boards
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Cleanup stale jobs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python main.py --finalize
+
+  # ── WEEKLY SLUG ENRICHMENT (Sundays only) ──
+  enrich-slugs:
+    if: github.event.schedule == '0 6 * * 0'   # Sundays at 06:00 UTC only
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Weekly slug enrichment
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python enrich_slugs.py --source all
