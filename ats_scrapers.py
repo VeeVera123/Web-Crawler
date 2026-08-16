@@ -31,10 +31,13 @@ def _get_session() -> requests.Session:
     """Return the current thread's reusable HTTP session."""
     if not hasattr(_thread_local, "session"):
         _thread_local.session = requests.Session()
-        # Set default retry adapter with connection pooling
+        # Set default retry adapter with connection pooling.
+        # 20 (was 10) — matches the higher per-platform worker counts below;
+        # a pool smaller than a platform's max_workers forces threads to
+        # queue for a connection even though the remote side has capacity.
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10,
-            pool_maxsize=10,
+            pool_connections=20,
+            pool_maxsize=20,
             max_retries=0,  # We handle retries in _get()
         )
         _thread_local.session.mount("https://", adapter)
@@ -55,7 +58,18 @@ def _get(url: str, **kwargs) -> requests.Response | None:
         try:
             r = session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
             if r.status_code == 429:
-                time.sleep(2 ** attempt)
+                # Respect the server's own Retry-After header when it gives
+                # one — this is the single most ban-risk-reducing change
+                # available: it means we back off exactly as long as the
+                # platform asked, instead of guessing with blind exponential
+                # backoff. Cap at 30s so one stubborn platform can't stall
+                # an entire worker thread for minutes.
+                retry_after = r.headers.get("Retry-After")
+                if retry_after and retry_after.strip().isdigit():
+                    wait = min(int(retry_after), 30)
+                else:
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                time.sleep(wait)
                 continue
             r.raise_for_status()
             return r
@@ -63,6 +77,9 @@ def _get(url: str, **kwargs) -> requests.Response | None:
             if attempt == MAX_RETRIES:
                 log.debug(f"Failed {url}: {e}")
                 return None
+            # Jitter on ordinary failures too — prevents a "thundering herd"
+            # of many worker threads retrying a flaky endpoint in lockstep.
+            time.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
     return None
 
 
@@ -993,6 +1010,12 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         log.debug(f"Invalid Oracle Cloud HCM slug format: {slug}")
         return []
 
+    # Legacy short-tenant slugs ('eeho' / 'eeho|CX_1') require brute-force
+    # domain discovery below. Once resolved this run, we cache the resolved
+    # slug back to slug_registry (see call near the end of discovery) so
+    # future runs skip the discovery cost entirely.
+    needs_resolve = not (".fa." in host_prefix or "." in host_prefix)
+
     import uuid as _uuid
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
@@ -1079,6 +1102,19 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         if not site_number:
             log.debug(f"Oracle Cloud HCM: could not discover site number for {tenant}")
             return []
+
+    # Cache the fully-resolved slug so future runs skip discovery entirely.
+    # base_api looks like 'https://eeho.fa.us2.oraclecloud.com/hcmRestApi/...'
+    # so the resolved host prefix is everything between 'https://' and
+    # '.oraclecloud.com'.
+    if needs_resolve and base_api:
+        try:
+            resolved_prefix = base_api.split("://", 1)[1].split(".oraclecloud.com")[0]
+            new_slug = f"{resolved_prefix}|{site_number}"
+            from supabase_handler import resolve_oracle_slug
+            resolve_oracle_slug(slug, new_slug)
+        except Exception as e:
+            log.debug(f"Oracle Cloud HCM: slug caching skipped for {slug!r}: {e}")
 
     all_jobs = []
     offset = 0
