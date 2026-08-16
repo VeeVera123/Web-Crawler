@@ -3,4 +3,3 @@ python-dotenv>=1.0
 openai>=1.0
 anthropic>=0.34
 groq>=0.4
-beautifulsoup4>=4.12
