@@ -866,6 +866,97 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
+def _oracle_tenant(slug: str) -> str:
+    """Extract the bare tenant name from an oracle_cloud_hcm slug, resolved
+    or not. 'eeho|CX_1' -> 'eeho'; 'eeho.fa.us2|CX_1' -> 'eeho'; 'eeho' -> 'eeho'."""
+    host_prefix = slug.split("|", 1)[0]
+    return host_prefix.split(".", 1)[0]
+
+
+def _is_resolved_oracle_slug(slug: str) -> bool:
+    """True if the slug already carries a discovered '.fa.<region>' domain."""
+    host_prefix = slug.split("|", 1)[0]
+    return ".fa." in host_prefix
+
+
+def _fetch_resolved_oracle_tenants() -> set[str]:
+    """
+    Tenants that already have a resolved oracle_cloud_hcm slug in
+    slug_registry (e.g. 'eeho.fa.us2|CX_1' -> tenant 'eeho').
+
+    scrape_oracle_cloud_hcm() persists the resolved slug once it discovers a
+    legacy tenant's real domain (see supabase_handler.resolve_oracle_slug).
+    Sources like OpenPostings/Common Crawl only ever know the legacy,
+    unresolved tenant name — without this check, upserting them here would
+    re-add the legacy slug next to its resolved twin every week, and the
+    scraper would burn an 11-region brute-force discovery on it all over
+    again on Monday. See _filter_oracle_slugs below.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return set()
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    tenants = set()
+    offset = 0
+    batch_size = 1000
+    try:
+        while True:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/slug_registry",
+                headers=headers,
+                timeout=30,
+                params={
+                    "select": "slug",
+                    "ats": "eq.oracle_cloud_hcm",
+                    "offset": offset,
+                    "limit": batch_size,
+                },
+            )
+            r.raise_for_status()
+            rows = r.json()
+            for row in rows:
+                slug = row.get("slug", "")
+                if _is_resolved_oracle_slug(slug):
+                    tenants.add(_oracle_tenant(slug))
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+    except Exception as e:
+        log.error(f"Failed to fetch existing oracle_cloud_hcm slugs for de-dup check: {e}")
+        return set()
+
+    return tenants
+
+
+def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
+    """
+    Drop legacy (unresolved) oracle_cloud_hcm slugs whose tenant already has
+    a resolved counterpart in slug_registry, so re-enrichment never
+    re-introduces a duplicate that would trigger discovery all over again.
+    Already-resolved slugs in slug_dict (rare, but possible if a source
+    somehow captured one) pass through untouched.
+    """
+    resolved_tenants = _fetch_resolved_oracle_tenants()
+    if not resolved_tenants:
+        return slug_dict
+
+    filtered = {}
+    skipped = 0
+    for slug, name in slug_dict.items():
+        if not _is_resolved_oracle_slug(slug) and _oracle_tenant(slug) in resolved_tenants:
+            skipped += 1
+            continue
+        filtered[slug] = name
+
+    if skipped:
+        log.info(f"  oracle_cloud_hcm: skipped {skipped} legacy slugs already resolved in slug_registry")
+
+    return filtered
+
+
 def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                         dry_run: bool = False) -> int:
     """Upsert slugs to Supabase slug_registry. Returns total upserted.
@@ -897,6 +988,13 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
             slug_dict = {s: "" for s in slugs}
         else:
             slug_dict = slugs
+
+        # Oracle Cloud HCM: don't re-add a legacy tenant slug that's already
+        # been resolved to its real domain — see _filter_oracle_slugs.
+        if ats == "oracle_cloud_hcm" and not dry_run:
+            slug_dict = _filter_oracle_slugs(slug_dict)
+            if not slug_dict:
+                continue
 
         items = list(slug_dict.items())
         ats_total = 0
