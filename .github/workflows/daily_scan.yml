@@ -66,6 +66,7 @@ jobs:
   # ── FINALIZE (cleanup + report, runs AFTER all shards finish) ──
   finalize:
     needs: [scrape, job-boards]   # ← waits for ALL 4 shards + job boards
+    if: always()   # run even if a shard failed
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
