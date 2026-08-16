@@ -6,13 +6,16 @@ Each returns a list of job dicts with standardised keys:
 """
 
 import re
+import json
 import logging
 import random
 import threading
 import time
 import xml.etree.ElementTree as ET
+from html import unescape
 from urllib.parse import unquote
 import requests
+from bs4 import BeautifulSoup
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 
 log = logging.getLogger(__name__)
@@ -3109,11 +3112,39 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
 
 
 # ── Application Question Enrichment ─────────────────────
-# Greenhouse and Ashby expose application questions via their APIs.
-# Questions about work authorization / visa sponsorship are strong
-# signals that a job is NOT globally open. We extract these and
-# append them to description_snippet so the AI location classifier
-# can see them.
+# Custom application-form screening questions ("Are you authorized to work
+# in X?", "Do you require visa sponsorship?") are strong signals that a job
+# is NOT actually globally open, even when its location field just says
+# "Remote". We extract those specific questions — across all 20 ATS
+# platforms — and append them to description_snippet so the AI location
+# classifier can see them.
+#
+# Multi-tier fallback per platform (verified per-platform via live research,
+# not assumed — see the docstring on each _fetch_*_questions function):
+#   Level 1 — public, unauthenticated API that returns question definitions
+#             directly (Greenhouse, Ashby, Workable, Recruitee).
+#   Level 2 — embedded JSON in the apply page's HTML (BreezyHR's hidden
+#             input#questions field; a generic __NEXT_DATA__/JSON-script
+#             scan used as a bonus pass inside the Level-3 fallback).
+#   Level 3 — _fetch_generic_form_questions(): universal HTML form parser
+#             (BeautifulSoup) that walks <input>/<textarea>/<select>
+#             elements and resolves each one's <label>. Used as the primary
+#             mechanism for platforms with predictable server-rendered
+#             apply forms (Lever, Teamtailor, ApplyToJob/JazzHR), and as the
+#             final fallback for every other platform if its dedicated
+#             fetcher finds nothing.
+#
+# Honest limitation: Rippling, BambooHR, iCIMS, Workday, Personio, JOIN,
+# Taleo, and Paylocity render their REAL application form client-side
+# (React/Angular SPA) behind session state, or inside a cross-origin iframe
+# (iCIMS), or behind partner-gated auth (Workday Staffing API, iCIMS
+# iForms). None of that is reachable with plain HTTP requests — it would
+# require a headless browser (Playwright/Selenium) driving the actual
+# "Apply" click. We still run the Level-3 DOM parser against their best
+# known URL as a best-effort attempt (a few tenants may have server-side-
+# rendered fallback markup), but expect these to mostly return nothing.
+# That's a real platform limitation, not a bug in this code — flagged
+# explicitly here so nobody "fixes" it into a false success rate later.
 
 _WORK_AUTH_RE = re.compile(
     r"(authorized?\s*to\s*work|work\s*authoriz|visa\s*sponsor|"
@@ -3124,6 +3155,134 @@ _WORK_AUTH_RE = re.compile(
     re.I,
 )
 
+
+def _clean_label(text: str) -> str:
+    """Normalize a question label: unescape entities, strip tags/whitespace,
+    strip trailing required-markers (*, ✱)."""
+    if not text:
+        return ""
+    text = unescape(str(text))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"[\*✱]+\s*$", "", text).strip()
+    return text
+
+
+def _format_auth_questions(questions: list[dict]) -> str:
+    """Given [{label, required}, ...], keep only work-authorization-relevant
+    ones and format them as 'Application Question: ...' lines."""
+    lines = []
+    for q in questions or []:
+        label = (q.get("label") or "").strip()
+        if label and _WORK_AUTH_RE.search(label):
+            lines.append(f"Application Question: {label}")
+    return "\n".join(lines)
+
+
+# ── Level 3: universal fallback (embedded JSON + generic DOM form parse) ──
+
+_QUESTION_JSON_SCRIPT_RE = re.compile(
+    r'<script[^>]*(?:id=["\']__NEXT_DATA__["\']|type=["\']application/json["\'])[^>]*>(.*?)</script>',
+    re.I | re.DOTALL,
+)
+_QUESTION_KEY_RE = re.compile(
+    r"question|screening|prescreen|knockout|custom.?field", re.I
+)
+
+
+def _walk_for_questions(obj, out: list[dict], depth: int = 0):
+    """Recursively search a parsed JSON blob for arrays that look like
+    application-form question definitions."""
+    if depth > 12 or len(out) > 100:
+        return
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if isinstance(val, list) and _QUESTION_KEY_RE.search(str(key)):
+                for item in val:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_label = (
+                        item.get("label") or item.get("title") or item.get("text")
+                        or item.get("question") or item.get("body") or item.get("prompt") or ""
+                    )
+                    label = _clean_label(str(raw_label))
+                    if label:
+                        required = bool(item.get("required") or item.get("isRequired"))
+                        out.append({"label": label, "required": required})
+            else:
+                _walk_for_questions(val, out, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_for_questions(item, out, depth + 1)
+
+
+def _find_embedded_questions(html_text: str) -> list[dict]:
+    """Level 2 sub-fallback: scan __NEXT_DATA__ / application-json <script>
+    blocks for embedded question definitions."""
+    for m in _QUESTION_JSON_SCRIPT_RE.finditer(html_text):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        found: list[dict] = []
+        _walk_for_questions(data, found)
+        if found:
+            return found
+    return []
+
+
+def _parse_form_elements(html_text: str) -> list[dict]:
+    """Absolute Level-3 fallback: blindly parse <input>/<textarea>/<select>
+    elements in the page and resolve each one's label."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    form = soup.find("form") or soup
+
+    questions = []
+    for el in form.find_all(["input", "textarea", "select"]):
+        el_type = el.name if el.name != "input" else (el.get("type") or "text").lower()
+        if el_type in ("hidden", "submit", "button", "image", "reset", "file"):
+            continue
+
+        label = ""
+        el_id = el.get("id")
+        if el_id:
+            label_tag = soup.find("label", attrs={"for": el_id})
+            if label_tag:
+                label = label_tag.get_text(" ", strip=True)
+        if not label:
+            parent_label = el.find_parent("label")
+            if parent_label:
+                label = parent_label.get_text(" ", strip=True)
+        label = _clean_label(label)
+        if not label:
+            continue
+
+        required = el.has_attr("required") or (el.get("aria-required") == "true")
+        questions.append({"label": label, "required": required})
+
+    return questions
+
+
+def _fetch_generic_form_questions(url: str) -> list[dict]:
+    """Universal Level-3 fallback used by every platform: fetch a URL and
+    try embedded JSON first, then raw form-element parsing. Returns []
+    (not an exception) on any failure — callers treat that as 'no signal
+    found', which is expected and fine for JS-rendered platforms."""
+    if not url:
+        return []
+    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return []
+    found = _find_embedded_questions(r.text)
+    if found:
+        return found
+    return _parse_form_elements(r.text)
+
+
+# ── Level 1/2: Greenhouse (public API) ──
 
 def _fetch_greenhouse_questions(job: dict) -> str:
     """Fetch application questions from Greenhouse job API.
@@ -3162,6 +3321,8 @@ def _fetch_greenhouse_questions(job: dict) -> str:
 
     return "\n".join(auth_questions)
 
+
+# ── Level 1/2: Ashby (public API) ──
 
 def _fetch_ashby_questions(job: dict) -> str:
     """Fetch application form from Ashby posting API.
@@ -3208,46 +3369,404 @@ def _fetch_ashby_questions(job: dict) -> str:
     return "\n".join(auth_questions)
 
 
-def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
-    """Fetch application questions for Greenhouse/Ashby jobs with bare 'Remote' location.
+# ── Level 3 (server-rendered, predictable DOM): Lever ──
+# Verified live: /apply pages wrap each question in
+# <li class="application-question">, with custom ones additionally tagged
+# class="custom-question". Label lives in .application-label .text;
+# required questions carry a <span class="required">✱</span>.
 
-    Work authorization questions (visa sponsorship, authorized to work, etc.)
-    are appended to description_snippet so the AI location classifier can use
-    them as signals. Only fetches for jobs likely to be sent to AI (bare Remote).
+def _fetch_lever_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    apply_url = url if url.rstrip("/").endswith("/apply") else url.rstrip("/") + "/apply"
+    r = _get(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+
+    questions = []
+    if r:
+        soup = BeautifulSoup(r.text, "html.parser")
+        for li in soup.select("li.application-question"):
+            label_el = li.select_one(".application-label .text") or li.select_one(".application-label")
+            label = _clean_label(label_el.get_text(" ", strip=True)) if label_el else ""
+            if not label:
+                continue
+            required = bool(li.select_one("span.required")) or bool(li.find(attrs={"required": True}))
+            questions.append({"label": label, "required": required})
+
+    if not questions:
+        questions = _fetch_generic_form_questions(apply_url)
+    return _format_auth_questions(questions)
+
+
+# ── Level 1: Workable (public API) ──
+# Verified live: GET https://apply.workable.com/api/v1/jobs/{shortcode}/form
+# returns field groups; custom questions live under fields[] with
+# label/required/type. shortcode is the alphanumeric segment in the job's
+# "/j/{shortcode}/" URL path (no account/auth needed for this endpoint).
+
+_WORKABLE_SHORTCODE_RE = re.compile(r"/j/([A-Za-z0-9]+)")
+
+
+def _fetch_workable_questions(job: dict) -> str:
+    url = job.get("url", "")
+    m = _WORKABLE_SHORTCODE_RE.search(url)
+    questions = []
+    if m:
+        shortcode = m.group(1)
+        api_url = f"https://apply.workable.com/api/v1/jobs/{shortcode}/form"
+        r = _get(api_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        if r:
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+            if isinstance(data, list):
+                for group in data:
+                    for field in (group.get("fields") or []) if isinstance(group, dict) else []:
+                        label = _clean_label(field.get("label", ""))
+                        if label:
+                            questions.append({"label": label, "required": bool(field.get("required"))})
+
+    if not questions:
+        questions = _fetch_generic_form_questions(url)
+    return _format_auth_questions(questions)
+
+
+# ── Level 1: Recruitee (public API) ──
+# Verified live: both the listing (/api/offers/) and detail
+# (/api/offers/{offer_slug}) endpoints include open_questions[] inline —
+# {body, required, kind, ...}. No extra auth needed.
+
+_RECRUITEE_OFFER_RE = re.compile(r"/o/([^/?#]+)")
+
+
+def _fetch_recruitee_questions(job: dict) -> str:
+    url = job.get("url", "")
+    slug = job.get("slug", "")
+    m = _RECRUITEE_OFFER_RE.search(url)
+    questions = []
+    if m and slug:
+        offer_slug = m.group(1)
+        api_url = f"https://{slug}.recruitee.com/api/offers/{offer_slug}"
+        r = _get(api_url, headers={"Accept": "application/json", "User-Agent": random.choice(USER_AGENTS)})
+        if r:
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                offer = data.get("offer", data)
+                for oq in (offer.get("open_questions") or []):
+                    label = _clean_label(oq.get("body", ""))
+                    if label:
+                        questions.append({"label": label, "required": bool(oq.get("required"))})
+
+    if not questions:
+        questions = _fetch_generic_form_questions(url)
+    return _format_auth_questions(questions)
+
+
+# ── Level 3 (server-rendered, predictable DOM): Teamtailor ──
+# Verified live: no __NEXT_DATA__ data island exists (despite Teamtailor
+# being React-based, careers pages are server-rendered). The apply form is
+# plain HTML at /jobs/{id}-{slug}/applications/new; each question is a
+# <div class="question">.
+
+def _fetch_teamtailor_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    apply_url = url.rstrip("/") + "/applications/new"
+    r = _get(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+
+    questions = []
+    if r:
+        soup = BeautifulSoup(r.text, "html.parser")
+        for div in soup.select("div.question"):
+            label = _clean_label(div.get_text(" ", strip=True))
+            if not label:
+                continue
+            classes = " ".join(div.get("class") or [])
+            required = ("required" in classes or bool(div.find(attrs={"required": True}))
+                        or div.get_text().rstrip().endswith("*"))
+            questions.append({"label": label, "required": required})
+
+    if not questions:
+        questions = _fetch_generic_form_questions(apply_url)
+    return _format_auth_questions(questions)
+
+
+# ── Level 2: BreezyHR (embedded JSON) ──
+# Verified live: the /apply page embeds the full question list as JSON in
+# <input id="questions" value="[...]">  — {text, type, required, _id}.
+# No separate XHR call is made for it; it's server-rendered into the page.
+
+_BREEZY_QUESTIONS_INPUT_RE = re.compile(r'id=["\']questions["\'][^>]*value=["\']([^"\']*)["\']', re.I)
+_BREEZY_QUESTIONS_INPUT_RE_ALT = re.compile(r'value=["\']([^"\']*)["\'][^>]*id=["\']questions["\']', re.I)
+
+
+def _fetch_breezyhr_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    apply_url = url.rstrip("/") + "/apply"
+    r = _get(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+
+    questions = []
+    if r:
+        m = _BREEZY_QUESTIONS_INPUT_RE.search(r.text) or _BREEZY_QUESTIONS_INPUT_RE_ALT.search(r.text)
+        if m:
+            raw = unescape(m.group(1))
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = None
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    label = _clean_label(item.get("text", ""))
+                    if label:
+                        questions.append({"label": label, "required": bool(item.get("required"))})
+
+    if not questions:
+        questions = _fetch_generic_form_questions(apply_url)
+    return _format_auth_questions(questions)
+
+
+# ── Level 3 (server-rendered, predictable DOM): ApplyToJob (JazzHR) ──
+# Verified live: classic server-rendered form (legacy "TheResumator" DOM
+# survives in JazzHR white-label pages). Custom questions sit in
+# div.job-form-fields, each with a
+# <label id="resumator-questionnaire-q{ID}-label"> and a matching
+# #resumator-questionnaire-q{ID} input/select/textarea. Required questions
+# have a trailing "*" in the label text. The scraped job listing URL is
+# already the apply page itself — no URL transform needed.
+
+def _fetch_applytojob_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+
+    questions = []
+    if r:
+        soup = BeautifulSoup(r.text, "html.parser")
+        container = soup.select_one("div.job-form-fields") or soup
+        for label_el in container.select('label[id^="resumator-questionnaire-"]'):
+            raw_label = label_el.get_text(" ", strip=True)
+            required = raw_label.rstrip().endswith("*")
+            label = _clean_label(raw_label)
+            if not label:
+                continue
+            questions.append({"label": label, "required": required})
+
+    if not questions:
+        questions = _fetch_generic_form_questions(url)
+    return _format_auth_questions(questions)
+
+
+# ── Level 2 (best-effort, inconsistent): Zoho Recruit ──
+# Research found Zoho sometimes embeds a candidate-module field-layout JSON
+# blob (with a custom_field flag) in the listing page's HTML, but this was
+# NOT confirmed present on every job-detail page or every org's template —
+# treat as a bonus pass, not a guaranteed source. Falls through to the
+# generic DOM parser either way.
+
+def _fetch_zoho_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    questions = []
+    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if r:
+        questions = _find_embedded_questions(r.text)
+        if not questions:
+            questions = _parse_form_elements(r.text)
+    return _format_auth_questions(questions)
+
+
+# ── Level 2 (unverified schema, best-effort): Oracle Cloud HCM ──
+# Research found a real "CE" (Candidate Experience) REST namespace, and a
+# recruitingCEJobRequisitionDetails resource that the public career site's
+# own Angular/JET app calls client-side to render the requisition — but
+# could not directly verify the exact JSON key for questionnaire data in
+# this session (the career sites are JS-rendered, blocking static
+# verification). We attempt the same authless CE endpoint pattern already
+# used successfully for job listings (see scrape_oracle_cloud_hcm) with
+# expand=all, then generically recurse the response for question-shaped
+# data. Falls back to the generic DOM parser if that comes up empty.
+
+_ORACLE_JOB_URL_RE = re.compile(r"^(https://[^/]+)/hcmUI/CandidateExperience/en/sites/([^/]+)/job/([^/?#]+)")
+
+
+def _fetch_oracle_cloud_hcm_questions(job: dict) -> str:
+    url = job.get("url", "")
+    questions = []
+    m = _ORACLE_JOB_URL_RE.match(url)
+    if m:
+        host, _site_number, job_id = m.groups()
+        api_url = f"{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails/{job_id}"
+        try:
+            import uuid as _uuid
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Accept": "application/json",
+                "ora-irc-cx-userid": str(_uuid.uuid4()),
+                "ora-irc-language": "en",
+            }
+            r = _get(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
+            if r:
+                data = r.json()
+                _walk_for_questions(data, questions)
+        except Exception:
+            pass
+
+    if not questions:
+        questions = _fetch_generic_form_questions(url)
+    return _format_auth_questions(questions)
+
+
+# ── Not reliably obtainable: HRMDirect ──
+# Verified live: listing pages (*.hrmdirect.com) are plain static HTML with
+# no form on them at all — the real apply form lives on a SEPARATE
+# subdomain (apply.hrmdirect.com, a ClearCompany/"ResumeDirect ApplyOnline"
+# ASP.NET app), and that subdomain's robots.txt disallows crawling
+# entirely ("Disallow: /"). We respect that rather than silently bypass
+# it — this fetcher intentionally does not request that subdomain.
+
+def _fetch_hrmdirect_questions(job: dict) -> str:
+    log.debug("HRMDirect: apply.hrmdirect.com disallows crawling via robots.txt; skipping")
+    return ""
+
+
+# ── Best-effort DOM-only platforms ──────────────────────
+# Verified live (see research notes above): these platforms render their
+# real application form client-side (React/Angular SPA) after JS
+# execution, behind session/cookie state established by the "Apply" click,
+# or (iCIMS) inside a cross-origin iframe. None of that is reachable with
+# plain HTTP requests. We still run the Level-3 DOM parser against the
+# best-known URL in case a given tenant happens to serve server-rendered
+# fallback markup, but for most jobs on these platforms this will
+# correctly return nothing — that's the platform's architecture, not a
+# bug here. Upgrading these to real coverage would require adding a
+# headless-browser step (Playwright) to drive the actual apply flow.
+
+def _fetch_rippling_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    apply_url = url.rstrip("/") + "/apply"
+    return _format_auth_questions(_fetch_generic_form_questions(apply_url))
+
+
+def _fetch_bamboohr_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+def _fetch_icims_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+def _fetch_workday_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+def _fetch_personio_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+def _fetch_joincom_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+def _fetch_taleo_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+def _fetch_paylocity_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+# ── SmartRecruiters ──
+# Research found the documented screening-questions endpoint
+# (GET /postings/{uuid}/configuration) requires an X-SmartToken auth
+# header issued per-company — not usable for arbitrary postings. An
+# unauthenticated "oneclick" widget config endpoint exists but could not
+# be confirmed to expose custom questions (the one live posting tested had
+# none configured). Best-effort DOM fallback only.
+
+def _fetch_smartrecruiters_questions(job: dict) -> str:
+    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+# ── Dispatch table: source_ats (as stored on job dicts) → fetcher ──
+QUESTION_FETCHERS = {
+    "Greenhouse": _fetch_greenhouse_questions,
+    "Ashby": _fetch_ashby_questions,
+    "Lever": _fetch_lever_questions,
+    "Workable": _fetch_workable_questions,
+    "Recruitee": _fetch_recruitee_questions,
+    "SmartRecruiters": _fetch_smartrecruiters_questions,
+    "Teamtailor": _fetch_teamtailor_questions,
+    "BreezyHR": _fetch_breezyhr_questions,
+    "ApplyToJob": _fetch_applytojob_questions,
+    "HRMDirect": _fetch_hrmdirect_questions,
+    "Zoho": _fetch_zoho_questions,
+    "Oracle Cloud HCM": _fetch_oracle_cloud_hcm_questions,
+    "Rippling": _fetch_rippling_questions,
+    "BambooHR": _fetch_bamboohr_questions,
+    "iCIMS": _fetch_icims_questions,
+    "Workday": _fetch_workday_questions,
+    "Personio": _fetch_personio_questions,
+    "JOIN": _fetch_joincom_questions,
+    "Taleo": _fetch_taleo_questions,
+    "Paylocity": _fetch_paylocity_questions,
+}
+
+
+def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
+    """Fetch application questions for location-'unsure' jobs, across ALL
+    20 supported ATS platforms (see QUESTION_FETCHERS above).
+
+    Work authorization / visa sponsorship questions are strong signals that
+    a job is NOT globally open, even when its location field just says
+    "Remote". We extract just those and append them to description_snippet
+    so the AI location classifier can use them.
+
+    "Unsure" is determined the same way classifier.keyword_classify_location()
+    determines it — i.e. this targets exactly the subset of jobs that will
+    actually be sent to the AI location step, not the full job list.
 
     Call this AFTER enrich_descriptions and BEFORE filter_locations."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    bare_remote_re = re.compile(
-        r"^\s*(remote|fully\s*remote|remote\s*worker|remote\s*job)?\s*$", re.I
-    )
+    from classifier import keyword_classify_location
 
     to_enrich = [
         j for j in jobs
-        if j.get("source_ats") in ("Greenhouse", "Ashby")
-        and bare_remote_re.match(j.get("location", ""))
+        if j.get("source_ats") in QUESTION_FETCHERS
+        and keyword_classify_location(j) == "unsure"
     ]
 
     if not to_enrich:
         return jobs
 
-    log.info(f"Fetching application questions for {len(to_enrich)} "
-             f"Greenhouse/Ashby jobs with bare 'Remote' location...")
-
-    fetchers = {
-        "Greenhouse": _fetch_greenhouse_questions,
-        "Ashby": _fetch_ashby_questions,
-    }
+    by_platform: dict[str, int] = {}
+    for j in to_enrich:
+        by_platform[j["source_ats"]] = by_platform.get(j["source_ats"], 0) + 1
+    platform_summary = ", ".join(f"{k}:{v}" for k, v in sorted(by_platform.items()))
+    log.info(f"Fetching application questions for {len(to_enrich)} unsure-location jobs "
+             f"across {len(by_platform)} ATS platforms ({platform_summary})...")
 
     def _fetch_one(job):
-        fetcher = fetchers[job["source_ats"]]
+        fetcher = QUESTION_FETCHERS[job["source_ats"]]
         try:
             questions = fetcher(job)
             if questions:
                 existing = job.get("description_snippet", "") or ""
                 job["description_snippet"] = existing + "\n\n" + questions
         except Exception as e:
-            log.debug(f"Failed to fetch questions for {job['url']}: {e}")
+            log.debug(f"Failed to fetch questions for {job.get('url', '')}: {e}")
         time.sleep(random.uniform(0.2, 0.5))
         return job
 
