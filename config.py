@@ -17,7 +17,10 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 # ── Scraper settings (shared, provider-independent) ──────
-REQUEST_TIMEOUT = 20
+# 15s (was 20s) — most ATS APIs respond in <5s; a genuinely dead board still
+# gets MAX_RETRIES attempts, so this only speeds up abandoning dead boards
+# (15s x 3 attempts = 45s worst case, vs 60s before), not real ones.
+REQUEST_TIMEOUT = 15
 MAX_RETRIES = 2
 
 # ── Multi-provider configuration ─────────────────────────
