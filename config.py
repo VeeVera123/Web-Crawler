@@ -28,6 +28,25 @@ MAX_RETRIES = 2
 # Role providers run concurrently for speed.
 # Location provider runs alone (needs the smartest model).
 
+# ── Cross-process rate-limit scaling ──────────────────────
+# classifier.py's _last_call_times throttle is in-process memory only — it
+# has no way to see other processes hitting the SAME provider API key.
+# GitHub Actions matrix sharding runs each shard as a separate runner/process,
+# so with the daily scan's 8 ATS shards + 1 job-boards process all classifying
+# concurrently, a per-shard min_call_interval tuned for "one process, whole
+# quota" lets all 9 processes race for that one shared-key quota at once —
+# real risk of 429s and wasted retry time on a free-tier key (this is the
+# issue Qwen flagged for Gemini's 15 RPM).
+#
+# Fix: each concurrent process throttles itself to a FAIR SHARE of the quota
+# instead of the whole thing, by multiplying its interval by how many AI
+# processes are running at once. daily_scan.yml sets AI_RATE_SHARDS=9 (8
+# scrape-ats shards + 1 scrape-job-boards) for exactly this reason. Local /
+# manual runs (--total-shards 1, no env var set) default to 1 — i.e. no
+# scaling, same behavior as before sharding existed.
+AI_RATE_SHARDS = max(1, int(os.environ.get("AI_RATE_SHARDS", "1")))
+
+
 def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call_interval=0.0):
     """Build a provider config dict. Skips if API key env var is not set."""
     key = os.environ.get(api_key_env, "")
@@ -42,16 +61,25 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
         "min_call_interval": min_call_interval,
     }
 
+# Base, single-process-safe intervals for shared-free-tier-key providers.
+# These get multiplied by AI_RATE_SHARDS below so N concurrent processes
+# collectively stay under the same quota one process was tuned against.
+_GEMINI_BASE_INTERVAL = 4.0     # 15 RPM free tier -> 60/15 = 4s/call, single process
+_GROQ_BASE_INTERVAL = 30.0      # 8K TPM free tier -> 2 req/min, single process
+
 # ── Role classification providers (free tiers, concurrent) ──
 _ROLE_PROVIDER_DEFS = [
-    # Gemini: 3.5 Flash, 1M context, 15 RPM / 1M TPD free tier
-    # Shared with location — role batches are tiny (titles only), so minimal impact
+    # Gemini: 3.5 Flash, 1M context, 15 RPM / 1M TPD free tier.
+    # Shared with location (same provider "gemini", same _last_call_times
+    # entry in classifier.py) — role and location run sequentially within
+    # one process, so they share one throttle clock safely.
     _make_provider(
         "gemini",
         "GEMINI_API_KEY",
         "gemini-3.5-flash",
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         max_batch_chars=400_000,     # 1M context
+        min_call_interval=_GEMINI_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
     # Groq: GPT OSS 120B, free tier 8K TPM — need small batches + throttle
     _make_provider(
@@ -60,7 +88,7 @@ _ROLE_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
-        min_call_interval=30.0,      # 2 req/min to stay under 8K TPM
+        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
 
@@ -76,8 +104,12 @@ _LOCATION_PROVIDER_DEFS = [
         "gemini-3.5-flash",
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         max_batch_chars=400_000,     # 1M context
+        min_call_interval=_GEMINI_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # OpenAI: GPT-4.1 nano, paid, smartest for classification
+    # OpenAI: GPT-4.1 nano, paid tier. Not scaled by AI_RATE_SHARDS — Tier 1
+    # paid limits (hundreds of RPM) comfortably absorb 9 concurrent processes
+    # at ~12 req/min each (~108 RPM aggregate). Revisit if your OpenAI account
+    # is on a lower tier than that.
     _make_provider(
         "openai",
         "OPENAI_API_KEY",
