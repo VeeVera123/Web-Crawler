@@ -1,3 +1,6 @@
+
+
+
 """
 Two-stage classifier — multi-provider architecture.
 
@@ -849,14 +852,144 @@ def enrich_unsure_roles_with_application_questions(
     max_workers: int = 8,
     use_browser: bool = True,
 ) -> list[dict]:
-    """Fetch application questions for every role still classified as unsure.
-
-    This is intentionally lazy-imported so normal title/location classification
-    does not require Playwright unless this enrichment stage is actually used.
     """
-    from unsure_role_application_pipeline import fetch_questions_for_unsure_roles
-    return fetch_questions_for_unsure_roles(
-        jobs,
-        max_workers=max_workers,
-        use_browser=use_browser,
+    Investigate every role still classified as 'unsure'.
+
+    Uses the same global multi-fallback application scraper as the main ATS
+    enrichment stage. The application scraper itself decides whether to use
+    ATS-specific APIs, static HTML/JSON, iframes, or Playwright.
+
+    No application is submitted.
+    """
+    from ats_scrapers import GlobalATSApplicationScraper
+
+    scraper = GlobalATSApplicationScraper(
+        timeout=15,
+        browser_timeout=30 if use_browser else 0,
+        max_steps=8,
     )
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    unsure = [
+        job for job in jobs
+        if str(job.get("role_classification", "")).lower() in {
+            "unsure", "uncertain"
+        }
+        and job.get("url")
+        and not job.get("application_question_checked")
+    ]
+
+    # Support pipelines that use a boolean instead of role_classification.
+    if not unsure:
+        unsure = [
+            job for job in jobs
+            if (
+                job.get("role_classification") is None
+                and (
+                    job.get("role_status") == "unsure"
+                    or job.get("role_class") == "unsure"
+                    or job.get("is_unsure") is True
+                )
+            )
+            and job.get("url")
+            and not job.get("application_question_checked")
+        ]
+
+    if not unsure:
+        log.info("No unsure roles require application-question enrichment.")
+        return jobs
+
+    log.info(
+        "Investigating application questions for %d unsure roles...",
+        len(unsure),
+    )
+
+    def _worker(job):
+        try:
+            result = scraper.get_application_questions(job["url"])
+
+            questions = result.get("questions", [])
+
+            job["application_questions"] = questions
+            job["application_question_count"] = len(questions)
+            job["application_question_ats"] = result.get("ats", "")
+            job["application_question_method"] = result.get("method", "")
+            job["application_question_attempts"] = result.get(
+                "attempts", []
+            )
+            job["application_question_checked"] = True
+            job["application_question_status"] = (
+                "found" if questions else "not_found"
+            )
+
+            # Make work-auth questions visible to the existing location AI.
+            signals = []
+
+            for q in questions:
+                label = str(q.get("label", ""))
+                if _VISA_YES_RE.search(label) or _VISA_NO_RE.search(label):
+                    signals.append(
+                        f"Application Question: {label}"
+                    )
+
+                for option in q.get("options", []) or []:
+                    option_text = str(option)
+                    if _VISA_YES_RE.search(option_text) or _VISA_NO_RE.search(option_text):
+                        signals.append(
+                            f"Application Option: {option_text}"
+                        )
+
+            if signals:
+                existing = job.get("description_snippet", "") or ""
+                additions = [
+                    signal for signal in signals
+                    if signal not in existing
+                ]
+                if additions:
+                    job["description_snippet"] = (
+                        existing + "\n\n" + "\n".join(additions)
+                    )
+
+        except Exception as exc:
+            job["application_question_checked"] = True
+            job["application_questions"] = []
+            job["application_question_count"] = 0
+            job["application_question_status"] = "error"
+            job["application_question_error"] = str(exc)
+
+            log.debug(
+                "Unsure-role application extraction failed for %s: %s",
+                job.get("url"),
+                exc,
+            )
+
+        return job
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_worker, job): job
+            for job in unsure
+        }
+
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                log.debug(
+                    "Unsure-role worker failed: %s",
+                    exc,
+                )
+
+    found = sum(
+        1 for job in unsure
+        if job.get("application_question_count", 0) > 0
+    )
+
+    log.info(
+        "Unsure-role application questions found for %d/%d roles.",
+        found,
+        len(unsure),
+    )
+
+    return jobs
