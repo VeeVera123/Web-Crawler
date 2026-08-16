@@ -92,20 +92,20 @@ def get_discovered_slugs() -> list[tuple[str, str]]:
 # REMOTEOK
 # ═══════════════════════════════════════════════════════
 
-def scrape_remoteok() -> list[dict]:
-    """Fetch all jobs from RemoteOK. Returns normalized job dicts."""
-    url = "https://remoteok.com/api"
+def _remoteok_fetch_one(url: str) -> list[dict]:
+    """Fetch a single RemoteOK endpoint (main feed or tag-filtered) and
+    normalize its jobs. Shared by scrape_remoteok()."""
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        log.error(f"RemoteOK API error: {e}")
+        log.debug(f"RemoteOK fetch failed ({url}): {e}")
         return []
 
     jobs = []
     # First item is metadata/legal notice, skip it
-    for item in data[1:] if len(data) > 1 else []:
+    for item in data[1:] if isinstance(data, list) and len(data) > 1 else []:
         job_url = item.get("url", "")
         if not job_url:
             continue
@@ -122,8 +122,40 @@ def scrape_remoteok() -> list[dict]:
             "salary": _format_salary(item.get("salary_min"), item.get("salary_max")),
             "tags": item.get("tags", []),
         })
+    return jobs
 
-    log.info(f"  RemoteOK: {len(jobs)} jobs fetched")
+
+# RemoteOK has no true pagination/offset param (verified — it's a fixed
+# snapshot of recent jobs). Its only lever for surfacing more unique jobs
+# is tag-filtered endpoints (remoteok.com/api?tag=...), which may include
+# postings outside the main snapshot's recency window. We fetch the main
+# feed plus a set of CSM/AM-relevant tags and dedupe by URL — cheap
+# (9 requests total) and strictly additive, never fewer jobs than before.
+_REMOTEOK_SUPPLEMENTAL_TAGS = [
+    "customer-support", "customer-success", "sales",
+    "account-manager", "marketing", "non-tech",
+]
+
+
+def scrape_remoteok() -> list[dict]:
+    """Fetch jobs from RemoteOK: the main feed plus tag-filtered endpoints
+    for CSM/AM-relevant tags, deduplicated by URL. Returns normalized job dicts."""
+    seen_urls = set()
+    jobs = []
+
+    for job in _remoteok_fetch_one("https://remoteok.com/api"):
+        if job["url"] not in seen_urls:
+            seen_urls.add(job["url"])
+            jobs.append(job)
+
+    for tag in _REMOTEOK_SUPPLEMENTAL_TAGS:
+        for job in _remoteok_fetch_one(f"https://remoteok.com/api?tag={tag}"):
+            if job["url"] not in seen_urls:
+                seen_urls.add(job["url"])
+                jobs.append(job)
+        time.sleep(0.3)  # be polite between tag calls
+
+    log.info(f"  RemoteOK: {len(jobs)} jobs fetched (main feed + {len(_REMOTEOK_SUPPLEMENTAL_TAGS)} tag feeds)")
     return jobs
 
 
@@ -272,15 +304,15 @@ def scrape_arbeitnow() -> list[dict]:
 # JOBICY
 # ═══════════════════════════════════════════════════════
 
-def scrape_jobicy() -> list[dict]:
-    """Fetch remote jobs from Jobicy (max 50 per request)."""
-    url = "https://jobicy.com/api/v2/remote-jobs?count=50"
+def _jobicy_fetch_one(params: dict) -> list[dict]:
+    """Fetch a single Jobicy query and normalize its jobs. Shared by scrape_jobicy()."""
+    url = "https://jobicy.com/api/v2/remote-jobs"
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp = requests.get(url, params=params, headers=_HEADERS, timeout=_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        log.error(f"Jobicy API error: {e}")
+        log.debug(f"Jobicy fetch failed ({params}): {e}")
         return []
 
     jobs = []
@@ -301,8 +333,34 @@ def scrape_jobicy() -> list[dict]:
             ),
             "employment_type": item.get("jobType", ""),
         })
+    return jobs
 
-    log.info(f"  Jobicy: {len(jobs)} jobs fetched")
+
+# Jobicy's `count` param is hard-capped at 50 (verified — no pagination
+# beyond that exists). To surface more than one 50-job snapshot, fan out
+# across `industry` filters relevant to CSM/AM roles and dedupe by URL.
+_JOBICY_INDUSTRIES = ["customer-service", "business", "marketing", "sales"]
+
+
+def scrape_jobicy() -> list[dict]:
+    """Fetch remote jobs from Jobicy: an unfiltered call plus several
+    industry-filtered calls (each capped at 50 by the API), deduplicated by URL."""
+    seen_urls = set()
+    jobs = []
+
+    for job in _jobicy_fetch_one({"count": 50}):
+        if job["url"] not in seen_urls:
+            seen_urls.add(job["url"])
+            jobs.append(job)
+
+    for industry in _JOBICY_INDUSTRIES:
+        for job in _jobicy_fetch_one({"count": 50, "industry": industry}):
+            if job["url"] not in seen_urls:
+                seen_urls.add(job["url"])
+                jobs.append(job)
+        time.sleep(0.3)
+
+    log.info(f"  Jobicy: {len(jobs)} jobs fetched (unfiltered + {len(_JOBICY_INDUSTRIES)} industry feeds)")
     return jobs
 
 
@@ -310,9 +368,15 @@ def scrape_jobicy() -> list[dict]:
 # WE WORK REMOTELY (RSS)
 # ═══════════════════════════════════════════════════════
 
-# Category feeds for targeted scraping (plus main feed as fallback)
+# We Work Remotely's main feed doesn't necessarily include every category
+# (verified — "all-other-remote-jobs" is a separate catch-all). Combine the
+# main feed with the category feeds most relevant to CSM/AM roles for a
+# superset of jobs; scrape_weworkremotely() already dedupes by URL.
 _WWR_FEEDS = [
     "https://weworkremotely.com/remote-jobs.rss",
+    "https://weworkremotely.com/categories/remote-customer-support-jobs.rss",
+    "https://weworkremotely.com/categories/remote-sales-and-marketing-jobs.rss",
+    "https://weworkremotely.com/categories/all-other-remote-jobs.rss",
 ]
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
