@@ -2497,11 +2497,11 @@ SCRAPERS = {
     "paylocity": scrape_paylocity,
     "hrmdirect": scrape_hrmdirect,
     "zoho": scrape_zoho,
-    # ── Additional ATS coverage ──
-    "brassring": scrape_brassring,
-    "successfactors": scrape_successfactors,
-    "softgarden": scrape_softgarden,
-    "ycombinator": scrape_ycombinator,
+    # ── DISABLED (JS-rendered / auth-required / blocked) ──
+    # "brassring": scrape_brassring,
+    # "successfactors": scrape_successfactors,
+    # "softgarden": scrape_softgarden,
+    # "ycombinator": scrape_ycombinator,
 }
 
 
@@ -3108,39 +3108,12 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     return jobs
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# GLOBAL MULTI-FALLBACK APPLICATION QUESTION SCRAPER
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# This is deliberately embedded in ats_scrapers.py so main.py keeps its
-# existing import contract:
-#
-#   from ats_scrapers import scrape_board, enrich_descriptions,
-#       enrich_application_questions
-#
-# Extraction order:
-#   1. ATS-specific public endpoint
-#   2. Application URL variants
-#   3. Embedded JSON / Next.js / Nuxt state
-#   4. JSON-LD
-#   5. Static DOM
-#   6. iframe DOM
-#   7. Playwright-rendered DOM
-#   8. Playwright Apply-button navigation
-#   9. Playwright multi-step traversal
-#
-# NEVER submits an application.
-# ═══════════════════════════════════════════════════════════════════════════
-
-import copy
-import json
-from urllib.parse import urljoin, urlparse
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
-
+# ── Application Question Enrichment ─────────────────────
+# Greenhouse and Ashby expose application questions via their APIs.
+# Questions about work authorization / visa sponsorship are strong
+# signals that a job is NOT globally open. We extract these and
+# append them to description_snippet so the AI location classifier
+# can see them.
 
 _WORK_AUTH_RE = re.compile(
     r"(authorized?\s*to\s*work|work\s*authoriz|visa\s*sponsor|"
@@ -3152,961 +3125,142 @@ _WORK_AUTH_RE = re.compile(
 )
 
 
-class GlobalATSApplicationScraper:
-    """Application-question extractor with ATS-specific and generic fallbacks."""
-
-    ATS_DOMAINS = {
-        "greenhouse": ("greenhouse.io", "greenhouse.com"),
-        "lever": ("lever.co",),
-        "ashby": ("ashbyhq.com",),
-        "workable": ("workable.com",),
-        "bamboohr": ("bamboohr.com",),
-        "icims": ("icims.com",),
-        "workday": ("myworkdayjobs.com", "workday.com"),
-        "recruitee": ("recruitee.com",),
-        "smartrecruiters": ("smartrecruiters.com",),
-        "taleo": ("taleo.net",),
-        "oracle_cloud_hcm": ("oraclecloud.com",),
-        "brassring": ("brassring.com",),
-        "teamtailor": ("teamtailor.com",),
-        "successfactors": ("successfactors.com", "successfactors.eu"),
-        "breezyhr": ("breezy.hr",),
-        "applytojob": ("applytojob.com",),
-        "hrmdirect": ("hrmdirect.com",),
-        "softgarden": ("softgarden.io", "softgarden.de"),
-        "zoho": ("zohorecruit.com",),
-        "ycombinator": ("workatastartup.com",),
-        "personio": ("personio.de", "personio.com"),
-        "joincom": ("join.com",),
-        "paylocity": ("paylocity.com",),
-        "rippling": ("rippling.com",),
-        "pinpoint": ("pinpointhq.com",),
-        "jobvite": ("jobvite.com",),
-        "comeet": ("comeet.com",),
-        "dayforce": ("dayforce.com",),
-    }
-
-    SKIP_INPUT_TYPES = {
-        "hidden", "submit", "button", "file", "image", "reset",
-    }
-
-    NEXT_RE = re.compile(
-        r"^(next|continue|proceed|save\s*&?\s*continue|"
-        r"continue\s*application|next\s*step)$", re.I
-    )
-    SUBMIT_RE = re.compile(
-        r"(submit application|submit|apply now|send application|"
-        r"complete application|finish application)", re.I
-    )
-
-    def __init__(self, timeout=15, browser_timeout=30, max_steps=8):
-        self.timeout = timeout
-        self.browser_timeout = browser_timeout
-        self.max_steps = max_steps
-
-    # ── Public entry point ───────────────────────────────────────────────
-
-    def get_application_questions(self, url):
-        result = {
-            "questions": [],
-            "ats": self.detect_ats(url),
-            "method": "",
-            "attempts": [],
-        }
-
-        if not url:
-            result["method"] = "invalid_url"
-            return result
-
-        # 1. ATS-specific APIs
-        try:
-            result["attempts"].append("ats_specific_api")
-            questions = self._ats_specific(url, result["ats"])
-            if questions:
-                result["questions"] = self._dedupe(questions)
-                result["method"] = "ats_specific_api"
-                return result
-        except Exception as exc:
-            log.debug("ATS-specific application extraction failed: %s", exc)
-
-        # 2. ATS-specific application URL variants
-        try:
-            result["attempts"].append("application_url_variants")
-            for candidate in self._application_variants(url, result["ats"]):
-                questions = self._fetch_static_questions(candidate)
-                if questions:
-                    result["questions"] = self._dedupe(questions)
-                    result["method"] = "application_url"
-                    return result
-        except Exception as exc:
-            log.debug("Application URL variants failed: %s", exc)
-
-        # 3-6. Static HTML: JSON, JSON-LD, DOM, iframes
-        try:
-            result["attempts"].append("static_json_dom_iframe")
-            html = self._get_text(url)
-            if html:
-                questions = self._parse_html(html, url)
-                if questions:
-                    result["questions"] = self._dedupe(questions)
-                    result["method"] = "static_html"
-                    return result
-        except Exception as exc:
-            log.debug("Static application extraction failed: %s", exc)
-
-        # 7-9. Browser rendering / navigation / multi-step forms
-        try:
-            result["attempts"].append("playwright")
-            questions = self._playwright(url)
-            if questions:
-                result["questions"] = self._dedupe(questions)
-                result["method"] = "playwright"
-                return result
-        except Exception as exc:
-            log.debug("Playwright application extraction failed: %s", exc)
-
-        result["method"] = "none"
-        return result
-
-    # ── ATS detection ────────────────────────────────────────────────────
-
-    def detect_ats(self, url):
-        domain = urlparse(url).netloc.lower()
-        for ats, markers in self.ATS_DOMAINS.items():
-            if any(marker in domain for marker in markers):
-                return ats
-        return "unknown"
-
-    # ── ATS-specific APIs ────────────────────────────────────────────────
-
-    def _ats_specific(self, url, ats):
-        if ats == "greenhouse":
-            return self._greenhouse_questions(url)
-        if ats == "ashby":
-            return self._ashby_questions(url)
-        return []
-
-    def _greenhouse_questions(self, url):
-        # Handles both boards.greenhouse.io and job-boards.greenhouse.io.
-        m = re.search(
-            r"(?:boards|job-boards)\.greenhouse\.io/([^/]+)/jobs/(\d+)",
-            url, re.I
-        )
-        if not m:
-            return []
-
-        board, job_id = m.groups()
-        api_url = (
-            f"https://boards-api.greenhouse.io/v1/boards/"
-            f"{board}/jobs/{job_id}?questions=true"
-        )
-        r = _get(api_url)
-        if not r:
-            return []
-
-        try:
-            data = r.json()
-        except Exception:
-            return []
-
-        found = []
-        for q in data.get("questions", []) or []:
-            if not isinstance(q, dict):
-                continue
-            label = q.get("label") or q.get("text") or q.get("name")
-            if not label:
-                continue
-
-            options = []
-            for field in q.get("fields", []) or []:
-                if isinstance(field, dict):
-                    value = (
-                        field.get("label")
-                        or field.get("name")
-                        or field.get("value")
-                    )
-                    if value:
-                        options.append(str(value))
-
-            found.append({
-                "label": str(label).strip(),
-                "type": q.get("type", "text"),
-                "required": bool(q.get("required")),
-                "options": options,
-                "source": "greenhouse_api",
-            })
-
-        # Metadata is useful when a bare Remote posting actually identifies
-        # a country/region in its application payload.
-        for md in data.get("metadata", []) or []:
-            if not isinstance(md, dict):
-                continue
-            name = str(md.get("name", "")).lower()
-            value = str(md.get("value", "")).strip()
-            if value and name in ("location", "location_country", "country"):
-                found.append({
-                    "label": f"Metadata Location: {value}",
-                    "type": "metadata",
-                    "required": False,
-                    "options": [],
-                    "source": "greenhouse_api",
-                })
-
-        return found
-
-    def _ashby_questions(self, url):
-        m = re.search(
-            r"ashbyhq\.com/([^/]+)/([a-f0-9-]+)",
-            url, re.I
-        )
-        if not m:
-            return []
-
-        slug, job_id = m.groups()
-        candidates = [
-            f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}",
-            f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}/",
-        ]
-
-        for api_url in candidates:
-            r = _get(api_url)
-            if not r:
-                continue
-            try:
-                data = r.json()
-            except Exception:
-                continue
-
-            questions = self._recursive_questions(data)
-            if questions:
-                return questions
-
-        return []
-
-    # ── Application URL variants ────────────────────────────────────────
-
-    def _application_variants(self, url, ats):
-        base = url.rstrip("/")
-        variants = []
-
-        suffixes = {
-            "lever": ["/apply"],
-            "ashby": ["/application"],
-            "recruitee": ["/application"],
-            "workable": ["/apply"],
-            "bamboohr": ["/apply"],
-            "teamtailor": ["/apply"],
-            "personio": ["/apply"],
-            "breezyhr": ["/apply"],
-            "softgarden": ["/applicationForm"],
-            "icims": ["?mode=apply&in_iframe=1", "?mode=apply", "?in_iframe=1"],
-        }
-
-        for suffix in suffixes.get(ats, []):
-            candidate = base + suffix
-            if candidate != url:
-                variants.append(candidate)
-
-        return list(dict.fromkeys(variants))
-
-    # ── Static fetching/parsing ──────────────────────────────────────────
-
-    def _get_text(self, url):
-        try:
-            r = _get(url)
-            return r.text if r else ""
-        except Exception:
-            return ""
-
-    def _fetch_static_questions(self, url):
-        html = self._get_text(url)
-        if not html:
-            return []
-        return self._parse_html(html, url)
-
-    def _parse_html(self, html, base_url=""):
-        if BeautifulSoup is None:
-            return []
-
-        soup = BeautifulSoup(html, "html.parser")
-        questions = []
-
-        # Embedded application state.
-        questions.extend(self._extract_json_state(soup))
-
-        # JSON-LD.
-        questions.extend(self._extract_jsonld(soup))
-
-        # Regular form controls.
-        questions.extend(self._extract_dom(soup))
-
-        # iframe application forms.
-        for iframe in soup.find_all("iframe"):
-            src = iframe.get("src") or iframe.get("data-src")
-            if not src:
-                continue
-            iframe_url = urljoin(base_url, src)
-            iframe_html = self._get_text(iframe_url)
-            if not iframe_html:
-                continue
-            questions.extend(self._parse_html_no_iframe(iframe_html))
-
-        return self._dedupe(questions)
-
-    def _parse_html_no_iframe(self, html):
-        if BeautifulSoup is None:
-            return []
-        soup = BeautifulSoup(html, "html.parser")
-        questions = []
-        questions.extend(self._extract_json_state(soup))
-        questions.extend(self._extract_jsonld(soup))
-        questions.extend(self._extract_dom(soup))
-        return questions
-
-    def _extract_json_state(self, soup):
-        found = []
-
-        # Next.js
-        script = soup.find("script", id="__NEXT_DATA__")
-        if script:
-            try:
-                data = json.loads(script.string or script.get_text())
-                found.extend(self._recursive_questions(data))
-            except Exception:
-                pass
-
-        # Nuxt
-        for script_id in ("__NUXT_DATA__", "__NUXT__"):
-            script = soup.find("script", id=script_id)
-            if script:
-                try:
-                    data = json.loads(script.string or script.get_text())
-                    found.extend(self._recursive_questions(data))
-                except Exception:
-                    pass
-
-        # Generic JSON/script state.
-        for script in soup.find_all("script"):
-            text = script.string or script.get_text()
-            if not text:
-                continue
-
-            lower = text.lower()
-            if not any(
-                x in lower
-                for x in (
-                    "question", "applicationform", "formfields",
-                    "customfields", "surveyquestions", "screening",
-                )
-            ):
-                continue
-
-            try:
-                data = json.loads(text)
-                found.extend(self._recursive_questions(data))
-                continue
-            except Exception:
-                pass
-
-            for candidate in self._balanced_json_objects(text):
-                try:
-                    found.extend(
-                        self._recursive_questions(json.loads(candidate))
-                    )
-                except Exception:
-                    pass
-
-        return found
-
-    def _balanced_json_objects(self, text):
-        results = []
-        for opening, closing in (("{", "}"), ("[", "]")):
-            stack = 0
-            start = None
-            in_string = False
-            escaped = False
-
-            for i, ch in enumerate(text):
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif ch == "\\":
-                        escaped = True
-                    elif ch == '"':
-                        in_string = False
-                    continue
-
-                if ch == '"':
-                    in_string = True
-                elif ch == opening:
-                    if stack == 0:
-                        start = i
-                    stack += 1
-                elif ch == closing and stack:
-                    stack -= 1
-                    if stack == 0 and start is not None:
-                        candidate = text[start:i + 1]
-                        if (
-                            len(candidate) >= 30
-                            and any(
-                                k in candidate.lower()
-                                for k in (
-                                    "question", "field", "application",
-                                    "survey", "screening",
-                                )
-                            )
-                        ):
-                            results.append(candidate)
-                        start = None
-
-        return results[:100]
-
-    def _recursive_questions(self, data):
-        found = []
-
-        if isinstance(data, dict):
-            label = (
-                data.get("label")
-                or data.get("question")
-                or data.get("title")
-                or data.get("text")
-                or data.get("prompt")
-                or data.get("name")
-            )
-            field_type = (
-                data.get("type")
-                or data.get("inputType")
-                or data.get("fieldType")
-                or data.get("component")
-            )
-
-            if (
-                isinstance(label, str)
-                and label.strip()
-                and (
-                    field_type
-                    or any(
-                        key in data
-                        for key in (
-                            "required", "isRequired",
-                            "options", "choices", "answers",
-                        )
-                    )
-                )
-            ):
-                raw_options = (
-                    data.get("options")
-                    or data.get("choices")
-                    or data.get("answers")
-                    or []
-                )
-                if isinstance(raw_options, dict):
-                    raw_options = list(raw_options.values())
-
-                options = []
-                if isinstance(raw_options, list):
-                    for option in raw_options:
-                        if isinstance(option, dict):
-                            value = (
-                                option.get("label")
-                                or option.get("name")
-                                or option.get("text")
-                                or option.get("value")
-                            )
-                        else:
-                            value = option
-                        if value is not None and str(value).strip():
-                            options.append(str(value).strip())
-
-                found.append({
-                    "label": label.strip(),
-                    "type": field_type or "text",
-                    "required": bool(
-                        data.get("required") or data.get("isRequired")
-                    ),
-                    "options": list(dict.fromkeys(options)),
-                    "source": "json_state",
-                })
-
-            for value in data.values():
-                found.extend(self._recursive_questions(value))
-
-        elif isinstance(data, list):
-            for item in data:
-                found.extend(self._recursive_questions(item))
-
-        return found
-
-    def _extract_jsonld(self, soup):
-        found = []
-        for script in soup.find_all(
-            "script", attrs={"type": "application/ld+json"}
-        ):
-            try:
-                data = json.loads(script.string or script.get_text())
-                found.extend(self._recursive_questions(data))
-            except Exception:
-                pass
-        return found
-
-    def _extract_dom(self, soup):
-        found = []
-        radio_groups = {}
-
-        for element in soup.find_all(["input", "textarea", "select"]):
-            element_type = (
-                element.name
-                if element.name != "input"
-                else element.get("type", "text").lower()
-            )
-
-            if element_type in self.SKIP_INPUT_TYPES:
-                continue
-
-            label = self._find_label(soup, element)
-            if not label:
-                continue
-
-            label = re.sub(r"\s*\*\s*$", "", label).strip()
-            if not label:
-                continue
-
-            required = (
-                element.has_attr("required")
-                or element.get("aria-required") == "true"
-                or bool(re.search(r"\*\s*$", label))
-            )
-
-            options = []
-
-            if element.name == "select":
-                for option in element.find_all("option"):
-                    text = option.get_text(" ", strip=True)
-                    if text and text.lower() not in {
-                        "select", "select...", "choose", "choose..."
-                    }:
-                        options.append(text)
-
-            if element_type in ("radio", "checkbox"):
-                name = (
-                    element.get("name")
-                    or element.get("id")
-                    or label
-                )
-                group = radio_groups.setdefault(
-                    name,
-                    {
-                        "label": label,
-                        "type": element_type,
-                        "required": required,
-                        "options": [],
-                        "source": "dom",
-                    },
-                )
-                value = (
-                    element.get("value")
-                    or element.get("aria-label")
-                    or self._find_label(soup, element)
-                )
-                if value:
-                    group["options"].append(str(value).strip())
-                continue
-
-            found.append({
-                "label": label,
-                "type": element_type,
-                "required": bool(required),
-                "options": list(dict.fromkeys(options)),
-                "source": "dom",
-            })
-
-        found.extend(radio_groups.values())
-
-        # Fieldsets often represent custom screening questions.
-        for fieldset in soup.find_all("fieldset"):
-            legend = fieldset.find("legend")
-            if not legend:
-                continue
-
-            label = legend.get_text(" ", strip=True)
-            controls = fieldset.find_all(
-                ["input", "textarea", "select"]
-            )
-            if not controls:
-                continue
-
-            options = []
-            for control in controls:
-                value = (
-                    control.get("value")
-                    or control.get("aria-label")
-                )
-                if value:
-                    options.append(str(value).strip())
-
-            found.append({
-                "label": label,
-                "type": "fieldset",
-                "required": any(
-                    c.has_attr("required") for c in controls
-                ),
-                "options": list(dict.fromkeys(options)),
-                "source": "fieldset",
-            })
-
-        return found
-
-    def _find_label(self, soup, element):
-        element_id = element.get("id")
-        if element_id:
-            label = soup.find("label", attrs={"for": element_id})
-            if label:
-                return label.get_text(" ", strip=True)
-
-        parent_label = element.find_parent("label")
-        if parent_label:
-            clone = copy.copy(parent_label)
-            for child in clone.find_all(["input", "textarea", "select"]):
-                child.decompose()
-            text = clone.get_text(" ", strip=True)
-            if text:
-                return text
-
-        for attr in ("aria-label", "aria-labelledby"):
-            value = element.get(attr)
-            if value:
-                if attr == "aria-labelledby":
-                    parts = []
-                    for ref in value.split():
-                        node = soup.find(id=ref)
-                        if node:
-                            parts.append(node.get_text(" ", strip=True))
-                    if parts:
-                        return " ".join(parts)
-                else:
-                    return value.strip()
-
-        placeholder = element.get("placeholder")
-        if placeholder:
-            return placeholder.strip()
-
-        parent = element.parent
-        if parent:
-            for sibling in (
-                parent.find_previous_sibling(),
-                element.find_previous_sibling(),
-            ):
-                if sibling and getattr(sibling, "name", None) in {
-                    "label", "div", "span", "p", "h3", "h4", "legend"
-                }:
-                    text = sibling.get_text(" ", strip=True)
-                    if text:
-                        return text
-
+def _fetch_greenhouse_questions(job: dict) -> str:
+    """Fetch application questions from Greenhouse job API.
+    Returns a string of work-authorization-related questions, or empty."""
+    url = job.get("url", "")
+    # Extract board slug and job ID from URL
+    # https://job-boards.greenhouse.io/SLUG/jobs/JOBID
+    m = re.search(r"greenhouse\.io/([^/]+)/jobs/(\d+)", url)
+    if not m:
+        return ""
+    slug, job_id = m.group(1), m.group(2)
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{job_id}?questions=true"
+    r = _get(api_url)
+    if not r:
+        return ""
+    try:
+        data = r.json()
+    except Exception:
         return ""
 
-    # ── Browser fallback ─────────────────────────────────────────────────
+    questions = data.get("questions") or []
+    auth_questions = []
+    for q in questions:
+        label = q.get("label", "")
+        if _WORK_AUTH_RE.search(label):
+            auth_questions.append(f"Application Question: {label}")
 
-    def _playwright(self, url):
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            log.debug("Playwright not installed; skipping browser fallback.")
-            return []
+    # Also check metadata for location hints (e.g. "United States (Remote)")
+    metadata = data.get("metadata") or []
+    for md in metadata:
+        if isinstance(md, dict):
+            name = md.get("name", "").lower()
+            val = str(md.get("value", ""))
+            if name in ("location", "location_country") and val:
+                auth_questions.append(f"Metadata Location: {val}")
 
-        questions = []
+    return "\n".join(auth_questions)
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=USER_AGENTS[0],
-                locale="en-US",
-            )
-            page = context.new_page()
-            json_responses = []
 
-            def on_response(response):
-                try:
-                    content_type = response.headers.get(
-                        "content-type", ""
-                    ).lower()
-                    if "json" in content_type and response.ok:
-                        json_responses.append(response)
-                except Exception:
-                    pass
+def _fetch_ashby_questions(job: dict) -> str:
+    """Fetch application form from Ashby posting API.
+    Returns work-authorization-related form fields, or empty."""
+    url = job.get("url", "")
+    # https://jobs.ashbyhq.com/SLUG/JOBID
+    m = re.search(r"ashbyhq\.com/([^/]+)/([a-f0-9-]+)", url)
+    if not m:
+        return ""
+    slug, job_id = m.group(1), m.group(2)
 
-            page.on("response", on_response)
+    # Ashby's posting-api/posting endpoint returns form fields
+    api_url = f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}"
+    r = _get(api_url)
+    if not r:
+        return ""
+    try:
+        data = r.json()
+    except Exception:
+        return ""
 
-            try:
-                page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=self.browser_timeout * 1000,
-                )
-                try:
-                    page.wait_for_load_state(
-                        "networkidle", timeout=10000
-                    )
-                except Exception:
-                    pass
-
-                time.sleep(0.8)
-
-                questions.extend(
-                    self._parse_html(page.content())
-                )
-
-                # Capture JSON API responses generated by the SPA.
-                for response in json_responses:
-                    try:
-                        questions.extend(
-                            self._recursive_questions(response.json())
-                        )
-                    except Exception:
-                        pass
-
-                # If the job page only has an Apply button, open it.
-                if not questions:
-                    self._click_apply(page)
-                    time.sleep(1)
-                    questions.extend(
-                        self._parse_html(page.content())
-                    )
-
-                # Walk non-submitting "Next" buttons.
-                for _ in range(self.max_steps):
-                    if not self._click_next(page):
-                        break
-                    time.sleep(0.8)
-                    questions.extend(
-                        self._parse_html(page.content())
-                    )
-
-            finally:
-                context.close()
-                browser.close()
-
-        return self._dedupe(questions)
-
-    def _click_apply(self, page):
-        selectors = [
-            "button:has-text('Apply')",
-            "a:has-text('Apply')",
-            "text=/^apply$/i",
-            "text=/apply now/i",
-        ]
-
-        for selector in selectors:
-            try:
-                locator = page.locator(selector).first
-                if locator.count() and locator.is_visible():
-                    locator.click(timeout=3000)
-                    return True
-            except Exception:
-                pass
-
-        return False
-
-    def _click_next(self, page):
-        buttons = page.locator(
-            "button, input[type='button'], a"
-        )
-        count = min(buttons.count(), 150)
-
-        for i in range(count):
-            try:
-                button = buttons.nth(i)
-                if not button.is_visible():
-                    continue
-
-                text = (
-                    button.inner_text(timeout=500).strip()
-                    or button.get_attribute("value")
-                    or ""
-                ).strip()
-
-                if self.SUBMIT_RE.search(text):
-                    continue
-
-                if self.NEXT_RE.match(text):
-                    button.click(timeout=3000)
-                    return True
-            except Exception:
+    auth_questions = []
+    # Check applicationFormDefinition for work auth questions
+    form_def = data.get("applicationFormDefinition") or data.get("formDefinition") or {}
+    sections = form_def.get("sections") or []
+    for section in sections:
+        fields = section.get("fields") or section.get("fieldEntries") or []
+        for field in fields:
+            # field might be nested: {field: {title: ...}} or {title: ...}
+            f = field.get("field", field) if isinstance(field, dict) else field
+            if not isinstance(f, dict):
                 continue
+            title = f.get("title", "") or f.get("label", "") or f.get("name", "")
+            if _WORK_AUTH_RE.search(title):
+                auth_questions.append(f"Application Question: {title}")
 
-        return False
+    # Also check surveyQuestions
+    survey = data.get("surveyQuestions") or []
+    for sq in survey:
+        label = sq.get("label", "") or sq.get("title", "") or sq.get("question", "")
+        if _WORK_AUTH_RE.search(label):
+            auth_questions.append(f"Application Question: {label}")
 
-    # ── Deduplication ────────────────────────────────────────────────────
-
-    def _dedupe(self, questions):
-        clean = []
-        seen = set()
-
-        for q in questions:
-            if not isinstance(q, dict):
-                continue
-
-            label = str(q.get("label", "")).strip()
-            if not label:
-                continue
-
-            key = re.sub(r"\s+", " ", label.lower())
-            if key in seen:
-                continue
-
-            seen.add(key)
-
-            q = dict(q)
-            q["label"] = label
-
-            if not isinstance(q.get("options"), list):
-                q["options"] = []
-
-            clean.append(q)
-
-        return clean
+    return "\n".join(auth_questions)
 
 
-_APPLICATION_QUESTION_SCRAPER = GlobalATSApplicationScraper(
-    timeout=15,
-    browser_timeout=30,
-    max_steps=8,
-)
+def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
+    """Fetch application questions for Greenhouse/Ashby jobs with bare 'Remote' location.
 
+    Work authorization questions (visa sponsorship, authorized to work, etc.)
+    are appended to description_snippet so the AI location classifier can use
+    them as signals. Only fetches for jobs likely to be sent to AI (bare Remote).
 
-def enrich_application_questions(
-    jobs: list[dict],
-    max_workers: int = 8,
-) -> list[dict]:
-    """
-    Enrich jobs that need application-form investigation.
-
-    Unlike the old implementation, this supports all ATSs recognized by the
-    scraper and uses multiple fallbacks. It does not submit applications.
-
-    The existing main.py import remains unchanged.
-    """
+    Call this AFTER enrich_descriptions and BEFORE filter_locations."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Keep the expensive application pass targeted. If the caller explicitly
-    # marks a job for application inspection, honor that even if its location
-    # is not bare Remote. Otherwise preserve the old bare-Remote behavior.
     bare_remote_re = re.compile(
-        r"^\s*(remote|fully\s*remote|remote\s*worker|remote\s*job)?\s*$",
-        re.I,
+        r"^\s*(remote|fully\s*remote|remote\s*worker|remote\s*job)?\s*$", re.I
     )
 
-    to_enrich = []
-    for job in jobs:
-        if not job.get("url"):
-            continue
-        if job.get("application_questions"):
-            continue
-
-        explicitly_requested = bool(
-            job.get("needs_application_questions")
-            or job.get("application_question_required")
-        )
-
-        bare_remote = bool(
-            bare_remote_re.match(str(job.get("location", "")))
-        )
-
-        if explicitly_requested or bare_remote:
-            to_enrich.append(job)
+    to_enrich = [
+        j for j in jobs
+        if j.get("source_ats") in ("Greenhouse", "Ashby")
+        and bare_remote_re.match(j.get("location", ""))
+    ]
 
     if not to_enrich:
         return jobs
 
-    log.info(
-        "Fetching application questions for %d jobs using "
-        "multi-fallback ATS extraction...",
-        len(to_enrich),
-    )
+    log.info(f"Fetching application questions for {len(to_enrich)} "
+             f"Greenhouse/Ashby jobs with bare 'Remote' location...")
+
+    fetchers = {
+        "Greenhouse": _fetch_greenhouse_questions,
+        "Ashby": _fetch_ashby_questions,
+    }
 
     def _fetch_one(job):
+        fetcher = fetchers[job["source_ats"]]
         try:
-            result = _APPLICATION_QUESTION_SCRAPER.get_application_questions(
-                job["url"]
-            )
-
-            questions = result.get("questions", [])
-
-            job["application_questions"] = questions
-            job["application_question_count"] = len(questions)
-            job["application_question_ats"] = result.get("ats", "")
-            job["application_question_method"] = result.get("method", "")
-            job["application_question_attempts"] = result.get(
-                "attempts", []
-            )
-            job["application_question_status"] = (
-                "found" if questions else "not_found"
-            )
-
-            # Feed work-authorization/location signals back into the
-            # description used by the location classifier.
-            signals = []
-
-            for q in questions:
-                label = str(q.get("label", ""))
-                if _WORK_AUTH_RE.search(label):
-                    signals.append(
-                        f"Application Question: {label}"
-                    )
-
-                for option in q.get("options", []) or []:
-                    option_text = str(option)
-                    if _WORK_AUTH_RE.search(option_text):
-                        signals.append(
-                            f"Application Option: {option_text}"
-                        )
-
-            if signals:
+            questions = fetcher(job)
+            if questions:
                 existing = job.get("description_snippet", "") or ""
-                addition = "\n".join(
-                    x for x in signals if x not in existing
-                )
-                if addition:
-                    job["description_snippet"] = (
-                        existing + "\n\n" + addition
-                    )
-
-        except Exception as exc:
-            job["application_questions"] = []
-            job["application_question_count"] = 0
-            job["application_question_status"] = "error"
-            job["application_question_error"] = str(exc)
-            log.debug(
-                "Application extraction failed for %s: %s",
-                job.get("url"),
-                exc,
-            )
-
+                job["description_snippet"] = existing + "\n\n" + questions
+        except Exception as e:
+            log.debug(f"Failed to fetch questions for {job['url']}: {e}")
+        time.sleep(random.uniform(0.2, 0.5))
         return job
 
-    found = 0
-
+    enriched = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_fetch_one, job): job
-            for job in to_enrich
-        }
-
+        futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
         for future in as_completed(futures):
             try:
                 job = future.result()
-                if job.get("application_question_count", 0) > 0:
-                    found += 1
-            except Exception as exc:
-                log.debug(
-                    "Application question worker failed: %s",
-                    exc,
-                )
+                if "Application Question:" in (job.get("description_snippet") or ""):
+                    enriched += 1
+            except Exception:
+                pass
 
-    log.info(
-        "Application questions found for %d/%d jobs.",
-        found,
-        len(to_enrich),
-    )
-
+    log.info(f"Found work-auth questions for {enriched}/{len(to_enrich)} jobs")
     return jobs
