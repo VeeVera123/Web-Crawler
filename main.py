@@ -265,9 +265,10 @@ def main():
         log.info(f"\nFetching descriptions for jobs missing them...")
         csm_jobs = enrich_descriptions(csm_jobs)
 
-        # 3c. Fetch application questions for Greenhouse/Ashby bare-Remote jobs
+        # 3c. Fetch application questions for location-"unsure" jobs, across
+        # all 20 ATS platforms (multi-tier fallback — see ats_scrapers.py).
         # Work authorization questions help the AI detect country-restricted roles
-        log.info(f"\nEnriching Greenhouse/Ashby application questions...")
+        log.info(f"\nEnriching application questions across all ATS platforms...")
         csm_jobs = enrich_application_questions(csm_jobs)
 
         # 4. Filter for Africa/Global locations
