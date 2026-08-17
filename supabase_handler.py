@@ -4,6 +4,8 @@ Handles deduplication by job URL, populates slug_registry, and logs scan reports
 """
 
 import logging
+import random
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
@@ -15,6 +17,31 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 log = logging.getLogger(__name__)
+
+
+class SupabaseFetchError(Exception):
+    """
+    Raised when a Supabase GET fails after all retries are exhausted —
+    deliberately distinct from a query that legitimately returns zero rows.
+
+    Without this, a single transient blip (Supabase cold-start, a brief
+    gateway 401/5xx, a network timeout) looks IDENTICAL to "the table is
+    genuinely empty" to any caller checking `if not rows`. For
+    get_all_slugs() that's dangerous: main.py's load_slugs() treats an
+    empty result as "nothing assigned to this shard" and quietly skips
+    scraping — no error, no non-zero exit, just a shard that silently did
+    nothing (this is exactly what happened to shard 2/8 on a one-off 401).
+    """
+    pass
+
+
+# Retryable: connection blips, and HTTP statuses that can be transient on
+# Supabase's side (401/403 can happen on project cold-start/gateway hiccups,
+# not just a genuinely bad key — a bad key will just keep failing and we'll
+# find out after MAX_HTTP_RETRIES anyway).
+_RETRYABLE_STATUSES = {401, 403, 429, 500, 502, 503, 504}
+MAX_HTTP_RETRIES = 4
+_RETRY_BASE_DELAY = 2  # seconds
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -61,15 +88,42 @@ def _patch(table: str, filters: str, data: dict) -> bool:
 
 
 def _get(table: str, params: str = "", limit: int = 10000) -> list[dict]:
-    """GET rows from a table."""
+    """
+    GET rows from a table. Retries transient failures (network errors and
+    401/403/429/5xx responses) with exponential backoff + jitter before
+    giving up. Raises SupabaseFetchError if every attempt fails — callers
+    that need to tell "really empty" apart from "the fetch broke" (like
+    get_all_slugs(), see above) let that propagate; callers where a
+    best-effort empty result is an acceptable fallback should catch it.
+    """
     url = f"{REST}/{table}?{params}&limit={limit}" if params else f"{REST}/{table}?limit={limit}"
-    try:
-        r = http_requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.error(f"Supabase GET {table} failed: {e}")
-        return []
+    last_error = None
+
+    for attempt in range(MAX_HTTP_RETRIES):
+        try:
+            r = http_requests.get(url, headers=HEADERS, timeout=30)
+            if r.status_code in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                log.warning(
+                    f"Supabase GET {table} got HTTP {r.status_code}, "
+                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/{MAX_HTTP_RETRIES})"
+                )
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                log.warning(
+                    f"Supabase GET {table} failed ({e}), "
+                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/{MAX_HTTP_RETRIES})"
+                )
+                time.sleep(wait)
+
+    log.error(f"Supabase GET {table} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
+    raise SupabaseFetchError(f"GET {table} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
 
 # ── Slug Registry ────────────────────────────────────────
@@ -169,6 +223,12 @@ def get_all_slugs() -> list[tuple[str, str]]:
     """
     Fetch all (ats, slug) pairs from slug_registry.
     Supabase caps responses at 1000 rows, so we paginate with that limit.
+
+    Raises SupabaseFetchError if any page fetch fails after retries — this
+    is intentionally NOT caught here. main.py's load_slugs() needs to be
+    able to tell "the registry is genuinely empty" apart from "the fetch to
+    Supabase broke", so it can fail the shard loudly instead of silently
+    scraping nothing.
     """
     pairs = []
     offset = 0
@@ -195,22 +255,32 @@ def get_all_slugs() -> list[tuple[str, str]]:
 # ── Deduplication ────────────────────────────────────────
 
 def get_existing_urls() -> set[str]:
-    """Pull all job URLs already in the database to avoid duplicates."""
+    """
+    Pull all job URLs already in the database to avoid duplicates.
+
+    Unlike get_all_slugs(), a fetch failure here is tolerated: worst case
+    we treat a few already-known jobs as "new" and re-upsert them, which is
+    harmless (upserts are idempotent). Failing the whole shard over a
+    dedup-list fetch would be a much worse trade than that.
+    """
     urls = set()
     offset = 0
     batch_size = 1000  # Supabase default max per response
 
-    while True:
-        rows = _get("jobs", f"select=job_url&offset={offset}", limit=batch_size)
-        if not rows:
-            break
-        for row in rows:
-            url = row.get("job_url", "")
-            if url:
-                urls.add(url)
-        if len(rows) < batch_size:
-            break
-        offset += batch_size
+    try:
+        while True:
+            rows = _get("jobs", f"select=job_url&offset={offset}", limit=batch_size)
+            if not rows:
+                break
+            for row in rows:
+                url = row.get("job_url", "")
+                if url:
+                    urls.add(url)
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+    except SupabaseFetchError as e:
+        log.warning(f"get_existing_urls: fetch failed after retries, proceeding with {len(urls)} URLs known so far: {e}")
 
     log.info(f"Found {len(urls)} existing jobs in Supabase")
     return urls
@@ -248,6 +318,10 @@ def _build_row(job: dict, location_confidence: str) -> dict:
         "date_added": today,
         "last_seen": today,
         "is_active": True,
+        # 1=Global, 2=Africa, 3=Unsure — set by main.py's filter_locations().
+        # Falls back to 3 (Unsure) for any job that somehow reaches here
+        # without it set, rather than silently sorting as if it were tier 0.
+        "location_priority": job.get("location_priority", 3),
     }
 
 
