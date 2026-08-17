@@ -406,6 +406,21 @@ GLOBAL_KEYWORDS = [
     r"\bany\s*country\b",
     r"\bno\s*location\s*(requirement|restriction|preference)\b",
     r"\bno\s*geographic\s*restriction\b",
+    r"\bno\s*country\s*restriction\b",
+    # Time-zone framed global signals — "any time zone" / "regardless of
+    # time zone" is a strong proxy for "we don't restrict by geography"
+    r"\btime[\-\s]*zone\s*agnostic\b",
+    r"\bany\s*time\s*zone\b",
+    # Explicit "we don't care where you are" phrasings
+    r"\bregardless\s*of\s*(location|country|time\s*zone)\b",
+    r"\birrespective\s*of\s*(location|country)\b",
+    r"\bcountry[\-\s]*agnostic\b",
+    r"\bwork\s*from\s*any\s*(country|location)\b",
+    # "hire/candidates/applicants ... worldwide/globally/anywhere" phrasings
+    # not already covered by the hire/hiring-globally patterns above
+    r"\bhire\s*talent\s*(globally|worldwide|from\s*anywhere)\b",
+    r"\bglobal\s*talent\s*pool\b",
+    r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -442,6 +457,29 @@ GLOBAL_STRIP_RE = re.compile(
     r"\b("
     r"global|worldwide|international|anywhere|everywhere|"  # global keywords
     r"wfa|distributed|borderless|work|from"                 # global modifiers
+    r")\b",
+    re.I,
+)
+
+# Connector/filler vocabulary used across GLOBAL_KEYWORDS phrase templates
+# ("open to candidates worldwide", "work from any country", "any time
+# zone", ...). The residue check strips out the exact substring that
+# matched a keyword pattern, but when TWO patterns overlap the same text
+# (e.g. the narrow "\bany\s*country\b" firing inside the longer "open to
+# applicants in any country"), only one match wins and the other pattern's
+# leftover connector words ("open", "to", "applicants", "work", "from")
+# would otherwise sit there as fake "residue" and wrongly downgrade a
+# genuine global match to no_match. This list is deliberately just
+# connector/filler words from OUR OWN phrase templates — never real
+# country/city names — so the "is there an actual place name left over"
+# protection those phrases exist for stays intact.
+GLOBAL_FILLER_RE = re.compile(
+    r"\b("
+    r"location|locations|agnostic|independent|geo|flexible|team|"
+    r"multiple|countries|country|regions|region|restriction|requirement|preference|"
+    r"geographic|any|all|no|talent|pool|candidates|applicants|open|hire|hiring|"
+    r"globally|time|zone|timezone|regardless|irrespective|of|welcome|eligible|"
+    r"in|work|from"
     r")\b",
     re.I,
 )
@@ -513,9 +551,20 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
     return loc
 
 
-def keyword_classify_location(job: dict) -> str:
+# ── Location priority tiers (for sort order on upsert) ────
+# Lower number = higher priority. Populates jobs.location_priority (the
+# column already existed in the schema, unused, before this).
+PRIORITY_GLOBAL = 1   # explicit worldwide/anywhere/global-hiring signal
+PRIORITY_AFRICA = 2   # Africa (continent) or bare EMEA match
+PRIORITY_UNSURE = 3   # kept as a plausible match, but geographic scope
+                       # wasn't confirmed by keyword OR AI evidence
+
+
+def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     """
-    Returns 'match', 'no_match', or 'unsure'.
+    Returns (result, priority) where result is 'match', 'no_match', or
+    'unsure', and priority (PRIORITY_GLOBAL / PRIORITY_AFRICA / None) is
+    only meaningful when result == 'match'.
 
     MATCH = truly global hiring signals (anywhere, worldwide,
     international, WFA, EMEA alone, Africa as continent).
@@ -534,17 +583,17 @@ def keyword_classify_location(job: dict) -> str:
 
     # ── 1. Empty / placeholder → UNSURE ──────────────────
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
-        return "unsure"
+        return "unsure", None
 
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
     # ── 2a. South Africa is a COUNTRY → always reject ──
     if re.search(r"\bsouth\s+africa\b", loc_lower):
-        return "no_match"
+        return "no_match", None
 
     # ── 2b. Africa (the continent) → always MATCH ──
     if re.search(r"\bafrica\b", loc_lower):
-        return "match"
+        return "match", PRIORITY_AFRICA
 
     # ── 2c. EMEA → match only if no country/city qualifier ──
     if re.search(r"\bemea\b", loc_lower):
@@ -552,26 +601,43 @@ def keyword_classify_location(job: dict) -> str:
         check = NON_GEO_WORDS_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
         if not check:
-            return "match"
-        return "no_match"
+            # EMEA (Europe/Middle East/Africa) includes Africa but is
+            # broader than "global" — bucketed with Africa, not Global.
+            return "match", PRIORITY_AFRICA
+        return "no_match", None
 
     # ── 2d. Global/Worldwide/International/WFA/Anywhere ──
-    has_global = any(rx.search(loc_lower) for rx in GLOBAL_RE) or STANDALONE_GLOBAL_RE.search(loc.strip())
-    if has_global:
-        check = GLOBAL_STRIP_RE.sub("", loc_lower)
+    # Residue check: strip out the EXACT substring(s) that matched a global
+    # keyword (not a separately-maintained word list — GLOBAL_STRIP_RE used
+    # to do this and silently drifted out of sync with GLOBAL_KEYWORDS,
+    # e.g. "Location Agnostic" and "Timezone Agnostic" matched as global
+    # keywords but then failed their own residue check and got downgraded
+    # to no_match, since "agnostic"/"location"/"timezone" weren't in the
+    # strip list). Stripping the matched spans themselves can't drift.
+    if STANDALONE_GLOBAL_RE.search(loc.strip()):
+        return "match", PRIORITY_GLOBAL
+
+    check = loc_lower
+    matched_any = False
+    for rx in GLOBAL_RE:
+        if rx.search(check):
+            matched_any = True
+            check = rx.sub(" ", check)
+    if matched_any:
         check = NON_GEO_WORDS_RE.sub("", check)
+        check = GLOBAL_FILLER_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
         if not check:
-            return "match"
-        return "no_match"
+            return "match", PRIORITY_GLOBAL
+        return "no_match", None
 
     # ── 3. REJECT: Hybrid / Onsite ──────────────────────
     if re.search(r"\bhybrid\b", loc_lower):
-        return "no_match"
+        return "no_match", None
     if re.search(r"\bon[\-\s]*site\b", loc_lower):
-        return "no_match"
+        return "no_match", None
     if re.search(r"\bin[\-\s]*person\b", loc_lower):
-        return "no_match"
+        return "no_match", None
 
     # ── 4. Remote + qualifier check ─────────────────────
     if has_remote:
@@ -579,11 +645,26 @@ def keyword_classify_location(job: dict) -> str:
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
 
         if not stripped:
-            return "unsure"
-        return "no_match"
+            return "unsure", None
+        return "no_match", None
 
     # ── 5. REJECT: Has location text but no "remote" → onsite ──
-    return "no_match"
+    return "no_match", None
+
+
+def keyword_classify_location(job: dict) -> str:
+    """
+    Returns 'match', 'no_match', or 'unsure'.
+
+    MATCH = truly global hiring signals (anywhere, worldwide,
+    international, WFA, EMEA alone, Africa as continent).
+
+    Thin wrapper over _keyword_classify_location_detail() for callers that
+    only need the verdict, not the priority tier (e.g. ats_scrapers.py's
+    application-question enrichment, which only checks for "unsure").
+    """
+    result, _ = _keyword_classify_location_detail(job)
+    return result
 
 
 LOCATION_SYSTEM_PROMPT = """\
