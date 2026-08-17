@@ -2468,19 +2468,29 @@ def scrape_eploy(slug: str) -> list[dict]:
 
 def scrape_folkshr(slug: str) -> list[dict]:
     """Folks HR — HTML scrape of the public careers microsite.
-    Slug is the company identifier on jobs.folksats.app
-    (e.g. 'acme' for jobs.folksats.app/acme). No public API;
-    listing and detail pages are server-rendered HTML.
+    Slug is the company identifier on the shared board domain.
+    No public API; listing and detail pages are server-rendered HTML.
 
-    List page:   https://jobs.folksats.app/{company}
-    Detail page: https://jobs.folksats.app/{company}/{job-id}
+    Two domains are live: jobs.folksats.app (post-2025-rebrand) and
+    jobs.glowinthecloud.com (the older "Glow Talents" domain Folks HR
+    acquired — most existing customers are still actually hosted there).
+    A given company lives on one or the other, not both, so we try
+    folksats.app first and fall back to glowinthecloud.com.
+
+    List page:   https://{domain}/{company}
+    Detail page: https://{domain}/{company}/{job-id}
     """
     company_name = slug.replace("-", " ").title()
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    base = f"https://jobs.folksats.app/{slug}"
 
-    r = _get(base, headers=headers)
-    if not r:
+    domain = None
+    r = None
+    for candidate in ("jobs.folksats.app", "jobs.glowinthecloud.com"):
+        r = _get(f"https://{candidate}/{slug}", headers=headers)
+        if r:
+            domain = candidate
+            break
+    if not r or not domain:
         return []
 
     jobs = []
@@ -2493,7 +2503,7 @@ def scrape_folkshr(slug: str) -> list[dict]:
         path, job_id, title = match.group(1), match.group(2), unescape(match.group(3)).strip()
         if job_id.lower() in ("apply", "about", "jobs", "") or len(title) < 3:
             continue
-        job_url = f"https://jobs.folksats.app{path}"
+        job_url = f"https://{domain}{path}"
         if job_url in seen:
             continue
         seen.add(job_url)
