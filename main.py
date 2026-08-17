@@ -29,6 +29,7 @@ CLI modes (see .github/workflows/daily_scan.yml for how these compose):
 
 import argparse
 import hashlib
+import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -39,10 +40,13 @@ from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
     detect_visa_sponsorship,
+    _keyword_classify_location_detail,
+    PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
     get_all_slugs, cleanup_stale_jobs, populate_slug_registry,
+    SupabaseFetchError,
 )
 
 logging.basicConfig(
@@ -232,15 +236,26 @@ def filter_roles(jobs: list[dict]) -> list[dict]:
 
 
 def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
-    """Stage 3+4: Keep only global/Africa-eligible jobs."""
+    """
+    Stage 3+4: Keep only global/Africa-eligible jobs.
+
+    Also tags each matched job with job["location_priority"]:
+      1 = Global   (explicit worldwide/anywhere/global-hiring signal)
+      2 = Africa   (Africa continent, or bare EMEA)
+      3 = Unsure   (kept as a plausible remote match, but AI/keyword
+                    evidence didn't confirm which of the above it is)
+    This is what jobs.location_priority (already in the schema) sorts on,
+    so Global rows surface before Africa rows before "maybe" rows.
+    """
     matched = []
     matched_confidences = []
     unsure_jobs = []
 
     for job in jobs:
-        result = keyword_classify_location(job)
+        result, priority = _keyword_classify_location_detail(job)
         if result == "match":
             job["clearance"] = "regex"
+            job["location_priority"] = priority  # PRIORITY_GLOBAL or PRIORITY_AFRICA
             matched.append(job)
             matched_confidences.append("match")
         elif result == "unsure":
@@ -254,11 +269,18 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             # Determine which provider classified this job (round-robin assignment)
             provider_name = LOCATION_PROVIDERS[i % len(LOCATION_PROVIDERS)]["name"]
             if label == "match":
+                # AI confirmed genuinely global hiring from the description
+                # (LOCATION_SYSTEM_PROMPT only ever says MATCH for worldwide
+                # evidence, never Africa-specifically — keyword step above
+                # already catches literal "Africa" mentions), so this is a
+                # Global-tier match, same as a keyword-level global match.
                 job["clearance"] = provider_name
+                job["location_priority"] = PRIORITY_GLOBAL
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
                 job["clearance"] = provider_name
+                job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
                 matched_confidences.append("uncertain")
             # "no_match" → drop; AI failure defaults to "uncertain" (included)
@@ -417,7 +439,16 @@ def main():
     boards: list[tuple[str, str]] = []
     if not args.job_boards_only:
         log.info("Loading company slugs from Supabase...")
-        boards = load_slugs(shard=args.shard, total_shards=args.total_shards)
+        try:
+            boards = load_slugs(shard=args.shard, total_shards=args.total_shards)
+        except SupabaseFetchError as e:
+            # A real fetch failure (e.g. the one-off 401 that made shard 2/8
+            # silently scrape nothing) is NOT the same as "this shard
+            # legitimately has zero boards" below — it must fail loudly
+            # (non-zero exit) so the GitHub Actions job shows red instead of
+            # a quiet, misleading "completed" with 0 jobs found.
+            log.error(f"Failed to load slugs from Supabase after retries — aborting shard: {e}")
+            sys.exit(1)
         if not boards:
             if args.total_shards == 1:
                 log.error("No boards to scrape.")
