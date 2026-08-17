@@ -612,6 +612,79 @@ def _url_to_slug_adp(url: str) -> str | None:
     return None
 
 
+def _extract_adp_legacy_client(url: str) -> str | None:
+    """Pure parse (no network): pull the 'client' shortname out of ADP's
+    legacy job-posting URL family (jobs/apply/posting.html?client=...).
+    ADP decommissioned this URL family on 2026-06-26 — it no longer serves
+    job content, only a redirect notice — but the redirect itself is a
+    live, working client→cid resolver (see _resolve_adp_legacy_client)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "adp.com" not in host or "/jobs/apply/posting.html" not in parsed.path:
+        return None
+    qs = parse_qs(parsed.query)
+    client = (qs.get("client") or [None])[0]
+    return client or None
+
+
+def _resolve_adp_legacy_client(client: str) -> str | None:
+    """ONE live HTTP call: follow the legacy posting.html URL's redirect
+    chain to pick up the modern cid (ADP's own server-side lookup — no
+    guessing). ccId=19000101_000001 is the generic 'career center root'
+    sentinel that reliably round-trips to the client's real cid in
+    testing; the redirect target echoes back whatever ccId is correct
+    for that tenant, which we use over the sentinel if present."""
+    try:
+        r = requests.get(
+            "https://workforcenow.adp.com/jobs/apply/posting.html",
+            params={"client": client, "ccId": "19000101_000001", "type": "MP"},
+            timeout=20, allow_redirects=True,
+            headers={"User-Agent": _ROBOTS_UA},
+        )
+        final_qs = parse_qs(urlparse(r.url).query)
+        cid = (final_qs.get("cid") or [None])[0]
+        cc_id = (final_qs.get("ccId") or [None])[0] or "19000101_000001"
+        if cid:
+            return f"{cid}|{cc_id}"
+    except Exception as e:
+        log.debug(f"ADP legacy client resolve failed for '{client}': {e}")
+    return None
+
+
+# Cap live resolve calls per run — this platform's legacy URL family is
+# deprecated and rare, and each hit costs one real HTTP round-trip against
+# ADP's own server (unlike the pure-parse extractors above), so we bound
+# it rather than risk hammering their server if a crawl surfaces a lot of
+# stale legacy links at once.
+_ADP_LEGACY_RESOLVE_CAP = 200
+
+
+def _url_to_slug_adp_discovery(url: str) -> str | None:
+    """Combined extractor for CC/Wayback ADP discovery: pure-parses the
+    modern cid/ccId URL family, and resolves the deprecated legacy
+    client= family via one live redirect-follow per unique client (capped
+    — see _ADP_LEGACY_RESOLVE_CAP). Kept separate from _url_to_slug_adp
+    (which stays a pure, no-network function used elsewhere, e.g. for
+    OpenPostings' 110k+ row scan where a live call per row isn't viable)."""
+    modern = _url_to_slug_adp(url)
+    if modern:
+        return modern
+    client = _extract_adp_legacy_client(url)
+    if not client:
+        return None
+    if client in _url_to_slug_adp_discovery._resolved_clients:
+        return _url_to_slug_adp_discovery._resolved_clients[client]
+    if len(_url_to_slug_adp_discovery._resolved_clients) >= _ADP_LEGACY_RESOLVE_CAP:
+        return None
+    resolved = _resolve_adp_legacy_client(client)
+    _url_to_slug_adp_discovery._resolved_clients[client] = resolved
+    time.sleep(0.5)  # be polite — this is a live call against ADP's own server
+    return resolved
+
+
+_url_to_slug_adp_discovery._resolved_clients = {}
+
+
 def _url_to_slug_avature(url: str) -> str | None:
     """Extract slug from Avature URLs.
     Pattern: {subdomain}.avature.net/careers/... (locale prefix varies,
@@ -895,8 +968,12 @@ CC_PLATFORM_PATTERNS = {
     # JS web component (<recruitment-current-openings cid=... ccid=...>)
     # rather than a plain <a href>, so Common Crawl's link-following crawler
     # has no anchor to discover in the first place. Treat CC as a weak
-    # source for ADP; manual/other-source cid|ccId seeding will do more.
-    "adp": ["workforcenow.adp.com/mascsr/*"],
+    # source for ADP; the Wayback Machine source below does much better.
+    # Second pattern is ADP's legacy (deprecated 2026-06-26) client= URL
+    # family — no longer serves job content, but its redirect resolves to
+    # a real modern cid, so old crawled/archived hits are still useful.
+    # See _url_to_slug_adp_discovery.
+    "adp": ["workforcenow.adp.com/mascsr/*", "workforcenow.adp.com/jobs/apply/posting.html*"],
     "avature": ["*.avature.net/careers/*"],
 }
 
@@ -923,7 +1000,7 @@ CC_EXTRACTORS = {
     "folkshr": _url_to_slug_folkshr,
     "jobadder": _url_to_slug_jobadder,
     "jobvite": _url_to_slug_jobvite,
-    "adp": _url_to_slug_adp,
+    "adp": _url_to_slug_adp_discovery,  # combined modern + legacy-resolve, see above
     "avature": _url_to_slug_avature,
 }
 
@@ -1031,7 +1108,14 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
 # web.archive.org/robots.txt live before every run rather than assume.
 
 WAYBACK_CDX_URL = "http://web.archive.org/cdx/search/cdx"
-_ADP_WAYBACK_PATTERN = "workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html*"
+_ADP_WAYBACK_PATTERNS = [
+    "workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html*",
+    # Legacy (deprecated 2026-06-26) family — no longer serves job content,
+    # but Wayback may still have snapshots from before the sunset, and its
+    # redirect chain resolves client= to a real modern cid — see
+    # _url_to_slug_adp_discovery.
+    "workforcenow.adp.com/jobs/apply/posting.html*",
+]
 
 _ROBOTS_UA = "ATS-Global-Scanner/1.0"
 
@@ -1070,9 +1154,10 @@ def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bo
 
 def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
     """Query the Wayback Machine CDX index for archived ADP career pages
-    and extract cid|ccId slugs directly from the URLs returned — no page
-    fetching needed, since ADP's real URLs carry both identifiers in the
-    query string already."""
+    (both the modern cid/ccId family and the deprecated legacy client=
+    family) and extract cid|ccId slugs — modern URLs parse directly from
+    the query string, legacy ones resolve via one live redirect-follow
+    each (capped, see _ADP_LEGACY_RESOLVE_CAP)."""
     slugs: set[str] = set()
 
     if not _robots_allows("https://web.archive.org", "/cdx/"):
@@ -1080,29 +1165,30 @@ def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
                      "(or robots.txt unreachable) — skipping ADP Wayback discovery.")
         return {"adp": slugs}
 
-    log.info(f"Wayback CDX: querying archived snapshots of {_ADP_WAYBACK_PATTERN}")
-    try:
-        r = requests.get(WAYBACK_CDX_URL, params={
-            "url": _ADP_WAYBACK_PATTERN,
-            "output": "json",
-            "fl": "original",
-            "collapse": "urlkey",
-            "limit": limit,
-        }, timeout=60, headers={"User-Agent": _ROBOTS_UA})
-        r.raise_for_status()
-        rows = r.json()
-    except Exception as e:
-        log.warning(f"Wayback CDX query failed: {e}")
-        return {"adp": slugs}
+    for pattern in _ADP_WAYBACK_PATTERNS:
+        log.info(f"Wayback CDX: querying archived snapshots of {pattern}")
+        try:
+            r = requests.get(WAYBACK_CDX_URL, params={
+                "url": pattern,
+                "output": "json",
+                "fl": "original",
+                "collapse": "urlkey",
+                "limit": limit,
+            }, timeout=60, headers={"User-Agent": _ROBOTS_UA})
+            r.raise_for_status()
+            rows = r.json()
+        except Exception as e:
+            log.warning(f"Wayback CDX query failed for {pattern}: {e}")
+            continue
 
-    # First row is the column header (["original"]) when output=json
-    urls = [row[0] for row in rows[1:]] if rows and isinstance(rows, list) else []
-    log.info(f"  Wayback CDX: {len(urls)} archived snapshot URLs")
+        # First row is the column header (["original"]) when output=json
+        urls = [row[0] for row in rows[1:]] if rows and isinstance(rows, list) else []
+        log.info(f"  Wayback CDX: {len(urls)} archived snapshot URLs")
 
-    for url in urls:
-        slug = _url_to_slug_adp(url)
-        if slug:
-            slugs.add(slug)
+        for url in urls:
+            slug = _url_to_slug_adp_discovery(url)
+            if slug:
+                slugs.add(slug)
 
     if slugs:
         log.info(f"  adp: {len(slugs)} companies from Wayback Machine")
@@ -1259,6 +1345,7 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                 ats_total += len(chunk)
                 continue
 
+            r = None
             try:
                 r = requests.post(
                     f"{SUPABASE_URL}/rest/v1/slug_registry",
@@ -1270,7 +1357,13 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                 r.raise_for_status()
                 ats_total += len(chunk)
             except Exception as e:
-                log.error(f"Supabase upsert failed for {ats}: {e}")
+                # requests' own exception message ("400 Client Error: Bad
+                # Request for url: ...") never includes PostgREST's actual
+                # reason (e.g. a CHECK constraint violation) — without the
+                # response body, a genuine schema mismatch looks identical
+                # to a transient network blip. Always log it when we have it.
+                body = f" — response: {r.text[:500]}" if r is not None else ""
+                log.error(f"Supabase upsert failed for {ats}: {e}{body}")
 
         if ats_total:
             log.info(f"  {ats}: upserted {ats_total} slugs ({source})")
