@@ -19,11 +19,13 @@ format that ats_scrapers.py produces, so it feeds directly into the existing
 classification pipeline (role filter → location filter → Supabase).
 """
 
+import json
 import logging
 import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from html import unescape
 import requests
 
 log = logging.getLogger(__name__)
@@ -693,6 +695,119 @@ def scrape_jooble() -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════
+# YCOMBINATOR (Work at a Startup)
+# ═══════════════════════════════════════════════════════
+#
+# Not a single-company ATS — workatastartup.com is a multi-company job
+# aggregator across the whole YC portfolio, so (like RemoteOK/Jobicy/etc.)
+# it belongs here rather than keyed by per-company slug in ats_scrapers.py.
+#
+# The site is Rails/Inertia-based (NOT Next.js): job data isn't in a
+# __NEXT_DATA__ script tag, it's JSON in a `data-page` attribute on the
+# React-mount <div>:
+#   <div id="jobs/public/pages/JobsPage-react-component-..." data-page='{...}'>
+# List pages:   /jobs  and  /jobs/l/{category}
+# Detail pages: /jobs/{numeric_id}  (data-page id starts with JobDetailPage)
+#
+# Requires an explicit Accept: text/html header — the default requests
+# Accept header gets a 406 from this site.
+
+_YC_CATEGORIES = [
+    "software-engineer", "designer", "recruiting", "science",
+    "product-manager", "operations", "sales-manager", "marketing",
+    "legal", "finance",
+]
+
+_YC_HEADERS = {
+    **_HEADERS,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _yc_extract_data_page(html: str) -> dict | None:
+    """Pull the `data-page='{...}'` JSON blob off the React-mount div."""
+    match = re.search(
+        r'id="jobs/public/pages/(?:JobsPage|JobDetailPage)-react-component-[^"]*"'
+        r'[^>]*data-page=\'([^\']+)\'',
+        html, re.I
+    )
+    if not match:
+        # Some templates use double quotes for the attribute instead
+        match = re.search(
+            r'id="jobs/public/pages/(?:JobsPage|JobDetailPage)-react-component-[^"]*"'
+            r'[^>]*data-page="([^"]+)"',
+            html, re.I
+        )
+    if not match:
+        return None
+    try:
+        return json.loads(unescape(match.group(1)))
+    except Exception:
+        return None
+
+
+def _yc_job_from_item(item: dict) -> dict:
+    company_name = item.get("companyName", "")
+    job_id = item.get("id", "")
+    apply_url = item.get("applyUrl") or (f"https://www.workatastartup.com/jobs/{job_id}" if job_id else "")
+
+    salary = item.get("salaryRange") or ""
+    if not salary and item.get("minSalary") and item.get("maxSalary"):
+        salary = f"${item['minSalary']:,} - ${item['maxSalary']:,}"
+
+    return {
+        "title": item.get("title", ""),
+        "company": company_name,
+        "location": item.get("location") or ("Remote" if item.get("roleType") == "remote" else ""),
+        "url": apply_url,
+        "source_ats": "ycombinator",
+        "source_type": "job_board",
+        "description_snippet": (item.get("descriptionHtml") or item.get("description") or "")[:2000],
+        "salary": salary,
+        "employment_type": item.get("jobType", ""),
+        "company_batch": item.get("companyBatch", ""),
+    }
+
+
+def scrape_ycombinator() -> list[dict]:
+    """Fetch jobs from YC's Work at a Startup board: the main /jobs feed
+    plus every verified category page, deduped by job id."""
+    jobs = []
+    seen_ids = set()
+
+    urls = ["https://www.workatastartup.com/jobs"] + [
+        f"https://www.workatastartup.com/jobs/l/{cat}" for cat in _YC_CATEGORIES
+    ]
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=_YC_HEADERS, timeout=_TIMEOUT)
+            resp.raise_for_status()
+        except Exception as e:
+            log.debug(f"YCombinator fetch failed ({url}): {e}")
+            continue
+
+        data_page = _yc_extract_data_page(resp.text)
+        if not data_page:
+            continue
+
+        props = data_page.get("props", {})
+        items = props.get("jobs") or []
+        for item in items:
+            job_id = item.get("id")
+            if job_id and job_id in seen_ids:
+                continue
+            if job_id:
+                seen_ids.add(job_id)
+            jobs.append(_yc_job_from_item(item))
+
+        time.sleep(0.3)  # be polite between category pages
+
+    log.info(f"  YCombinator: {len(jobs)} jobs fetched across /jobs + {len(_YC_CATEGORIES)} category pages")
+    return jobs
+
+
+# ═══════════════════════════════════════════════════════
 # UNIFIED ENTRY POINT
 # ═══════════════════════════════════════════════════════
 
@@ -706,6 +821,7 @@ BOARD_SCRAPERS = {
     "workingnomads": scrape_workingnomads,
     "freehire": scrape_freehire,
     "jooble": scrape_jooble,
+    "ycombinator": scrape_ycombinator,
 }
 
 
