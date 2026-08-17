@@ -541,10 +541,14 @@ def _url_to_slug_eploy(url: str) -> str | None:
 
 def _url_to_slug_folkshr(url: str) -> str | None:
     """Extract slug from Folks HR URLs.
-    Pattern: jobs.folksats.app/{company}/..."""
+    Pattern: jobs.folksats.app/{company}/... (post-2025-rebrand domain) or
+    jobs.glowinthecloud.com/{company}/... (older "Glow Talents" domain —
+    still what most existing customers are actually linked from; Folks
+    acquired Glow Talents in Aug 2025 but the legacy domain is still live
+    and better-linked). Same path shape on both, same slug format."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if "folksats.app" not in host:
+    if "folksats.app" not in host and "glowinthecloud.com" not in host:
         return None
     parts = parsed.path.strip("/").split("/")
     if parts and parts[0]:
@@ -574,12 +578,17 @@ def _url_to_slug_jobadder(url: str) -> str | None:
 
 def _url_to_slug_jobvite(url: str) -> str | None:
     """Extract slug from Jobvite URLs.
-    Pattern: jobs.jobvite.com/{company}/jobs or /{company}/job/{id}"""
+    Pattern: jobs.jobvite.com/{company}[/jobs|/job/{id}|/...] — the board
+    homepage itself carries no extra path segment. A second, alias URL
+    family also exists: jobs.jobvite.com/careers/{company}/... (same
+    board, "careers/" literal prefix) — both resolve to the same slug."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "jobvite.com" not in host:
         return None
     parts = parsed.path.strip("/").split("/")
+    if parts and parts[0].lower() == "careers":
+        parts = parts[1:]
     if parts and parts[0]:
         slug = parts[0].lower()
         if slug not in SKIP_SLUGS:
@@ -875,10 +884,19 @@ CC_PLATFORM_PATTERNS = {
     "softgarden": ["*.softgarden.io/en/vacancies*", "*.softgarden.io/vacancies*", "*.softgarden.io/job/*"],
     # New (2026-08):
     "eploy": ["*.eploy.net/candidate/jobboard/*"],
-    "folkshr": ["jobs.folksats.app/*"],
-    "jobadder": ["clientapps.jobadder.com/*/*"],
-    "jobvite": ["jobs.jobvite.com/*/jobs*", "jobs.jobvite.com/*/job/*"],
-    "adp": ["workforcenow.adp.com/mascsr/*/mdf/recruitment/*", "workforcenow.adp.com/mascsr/*/careercenter/public/*"],
+    # Folks HR: folksats.app is the post-2025-rebrand domain; glowinthecloud.com
+    # is the older (pre-acquisition "Glow Talents") domain that's still what
+    # most existing customers are actually linked from — both are queried.
+    "folkshr": ["jobs.folksats.app/*", "jobs.glowinthecloud.com/*"],
+    "jobadder": ["clientapps.jobadder.com/*"],
+    "jobvite": ["jobs.jobvite.com/*"],
+    # NOTE: verified live and unchanged, but expect near-zero real hits even
+    # with the query fixed — most ADP customers embed career listings via a
+    # JS web component (<recruitment-current-openings cid=... ccid=...>)
+    # rather than a plain <a href>, so Common Crawl's link-following crawler
+    # has no anchor to discover in the first place. Treat CC as a weak
+    # source for ADP; manual/other-source cid|ccId seeding will do more.
+    "adp": ["workforcenow.adp.com/mascsr/*"],
     "avature": ["*.avature.net/careers/*"],
 }
 
