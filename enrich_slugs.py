@@ -526,6 +526,97 @@ def _url_to_slug_ycombinator(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_eploy(url: str) -> str | None:
+    """Extract slug from Eploy URLs.
+    Pattern: {slug}.eploy.net/candidate/jobboard/..."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "eploy.net" not in host:
+        return None
+    slug = host.replace(".eploy.net", "").lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
+    return None
+
+
+def _url_to_slug_folkshr(url: str) -> str | None:
+    """Extract slug from Folks HR URLs.
+    Pattern: jobs.folksats.app/{company}/..."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "folksats.app" not in host:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if parts and parts[0]:
+        slug = parts[0].lower()
+        if slug not in SKIP_SLUGS:
+            return slug
+    return None
+
+
+def _url_to_slug_jobadder(url: str) -> str | None:
+    """Extract slug from JobAdder URLs.
+    Pattern: clientapps.jobadder.com/{client_id}/{board_slug}/...
+    Our internal slug format is '{client_id}|{board_slug}' — both are
+    required since JobAdder boards are namespaced per-client, not by
+    company name alone."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "jobadder.com" not in host:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        client_id, board_slug = parts[0], parts[1]
+        if client_id.lower() not in SKIP_SLUGS and board_slug.lower() not in SKIP_SLUGS:
+            return f"{client_id}|{board_slug}"
+    return None
+
+
+def _url_to_slug_jobvite(url: str) -> str | None:
+    """Extract slug from Jobvite URLs.
+    Pattern: jobs.jobvite.com/{company}/jobs or /{company}/job/{id}"""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "jobvite.com" not in host:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if parts and parts[0]:
+        slug = parts[0].lower()
+        if slug not in SKIP_SLUGS:
+            return slug
+    return None
+
+
+def _url_to_slug_adp(url: str) -> str | None:
+    """Extract slug from ADP Workforce Now career-center URLs.
+    Both 'cid' and 'ccId' query params are required to hit the public
+    job-requisitions API — our internal slug format is '{cid}|{ccId}'."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "adp.com" not in host:
+        return None
+    qs = parse_qs(parsed.query)
+    cid = (qs.get("cid") or qs.get("CID") or [None])[0]
+    cc_id = (qs.get("ccId") or qs.get("ccid") or qs.get("CCID") or [None])[0]
+    if cid and cc_id:
+        return f"{cid}|{cc_id}"
+    return None
+
+
+def _url_to_slug_avature(url: str) -> str | None:
+    """Extract slug from Avature URLs.
+    Pattern: {subdomain}.avature.net/careers/... (locale prefix varies,
+    e.g. /en_US/careers/... — the subdomain alone is the slug)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "avature.net" not in host:
+        return None
+    slug = host.replace(".avature.net", "").lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
+    return None
+
+
 URL_TO_SLUG = {
     "greenhouse": _url_to_slug_greenhouse,
     "lever": _url_to_slug_lever,
@@ -551,6 +642,13 @@ URL_TO_SLUG = {
     "ycombinator": _url_to_slug_ycombinator,
     "personio": _url_to_slug_personio,
     "joincom": _url_to_slug_joincom,
+    # New (2026-08):
+    "eploy": _url_to_slug_eploy,
+    "folkshr": _url_to_slug_folkshr,
+    "jobadder": _url_to_slug_jobadder,
+    "jobvite": _url_to_slug_jobvite,
+    "adp": _url_to_slug_adp,
+    "avature": _url_to_slug_avature,
 }
 
 
@@ -774,6 +872,14 @@ CC_PLATFORM_PATTERNS = {
     "paylocity": ["recruiting.paylocity.com/recruiting/jobs/*"],
     "hrmdirect": ["*.hrmdirect.com/employment/*"],
     "zoho": ["*.zohorecruit.com/jobs/*"],
+    "softgarden": ["*.softgarden.io/en/vacancies*", "*.softgarden.io/vacancies*", "*.softgarden.io/job/*"],
+    # New (2026-08):
+    "eploy": ["*.eploy.net/candidate/jobboard/*"],
+    "folkshr": ["jobs.folksats.app/*"],
+    "jobadder": ["clientapps.jobadder.com/*/*"],
+    "jobvite": ["jobs.jobvite.com/*/jobs*", "jobs.jobvite.com/*/job/*"],
+    "adp": ["workforcenow.adp.com/mascsr/*/mdf/recruitment/*", "workforcenow.adp.com/mascsr/*/careercenter/public/*"],
+    "avature": ["*.avature.net/careers/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -793,6 +899,14 @@ CC_EXTRACTORS = {
     "paylocity": _url_to_slug_paylocity,
     "hrmdirect": _url_to_slug_hrmdirect,
     "zoho": _url_to_slug_zoho,
+    "softgarden": _url_to_slug_softgarden,
+    # New (2026-08):
+    "eploy": _url_to_slug_eploy,
+    "folkshr": _url_to_slug_folkshr,
+    "jobadder": _url_to_slug_jobadder,
+    "jobvite": _url_to_slug_jobvite,
+    "adp": _url_to_slug_adp,
+    "avature": _url_to_slug_avature,
 }
 
 
@@ -1119,7 +1233,7 @@ def main():
         else:
             grand_total += op_total
 
-    # Source 4: Common Crawl (ongoing discovery for 15 platforms)
+    # Source 4: Common Crawl (ongoing discovery for 21 platforms)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
         cc_slugs = fetch_commoncrawl_slugs(args.crawls)
