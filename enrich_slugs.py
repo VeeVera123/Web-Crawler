@@ -94,17 +94,31 @@ KALIL_SOURCES = {
 CC_INDEX_URL = "https://index.commoncrawl.org"
 CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
 
-# ATS platforms we have working scrapers for (20 active)
+# ATS platforms we have working scrapers for (21 active)
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
     "teamtailor", "breezyhr", "applytojob", "personio", "joincom",
     # Newly enabled (confirmed working via test_blacklisted_ats.py):
     "taleo", "oracle_cloud_hcm", "paylocity", "hrmdirect", "zoho",
+    # Fixed (2026-08) — was blacklisted with wrong URL/API assumptions,
+    # now scrapes correctly (see ats_scrapers.py):
+    "softgarden",
 }
 
-# BLACKLISTED — scrapers exist but don't work (JS-rendered / auth / blocked):
-# brassring, successfactors, softgarden, ycombinator
+# Eploy / Folks HR / JobAdder / Jobvite / ADP / Avature (added 2026-08) are
+# NOT in SUPPORTED_ATS yet: none of them appear in the OpenPostings dataset
+# this file enriches from, and JobAdder/ADP additionally need composite
+# slugs (client_id|board, cid|ccId) that a single URL has no way to fully
+# encode. Their slugs currently have to be added to slug_registry by hand
+# (or via discover_slugs.py, if/when Common Crawl query patterns are added
+# for them) — they scrape fine once a slug row exists, this file just
+# doesn't discover new ones for them yet.
+
+# BLACKLISTED — scrapers exist but don't work (robots.txt / JS-rendered):
+# brassring, successfactors
+# ycombinator is no longer per-company here — it moved to
+# job_board_scrapers.py as a multi-company aggregator (see there).
 
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
@@ -143,9 +157,10 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "zoho": "zoho",
     "zoho recruit": "zoho",
     "zohorecruit": "zoho",
+    "softgarden": "softgarden",
     # Disabled platforms (kept for reference):
-    # "ycombinator", "brassring", "successfactors", "softgarden",
-    # "brassring", "successfactors", "hrmdirect", "softgarden"
+    # "brassring", "successfactors"
+    # ycombinator moved to job_board_scrapers.py — no longer mapped here.
 }
 
 def _map_ats_name(name: str) -> str | None:
