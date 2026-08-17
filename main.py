@@ -109,6 +109,17 @@ PLATFORM_WORKERS = {
                                   # memory/bandwidth constraint, not a
                                   # ban-risk one; concurrency here trades
                                   # against the runner's own resources.
+    "softgarden": 18,            # per-company subdomain
+
+    # ── New (2026-08) ──
+    "eploy": 12,                  # per-company subdomain, unproven at scale — conservative
+    "folkshr": 15,                # shared jobs.folksats.app domain, lightweight pages
+    "jobadder": 10,                # shared clientapps.jobadder.com domain — be cautious
+    "jobvite": 15,                 # shared jobs.jobvite.com domain
+    "adp": 10,                     # shared workforcenow.adp.com domain, real JSON API
+                                    # but unauthenticated public endpoint — stay modest
+    "avature": 8,                  # per-customer subdomain, but templates vary wildly
+                                    # and reliability is lower — keep it conservative
 }
 
 
