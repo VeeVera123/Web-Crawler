@@ -156,6 +156,7 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
             **HEADERS,
             "Prefer": "return=minimal,resolution=merge-duplicates",
         }
+        r = None
         try:
             r = http_requests.post(
                 f"{REST}/slug_registry",
@@ -165,7 +166,13 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
             r.raise_for_status()
             total += len(chunk)
         except Exception as e:
-            log.error(f"Failed to upsert slug batch: {e}")
+            # Without the response body, a CHECK-constraint rejection (e.g.
+            # an unrecognized `source` value — this is exactly what silently
+            # dropped every job_board_discovery slug before the
+            # slug_registry_source_check migration) looks identical to a
+            # transient network error in the logs. Always surface it.
+            body = f" — response: {r.text[:500]}" if r is not None else ""
+            log.error(f"Failed to upsert slug batch (source={source}): {e}{body}")
 
     log.info(f"Slug registry: upserted {total} slugs (source={source})")
     return total
