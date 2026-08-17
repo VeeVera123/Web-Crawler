@@ -1010,6 +1010,106 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
 
 
 # ══════════════════════════════════════════════════════════
+# WAYBACK MACHINE CDX — ADP-only supplemental discovery
+# ══════════════════════════════════════════════════════════
+#
+# ADP is a bad fit for Common Crawl: most customers embed their board via
+# a JS web component (<recruitment-current-openings cid=... ccid=...>)
+# rather than a plain <a href>, so a link-following crawler like CC never
+# sees a URL to follow. The Wayback Machine's CDX index is a different,
+# broader, independently-sourced index (it also ingests URLs via Google
+# Sitemaps, third-party "Save Page Now" submissions, etc.), so it can
+# have snapshots of the actual workforcenow.adp.com recruitment.html
+# pages themselves even when Common Crawl has none — and those URLs
+# already carry cid/ccId directly in the query string, so no HTML
+# fetching or parsing is needed at all, just the CDX index lookup.
+#
+# The CDX API (web.archive.org/cdx/search/cdx) is IA's own documented,
+# public, purpose-built endpoint for exactly this kind of targeted
+# URL-pattern lookup — not a scrape of a page meant for browsers — but
+# per this project's non-negotiable robots.txt policy we still check
+# web.archive.org/robots.txt live before every run rather than assume.
+
+WAYBACK_CDX_URL = "http://web.archive.org/cdx/search/cdx"
+_ADP_WAYBACK_PATTERN = "workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html*"
+
+_ROBOTS_UA = "ATS-Global-Scanner/1.0"
+
+
+def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bool:
+    """Minimal robots.txt check: fetch {base_url}/robots.txt and verify
+    `path` isn't disallowed for '*' or our own UA. Fails CLOSED (returns
+    False) on any fetch/parse error — if we can't confirm it's allowed,
+    we don't proceed. This mirrors the same non-negotiable policy already
+    applied to UKG (excluded from ats_scrapers.py for exactly this)."""
+    try:
+        r = requests.get(f"{base_url}/robots.txt", timeout=15,
+                          headers={"User-Agent": user_agent})
+        if r.status_code >= 400:
+            # No robots.txt at all is conventionally "allow everything"
+            return True
+        applicable_disallows = []
+        current_ua = None
+        for line in r.text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            if key == "user-agent":
+                current_ua = value.lower()
+            elif key == "disallow" and current_ua in ("*", user_agent.lower()):
+                if value:
+                    applicable_disallows.append(value)
+        return not any(path.startswith(d) for d in applicable_disallows)
+    except Exception as e:
+        log.warning(f"robots.txt check failed for {base_url}: {e} — treating as disallowed")
+        return False
+
+
+def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
+    """Query the Wayback Machine CDX index for archived ADP career pages
+    and extract cid|ccId slugs directly from the URLs returned — no page
+    fetching needed, since ADP's real URLs carry both identifiers in the
+    query string already."""
+    slugs: set[str] = set()
+
+    if not _robots_allows("https://web.archive.org", "/cdx/"):
+        log.warning("Wayback CDX: /cdx/ disallowed by web.archive.org/robots.txt "
+                     "(or robots.txt unreachable) — skipping ADP Wayback discovery.")
+        return {"adp": slugs}
+
+    log.info(f"Wayback CDX: querying archived snapshots of {_ADP_WAYBACK_PATTERN}")
+    try:
+        r = requests.get(WAYBACK_CDX_URL, params={
+            "url": _ADP_WAYBACK_PATTERN,
+            "output": "json",
+            "fl": "original",
+            "collapse": "urlkey",
+            "limit": limit,
+        }, timeout=60, headers={"User-Agent": _ROBOTS_UA})
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        log.warning(f"Wayback CDX query failed: {e}")
+        return {"adp": slugs}
+
+    # First row is the column header (["original"]) when output=json
+    urls = [row[0] for row in rows[1:]] if rows and isinstance(rows, list) else []
+    log.info(f"  Wayback CDX: {len(urls)} archived snapshot URLs")
+
+    for url in urls:
+        slug = _url_to_slug_adp(url)
+        if slug:
+            slugs.add(slug)
+
+    if slugs:
+        log.info(f"  adp: {len(slugs)} companies from Wayback Machine")
+    return {"adp": slugs}
+
+
+# ══════════════════════════════════════════════════════════
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
@@ -1185,11 +1285,11 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich Supabase slug_registry from 4 sources"
+        description="Enrich Supabase slug_registry from 5 sources"
     )
     parser.add_argument(
         "--source",
-        choices=["feashliaa", "kalil", "openpostings", "commoncrawl", "all"],
+        choices=["feashliaa", "kalil", "openpostings", "commoncrawl", "wayback_adp", "all"],
         default="all",
         help="Which source to pull from (default: all)",
     )
@@ -1205,7 +1305,7 @@ def main():
 
     log.info("=" * 60)
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
-    log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
+    log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl + Wayback CDX (ADP)")
     log.info("=" * 60)
 
     grand_total = 0
@@ -1265,6 +1365,21 @@ def main():
             grand_total += upserted
         else:
             grand_total += cc_total
+
+    # Source 5: Wayback Machine CDX (ADP-only — see fetch_wayback_adp_slugs
+    # docstring for why ADP specifically needs a second discovery source)
+    if args.source in ("wayback_adp", "all"):
+        log.info("\n--- WAYBACK MACHINE CDX (ADP-only supplemental discovery) ---")
+        wb_slugs = fetch_wayback_adp_slugs()
+        wb_total = sum(len(s) for s in wb_slugs.values())
+        log.info(f"Wayback CDX total: {wb_total} slugs")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(wb_slugs, source="wayback_adp",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += wb_total
 
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")
