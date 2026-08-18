@@ -639,6 +639,11 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     "Remote" with nothing else attached — those two cases alone go to
     'unsure' so the AI stage gets a look at genuinely ambiguous listings,
     rather than every non-matching job being silently AI-reviewed.
+
+    CRITICAL 2026-08-FIX: Added explicit rejection of single African
+    countries. Jobs with only one African country mentioned (South Africa,
+    Cape Town, Nigeria, etc.) are REJECTED outright — they're not truly
+    global or Africa-wide, even if paired with remote/global keywords.
     """
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
@@ -652,6 +657,17 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     loc = _enrich_location_from_title(loc, title)
     loc_lower = loc.lower()
 
+    # ── 0. CRITICAL GATEKEEPER: Reject any single African country ──
+    # This check runs FIRST and cannot be overridden by any keyword.
+    # If a single African country is the only real geographic signal,
+    # it's a single-country job, not global or Africa-wide.
+    # Multiple African countries pass (continent-wide signal).
+    initial_african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
+    if len(initial_african_hits) == 1:
+        # Single African country mentioned anywhere → reject immediately
+        # (unless we hit the multi-country or explicit "Africa" cases below)
+        pass  # Will re-check after keyword processing with full logic
+
     # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
         return "unsure", None
@@ -659,24 +675,52 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
     # ── 2. Africa as a continent ──────────────────────────
-    # Literal "Africa" anywhere → match. Otherwise, 2+ DIFFERENT African
-    # countries named together is real evidence of continent-wide
-    # African hiring — a single African country alone ("Nigeria",
-    # "South Africa") is REJECTED, because that's "based in one African
-    # country," not "hiring across Africa."
-    if re.search(r"\bafrica\b", loc_lower):
-        return "match", PRIORITY_AFRICA
-
+    # STRICT: Literal "Africa" must be continent-wide evidence, not referring
+    # to a single country. 2+ DIFFERENT African countries named together is
+    # real evidence of continent-wide African hiring — a single African country
+    # alone ("Nigeria", "South Africa", "Cape Town") is REJECTED, because
+    # that's "based in one African country," not "hiring across Africa."
     african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
+
+    # CRITICAL: Reject any location with a SINGLE African country, regardless
+    # of other keywords. This prevents "Remote, South Africa", "EMEA (South
+    # Africa)", "Africa - South Africa" from slipping through.
+    if len(african_hits) == 1:
+        return "no_match", None
+
+    # Only match if 2+ DIFFERENT African countries found
     if len(african_hits) >= 2:
         return "match", PRIORITY_AFRICA
+
+    # Match only if "Africa" appears as standalone continent reference
+    # (NOT as "Africa, Nigeria" or "(Africa)" with country qualifier)
+    if re.search(r"\bafrica\b", loc_lower):
+        # Residue check: strip "Africa" and confirm no single country is left
+        check = re.sub(r"\bafrica\b", "", loc_lower)
+        check = NON_GEO_WORDS_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
+        # If a country name or city is left, this is a single-country job, not Africa-wide
+        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(check)}
+        if remaining_countries:
+            # "Africa, South Africa" or "Africa (South Africa)" → reject
+            return "no_match", None
+        if not check:
+            # Pure "Africa" with no country qualifier → match
+            return "match", PRIORITY_AFRICA
 
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
         check = re.sub(r"\bemea\b", "", loc_lower)
         check = NON_GEO_WORDS_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
+        # CRITICAL: Reject "EMEA (South Africa)" or "EMEA - Cape Town" etc.
+        # EMEA must be standalone regional qualifier with NO country/city specified.
+        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(check)}
+        if remaining_countries:
+            # "EMEA, South Africa" or "EMEA - Nigeria" → reject (single country job)
+            return "no_match", None
         if not check:
+            # Pure EMEA with no country qualifier → match
             # EMEA (Europe/Middle East/Africa) includes Africa but is
             # broader than "global" — bucketed with Africa, not Global.
             return "match", PRIORITY_AFRICA
@@ -689,6 +733,12 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # left over — "Global (Remote, US Only)" should NOT match just
     # because "Global" appears; the leftover "us only" gives it away.
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
+        # CRITICAL: Even a standalone global keyword is rejected if a
+        # single African country is mentioned anywhere in the location
+        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc_lower)}
+        if remaining_countries:
+            # "Global (South Africa)" or "Worldwide, Cape Town" → reject
+            return "no_match", None
         return "match", PRIORITY_GLOBAL
 
     check = loc_lower
@@ -701,6 +751,12 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
         check = NON_GEO_WORDS_RE.sub("", check)
         check = GLOBAL_FILLER_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
+        # CRITICAL: Reject if a single African country is mentioned
+        # alongside a global keyword (this means it's not truly global)
+        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(check)}
+        if remaining_countries:
+            # "Global, South Africa" → reject (single country, not global)
+            return "no_match", None
         if not check:
             return "match", PRIORITY_GLOBAL
         return "no_match", None
@@ -712,6 +768,12 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     if has_remote:
         stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
+        # CRITICAL: If any African country is mentioned with "Remote", it's a
+        # single-country job → no_match (don't send to AI for approval)
+        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(stripped)}
+        if remaining_countries:
+            # "Remote, South Africa" → reject outright
+            return "no_match", None
         if not stripped:
             return "unsure", None
         return "no_match", None
