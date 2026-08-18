@@ -2684,7 +2684,15 @@ def scrape_adp(slug: str) -> list[dict]:
         "https://workforcenow.adp.com/mascsr/default/careercenter/public/events/"
         "staffing/v1/job-requisitions"
     )
-    company_name = slug.replace("-", " ").title()
+    # ADP's slug is '{cid}|{ccId}' (two opaque GUIDs/IDs), NOT a readable
+    # company name — unlike every other ATS in this file. The old
+    # `slug.replace("-", " ").title()` fallback therefore leaked raw GUID
+    # text into company_name (confirmed live, e.g.
+    # "F417713F 4524 4Ba7 B017 731934A3B31C|19000101_000001"). The list
+    # payload has no company/org name field either (see docstring), so
+    # leave it blank rather than emit garbage — enrichment/UI should treat
+    # blank company_name as "unknown", not display a fake name.
+    company_name = ""
     jobs = []
     limit = 50
     offset = 0
