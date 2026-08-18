@@ -19,6 +19,7 @@ import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
+import geo
 
 log = logging.getLogger(__name__)
 
@@ -401,7 +402,6 @@ GLOBAL_KEYWORDS = [
     r"\bborderless\b",
     r"\b(fully\s*)?distributed\b",
     r"\b(global|international)\s*team\b",
-    r"\bmultiple\s*(countries|locations|regions)\b",
     r"\ball\s*geograph",
     r"\bany\s*country\b",
     r"\bno\s*location\s*(requirement|restriction|preference)\b",
@@ -428,6 +428,21 @@ GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 STANDALONE_GLOBAL_RE = re.compile(
     r"^\s*(global|worldwide|anywhere|international|wfa|earth|"
     r"remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international|wfa))\s*$", re.I
+)
+
+# A bare "Multiple Locations" / "Multiple Countries" / "Various Locations"
+# phrase — many ATS platforms (ADP included) use this as a generic
+# placeholder that just means "more than one office," with zero evidence
+# about WHERE those offices actually are. It used to be a straight
+# GLOBAL_KEYWORDS auto-match, which is exactly how "New York, NY;
+# Los Angeles, CA; Chicago, IL" (three US cities, one country) or a
+# same-country multi-state ADP posting got waved through as "global." It's
+# not removed outright — it's still a hint worth surfacing — just downgraded
+# to "unsure" unless the real place names present ALSO prove genuine
+# cross-country reach (see the requisitionLocations country-counting check
+# below, which is the actual signal that should decide this).
+GENERIC_MULTI_LOCATION_RE = re.compile(
+    r"\b(multiple|various|several)\s*(countries|locations|regions|offices|sites)\b", re.I
 )
 
 # ── Non-geographic words in location fields ──────────
@@ -587,12 +602,39 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
 
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
-    # ── 2a. South Africa is a COUNTRY → always reject ──
-    if re.search(r"\bsouth\s+africa\b", loc_lower):
-        return "no_match", None
+    # ── Real place-name evidence, shared by several checks below ──
+    # The whole point of this scanner: match GLOBAL hiring (open across
+    # many countries/continents) or hiring OPEN ACROSS AFRICA — not a role
+    # that merely happens to be based in one specific country, whether
+    # that's the US or Nigeria. A location string listing several real
+    # places only counts as evidence of broad reach if those places are
+    # actually in DIFFERENT COUNTRIES — "New York, NY; Los Angeles, CA;
+    # Chicago, IL" is one country (three US cities) and proves nothing
+    # about global reach; "New York, NY; Toronto, ON; London, UK" is three
+    # different countries and is real evidence of cross-border hiring;
+    # "Lagos, Nigeria; Nairobi, Kenya; Accra, Ghana" is three different
+    # African countries — real evidence of continent-wide African hiring,
+    # not just "based in one African country."
+    countries_found = geo.extract_countries(loc)
+    distinct_african = countries_found & geo.AFRICAN_COUNTRIES
 
-    # ── 2b. Africa (the continent) → always MATCH ──
-    if re.search(r"\bafrica\b", loc_lower):
+    # ── 2a. Exactly ONE country, and it's African (e.g. "Nigeria",
+    # "South Africa") → reject, UNLESS the literal word "Africa" also
+    # survives once that one country's name is stripped out (covers
+    # phrasing like "Africa (currently based in South Africa)"). ──
+    if len(countries_found) == 1 and distinct_african:
+        residue = loc_lower
+        for c in distinct_african:
+            residue = re.sub(re.escape(c.lower()), " ", residue)
+        if not re.search(r"\bafrica\b", residue):
+            return "no_match", None
+
+    # ── 2b. Africa (the continent) as a literal word, OR 2+ DIFFERENT
+    # African countries actually named together → MATCH. Two+ distinct
+    # African countries in one listing is real proof of "hiring across
+    # Africa," not just "based in one African country" — same standard
+    # as the multi-country Global check below (2e), just Africa-scoped. ──
+    if re.search(r"\bafrica\b", loc_lower) or len(distinct_african) >= 2:
         return "match", PRIORITY_AFRICA
 
     # ── 2c. EMEA → match only if no country/city qualifier ──
@@ -632,12 +674,24 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
         return "no_match", None
 
     # ── 3. REJECT: Hybrid / Onsite ──────────────────────
+    # These override even real multi-country evidence below — "hybrid"
+    # means physically coming into a specific office, which contradicts
+    # genuine global-remote hiring regardless of how many cities/countries
+    # are listed as options.
     if re.search(r"\bhybrid\b", loc_lower):
         return "no_match", None
     if re.search(r"\bon[\-\s]*site\b", loc_lower):
         return "no_match", None
     if re.search(r"\bin[\-\s]*person\b", loc_lower):
         return "no_match", None
+
+    # ── 3b. 2+ DIFFERENT countries actually named → MATCH (Global) ──
+    # This is what a bare "Multiple Locations" placeholder phrase used to
+    # auto-match on with zero verification (see GENERIC_MULTI_LOCATION_RE
+    # below for what happens when there's no real country evidence to back
+    # that phrase up). Real named countries are the actual signal.
+    if len(countries_found) >= 2:
+        return "match", PRIORITY_GLOBAL
 
     # ── 4. Remote + qualifier check ─────────────────────
     if has_remote:
@@ -648,7 +702,14 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
             return "unsure", None
         return "no_match", None
 
-    # ── 5. REJECT: Has location text but no "remote" → onsite ──
+    # ── 5. A bare "Multiple Locations" placeholder with no real country
+    # evidence anywhere above → unsure (surfaced for AI/human review),
+    # not a silent reject — the phrase itself isn't proof of anything, but
+    # it also isn't proof of nothing. ──
+    if GENERIC_MULTI_LOCATION_RE.search(loc_lower):
+        return "unsure", None
+
+    # ── 6. REJECT: Has location text but no "remote" → onsite ──
     return "no_match", None
 
 
