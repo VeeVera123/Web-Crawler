@@ -1,7 +1,7 @@
 """
 Two-stage classifier — multi-provider architecture.
 
-Role classification:  Gemini + Groq (free tiers, concurrent)
+Role classification:  Cerebras + Groq (free tiers, concurrent)
 Location classification: Gemini + OpenAI GPT-4.1 nano (concurrent)
 
 Falls back to single-provider mode if only LLM_PROVIDER is set.
@@ -290,7 +290,7 @@ def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[lis
 def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     """Send ambiguous titles to AI for role classification.
 
-    Multi-provider mode: splits titles across Gemini/Groq,
+    Multi-provider mode: splits titles across Cerebras/Groq,
     batches per provider's context window, runs all concurrently.
 
     Single-provider fallback: uses whichever provider is configured.
