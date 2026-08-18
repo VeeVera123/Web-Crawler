@@ -381,11 +381,45 @@ GLOBAL_KEYWORDS = [
     r"\bremote\s*[\-–—/,()]?\s*international\b",
     r"\bremote\s*[\-–—/,()]?\s*wfa\b",
     r"\bremote\s*[\-–—/,()]?\s*everywhere\b",
+    r"\bremote\s*[\-–—/,()]?\s*distributed\b",
+    r"\bremote\s*[\-–—/,()]?\s*(all|any)\s*location\b",
+    r"\bremote\s*[\-–—/,()]?\s*(all|any)\s*countr\w*\b",
     # Qualifier + remote (handles "Global (Remote)", "Worldwide - Remote", etc.)
     r"\bglobal\s*[\-–—/,()]?\s*remote\b",
     r"\bworldwide\s*[\-–—/,()]?\s*remote\b",
     r"\binternational\s*[\-–—/,()]?\s*remote\b",
     r"\banywhere\s*[\-–—/,()]?\s*remote\b",
+    r"\bdistributed\s*[\-–—/,()]?\s*remote\b",
+    # Bare "global"/"worldwide"/etc. qualifiers (not necessarily paired
+    # with "remote" in the string — e.g. "100% Global", "Fully Global")
+    r"\b(100%|fully|truly|genuinely)\s*global\b",
+    r"\b(100%|fully|truly|genuinely)\s*worldwide\b",
+    r"\bglobal(?:ly)?\s*[\-–—/,()]?\s*hiring\b",
+    r"\bhiring\s*global(?:ly)?\b",
+    r"\bglobal\s*hire\b",
+    r"\bglobal\s*hires\b",
+    r"\bworld\s*[\-\s]*wide\b",
+    r"\bearth\b",
+    r"\bplanet\s*earth\b",
+    r"\bglobal\s*citizens?\b",
+    r"\bglobal\s*workforce\b",
+    r"\bglobal\s*operations?\b",
+    r"\bglobal\s*presence\b",
+    r"\bglobal\s*network\b",
+    r"\bglobal\s*reach\b",
+    r"\bglobal\s*coverage\b",
+    r"\bglobal\s*scale\b",
+    r"\bpan[\-\s]*global\b",
+    r"\ball\s*regions?\b",
+    r"\bany\s*region\b",
+    r"\bmulti[\-\s]*continent\b",
+    r"\bcross[\-\s]*continental\b",
+    r"\bcross[\-\s]*border\b",
+    r"\bmulti[\-\s]*national\b",
+    r"\btransnational\b",
+    r"\ball\s*over\s*the\s*world\b",
+    r"\banywhere\s*(in|on)\s*(the\s*)?(world|earth|globe)\b",
+    r"\baround\s*the\s*(world|globe)\b",
     # Explicit phrases
     r"\bwork\s*from\s*anywhere\b",
     r"\bwfa\b",
@@ -395,15 +429,23 @@ GLOBAL_KEYWORDS = [
     r"\bopen\s*to\s*(all|any)\s*countr",
     r"\blocation\s*[\-–—:]?\s*anywhere\b",
     r"\blocation\s*[\-–—:]?\s*flexible\b",
+    r"\blocation\s*[\-\s]*free\b",
     r"\blocation\s*agnostic\b",
     r"\blocation\s*independent\b",
     r"\bgeo[\-\s]*flexible\b",
     r"\bgeo[\-\s]*agnostic\b",
     r"\bborderless\b",
+    r"\bunrestricted\s*location\b",
+    r"\bno\s*location\s*restriction\b",
     r"\b(fully\s*)?distributed\b",
+    r"\bdistributed\s*team\b",
+    r"\bdistributed\s*workforce\b",
     r"\b(global|international)\s*team\b",
     r"\ball\s*geograph",
     r"\bany\s*country\b",
+    r"\ball\s*countries\b",
+    r"\bany\s*location\b",
+    r"\ball\s*locations?\b",
     r"\bno\s*location\s*(requirement|restriction|preference)\b",
     r"\bno\s*geographic\s*restriction\b",
     r"\bno\s*country\s*restriction\b",
@@ -411,14 +453,16 @@ GLOBAL_KEYWORDS = [
     # time zone" is a strong proxy for "we don't restrict by geography"
     r"\btime[\-\s]*zone\s*agnostic\b",
     r"\bany\s*time\s*zone\b",
+    r"\bany\s*timezone\b",
     # Explicit "we don't care where you are" phrasings
-    r"\bregardless\s*of\s*(location|country|time\s*zone)\b",
+    r"\bregardless\s*of\s*(location|country|time\s*zone|timezone)\b",
     r"\birrespective\s*of\s*(location|country)\b",
     r"\bcountry[\-\s]*agnostic\b",
     r"\bwork\s*from\s*any\s*(country|location)\b",
     # "hire/candidates/applicants ... worldwide/globally/anywhere" phrasings
     # not already covered by the hire/hiring-globally patterns above
     r"\bhire\s*talent\s*(globally|worldwide|from\s*anywhere)\b",
+    r"\bglobal\s*talent\b",
     r"\bglobal\s*talent\s*pool\b",
     r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
 ]
@@ -426,23 +470,9 @@ GLOBAL_KEYWORDS = [
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
 STANDALONE_GLOBAL_RE = re.compile(
-    r"^\s*(global|worldwide|anywhere|international|wfa|earth|"
-    r"remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international|wfa))\s*$", re.I
-)
-
-# A bare "Multiple Locations" / "Multiple Countries" / "Various Locations"
-# phrase — many ATS platforms (ADP included) use this as a generic
-# placeholder that just means "more than one office," with zero evidence
-# about WHERE those offices actually are. It used to be a straight
-# GLOBAL_KEYWORDS auto-match, which is exactly how "New York, NY;
-# Los Angeles, CA; Chicago, IL" (three US cities, one country) or a
-# same-country multi-state ADP posting got waved through as "global." It's
-# not removed outright — it's still a hint worth surfacing — just downgraded
-# to "unsure" unless the real place names present ALSO prove genuine
-# cross-country reach (see the requisitionLocations country-counting check
-# below, which is the actual signal that should decide this).
-GENERIC_MULTI_LOCATION_RE = re.compile(
-    r"\b(multiple|various|several)\s*(countries|locations|regions|offices|sites)\b", re.I
+    r"^\s*(global|worldwide|world\s*wide|anywhere|international|wfa|earth|planet\s*earth|"
+    r"distributed|borderless|everywhere|"
+    r"remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international|wfa|distributed|everywhere))\s*$", re.I
 )
 
 # ── Non-geographic words in location fields ──────────
@@ -468,14 +498,6 @@ NON_GEO_WORDS_RE = re.compile(
 )
 
 # Words to strip ONLY in global-keyword residue check
-GLOBAL_STRIP_RE = re.compile(
-    r"\b("
-    r"global|worldwide|international|anywhere|everywhere|"  # global keywords
-    r"wfa|distributed|borderless|work|from"                 # global modifiers
-    r")\b",
-    re.I,
-)
-
 # Connector/filler vocabulary used across GLOBAL_KEYWORDS phrase templates
 # ("open to candidates worldwide", "work from any country", "any time
 # zone", ...). The residue check strips out the exact substring that
@@ -575,14 +597,48 @@ PRIORITY_UNSURE = 3   # kept as a plausible match, but geographic scope
                        # wasn't confirmed by keyword OR AI evidence
 
 
+# ── Africa-continent detection ────────────────────────────
+# Deliberately a NARROW, standalone check — just "does a real African
+# country's full name appear as a whole word" — rather than routing
+# through geo.extract_countries()'s full multi-country machinery (state
+# codes, ISO2 prefixes, trailing-country-code rules, etc.). None of that
+# apparatus is needed here: no African country name in this project's
+# gazetteer collides with a US state/Canadian province name the way
+# "Mexico"/"Wales"/"Ontario" did, so a bare word-boundary match is safe.
+_AFRICAN_COUNTRY_RE = re.compile(
+    r"\b(" + "|".join(re.escape(c) for c in sorted(geo.AFRICAN_COUNTRIES, key=len, reverse=True)) + r")\b",
+    re.I,
+)
+
+
 def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     """
     Returns (result, priority) where result is 'match', 'no_match', or
     'unsure', and priority (PRIORITY_GLOBAL / PRIORITY_AFRICA / None) is
     only meaningful when result == 'match'.
 
-    MATCH = truly global hiring signals (anywhere, worldwide,
-    international, WFA, EMEA alone, Africa as continent).
+    STRICT ALLOWLIST, rewritten 2026-08. The only ways a job can survive
+    this filter:
+      1. An explicit GLOBAL_KEYWORDS phrase (global/worldwide/
+         international/distributed/anywhere/... — ~80 variants).
+      2. Africa as a continent — the literal word "Africa", or 2+
+         DIFFERENT African countries named together (proof of
+         continent-wide reach, not just "based in one African country").
+      3. EMEA alone, with no city/country qualifier attached.
+    Everything else is rejected immediately — including a location that
+    lists several real places, no matter how many, if none of the above
+    three signals is present. The previous version tried to infer "global"
+    from counting distinct countries in the text (2+ countries = Global);
+    that inference kept getting fooled by real-world place-name collisions
+    (US towns sharing a name with a country, state/province codes that are
+    also ISO2 country codes, etc.) and was letting single-country US/CA/AU
+    postings through. This version doesn't try to infer anything — it
+    only trusts an explicit keyword, or genuine multi-country Africa
+    evidence, or explicit EMEA text. A location with NO qualifying
+    keyword is rejected outright, UNLESS it's blank/placeholder or a bare
+    "Remote" with nothing else attached — those two cases alone go to
+    'unsure' so the AI stage gets a look at genuinely ambiguous listings,
+    rather than every non-matching job being silently AI-reviewed.
     """
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
@@ -596,48 +652,26 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     loc = _enrich_location_from_title(loc, title)
     loc_lower = loc.lower()
 
-    # ── 1. Empty / placeholder → UNSURE ──────────────────
+    # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
         return "unsure", None
 
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
-    # ── Real place-name evidence, shared by several checks below ──
-    # The whole point of this scanner: match GLOBAL hiring (open across
-    # many countries/continents) or hiring OPEN ACROSS AFRICA — not a role
-    # that merely happens to be based in one specific country, whether
-    # that's the US or Nigeria. A location string listing several real
-    # places only counts as evidence of broad reach if those places are
-    # actually in DIFFERENT COUNTRIES — "New York, NY; Los Angeles, CA;
-    # Chicago, IL" is one country (three US cities) and proves nothing
-    # about global reach; "New York, NY; Toronto, ON; London, UK" is three
-    # different countries and is real evidence of cross-border hiring;
-    # "Lagos, Nigeria; Nairobi, Kenya; Accra, Ghana" is three different
-    # African countries — real evidence of continent-wide African hiring,
-    # not just "based in one African country."
-    countries_found = geo.extract_countries(loc)
-    distinct_african = countries_found & geo.AFRICAN_COUNTRIES
-
-    # ── 2a. Exactly ONE country, and it's African (e.g. "Nigeria",
-    # "South Africa") → reject, UNLESS the literal word "Africa" also
-    # survives once that one country's name is stripped out (covers
-    # phrasing like "Africa (currently based in South Africa)"). ──
-    if len(countries_found) == 1 and distinct_african:
-        residue = loc_lower
-        for c in distinct_african:
-            residue = re.sub(re.escape(c.lower()), " ", residue)
-        if not re.search(r"\bafrica\b", residue):
-            return "no_match", None
-
-    # ── 2b. Africa (the continent) as a literal word, OR 2+ DIFFERENT
-    # African countries actually named together → MATCH. Two+ distinct
-    # African countries in one listing is real proof of "hiring across
-    # Africa," not just "based in one African country" — same standard
-    # as the multi-country Global check below (2e), just Africa-scoped. ──
-    if re.search(r"\bafrica\b", loc_lower) or len(distinct_african) >= 2:
+    # ── 2. Africa as a continent ──────────────────────────
+    # Literal "Africa" anywhere → match. Otherwise, 2+ DIFFERENT African
+    # countries named together is real evidence of continent-wide
+    # African hiring — a single African country alone ("Nigeria",
+    # "South Africa") is REJECTED, because that's "based in one African
+    # country," not "hiring across Africa."
+    if re.search(r"\bafrica\b", loc_lower):
         return "match", PRIORITY_AFRICA
 
-    # ── 2c. EMEA → match only if no country/city qualifier ──
+    african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
+    if len(african_hits) >= 2:
+        return "match", PRIORITY_AFRICA
+
+    # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
         check = re.sub(r"\bemea\b", "", loc_lower)
         check = NON_GEO_WORDS_RE.sub("", check)
@@ -648,14 +682,12 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
             return "match", PRIORITY_AFRICA
         return "no_match", None
 
-    # ── 2d. Global/Worldwide/International/WFA/Anywhere ──
-    # Residue check: strip out the EXACT substring(s) that matched a global
-    # keyword (not a separately-maintained word list — GLOBAL_STRIP_RE used
-    # to do this and silently drifted out of sync with GLOBAL_KEYWORDS,
-    # e.g. "Location Agnostic" and "Timezone Agnostic" matched as global
-    # keywords but then failed their own residue check and got downgraded
-    # to no_match, since "agnostic"/"location"/"timezone" weren't in the
-    # strip list). Stripping the matched spans themselves can't drift.
+    # ── 4. Explicit Global/Worldwide/International/Distributed/
+    # Anywhere/... keyword (see GLOBAL_KEYWORDS, ~80 variants) ──
+    # Residue check: strip out the EXACT substring(s) that matched a
+    # keyword, then confirm nothing else (a real city/country name) is
+    # left over — "Global (Remote, US Only)" should NOT match just
+    # because "Global" appears; the leftover "us only" gives it away.
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
         return "match", PRIORITY_GLOBAL
 
@@ -673,43 +705,21 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
             return "match", PRIORITY_GLOBAL
         return "no_match", None
 
-    # ── 3. REJECT: Hybrid / Onsite ──────────────────────
-    # These override even real multi-country evidence below — "hybrid"
-    # means physically coming into a specific office, which contradicts
-    # genuine global-remote hiring regardless of how many cities/countries
-    # are listed as options.
-    if re.search(r"\bhybrid\b", loc_lower):
-        return "no_match", None
-    if re.search(r"\bon[\-\s]*site\b", loc_lower):
-        return "no_match", None
-    if re.search(r"\bin[\-\s]*person\b", loc_lower):
-        return "no_match", None
-
-    # ── 3b. 2+ DIFFERENT countries actually named → MATCH (Global) ──
-    # This is what a bare "Multiple Locations" placeholder phrase used to
-    # auto-match on with zero verification (see GENERIC_MULTI_LOCATION_RE
-    # below for what happens when there's no real country evidence to back
-    # that phrase up). Real named countries are the actual signal.
-    if len(countries_found) >= 2:
-        return "match", PRIORITY_GLOBAL
-
-    # ── 4. Remote + qualifier check ─────────────────────
+    # ── 5. Bare "Remote" with nothing else qualifying it → UNSURE
+    # (send to AI). Any OTHER text attached to "remote" (a city, a
+    # country, "hybrid", "US only", etc.) is a real qualifier and gets
+    # rejected outright, per the strict-allowlist policy above. ──
     if has_remote:
         stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
-
         if not stripped:
             return "unsure", None
         return "no_match", None
 
-    # ── 5. A bare "Multiple Locations" placeholder with no real country
-    # evidence anywhere above → unsure (surfaced for AI/human review),
-    # not a silent reject — the phrase itself isn't proof of anything, but
-    # it also isn't proof of nothing. ──
-    if GENERIC_MULTI_LOCATION_RE.search(loc_lower):
-        return "unsure", None
-
-    # ── 6. REJECT: Has location text but no "remote" → onsite ──
+    # ── 6. REJECT everything else outright ────────────────
+    # No Global/EMEA/Africa keyword, not blank, not bare "Remote" — this
+    # is a job tied to a specific place (or places) with no explicit
+    # broad-hiring signal, so it's rejected without going to the AI.
     return "no_match", None
 
 
