@@ -146,8 +146,21 @@ _US_STATE_NAMES_RE = re.compile(
     r"\b(" + "|".join(re.escape(n) for n in sorted(_US_STATES.values(), key=len, reverse=True)) + r")\b",
     re.I,
 )
+# "Ontario" and "Yukon" excluded from the free province-name mask —
+# confirmed live: "Ontario, California" / "Ontario, NY" (both real US
+# cities named Ontario) and "Yukon, OK" (a real Oklahoma town) were
+# getting Canada credit purely from the word "Ontario"/"Yukon" itself,
+# stacking with the correct US-state evidence to falsely register 2
+# countries. Every other province full name (British Columbia, Alberta,
+# Saskatchewan, Manitoba, Quebec, Nova Scotia, New Brunswick, Prince
+# Edward Island, Newfoundland and Labrador, Northwest Territories,
+# Nunavut) isn't a real US place name, so those stay trusted.
+_AMBIGUOUS_CA_PROVINCE_NAMES = {"Ontario", "Yukon"}
 _CA_PROVINCE_NAMES_RE = re.compile(
-    r"\b(" + "|".join(re.escape(n) for n in sorted(_CA_PROVINCES.values(), key=len, reverse=True)) + r")\b",
+    r"\b(" + "|".join(
+        re.escape(n) for n in sorted(_CA_PROVINCES.values(), key=len, reverse=True)
+        if n not in _AMBIGUOUS_CA_PROVINCE_NAMES
+    ) + r")\b",
     re.I,
 )
 
@@ -198,10 +211,14 @@ _alias("United States of America", "United States")
 _alias("UK", "United Kingdom")
 _alias("U.K.", "United Kingdom")
 _alias("Great Britain", "United Kingdom")
-_alias("England", "United Kingdom")
-_alias("Scotland", "United Kingdom")
-_alias("Wales", "United Kingdom")
-_alias("Northern Ireland", "United Kingdom")
+# England/Scotland/Wales/Northern Ireland deliberately NOT registered as
+# free-matching aliases — confirmed live, this exact class of bug: "North
+# Wales, PA" (a real Pennsylvania town) and "New South Wales" (an
+# Australian state) both contain "Wales" as a stand-alone word, and
+# similarly "New England" (the US region) contains "England". Real ATS
+# postings for actual UK jobs consistently say "United Kingdom" or "UK",
+# so this loses essentially nothing while closing off a whole class of
+# false-positive collisions with real place names elsewhere.
 _alias("UAE", "United Arab Emirates")
 _alias("Ivory Coast", "Ivory Coast")
 _alias("Cote d'Ivoire", "Ivory Coast")
@@ -314,6 +331,28 @@ def _extract_from_segment(seg: str) -> set[str]:
             return {canon}
         # last part isn't a recognized country — fall through to the
         # normal pipeline below instead of silently finding nothing.
+
+    # 0c. "Country, ST" 2-part shape where the FIRST part is a real,
+    # complete country name and the SECOND is a real US/CA state or
+    # province code — confirmed live: "Poland, OH" (a real Ohio town) was
+    # resolving to {Poland, United States}, 2 countries, wrongly promoted
+    # to Global. With no 3rd part to settle it (rule 0b needs 3+ parts),
+    # a bare 2-letter code straight after a full country name is much
+    # more likely a coincidental US/CA town name than a real "Country,
+    # State" pairing — trust the code, drop the literal country match.
+    if len(parts) == 2:
+        first_canon = COUNTRY_ALIASES.get(parts[0].lower())
+        # Match a code at the START of the second part rather than
+        # requiring an exact match — confirmed live, some ATS templates
+        # leave unrendered placeholder junk trailing after the real code
+        # (e.g. "Poland, OH %LABEL_POSITION_TYPE_REMOTE_WITHIN% ..."),
+        # which an exact-match check would silently fail to catch.
+        second_code_m = re.match(r"^([A-Za-z]{2})\b", parts[1])
+        second_code = second_code_m.group(1).upper() if second_code_m else None
+        if first_canon and second_code in _US_STATES:
+            return {"United States"}
+        if first_canon and second_code in _CA_PROVINCES:
+            return {"Canada"}
 
     working = seg
 
