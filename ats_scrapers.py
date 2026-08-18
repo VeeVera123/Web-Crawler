@@ -17,6 +17,7 @@ from urllib.parse import unquote
 import requests
 from bs4 import BeautifulSoup
 from config import REQUEST_TIMEOUT, MAX_RETRIES
+import geo
 
 log = logging.getLogger(__name__)
 
@@ -2650,7 +2651,27 @@ def scrape_adp(slug: str) -> list[dict]:
       ccId = the career-center id (query param 'ccId')
     Both are visible in any public ADP careers URL, e.g.
     workforcenow.adp.com/mascsr/default/careercenter/public/events/
-    staffing/v1/job-requisitions?cid={cid}&ccId={ccId}."""
+    staffing/v1/job-requisitions?cid={cid}&ccId={ccId}.
+
+    Real, verified field names (list endpoint) — the earlier version of
+    this function guessed several field names that don't actually exist
+    (requisitionId, hiringOrganizationName, primaryLocation,
+    jobFamilyName, workerTypeCode, and a description on the list item
+    itself) and silently produced empty/wrong data for all of them:
+      itemID              — the requisition's real ID (used for the detail
+                             URL and _fetch_adp_description below)
+      requisitionTitle    — plain string, not a nested object
+      requisitionLocations[] — list of {address, nameCode.shortName}; a
+                             requisition can have MULTIPLE real locations
+                             (confirmed live: e.g. one req posted in both
+                             Miami, FL and St. Petersburg, FL)
+    There is no company-name or department field in the payload at all —
+    left as slug-derived / empty rather than guessed again. The full job
+    description (requisitionDescription) only exists on the per-item
+    DETAIL endpoint, not this list endpoint — see _fetch_adp_description,
+    registered in DESCRIPTION_FETCHERS, which the existing enrichment
+    pass calls after role filtering (so only the small role-relevant
+    subset costs an extra HTTP call, not every listed job)."""
     if "|" not in slug:
         return []
     cid, cc_id = slug.split("|", 1)
@@ -2663,7 +2684,7 @@ def scrape_adp(slug: str) -> list[dict]:
         "https://workforcenow.adp.com/mascsr/default/careercenter/public/events/"
         "staffing/v1/job-requisitions"
     )
-    company_name = ""
+    company_name = slug.replace("-", " ").title()
     jobs = []
     limit = 50
     offset = 0
@@ -2684,28 +2705,32 @@ def scrape_adp(slug: str) -> list[dict]:
             break
 
         for item in items:
-            title = item.get("requisitionTitle", {})
-            if isinstance(title, dict):
+            title = item.get("requisitionTitle", "")
+            if isinstance(title, dict):  # defensive — seen as plain string in practice
                 title = title.get("titleText", "")
-            req_id = item.get("requisitionId") or item.get("id") or ""
+            req_id = item.get("itemID") or item.get("requisitionId") or item.get("id") or ""
 
-            org = item.get("hiringOrganizationName", {})
-            if isinstance(org, dict):
-                comp = org.get("nameCode", {}).get("shortName", "") or org.get("nameCode", {}).get("codeValue", "")
-            else:
-                comp = str(org or "")
-            job_company = comp or company_name or slug.replace("-", " ").title()
+            # requisitionLocations is a LIST — a requisition can genuinely
+            # have more than one real location. nameCode.shortName is
+            # already a human-readable "City, ST, US"-style string.
+            req_locs = item.get("requisitionLocations") or []
+            loc_strings = []
+            for rl in req_locs:
+                if not isinstance(rl, dict):
+                    continue
+                name = (rl.get("nameCode") or {}).get("shortName", "")
+                if name and name.strip():
+                    loc_strings.append(name.strip())
+                else:
+                    addr = rl.get("address") or {}
+                    city = addr.get("cityName", "")
+                    state = (addr.get("countrySubdivisionLevel1") or {}).get("codeValue", "")
+                    if city or state:
+                        loc_strings.append(", ".join(p for p in [city, state] if p))
+            location = "; ".join(loc_strings)
 
-            locs = item.get("primaryLocation") or {}
-            city = locs.get("cityName", "") if isinstance(locs, dict) else ""
-            country = ""
-            country_obj = locs.get("countryCode", {}) if isinstance(locs, dict) else {}
-            if isinstance(country_obj, dict):
-                country = country_obj.get("longName", "") or country_obj.get("codeValue", "")
-            location = ", ".join(p for p in [city, country] if p)
-
-            desc = _snippet(item.get("requisitionDescription", "") or item.get("jobDescription", ""))
-            salary = _extract_salary(desc)
+            countries = geo.extract_countries(location)
+            country = ", ".join(sorted(countries))
 
             job_url = (
                 f"https://workforcenow.adp.com/mascsr/default/careercenter/public/"
@@ -2715,14 +2740,14 @@ def scrape_adp(slug: str) -> list[dict]:
             jobs.append({
                 "title": str(title).strip(),
                 "url": job_url,
-                "company": job_company,
+                "company": company_name,
                 "location": location,
                 "country": country,
-                "department": item.get("jobFamilyName", "") or "",
+                "department": "",
                 "workplace_type": "",
-                "employment_type": item.get("workerTypeCode", {}).get("longName", "") if isinstance(item.get("workerTypeCode"), dict) else "",
-                "salary": salary,
-                "description_snippet": desc,
+                "employment_type": "",
+                "salary": "",
+                "description_snippet": "",  # filled by _fetch_adp_description
                 "source_ats": "ADP",
                 "slug": slug,
             })
@@ -3244,6 +3269,30 @@ def _fetch_smartrecruiters_description(job: dict) -> str:
     return ""
 
 
+def _fetch_adp_description(job: dict) -> str:
+    """Fetch full description from ADP's per-requisition DETAIL endpoint.
+    scrape_adp() already builds job["url"] as this exact detail URL
+    (.../job-requisitions/{itemID}?cid=...&ccId=...) — confirmed live to
+    return the same fields as the list endpoint PLUS one extra field,
+    requisitionDescription (raw HTML: intro, duties, requirements,
+    benefits, etc.), which does NOT exist on the list endpoint at all."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    r = _get(url, headers={
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+    })
+    if not r:
+        return ""
+    try:
+        data = r.json()
+    except Exception:
+        return ""
+    desc_html = data.get("requisitionDescription", "")
+    return _snippet(desc_html) if desc_html else ""
+
+
 def _fetch_taleo_description(job: dict) -> str:
     """Fetch full description from a Taleo job detail page."""
     r = _get(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
@@ -3402,8 +3451,12 @@ DESCRIPTION_FETCHERS = {
     "JobAdder": _fetch_generic_description,
     "Jobvite": _fetch_generic_description,
     "Avature": _fetch_generic_description,
-    # ADP's list API already returns the full requisitionDescription, so
-    # it's intentionally NOT in this dict — nothing to enrich.
+    # ADP's list API does NOT include requisitionDescription — confirmed
+    # live; only the per-item DETAIL endpoint does (see
+    # _fetch_adp_description). An earlier version of this file assumed
+    # the list endpoint had it and silently produced empty descriptions
+    # for every ADP job.
+    "ADP": _fetch_adp_description,
 }
 
 
