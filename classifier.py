@@ -532,15 +532,56 @@ PLACEHOLDER_LOC_RE = re.compile(
 
 
 # ── Title-based location enrichment ───────────────────
+# Country/region codes AND global-hiring words, recognized only when
+# structurally delimited in a title (trailing "- US", leading "EMEA:",
+# parenthesised "(APAC)", "- Global", etc.) — never as a bare word floating
+# anywhere in the title. That distinction matters: "Global"/"International"
+# frequently describe SENIORITY OR SCOPE OF ACCOUNTS, not hiring
+# eligibility ("Global Head of Customer Success", "International Account
+# Manager" both routinely mean "manages global/international accounts from
+# one specific office", not "we'll hire you from anywhere"). Requiring a
+# delimiter (dash/pipe/colon/parens) at the START or END of the title is
+# what distinguishes an actual "Title - Region" suffix/prefix convention
+# from an ordinary descriptive word inside the title text.
+#
+# Region acronyms (EMEA/APAC/LATAM/ANZ/NAM/MENA) are NOT all "global"
+# signals — APAC/LATAM/ANZ/NAM/MENA are single-region RESTRICTIONS, same as
+# "US" or "UK". Everything this regex extracts is handed to the same
+# strict-allowlist pipeline that already knows EMEA/Africa/Global are
+# acceptable and everything else isn't — no separate "is this global"
+# judgment is made here.
+_TITLE_CODES = (
+    r"US|USA|UK|EU|EMEA|APAC|LATAM|ANZ|NAM|MENA|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|"
+    r"PL|CZ|RO|BG|HU|IE|ES|IT|PT|SE|NO|DK|FI|CH|AT|BE|NZ"
+)
+# Global/Africa-hiring words allowed in the same delimiter-anchored
+# positions as the codes above (e.g. "CSM - Global", "Account Manager -
+# Worldwide", "Distributed - Support Engineer").
+_TITLE_GLOBAL_WORDS = r"Global|Worldwide|International|Africa|Distributed|Anywhere|Borderless"
+_TITLE_CODES_OR_GLOBAL = _TITLE_CODES + r"|" + _TITLE_GLOBAL_WORDS
+
 _TITLE_LOCATION_RE = re.compile(
     r"(?:"
-    r"\b(US|USA|UK|EU|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|PL|CZ|RO|BG|HU|IE|ES|IT|PT|SE|NO|DK|FI|CH|AT|BE|NZ)"
-    r"\s*[\-–—/]?\s*(?:remote|based|only)"
+    # code immediately followed by a remote/based/only qualifier, anywhere
+    r"\b(" + _TITLE_CODES + r")\s*[\-–—/]?\s*(?:remote|based|only)\b"
     r"|"
     r"(?:remote)\s*[\-–—/,()]*\s*"
-    r"(US|USA|UK|EU|India|United\s+States|United\s+Kingdom|Canada|Australia|Germany|France|Netherlands)"
+    r"(US|USA|UK|EU|EMEA|APAC|LATAM|India|United\s+States|United\s+Kingdom|Canada|Australia|Germany|France|Netherlands)"
     r"|"
-    r"\(\s*(US|USA|UK|EU|India|Canada|Australia)\s*\)\s*$"
+    # parenthesised code/global-word anywhere in the title, e.g. "CSM (US)",
+    # "AM (EMEA) - Enterprise", "Support Engineer (Global)"
+    r"\(\s*(" + _TITLE_CODES_OR_GLOBAL + r"|India|Canada|Australia|Nigeria|Kenya|South\s+Africa)\s*\)"
+    r"|"
+    # bare code/global-word at the very END of the title after a delimiter —
+    # the "CSM - US" / "CSM - Global" pattern that plain remote/based/only-
+    # suffix matching above misses entirely, since there's no qualifier
+    # word at all, just the code or global-hiring word itself
+    r"[\-–—|:,]\s*(" + _TITLE_CODES_OR_GLOBAL + r")\s*(?:Only|Based|Remote)?\s*$"
+    r"|"
+    # bare code/global-word at the very START of the title before a
+    # delimiter, e.g. "US - Customer Success Manager", "EMEA: Account
+    # Manager", "Global: Customer Success Manager"
+    r"^\s*(" + _TITLE_CODES_OR_GLOBAL + r")\s*[\-–—|:]"
     r"|"
     r"\b(New\s+York|San\s+Francisco|Los\s+Angeles|Chicago|Boston|Seattle|Austin|Denver|Atlanta|Dallas|Miami|"
     r"London|Berlin|Paris|Amsterdam|Toronto|Sydney|Singapore|Dubai|Mumbai|Bangalore|"
@@ -553,7 +594,17 @@ _TITLE_LOCATION_RE = re.compile(
 
 
 def _enrich_location_from_title(loc: str, title: str) -> str:
-    """If location is bare 'Remote' or empty, extract geographic hints from title."""
+    """If location is bare 'Remote' or empty, extract geographic hints from
+    title — e.g. a title like "CSM - US" or "Account Manager (EMEA)" often
+    carries the actual hiring-eligibility signal an ATS never put in the
+    structured location field at all. Deliberately gated to the BARE-location
+    case only (not applied when location already has real content): the main
+    classification pipeline's EMEA/Global residue checks are sensitive to any
+    extra text sitting in `loc`, so blending title text into an
+    already-populated, already-qualified location risks a false-negative
+    (e.g. downgrading a genuine EMEA match because of unrelated leftover
+    title text). When location is bare/blank, there's nothing to blend with —
+    the title is the ONLY signal available, so it's used outright."""
     if not title:
         return loc
 
@@ -565,16 +616,6 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
     )
     if not is_bare:
         return loc
-
-    _title_global = re.search(
-        r"\b(EMEA|Global\s*Remote|Remote\s*Global|Worldwide|International|Africa)\b",
-        title, re.I
-    )
-    if _title_global:
-        geo = _title_global.group(1).strip()
-        if loc_stripped and "remote" in loc_stripped:
-            return f"Remote, {geo}"
-        return geo
 
     match = _TITLE_LOCATION_RE.search(title)
     if match:
@@ -639,11 +680,6 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     "Remote" with nothing else attached — those two cases alone go to
     'unsure' so the AI stage gets a look at genuinely ambiguous listings,
     rather than every non-matching job being silently AI-reviewed.
-
-    CRITICAL 2026-08-FIX: Added explicit rejection of single African
-    countries. Jobs with only one African country mentioned (South Africa,
-    Cape Town, Nigeria, etc.) are REJECTED outright — they're not truly
-    global or Africa-wide, even if paired with remote/global keywords.
     """
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
@@ -657,17 +693,6 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     loc = _enrich_location_from_title(loc, title)
     loc_lower = loc.lower()
 
-    # ── 0. CRITICAL GATEKEEPER: Reject any single African country ──
-    # This check runs FIRST and cannot be overridden by any keyword.
-    # If a single African country is the only real geographic signal,
-    # it's a single-country job, not global or Africa-wide.
-    # Multiple African countries pass (continent-wide signal).
-    initial_african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
-    if len(initial_african_hits) == 1:
-        # Single African country mentioned anywhere → reject immediately
-        # (unless we hit the multi-country or explicit "Africa" cases below)
-        pass  # Will re-check after keyword processing with full logic
-
     # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
         return "unsure", None
@@ -675,52 +700,24 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
     # ── 2. Africa as a continent ──────────────────────────
-    # STRICT: Literal "Africa" must be continent-wide evidence, not referring
-    # to a single country. 2+ DIFFERENT African countries named together is
-    # real evidence of continent-wide African hiring — a single African country
-    # alone ("Nigeria", "South Africa", "Cape Town") is REJECTED, because
-    # that's "based in one African country," not "hiring across Africa."
-    african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
-
-    # CRITICAL: Reject any location with a SINGLE African country, regardless
-    # of other keywords. This prevents "Remote, South Africa", "EMEA (South
-    # Africa)", "Africa - South Africa" from slipping through.
-    if len(african_hits) == 1:
-        return "no_match", None
-
-    # Only match if 2+ DIFFERENT African countries found
-    if len(african_hits) >= 2:
+    # Literal "Africa" anywhere → match. Otherwise, 2+ DIFFERENT African
+    # countries named together is real evidence of continent-wide
+    # African hiring — a single African country alone ("Nigeria",
+    # "South Africa") is REJECTED, because that's "based in one African
+    # country," not "hiring across Africa."
+    if re.search(r"\bafrica\b", loc_lower):
         return "match", PRIORITY_AFRICA
 
-    # Match only if "Africa" appears as standalone continent reference
-    # (NOT as "Africa, Nigeria" or "(Africa)" with country qualifier)
-    if re.search(r"\bafrica\b", loc_lower):
-        # Residue check: strip "Africa" and confirm no single country is left
-        check = re.sub(r"\bafrica\b", "", loc_lower)
-        check = NON_GEO_WORDS_RE.sub("", check)
-        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
-        # If a country name or city is left, this is a single-country job, not Africa-wide
-        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(check)}
-        if remaining_countries:
-            # "Africa, South Africa" or "Africa (South Africa)" → reject
-            return "no_match", None
-        if not check:
-            # Pure "Africa" with no country qualifier → match
-            return "match", PRIORITY_AFRICA
+    african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
+    if len(african_hits) >= 2:
+        return "match", PRIORITY_AFRICA
 
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
         check = re.sub(r"\bemea\b", "", loc_lower)
         check = NON_GEO_WORDS_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
-        # CRITICAL: Reject "EMEA (South Africa)" or "EMEA - Cape Town" etc.
-        # EMEA must be standalone regional qualifier with NO country/city specified.
-        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(check)}
-        if remaining_countries:
-            # "EMEA, South Africa" or "EMEA - Nigeria" → reject (single country job)
-            return "no_match", None
         if not check:
-            # Pure EMEA with no country qualifier → match
             # EMEA (Europe/Middle East/Africa) includes Africa but is
             # broader than "global" — bucketed with Africa, not Global.
             return "match", PRIORITY_AFRICA
@@ -733,12 +730,6 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # left over — "Global (Remote, US Only)" should NOT match just
     # because "Global" appears; the leftover "us only" gives it away.
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
-        # CRITICAL: Even a standalone global keyword is rejected if a
-        # single African country is mentioned anywhere in the location
-        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc_lower)}
-        if remaining_countries:
-            # "Global (South Africa)" or "Worldwide, Cape Town" → reject
-            return "no_match", None
         return "match", PRIORITY_GLOBAL
 
     check = loc_lower
@@ -751,12 +742,6 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
         check = NON_GEO_WORDS_RE.sub("", check)
         check = GLOBAL_FILLER_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
-        # CRITICAL: Reject if a single African country is mentioned
-        # alongside a global keyword (this means it's not truly global)
-        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(check)}
-        if remaining_countries:
-            # "Global, South Africa" → reject (single country, not global)
-            return "no_match", None
         if not check:
             return "match", PRIORITY_GLOBAL
         return "no_match", None
@@ -768,12 +753,6 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     if has_remote:
         stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
-        # CRITICAL: If any African country is mentioned with "Remote", it's a
-        # single-country job → no_match (don't send to AI for approval)
-        remaining_countries = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(stripped)}
-        if remaining_countries:
-            # "Remote, South Africa" → reject outright
-            return "no_match", None
         if not stripped:
             return "unsure", None
         return "no_match", None
@@ -801,59 +780,106 @@ def keyword_classify_location(job: dict) -> str:
 
 
 LOCATION_SYSTEM_PROMPT = """\
-You classify whether a job is open to candidates working remotely \
-from ANYWHERE in the world (truly global hiring, not country-specific).
+You decide whether a job posting should be included in a list of roles \
+open to candidates working remotely from ANYWHERE in the world, from \
+across the EMEA region (Europe/Middle East/Africa), or from anywhere on \
+the African continent. Everything else — including roles genuinely open \
+to remote candidates but restricted to a single country or a narrower \
+region (APAC, LATAM, one specific country, etc.) — must be excluded.
 
-These jobs say "Remote" with no country qualifier. Your task: \
-check the DESCRIPTION for evidence of global hiring OR geographic restrictions.
+Every job you're shown here already has an ambiguous LOCATION field \
+(bare "Remote", blank, or a placeholder like "N/A") — the location field \
+gave no usable signal, which is exactly why it's being sent to you. Your \
+only source of truth is the JOB TITLE and the full DESCRIPTION text \
+below, which is provided IN FULL (not truncated) specifically so you can \
+find the real eligibility language wherever it appears in the posting — \
+including in application-question text that may be appended at the end \
+of the description (e.g. "Application Question: Are you authorized to \
+work in the US?" is itself evidence of a country restriction, not just \
+a form field). A short or jargon-heavy description is not by itself a \
+reason to say MATCH_GLOBAL or MATCH_AFRICA — read for real content, and \
+if there genuinely isn't any after reading everything provided, say \
+UNCERTAIN rather than guessing.
 
-MATCH — positive evidence the role is genuinely global:
-- Description explicitly says "global", "worldwide", "anywhere", \
-  "international", "work from anywhere", "distributed team"
-- Hiring across multiple continents or many countries
+Respond with exactly one of these four labels per job:
+
+MATCH_GLOBAL — positive evidence of genuinely worldwide hiring:
+- Description or title explicitly says "global", "worldwide", "anywhere \
+  in the world", "international", "work from anywhere", "distributed \
+  team", "location-agnostic", "hire in any country", or a clear \
+  equivalent
+- Hiring across many countries spanning multiple continents (not just \
+  "a few offices" — genuine "we hire wherever you are" language)
 - No geographic restrictions AND the role/company context clearly \
-  suggests global openness (e.g. "our team spans 30+ countries")
+  supports global openness (e.g. "our fully remote team spans 30+ \
+  countries across 6 continents")
 
-NO_MATCH — evidence of country or region restriction:
+MATCH_AFRICA — positive evidence of hiring across the African continent \
+(as a continent, not a single African country) or across the EMEA region:
+- Description or title explicitly says "Africa" (as a hiring region, \
+  not just "we have a Cape Town office") or names 2+ different African \
+  countries as places the company hires from
+- Description or title says "EMEA" with no further single-country/city \
+  qualifier narrowing it back down to one place
+- A single African country alone (e.g. "based in Nigeria", "Kenya \
+  office only") is NOT enough — that's one country, not the continent
+
+NO_MATCH — evidence of a country- or narrow-region-specific restriction:
 - "must be authorized/eligible to work in [country]"
 - "US/UK/EU work authorization required"
 - "W-2 employment", "W2 only", "must have SSN"
 - "no visa sponsorship", "cannot sponsor", "will not sponsor"
 - "must reside in [state/country]", "must be located in [place]"
-- "this role is based in [country]" without global remote option
+- "this role is based in [country]" without a global/EMEA/Africa-wide \
+  remote option
+- Restricted to APAC, LATAM, ANZ, NAM, DACH, or any other single region \
+  narrower than "worldwide" or "EMEA/Africa"
 - Country-specific benefits as requirements (401k, PAYE, tax residency)
 - Time zone requirements that exclude most of the world \
   (e.g. "PST/EST hours required", "US business hours only")
 - Says "remote" but then lists specific countries you must be located in
+- An application question about work authorization/visa sponsorship for \
+  one specific country, with no global/EMEA/Africa language elsewhere
 - Description context makes it obvious the role is for one country \
   (e.g. references to US-specific regulations, UK employment law)
 
-UNCERTAIN — cannot determine either way:
-- No description available
-- Description does not mention location requirements at all
-- Ambiguous or conflicting signals
+UNCERTAIN — cannot determine either way after reading everything given:
+- No description available, or description genuinely says nothing about \
+  location/eligibility
+- Ambiguous or conflicting signals that don't clearly resolve to one of \
+  the above
 
-IMPORTANT: When there is no description or no clear signal, say UNCERTAIN. \
-Do NOT default to MATCH. Only say MATCH when you see positive evidence \
-of global/worldwide hiring. When in doubt, UNCERTAIN.
+IMPORTANT: When there is no description or no clear signal, say \
+UNCERTAIN. Do NOT default to MATCH_GLOBAL or MATCH_AFRICA — only use \
+those when you see real positive evidence, per the definitions above. \
+When in doubt, UNCERTAIN.
 
 Respond ONLY with lines like:
-1 MATCH
-2 NO_MATCH
-3 UNCERTAIN"""
+1 MATCH_GLOBAL
+2 MATCH_AFRICA
+3 NO_MATCH
+4 UNCERTAIN"""
 
 
-def _classify_location_batch(batch_jobs: list[dict], provider: dict, client, max_user_chars: int) -> list[str]:
-    """Classify a single batch of jobs by location using a specific provider."""
-    DESC_OVERHEAD = 120
-    max_desc = max(500, (max_user_chars - len(batch_jobs) * DESC_OVERHEAD) // len(batch_jobs))
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> list[str]:
+    """Classify a single batch of jobs by location using a specific provider.
+
+    Descriptions are sent IN FULL (only bounded by MAX_DESC_CHARS, applied
+    once already in _build_dynamic_batches) — no further per-batch slicing.
+    Previously this re-truncated every job's description to an EVEN SPLIT of
+    max_user_chars across the whole batch (e.g. a full-size batch could cut
+    each job down to ~4K chars regardless of how short the batch's other
+    descriptions were), which silently chopped real JDs mid-sentence even
+    when the batch as a whole was nowhere near max_user_chars — exactly the
+    kind of truncation that can hide the eligibility language the AI is
+    being asked to find. _build_dynamic_batches already guarantees the
+    batch's TOTAL character count stays under the provider's real budget
+    (max_batch_chars), so no additional re-slicing is needed here.
+    """
     numbered_lines = []
     for j, job in enumerate(batch_jobs):
         desc = job.get("description_snippet", "")
-        if desc:
-            desc_note = desc[:max_desc] + ("…" if len(desc) > max_desc else "")
-        else:
-            desc_note = "[No description available]"
+        desc_note = desc if desc else "[No description available]"
         numbered_lines.append(
             f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
             f"Location: {job.get('location', 'Remote')} | "
@@ -883,10 +909,19 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client, max
                 continue
             if 0 <= idx < len(batch_jobs):
                 label = parts[1].upper() if len(parts) > 1 else ""
+                # Check longest/most-specific prefixes first — "NO_MATCH" and
+                # "MATCH_AFRICA" both start with characters "MATCH" is also a
+                # prefix of, so order matters here.
                 if label.startswith("NO_MATCH"):
                     batch_results[idx] = "no_match"
+                elif label.startswith("MATCH_AFRICA"):
+                    batch_results[idx] = "match_africa"
+                elif label.startswith("MATCH_GLOBAL"):
+                    batch_results[idx] = "match_global"
                 elif label.startswith("MATCH"):
-                    batch_results[idx] = "match"
+                    # Model didn't use a category suffix — treat as Global,
+                    # matching this prompt's pre-2026-08 behavior.
+                    batch_results[idx] = "match_global"
                 elif label.startswith("UNCERTAIN"):
                     batch_results[idx] = "uncertain"
 
@@ -904,7 +939,11 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     not character count, is what actually bounds a safely-sized response.
     """
     OVERHEAD_PER_JOB = 120
-    MAX_DESC_CHARS = 8000
+    # Matches ats_scrapers._snippet's default cap — descriptions are already
+    # bounded there, so this is just a defensive re-assertion, not the
+    # primary truncation point. 30,000 chars is large enough that no real
+    # job description is ever actually cut off by it.
+    MAX_DESC_CHARS = 30_000
     MAX_JOBS_PER_BATCH = 120  # keeps AI response comfortably within token limits
 
     batches = []
@@ -946,14 +985,14 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     Jobs are round-robin split across providers, batched per provider's
     context window, and all batches run concurrently.
 
-    Returns list of 'match', 'no_match', or 'uncertain' in same order.
-    On rate limit/failure: defaults to 'uncertain' (include with flag).
+    Returns list of 'match_global', 'match_africa', 'no_match', or
+    'uncertain' in same order. On rate limit/failure: defaults to
+    'uncertain' (include with flag).
     """
     if not jobs:
         return []
 
     providers = LOCATION_PROVIDERS
-    max_user_chars = 500_000
 
     # ── Round-robin assign jobs to providers (tracking original indices) ──
     provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
@@ -996,7 +1035,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     with ThreadPoolExecutor(max_workers=len(providers)) as pool:
         future_map = {}
         for provider, client, batch, orig_indices in all_work:
-            f = pool.submit(_classify_location_batch, batch, provider, client, max_user_chars)
+            f = pool.submit(_classify_location_batch, batch, provider, client)
             future_map[f] = (provider["name"], batch, orig_indices)
 
         for future in as_completed(future_map):
@@ -1010,7 +1049,9 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
 
     classified = sum(1 for r in results if r != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
-             f"({results.count('match')} match, {results.count('no_match')} no_match, "
+             f"({results.count('match_global')} match_global, "
+             f"{results.count('match_africa')} match_africa, "
+             f"{results.count('no_match')} no_match, "
              f"{results.count('uncertain')} uncertain/unclassified)")
 
     return results
