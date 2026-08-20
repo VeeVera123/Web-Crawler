@@ -343,14 +343,14 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
     today = date.today().isoformat()
 
     new_rows = []
-    seen_urls = []
+    seen_jobs = []  # (job, confidence) pairs for existing jobs — see _touch_last_seen
 
     for job, confidence in zip(jobs, location_confidences):
         url = job.get("url", "")
         if not url:
             continue
         if url in existing:
-            seen_urls.append(url)
+            seen_jobs.append((job, confidence))
         else:
             new_rows.append(_build_row(job, confidence))
             existing.add(url)  # prevent dupes within this batch
@@ -364,16 +364,16 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str]) -> int:
             added += len(chunk)
 
     # ── Touch last_seen for existing jobs still active ────
-    if seen_urls:
-        _touch_last_seen(seen_urls, today)
+    if seen_jobs:
+        _touch_last_seen(seen_jobs, today)
 
     log.info(f"Added {added} new jobs to Supabase "
-             f"({len(seen_urls)} existing touched, "
-             f"{len(jobs) - len(new_rows) - len(seen_urls)} no-url skipped)")
+             f"({len(seen_jobs)} existing touched, "
+             f"{len(jobs) - len(new_rows) - len(seen_jobs)} no-url skipped)")
     return added
 
 
-def _touch_last_seen(urls: list[str], today: str):
+def _touch_last_seen(seen_jobs: list[tuple[dict, str]], today: str):
     """Update last_seen and is_active for jobs we saw again this scan.
 
     Uses a bulk upsert (POST + Prefer: resolution=merge-duplicates, keyed on
@@ -386,6 +386,22 @@ def _touch_last_seen(urls: list[str], today: str):
     can corrupt the `in.(...)` filter syntax outright (PGRST100 parse
     errors). Sending URLs as normal JSON body values sidesteps both — JSON
     handles escaping correctly by construction.
+
+    CRITICAL BUG FIXED 2026-08: this previously sent upsert rows with ONLY
+    job_url/last_seen/is_active. Postgres validates NOT NULL constraints
+    against an INSERT...ON CONFLICT statement's target column list before
+    it even checks whether a conflict exists — so a row missing `title` or
+    `ats` (both NOT NULL, no default) throws a 23502 not-null-violation
+    (PostgREST 400) for EVERY row, EVERY time, even though the row always
+    already existed and only an UPDATE was ever intended. This was 100%
+    silently failing (confirmed live via Supabase edge logs: every
+    `on_conflict=job_url` POST returned 400) which meant `last_seen` was
+    NEVER being refreshed for previously-seen jobs — so once the
+    60-day-stale hard-delete in cleanup_stale_jobs() finally ran, it wiped
+    out the entire accumulated backlog in one pass (this is what caused
+    the jobs table to go to 0 rows in production). Fix: build full rows
+    (same shape as a fresh insert via _build_row) so the upsert is a valid
+    standalone row no matter which branch Postgres takes.
     """
     CHUNK = 500
     headers = {
@@ -394,9 +410,21 @@ def _touch_last_seen(urls: list[str], today: str):
     }
 
     touched = 0
-    for i in range(0, len(urls), CHUNK):
-        chunk = urls[i:i + CHUNK]
-        rows = [{"job_url": u, "last_seen": today, "is_active": True} for u in chunk]
+    for i in range(0, len(seen_jobs), CHUNK):
+        chunk = seen_jobs[i:i + CHUNK]
+        rows = []
+        for job, confidence in chunk:
+            row = _build_row(job, confidence)
+            row["last_seen"] = today
+            row["is_active"] = True
+            # merge-duplicates upserts UPDATE every column present in the
+            # payload — date_added must NOT be included here, or every
+            # daily touch would overwrite a job's true first-seen date
+            # with today's date. _build_row() always sets it to today
+            # (correct for a genuine new insert); strip it back out here
+            # so the UPDATE branch leaves the existing date_added alone.
+            del row["date_added"]
+            rows.append(row)
         try:
             r = http_requests.post(
                 f"{REST}/jobs",
@@ -412,7 +440,7 @@ def _touch_last_seen(urls: list[str], today: str):
                 detail = f" | body: {resp.text[:500]}"
             log.error(f"Supabase touch-upsert (jobs) failed for chunk of {len(chunk)}: {e}{detail}")
 
-    log.info(f"Updated last_seen for {touched}/{len(urls)} existing jobs")
+    log.info(f"Updated last_seen for {touched}/{len(seen_jobs)} existing jobs")
 
 
 # ── Stale job cleanup ───────────────────────────────────
