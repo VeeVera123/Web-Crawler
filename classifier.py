@@ -705,7 +705,21 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # African hiring — a single African country alone ("Nigeria",
     # "South Africa") is REJECTED, because that's "based in one African
     # country," not "hiring across Africa."
-    if re.search(r"\bafrica\b", loc_lower):
+    #
+    # BUG FIXED 2026-08: "South Africa" is itself a single African
+    # country whose official name CONTAINS the word "Africa" as its own
+    # token — \bafrica\b matched inside it and let a single-country
+    # "South Africa" / "Cape Town, South Africa" posting through as a
+    # continent-wide match, exactly the failure mode this function's own
+    # docstring says must be rejected. Fix: strip every "South Africa"
+    # occurrence out of the text before testing for a bare "Africa"
+    # continent mention, so only a genuine standalone "Africa" (or a
+    # regional phrase like "West Africa", "Sub-Saharan Africa", "Africa
+    # (Remote)") still counts as the continent signal. "South Africa" the
+    # country still gets its fair shot at matching below via the 2+
+    # distinct-countries rule, same as any other single African country.
+    africa_continent_check = re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_lower)
+    if re.search(r"\bafrica\b", africa_continent_check):
         return "match", PRIORITY_AFRICA
 
     african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
