@@ -84,11 +84,40 @@ def _get(url: str, **kwargs) -> requests.Response | None:
     return None
 
 
-def _snippet(html_or_text: str, max_chars: int = 8000) -> str:
-    """Strip HTML and truncate."""
+# ATS template placeholders that leak into raw description payloads when a
+# templating variable fails to resolve — e.g. "%LABEL_POSITION_TYPE_REMOTE_WITHIN%"
+# (confirmed live in an ADP/Workday-style feed, see geo.py history). These are
+# never real content, always noise, and materially hurt AI classification when
+# left in (garbled jargon around the real sentence). Matched before the
+# generic-junk pass below so a legitimate reading of the surrounding text
+# survives.
+_TEMPLATE_TOKEN_RE = re.compile(r"%[A-Z][A-Z0-9_]{2,}%")
+
+# Runs of 3+ non-alphanumeric/non-space symbols in a row are near-always
+# rendering/encoding garbage (mismatched CMS tokens, stray markup fragments)
+# rather than real punctuation — real prose never needs "@)%" or "##%%--".
+# Threshold is 3 so ordinary punctuation ("...", "--", "!!") and single
+# percent signs ("50% remote") are left untouched.
+_SYMBOL_GARBAGE_RE = re.compile(r"[^\w\s]{3,}")
+
+
+def _snippet(html_or_text: str, max_chars: int = 30_000) -> str:
+    """Strip HTML, decode entities, drop ATS template/encoding junk, and cap length.
+
+    max_chars defaults to 30,000 — large enough that virtually no genuine job
+    description (even a long, multi-section one) is ever actually truncated;
+    it exists purely as a safety ceiling against pathological outliers (e.g.
+    an ATS dumping repeated legal boilerplate), not as a normal operating limit.
+    Full, untruncated text matters here because this snippet is what gets sent
+    to the AI classification stage — a JD cut off mid-sentence can hide the
+    exact restriction/eligibility language the AI is being asked to find.
+    """
     if not html_or_text:
         return ""
     text = re.sub(r"<[^>]+>", " ", html_or_text)
+    text = unescape(text)
+    text = _TEMPLATE_TOKEN_RE.sub(" ", text)
+    text = _SYMBOL_GARBAGE_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]
 
@@ -2179,14 +2208,20 @@ def scrape_personio(slug: str) -> list[dict]:
         company = (pos.findtext("subcompany") or company_name).strip()
         schedule = (pos.findtext("schedule") or "").strip()
 
-        # Description blocks
+        # Description blocks — clean each block (HTML strip/entity-decode/
+        # junk-strip) WITHOUT per-block truncation, then cap the joined
+        # whole once via _snippet's default. A JD is usually split across
+        # several blocks (intro/requirements/benefits); truncating each
+        # block individually (previously 2000 chars each) could still chop
+        # a real block mid-sentence even though the full joined text was
+        # well under the overall safety ceiling.
         desc_parts = []
         for desc_elem in pos.iter("jobDescription"):
             name = (desc_elem.findtext("name") or "").strip()
             value = (desc_elem.findtext("value") or "").strip()
             if value:
-                desc_parts.append(_snippet(value, max_chars=2000))
-        desc = " ".join(desc_parts)
+                desc_parts.append(_snippet(value, max_chars=30_000))
+        desc = _snippet(" ".join(desc_parts))
         salary = _extract_salary(desc) if desc else ""
 
         # Build job URL
@@ -3465,7 +3500,32 @@ DESCRIPTION_FETCHERS = {
     # the list endpoint had it and silently produced empty descriptions
     # for every ADP job.
     "ADP": _fetch_adp_description,
+    # Zoho and BambooHR normally get a full description straight from
+    # their LIST endpoint (see scrape_zoho / scrape_bamboohr) — no detail
+    # fetch is architecturally needed in the common case. But both have a
+    # fallback code path that can legitimately produce an EMPTY
+    # description_snippet (Zoho's generic-link fallback when structured
+    # JSON/JSON-LD parsing fails; BambooHR's undocumented public
+    # `/careers/list` feed, which is a different endpoint from BambooHR's
+    # official documented Applicant Tracking API — that documented one is
+    # confirmed summary-only, so this is a defensive safety net in case
+    # the public feed field is ever short/empty for a given posting too).
+    # Previously NEITHER had any fallback registered here, so a job that
+    # hit either gap silently kept an empty description forever with no
+    # way to recover it.
+    "Zoho": _fetch_generic_description,
+    "BambooHR": _fetch_generic_description,
 }
+
+
+# Below this length, a description is treated as "missing" for enrichment
+# purposes even if it's non-empty — a real job description is essentially
+# never this short. Catches list-endpoint fields that turn out to be a
+# short teaser/summary rather than the full JD (the documented risk for
+# BambooHR's official Applicant Tracking API, and a plausible failure mode
+# for any platform if a company's posting is unusually terse at the source)
+# instead of silently accepting a truncated description as "done".
+MIN_REAL_DESC_CHARS = 150
 
 
 def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
@@ -3478,7 +3538,8 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
 
     to_enrich = [j for j in jobs
                  if j.get("source_ats") in DESCRIPTION_FETCHERS
-                 and (not j.get("description_snippet") or not j.get("location"))]
+                 and (len(j.get("description_snippet") or "") < MIN_REAL_DESC_CHARS
+                      or not j.get("location"))]
 
     if not to_enrich:
         return jobs
@@ -3490,7 +3551,14 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
         fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
         try:
             desc = fetcher(job)
-            if desc:
+            # Only replace the existing description if the fetch produced
+            # something at least as long — a detail-page fetch can itself
+            # fail partially (rate-limited, JS-rendered shell, changed DOM)
+            # and return a short/empty result. Since this function can now
+            # run on jobs that already have a short-but-real description
+            # (see MIN_REAL_DESC_CHARS), never let a worse result clobber a
+            # better one already in hand.
+            if desc and len(desc) >= len(job.get("description_snippet") or ""):
                 job["description_snippet"] = desc
                 salary = _extract_salary(desc)
                 if salary and not job.get("salary"):
