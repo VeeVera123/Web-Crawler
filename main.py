@@ -279,14 +279,19 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
         for i, (job, label) in enumerate(zip(unsure_jobs, ai_results)):
             # Determine which provider classified this job (round-robin assignment)
             provider_name = LOCATION_PROVIDERS[i % len(LOCATION_PROVIDERS)]["name"]
-            if label == "match":
-                # AI confirmed genuinely global hiring from the description
-                # (LOCATION_SYSTEM_PROMPT only ever says MATCH for worldwide
-                # evidence, never Africa-specifically — keyword step above
-                # already catches literal "Africa" mentions), so this is a
-                # Global-tier match, same as a keyword-level global match.
+            if label == "match_global":
+                # AI found genuinely worldwide-hiring evidence in the title/
+                # description that the location field itself never stated.
                 job["clearance"] = provider_name
                 job["location_priority"] = PRIORITY_GLOBAL
+                matched.append(job)
+                matched_confidences.append("match")
+            elif label == "match_africa":
+                # AI found Africa-continent or bare-EMEA evidence in the
+                # title/description — same tier as a keyword-level Africa
+                # match, just discovered via the AI stage instead.
+                job["clearance"] = provider_name
+                job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
