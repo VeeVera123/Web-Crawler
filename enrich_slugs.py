@@ -11,16 +11,31 @@ Sources:
      incl. successfactors, smartrecruiters, workable)
   3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
   4. Common Crawl index (ongoing discovery for 15 platforms)
+  5. Wayback Machine CDX (ADP-only supplemental discovery)
+  6. Y Combinator (yc-oss/api — ~6k companies, free, no auth. Each
+     company's own website is fetched and scanned for a link to a
+     known ATS domain — this is net-new discovery, not just another
+     dump of the same companies the other sources already have,
+     since YC startups skew toward exactly the modern ATS platforms
+     — Greenhouse/Lever/Ashby/Rippling — this project already covers
+     well, just companies too new/small to be in the bigger dumps yet)
+  7. TheirStack (freemium technology-usage API — 50 company credits/
+     month on the free tier, so this is a small monthly trickle for
+     gap-filling thin platforms, not a bulk source. Needs a free
+     THEIRSTACK_API_KEY — sign up at theirstack.com, no credit card)
 
 Runs weekly (Sunday) via GitHub Actions. The daily scanner
 reads from Supabase slug_registry — no local .txt files needed.
 
 Usage:
-    python enrich_slugs.py                        # full enrichment (all 4)
+    python enrich_slugs.py                        # full enrichment (all sources)
     python enrich_slugs.py --source feashliaa     # Feashliaa only
     python enrich_slugs.py --source kalil         # kalil0321 only
     python enrich_slugs.py --source openpostings  # OpenPostings only
     python enrich_slugs.py --source commoncrawl   # Common Crawl only
+    python enrich_slugs.py --source wayback_adp   # Wayback CDX (ADP) only
+    python enrich_slugs.py --source yc            # Y Combinator only
+    python enrich_slugs.py --source theirstack    # TheirStack only
     python enrich_slugs.py --dry-run              # count without writing
 """
 
@@ -32,7 +47,7 @@ import re
 import sqlite3
 import tempfile
 import time
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin
 
 import requests
 from dotenv import load_dotenv
@@ -93,6 +108,43 @@ KALIL_SOURCES = {
 # Common Crawl
 CC_INDEX_URL = "https://index.commoncrawl.org"
 CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
+
+# Y Combinator (yc-oss/api — free, static JSON, no auth, GitHub Pages-hosted)
+YC_ALL_COMPANIES_URL = "https://yc-oss.github.io/api/companies/all.json"
+
+# TheirStack (freemium technology-usage API)
+THEIRSTACK_API_URL = "https://api.theirstack.com/v1/companies/search"
+THEIRSTACK_API_KEY = os.environ.get("THEIRSTACK_API_KEY", "")
+# Free tier: 50 company credits/month, 200 API credits/month, 2 req/sec,
+# max 5 pages x 25 results per search. Deliberately spent on the thinner,
+# newer platforms (poorly covered by the bulk dumps above) rather than
+# Greenhouse/Lever/Workday, which are already well covered elsewhere —
+# no point burning a scarce monthly budget on companies we likely already
+# have. NOTE: these are OUR internal ATS keys on the left; the right side
+# is TheirStack's own technology slug — VERIFIED live (2026-08) by fetching
+# each https://theirstack.com/en/technology/{slug} page directly and
+# confirming it 200s with a real company count (shown in the comment).
+# These counts are TheirStack's own tracked totals (their site, not ours)
+# — useful context for how much this source can realistically add, but
+# note our free-tier budget (40/run, ~50/month) only pulls a small slice
+# of each, and every count below almost certainly includes companies we
+# already have from other sources — see the response this was added in
+# reply to for why these are gap-filling, not the primary source.
+THEIRSTACK_ATS_SLUGS = {
+    "softgarden": "softgarden",       # verified: 10,805 companies tracked
+    "eploy": "eploy",                 # verified: 209 companies tracked
+    "jobadder": "jobadder",           # verified: 393 companies tracked
+    "jobvite": "jobvite",             # verified: 4,832 companies tracked
+    "avature": "avature",             # verified: 3,217 companies tracked
+    "hrmdirect": "clearcompany",      # verified: 736 (HRMDirect rebranded to ClearCompany)
+    "paylocity": "paylocity",         # verified: 60,976 companies tracked
+    "zoho": "zoho-recruit",           # verified: 4,766 companies tracked
+    # "folkshr" deliberately omitted: neither "folks-hr" nor "folkshr"
+    # resolves on TheirStack (both confirmed 404 live) — they don't appear
+    # to track this platform at all (FolksHR/Glow Talents is a small,
+    # UK/Ireland-focused ATS). Not worth spending a query on a guaranteed
+    # empty result every run.
+}
 
 # ATS platforms we have working scrapers for (21 active)
 SUPPORTED_ATS = {
@@ -1196,6 +1248,251 @@ def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 6: Y Combinator (yc-oss/api)
+# ══════════════════════════════════════════════════════════
+#
+# Unlike the other sources, this one doesn't come as a pre-built list of
+# ATS URLs — yc-oss/api just gives company names + their own websites.
+# So the discovery step here is genuinely different: fetch each company's
+# homepage, look for a link to a known ATS domain (either right on the
+# homepage nav/footer, or one hop through whatever page looks like their
+# careers page), and run that URL through the SAME per-platform resolvers
+# every other source already uses (URL_TO_SLUG). This is why it's worth
+# doing despite the extra work: YC's cohort skews toward exactly the
+# modern ATS platforms this project already scrapes well (Greenhouse,
+# Lever, Ashby, Rippling), but skews toward companies too new or small to
+# have shown up in the bigger static dumps (Feashliaa/kalil/OpenPostings)
+# yet — so it's net-new companies, not just the same ones again.
+
+YC_USER_AGENT = _ROBOTS_UA
+_YC_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.I)
+_YC_CAREER_LINK_RE = re.compile(
+    r"\b(careers?|jobs?|join[\s\-]?us|we[\s\-]?re[\s\-]?hiring|work[\s\-]?with[\s\-]?us)\b",
+    re.I,
+)
+
+
+def fetch_yc_companies() -> list[dict]:
+    """Download the full YC company list (~6k companies, free, no auth)."""
+    try:
+        r = requests.get(YC_ALL_COMPANIES_URL, timeout=60,
+                          headers={"User-Agent": YC_USER_AGENT})
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.error(f"Failed to fetch YC company list: {e}")
+        return []
+
+
+def _scan_html_for_ats_slug(html: str, base_url: str) -> tuple[str, str] | None:
+    """Scan every href in `html` (resolved to absolute against `base_url`)
+    against all known ATS URL patterns. Returns (ats, slug) on first hit."""
+    for href in _YC_HREF_RE.findall(html):
+        try:
+            absolute = urljoin(base_url, href)
+        except Exception:
+            continue
+        for ats, resolver in URL_TO_SLUG.items():
+            slug = resolver(absolute)
+            if slug:
+                return ats, slug
+    return None
+
+
+def _find_career_page_link(html: str, base_url: str) -> str | None:
+    """Find the first link on the page that looks like a careers page."""
+    for href in _YC_HREF_RE.findall(html):
+        if _YC_CAREER_LINK_RE.search(href):
+            try:
+                return urljoin(base_url, href)
+            except Exception:
+                continue
+    return None
+
+
+def resolve_company_to_ats_slug(website: str, timeout: int = 15) -> tuple[str, str] | None:
+    """Given a company's own homepage URL, try to find which ATS it uses
+    and that ATS's slug for it. Checks robots.txt before fetching each
+    distinct domain touched (homepage, and the careers page if different).
+    Returns (ats, slug) or None if nothing was found / not allowed."""
+    parsed = urlparse(website if "://" in website else f"https://{website}")
+    if not parsed.hostname:
+        return None
+    base = f"{parsed.scheme}://{parsed.hostname}"
+
+    if not _robots_allows(base, "/"):
+        return None
+
+    try:
+        r = requests.get(base, timeout=timeout,
+                          headers={"User-Agent": YC_USER_AGENT})
+        if r.status_code >= 400:
+            return None
+        html = r.text
+    except Exception:
+        return None
+
+    # Most modern startups link straight to their ATS from the homepage
+    # nav/footer — check that first, no second fetch needed.
+    hit = _scan_html_for_ats_slug(html, base)
+    if hit:
+        return hit
+
+    # Otherwise, follow one hop to whatever looks like a careers page and
+    # check again there.
+    career_url = _find_career_page_link(html, base)
+    if not career_url:
+        return None
+
+    career_parsed = urlparse(career_url)
+    career_base = f"{career_parsed.scheme}://{career_parsed.hostname}"
+    if career_base != base and not _robots_allows(career_base, career_parsed.path or "/"):
+        return None
+
+    try:
+        r2 = requests.get(career_url, timeout=timeout,
+                           headers={"User-Agent": YC_USER_AGENT})
+        if r2.status_code >= 400:
+            return None
+        return _scan_html_for_ats_slug(r2.text, career_url)
+    except Exception:
+        return None
+
+
+def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[str, str]]:
+    """Resolve YC companies' own websites to an ATS slug where possible.
+
+    `limit` caps how many companies are attempted per run (default 2000,
+    not the full ~6k) — this source does 1-2 live HTTP fetches PER
+    COMPANY (unlike the other sources, which are single bulk downloads),
+    so it's meaningfully heavier; capping keeps a single weekly run's
+    wall-clock and request volume reasonable. Pass 0 for no cap. Runs are
+    idempotent (on_conflict upsert), so a rolling subset across multiple
+    weekly runs still converges on full coverage over time.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    all_companies = fetch_yc_companies()
+    companies = all_companies[:limit] if limit else all_companies
+    log.info(f"Y Combinator: resolving ATS slug for {len(companies)} of "
+             f"{len(all_companies)} total companies...")
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    resolved = 0
+
+    def _resolve_one(company):
+        website = company.get("website", "")
+        if not website:
+            return None
+        result = resolve_company_to_ats_slug(website)
+        time.sleep(0.1)  # light rate-limit courtesy across ~6k distinct domains
+        if result:
+            return company.get("name", ""), result
+        return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_resolve_one, c): c for c in companies}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                res = future.result()
+            except Exception:
+                res = None
+            if res:
+                name, (ats, slug) = res
+                slugs_by_ats.setdefault(ats, {})[slug] = name
+                resolved += 1
+            if i % 500 == 0:
+                log.info(f"  ...{i}/{len(companies)} checked, {resolved} resolved so far")
+
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} companies from Y Combinator")
+
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE 7: TheirStack (freemium technology-usage API)
+# ══════════════════════════════════════════════════════════
+
+def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]:
+    """Pull companies for the thinner platforms from TheirStack's free
+    tier. Requires THEIRSTACK_API_KEY (free signup, no credit card) —
+    returns empty and logs a one-line notice if it's not set, rather than
+    failing the whole enrichment run.
+
+    `max_companies` caps TOTAL companies fetched across all platforms
+    this run (default 40, under the free tier's 50 company-credits/month
+    so a couple of runs a month stay comfortably inside the free budget —
+    raise it if you're on a paid plan).
+    """
+    if not THEIRSTACK_API_KEY:
+        log.info("TheirStack: THEIRSTACK_API_KEY not set — skipping "
+                 "(free signup at https://theirstack.com, no credit card needed).")
+        return {}
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {THEIRSTACK_API_KEY}",
+    }
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    spent = 0
+
+    for ats, ts_slug in THEIRSTACK_ATS_SLUGS.items():
+        if spent >= max_companies:
+            log.info(f"TheirStack: hit max_companies budget ({max_companies}) — stopping.")
+            break
+        remaining = max_companies - spent
+        page_limit = min(25, remaining)
+
+        try:
+            r = requests.post(
+                THEIRSTACK_API_URL,
+                headers=headers,
+                json={
+                    "company_technology_slug_or": [ts_slug],
+                    "limit": page_limit,
+                    "page": 0,
+                },
+                timeout=30,
+            )
+            if r.status_code == 401:
+                log.error("TheirStack: 401 Unauthorized — check THEIRSTACK_API_KEY.")
+                break
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            log.warning(f"TheirStack query failed for {ats} (slug={ts_slug!r}): {e}")
+            time.sleep(0.6)  # stay under the 2 req/sec free-tier rate limit
+            continue
+
+        companies = data.get("data") or data.get("companies") or []
+        added = 0
+        for c in companies:
+            domain = c.get("domain") or c.get("website") or ""
+            name = c.get("name", "")
+            if not domain:
+                continue
+            host = urlparse(domain if "://" in domain else f"https://{domain}").hostname or domain
+            slug = host.split(".")[0] if host else None
+            if slug and slug.lower() not in SKIP_SLUGS:
+                slugs_by_ats.setdefault(ats, {})[slug] = name
+                added += 1
+
+        if added:
+            log.info(f"  {ats}: {added} companies from TheirStack (slug={ts_slug!r})")
+        elif companies == [] and not added:
+            log.info(f"  {ats}: 0 results for TheirStack slug {ts_slug!r} — "
+                      f"double-check it against theirstack.com/en/technology/{ts_slug}")
+
+        spent += added
+        time.sleep(0.6)
+
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
@@ -1378,17 +1675,29 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich Supabase slug_registry from 5 sources"
+        description="Enrich Supabase slug_registry from 7 sources"
     )
     parser.add_argument(
         "--source",
-        choices=["feashliaa", "kalil", "openpostings", "commoncrawl", "wayback_adp", "all"],
+        choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
+                 "wayback_adp", "yc", "theirstack", "all"],
         default="all",
         help="Which source to pull from (default: all)",
     )
     parser.add_argument(
-        "--crawls", type=int, default=3,
-        help="Number of Common Crawl archives to query (default: 3)",
+        "--crawls", type=int, default=6,
+        help="Number of Common Crawl archives to query (default: 6 — "
+             "raised from 3 for deeper historical discovery)",
+    )
+    parser.add_argument(
+        "--yc-limit", type=int, default=2000,
+        help="Max YC companies to attempt per run (default: 2000; 0 = all "
+             "~6k — see fetch_yc_slugs docstring for why this is capped)",
+    )
+    parser.add_argument(
+        "--theirstack-max", type=int, default=40,
+        help="Max companies to pull from TheirStack per run, across all "
+             "platforms (default: 40, under the free tier's 50/month)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -1398,7 +1707,8 @@ def main():
 
     log.info("=" * 60)
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
-    log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl + Wayback CDX (ADP)")
+    log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
+    log.info("           + Wayback CDX (ADP) + Y Combinator + TheirStack")
     log.info("=" * 60)
 
     grand_total = 0
@@ -1473,6 +1783,39 @@ def main():
             grand_total += upserted
         else:
             grand_total += wb_total
+
+    # Source 6: Y Combinator (net-new companies too small/new for the
+    # bulk dumps above — see fetch_yc_slugs docstring)
+    if args.source in ("yc", "all"):
+        log.info("\n--- Y COMBINATOR (own-website ATS discovery) ---")
+        yc_slugs = fetch_yc_slugs(limit=args.yc_limit)
+        yc_total = sum(len(s) for s in yc_slugs.values())
+        log.info(f"Y Combinator total: {yc_total} slugs across "
+                 f"{sum(1 for s in yc_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(yc_slugs, source="yc",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += yc_total
+
+    # Source 7: TheirStack (freemium — small monthly trickle for thin
+    # platforms, see fetch_theirstack_slugs docstring)
+    if args.source in ("theirstack", "all"):
+        log.info("\n--- THEIRSTACK (freemium, thin-platform gap-fill) ---")
+        ts_slugs = fetch_theirstack_slugs(max_companies=args.theirstack_max)
+        ts_total = sum(len(s) for s in ts_slugs.values())
+        if ts_total:
+            log.info(f"TheirStack total: {ts_total} slugs across "
+                     f"{sum(1 for s in ts_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(ts_slugs, source="theirstack",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ts_total
 
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")
