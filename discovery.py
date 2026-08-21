@@ -1608,10 +1608,33 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
 # of "pages that likely link to one of our ATS platforms" than YC's
 # company list is.
 
-def fetch_httparchive_candidate_urls(limit_per_tech: int = 200) -> dict[str, list[str]]:
+def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
+                                      months: int = 6) -> dict[str, list[str]]:
     """Query HTTP Archive's public BigQuery dataset for pages where a
     known ATS technology was detected. Returns {ats: [urls]}, ranked by
     CrUX popularity (most popular/reliable first) within limit_per_tech.
+
+    Widened 2026-08 from a single-month/desktop-only query (limit_per_tech
+    200) to querying the last `months` monthly crawl partitions AND both
+    `desktop`+`mobile` clients, unioned and deduped — this is the real,
+    free way to raise HTTP Archive's ceiling for this project, as opposed
+    to just bumping one number. HTTP Archive publishes a full crawl every
+    month, and a nontrivial number of sites are crawled successfully on
+    one client/month but not another (transient fetch failures, mobile-vs-
+    desktop rendering differences that change what Wappalyzer detects) —
+    so scanning N months x 2 clients surfaces real additional companies
+    that a single-snapshot query structurally cannot see, not just a
+    higher score against the same pool. Still cheap: ~1-2GB per
+    month/client scanned against BigQuery Sandbox's 1TB/month free
+    allowance, so even months=6 (12 scans) is well under 1% of quota.
+
+    NOTE: this does NOT change what HTTP Archive's crawl universe covers
+    in the first place (Chrome UX Report's popular-site list) — it only
+    recovers the extra names that ARE in that universe but were missed by
+    querying just one month/client. A site too low-traffic for CrUX to
+    ever crawl still won't appear here no matter how wide this query gets;
+    see the module docstring for why this source is a supplemental
+    trickle, not a bulk source like Feashliaa/OpenPostings/Common Crawl.
 
     Requires `pip install google-cloud-bigquery` and a GCP project with
     BigQuery enabled (GCP_PROJECT_ID env var + standard Google
@@ -1639,24 +1662,30 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200) -> dict[str, lis
                     f"(check GOOGLE_APPLICATION_CREDENTIALS): {e}")
         return {}
 
-    # Find the most recent available monthly crawl partition first —
-    # hardcoding a date would silently go stale as new crawls land.
+    # Find the available monthly crawl partitions first — hardcoding dates
+    # would silently go stale as new crawls land / old ones age out.
     try:
         date_rows = list(client.query(
-            "SELECT MAX(date) AS latest FROM `httparchive.crawl.pages` "
-            "WHERE date > DATE_SUB(CURRENT_DATE(), INTERVAL 4 MONTH)"
+            "SELECT DISTINCT date FROM `httparchive.crawl.pages` "
+            "WHERE date > DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH) "
+            "ORDER BY date DESC "
+            "LIMIT @months",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("months", "INT64", months),
+            ]),
         ).result())
-        latest_date = date_rows[0].latest if date_rows else None
+        crawl_dates = [r.date for r in date_rows]
     except Exception as e:
-        log.warning(f"HTTP Archive: failed to find latest crawl date: {e}")
+        log.warning(f"HTTP Archive: failed to find recent crawl dates: {e}")
         return {}
 
-    if not latest_date:
-        log.warning("HTTP Archive: no recent crawl partition found — skipping.")
+    if not crawl_dates:
+        log.warning("HTTP Archive: no recent crawl partitions found — skipping.")
         return {}
 
-    log.info(f"HTTP Archive: querying {latest_date} crawl for "
-             f"{len(HTTPARCHIVE_ATS_TECH_NAMES)} known ATS fingerprints...")
+    log.info(f"HTTP Archive: querying {len(crawl_dates)} crawl(s) "
+             f"({crawl_dates[-1]} .. {crawl_dates[0]}), both desktop+mobile, "
+             f"for {len(HTTPARCHIVE_ATS_TECH_NAMES)} known ATS fingerprints...")
 
     urls_by_ats: dict[str, list[str]] = {}
     tech_to_ats = {v: k for k, v in HTTPARCHIVE_ATS_TECH_NAMES.items()}
@@ -1666,19 +1695,28 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200) -> dict[str, lis
     # info ARRAY<STRING>>) — NOT `name`. Confirmed live via BigQuery's own
     # error message after the original `tech.name` version 400'd with
     # "Field name name does not exist in STRUCT<technology STRING, ...>".
+    #
+    # `date IN UNNEST(@crawl_dates)` (instead of a single `date = @date`)
+    # plus dropping the `client = 'desktop'` filter is the actual widening
+    # — QUALIFY still caps each tech to its top limit_per_tech rows overall
+    # (by rank, so the best/most-popular pages win regardless of which
+    # month/client they came from), and DISTINCT page in the outer query
+    # dedupes a site that shows up in more than one month/client.
     query = """
-        SELECT tech.technology AS tech_name, page, rank
-        FROM `httparchive.crawl.pages`,
-        UNNEST(technologies) AS tech
-        WHERE date = @crawl_date
-          AND client = 'desktop'
-          AND tech.technology IN UNNEST(@tech_names)
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY tech.technology ORDER BY rank ASC
-        ) <= @limit_per_tech
+        SELECT DISTINCT tech_name, page
+        FROM (
+            SELECT tech.technology AS tech_name, page, rank
+            FROM `httparchive.crawl.pages`,
+            UNNEST(technologies) AS tech
+            WHERE date IN UNNEST(@crawl_dates)
+              AND tech.technology IN UNNEST(@tech_names)
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY tech.technology ORDER BY rank ASC
+            ) <= @limit_per_tech
+        )
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("crawl_date", "DATE", latest_date),
+        bigquery.ArrayQueryParameter("crawl_dates", "DATE", crawl_dates),
         bigquery.ArrayQueryParameter("tech_names", "STRING",
                                        list(HTTPARCHIVE_ATS_TECH_NAMES.values())),
         bigquery.ScalarQueryParameter("limit_per_tech", "INT64", limit_per_tech),
@@ -1701,13 +1739,21 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200) -> dict[str, lis
     return urls_by_ats
 
 
-def fetch_httparchive_slugs(limit_per_tech: int = 200,
-                             max_workers: int = 15) -> dict[str, dict[str, str]]:
+def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
+                             max_workers: int = 30) -> dict[str, dict[str, str]]:
     """Resolve HTTP Archive's candidate pages to real ATS slugs, reusing
-    the exact same resolver built for the Y Combinator source."""
+    the exact same resolver built for the Y Combinator source.
+
+    max_workers raised 15->30 alongside the higher default limit_per_tech
+    (200->2000) and months (1->6) — those changes can produce roughly
+    10x+ as many candidate pages to resolve per run, so resolve
+    concurrency needs to scale with it or a run's wall-clock would blow up
+    proportionally. Each resolve is 1-2 lightweight HTTP fetches, so this
+    is still well within what a single GitHub Actions runner handles fine.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    urls_by_ats = fetch_httparchive_candidate_urls(limit_per_tech)
+    urls_by_ats = fetch_httparchive_candidate_urls(limit_per_tech, months)
     if not urls_by_ats:
         return {}
 
@@ -1966,11 +2012,19 @@ def main():
              "platforms (default: 40, under the free tier's 50/month)",
     )
     parser.add_argument(
-        "--httparchive-limit", type=int, default=200,
+        "--httparchive-limit", type=int, default=2000,
         help="Max candidate pages to pull PER ATS platform from HTTP "
              "Archive's BigQuery dataset, ranked by popularity (default: "
-             "200 — the resolve step is 1-2 live fetches per candidate, "
-             "same cost profile as --yc-limit)",
+             "2000, raised from 200 — the resolve step is 1-2 live fetches "
+             "per candidate, same cost profile as --yc-limit)",
+    )
+    parser.add_argument(
+        "--httparchive-months", type=int, default=6,
+        help="Number of recent monthly HTTP Archive crawl partitions to "
+             "query, unioned with both desktop+mobile clients and deduped "
+             "(default: 6) — see fetch_httparchive_candidate_urls docstring "
+             "for why multi-month/multi-client is the real lever for more "
+             "coverage here, not just a bigger --httparchive-limit alone",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -2105,7 +2159,8 @@ def main():
     # detection at scale, see fetch_httparchive_slugs docstring)
     if args.source in ("httparchive", "all"):
         log.info("\n--- HTTP ARCHIVE (BigQuery, technology-fingerprint detection) ---")
-        ha_slugs = fetch_httparchive_slugs(limit_per_tech=args.httparchive_limit)
+        ha_slugs = fetch_httparchive_slugs(limit_per_tech=args.httparchive_limit,
+                                            months=args.httparchive_months)
         ha_total = sum(len(s) for s in ha_slugs.values())
         if ha_total:
             log.info(f"HTTP Archive total: {ha_total} slugs across "
