@@ -1,4 +1,5 @@
-name: Discovery 
+name: Discovery (Slug Registry Enrichment)
+
 on:
   schedule:
     - cron: "0 3 * * 0"   # Every Sunday at 3:00 UTC
@@ -12,21 +13,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 8-way matrix, one job per source, all running in parallel — instead of
-  # one job running all 8 sources back-to-back. Each source is already an
+  # 9-way matrix, one job per source, all running in parallel — instead of
+  # one job running all 9 sources back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for sources
-  # 1-6, thousands of live per-company fetches for sources 7-8), so
+  # 1-6 and 9, thousands of live per-company fetches for sources 7-8), so
   # sharding BY SOURCE is the natural split here — unlike daily_scan.yml's
   # ATS-board matrix, there's no single flat pool of "work items" to
   # hash-shard across a fixed number of workers. Concurrent writes across
   # different sources are safe: every source's upsert already goes through
   # `on_conflict=ats,slug` per-row, so there's no shared mutable state
   # between sources to race on.
+  #
+  # NOTE on the wdc source: it downloads ~4.86GB across 14 gzip files from
+  # data.dws.informatik.uni-mannheim.de, which 403'd this project's own
+  # dev sandbox outright (see discovery.py's Source 9 docstring). First
+  # real run here is the actual test of whether GitHub Actions' runner
+  # IPs fare better — it fails cleanly (skip + warning) rather than break
+  # the job if that host is unreachable, so a red wdc shard specifically
+  # (not the other 8) is the signal to look into that further.
   discover:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
-      fail-fast: false   # one bad source shouldn't cancel the other 7
+      fail-fast: false   # one bad source shouldn't cancel the other 8
       matrix:
         source:
           - feashliaa
@@ -37,6 +46,7 @@ jobs:
           - yc
           - theirstack
           - httparchive
+          - wdc
 
     steps:
       - name: Checkout
