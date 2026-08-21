@@ -1224,6 +1224,13 @@ _ADP_WAYBACK_PATTERNS = [
 
 _ROBOTS_UA = "ATS-Global-Scanner/1.0"
 
+# Running tallies of *why* a robots.txt check came back "disallowed" —
+# incremented by _robots_allows(), read/reset by callers that want a
+# one-line end-of-run summary instead of a warning log per dead domain
+# (most failures here are just dead/unreachable company sites, not actual
+# robots.txt disallow rules — see fetch_yc_slugs for the summary log).
+_robots_check_stats = {"unreachable": 0, "disallowed_by_rule": 0}
+
 
 def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bool:
     """Minimal robots.txt check: fetch {base_url}/robots.txt and verify
@@ -1251,9 +1258,19 @@ def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bo
             elif key == "disallow" and current_ua in ("*", user_agent.lower()):
                 if value:
                     applicable_disallows.append(value)
-        return not any(path.startswith(d) for d in applicable_disallows)
+        allowed = not any(path.startswith(d) for d in applicable_disallows)
+        if not allowed:
+            _robots_check_stats["disallowed_by_rule"] += 1
+        return allowed
     except Exception as e:
-        log.warning(f"robots.txt check failed for {base_url}: {e} — treating as disallowed")
+        # Almost always a dead/unreachable/misconfigured site (DNS failure,
+        # timeout, broken SSL) rather than an actual robots.txt rule — log
+        # it at DEBUG (silent unless you pass -v) instead of WARNING so a
+        # run against thousands of candidate domains doesn't spam the log
+        # with one warning per dead site. Callers hitting this at volume
+        # report a one-line summary count instead — see fetch_yc_slugs.
+        _robots_check_stats["unreachable"] += 1
+        log.debug(f"robots.txt check failed for {base_url}: {e} — treating as disallowed")
         return False
 
 
@@ -1430,6 +1447,9 @@ def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[s
     log.info(f"Y Combinator: resolving ATS slug for {len(companies)} of "
              f"{len(all_companies)} total companies...")
 
+    _robots_check_stats["unreachable"] = 0
+    _robots_check_stats["disallowed_by_rule"] = 0
+
     slugs_by_ats: dict[str, dict[str, str]] = {}
     resolved = 0
 
@@ -1459,6 +1479,13 @@ def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[s
 
     for ats, slugs in slugs_by_ats.items():
         log.info(f"  {ats}: {len(slugs)} companies from Y Combinator")
+
+    skipped = len(companies) - resolved
+    log.info(f"  Y Combinator summary: {resolved} resolved, {skipped} skipped "
+             f"({_robots_check_stats['unreachable']} unreachable sites, "
+             f"{_robots_check_stats['disallowed_by_rule']} disallowed by "
+             f"robots.txt, rest had no detectable ATS link) — run with "
+             f"-v/--verbose for the per-site detail.")
 
     return slugs_by_ats
 
@@ -1626,15 +1653,20 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200) -> dict[str, lis
     urls_by_ats: dict[str, list[str]] = {}
     tech_to_ats = {v: k for k, v in HTTPARCHIVE_ATS_TECH_NAMES.items()}
 
+    # NOTE 2026-08: `technologies` is UNNESTed into a STRUCT whose field is
+    # named `technology` (STRUCT<technology STRING, categories ARRAY<STRING>,
+    # info ARRAY<STRING>>) — NOT `name`. Confirmed live via BigQuery's own
+    # error message after the original `tech.name` version 400'd with
+    # "Field name name does not exist in STRUCT<technology STRING, ...>".
     query = """
-        SELECT tech.name AS tech_name, page, rank
+        SELECT tech.technology AS tech_name, page, rank
         FROM `httparchive.crawl.pages`,
         UNNEST(technologies) AS tech
         WHERE date = @crawl_date
           AND client = 'desktop'
-          AND tech.name IN UNNEST(@tech_names)
+          AND tech.technology IN UNNEST(@tech_names)
         QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY tech.name ORDER BY rank ASC
+            PARTITION BY tech.technology ORDER BY rank ASC
         ) <= @limit_per_tech
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
@@ -1674,6 +1706,9 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200,
     all_urls = [(ats, url) for ats, urls in urls_by_ats.items() for url in urls]
     log.info(f"HTTP Archive: resolving {len(all_urls)} candidate pages...")
 
+    _robots_check_stats["unreachable"] = 0
+    _robots_check_stats["disallowed_by_rule"] = 0
+
     slugs_by_ats: dict[str, dict[str, str]] = {}
     resolved = 0
 
@@ -1704,6 +1739,13 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200,
     log.info(f"HTTP Archive: resolved {resolved}/{len(all_urls)} candidate pages")
     for ats, slugs in slugs_by_ats.items():
         log.info(f"  {ats}: {len(slugs)} companies from HTTP Archive")
+
+    skipped = len(all_urls) - resolved
+    log.info(f"  HTTP Archive summary: {resolved} resolved, {skipped} skipped "
+             f"({_robots_check_stats['unreachable']} unreachable sites, "
+             f"{_robots_check_stats['disallowed_by_rule']} disallowed by "
+             f"robots.txt, rest had no detectable ATS link) — run with "
+             f"-v/--verbose for the per-site detail.")
 
     return slugs_by_ats
 
@@ -1926,7 +1968,17 @@ def main():
         "--dry-run", action="store_true",
         help="Count slugs without writing to Supabase",
     )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Log every individual robots.txt/site-fetch failure (DEBUG "
+             "level) instead of just the one-line per-source summary. Off "
+             "by default because most of these are just dead/unreachable "
+             "company domains, not real problems — see fetch_yc_slugs.",
+    )
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     log.info("=" * 60)
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
