@@ -10,7 +10,9 @@ Sources:
   2. kalil0321/ats-scrapers (CSV inventories for 15 platforms —
      incl. successfactors, smartrecruiters, workable)
   3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
-  4. Common Crawl index (ongoing discovery for 15 platforms)
+  4. Common Crawl index (ongoing discovery for 27 platforms — including
+     6 also covered by Feashliaa's bulk dump, added as a supplemental
+     top-up since dedup is free via the on_conflict upsert)
   5. Wayback Machine CDX (ADP-only supplemental discovery)
   6. Y Combinator (yc-oss/api — ~6k companies, free, no auth. Each
      company's own website is fetched and scanned for a link to a
@@ -816,8 +818,11 @@ _url_to_slug_adp_discovery._resolved_clients = {}
 
 def _url_to_slug_avature(url: str) -> str | None:
     """Extract slug from Avature URLs.
-    Pattern: {subdomain}.avature.net/careers/... (locale prefix varies,
-    e.g. /en_US/careers/... — the subdomain alone is the slug)."""
+    Pattern: {subdomain}.avature.net/... — path structure varies a lot in
+    practice (bare /careers/, locale-prefixed /en_US/careers/, or even
+    /en_US/main/ with no "careers" segment at all — Avature's own
+    corporate site uses that last one), so this only keys off the
+    subdomain and ignores path entirely; the subdomain alone is the slug."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "avature.net" not in host:
@@ -1068,6 +1073,29 @@ def fetch_openpostings_slugs() -> dict[str, dict[str, str]]:
 # ══════════════════════════════════════════════════════════
 
 CC_PLATFORM_PATTERNS = {
+    # ADDED 2026-08: these 6 already have their bulk needs met by Feashliaa
+    # (single static JSON dump per platform, much faster than a CDX
+    # search), so they were deliberately left out of Common Crawl at
+    # first. Adding them here anyway as a supplemental top-up — dedup
+    # against Feashliaa's own list is free (on_conflict=ats,slug upsert),
+    # so any extra companies CC's independent crawl happens to catch that
+    # Feashliaa's dump missed are pure upside, not redundant work. Costs
+    # real runtime though (paginated CDX queries + rate-limit sleeps per
+    # pattern), so this is a deliberate "worth it as a top-up" choice, not
+    # a claim these need CC as their primary source.
+    "greenhouse": ["boards.greenhouse.io/*"],
+    "lever": ["jobs.lever.co/*"],
+    "ashby": ["jobs.ashbyhq.com/*"],
+    "bamboohr": ["*.bamboohr.com/careers*", "*.bamboohr.com/jobs*"],
+    "icims": ["*.icims.com/jobs/*"],
+    # NOTE: Workday's "wd{N}" instance number isn't a small fixed set —
+    # verified live examples exist for wd1 through wd12+ (e.g. Walmart on
+    # wd5, Salesforce/Capital One on wd12, Desjardins on wd10), assigned
+    # essentially arbitrarily per customer with no obvious pattern — so a
+    # single wildcarded host pattern is used instead of enumerating
+    # specific wd numbers, which would silently miss real companies on
+    # any instance not explicitly listed.
+    "workday": ["*.myworkdayjobs.com/*"],
     "workable": ["apply.workable.com/*"],
     "recruitee": ["*.recruitee.com/api/offers*", "*.recruitee.com/o/*"],
     "smartrecruiters": ["jobs.smartrecruiters.com/*", "careers.smartrecruiters.com/*"],
@@ -1083,7 +1111,12 @@ CC_PLATFORM_PATTERNS = {
     "paylocity": ["recruiting.paylocity.com/recruiting/jobs/*"],
     "hrmdirect": ["*.hrmdirect.com/employment/*"],
     "zoho": ["*.zohorecruit.com/jobs/*"],
-    "softgarden": ["*.softgarden.io/en/vacancies*", "*.softgarden.io/vacancies*", "*.softgarden.io/job/*"],
+    # "api.softgarden.io/.../jobboards/{channelId}/..." added 2026-08 —
+    # confirmed real (softgarden's own dev docs), and _url_to_slug_softgarden
+    # already parses this shape via its /jobboards/ regex — it just wasn't
+    # being searched for yet.
+    "softgarden": ["*.softgarden.io/en/vacancies*", "*.softgarden.io/vacancies*",
+                    "*.softgarden.io/job/*", "api.softgarden.io/*/jobboards/*"],
     # New (2026-08):
     "eploy": ["*.eploy.net/candidate/jobboard/*"],
     # Folks HR: folksats.app is the post-2025-rebrand domain; glowinthecloud.com
@@ -1103,7 +1136,17 @@ CC_PLATFORM_PATTERNS = {
     # a real modern cid, so old crawled/archived hits are still useful.
     # See _url_to_slug_adp_discovery.
     "adp": ["workforcenow.adp.com/mascsr/*", "workforcenow.adp.com/jobs/apply/posting.html*"],
-    "avature": ["*.avature.net/careers/*"],
+    # WIDENED 2026-08: real Avature career sites don't reliably use a
+    # "/careers/" path segment — verified live examples include
+    # {sub}.avature.net/en_US/careers/*, {sub}.avature.net/en_US/main/*
+    # (Avature's own corporate site uses this, no "careers" segment at
+    # all), and bare {sub}.avature.net/careers/* with no locale prefix.
+    # _url_to_slug_avature() already only keys off the subdomain and
+    # ignores path entirely, so a single broad */* pattern costs nothing
+    # in false positives (there's no separate "not a careers page" host
+    # to accidentally match) while catching every real path variant
+    # instead of just guessing at path segments one at a time.
+    "avature": ["*.avature.net/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -2259,7 +2302,7 @@ def main():
         else:
             grand_total += op_total
 
-    # Source 4: Common Crawl (ongoing discovery for 21 platforms)
+    # Source 4: Common Crawl (ongoing discovery for 27 platforms)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
         cc_slugs = fetch_commoncrawl_slugs(args.crawls)
