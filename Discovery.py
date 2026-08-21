@@ -35,20 +35,28 @@ Sources:
      docstring for the full explanation of how this reuses the Y
      Combinator resolver rather than being a separate pipeline.)
 
-Runs weekly (Sunday) via GitHub Actions. The daily scanner
-reads from Supabase slug_registry — no local .txt files needed.
+Runs weekly (Sunday) via GitHub Actions, as an 8-way matrix — one job per
+source, all in parallel (see .github/workflows/discovery.yml) — rather
+than one job running all 8 back-to-back. Each source is already an
+independent fetch-and-resolve pass with its own cost profile (bulk single
+download vs. thousands of live per-company fetches), so sharding by
+source is the natural split here — there's no single flat pool of "work
+items" to hash-shard the way main.py splits ATS boards across its matrix.
+
+The daily scanner reads from Supabase slug_registry — no local .txt files
+needed.
 
 Usage:
-    python enrich_slugs.py                        # full enrichment (all sources)
-    python enrich_slugs.py --source feashliaa     # Feashliaa only
-    python enrich_slugs.py --source kalil         # kalil0321 only
-    python enrich_slugs.py --source openpostings  # OpenPostings only
-    python enrich_slugs.py --source commoncrawl   # Common Crawl only
-    python enrich_slugs.py --source wayback_adp   # Wayback CDX (ADP) only
-    python enrich_slugs.py --source yc            # Y Combinator only
-    python enrich_slugs.py --source theirstack    # TheirStack only
-    python enrich_slugs.py --source httparchive   # HTTP Archive (BigQuery) only
-    python enrich_slugs.py --dry-run              # count without writing
+    python discovery.py                        # full enrichment (all sources, sequential)
+    python discovery.py --source feashliaa     # Feashliaa only
+    python discovery.py --source kalil         # kalil0321 only
+    python discovery.py --source openpostings  # OpenPostings only
+    python discovery.py --source commoncrawl   # Common Crawl only
+    python discovery.py --source wayback_adp   # Wayback CDX (ADP) only
+    python discovery.py --source yc            # Y Combinator only
+    python discovery.py --source theirstack    # TheirStack only
+    python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
+    python discovery.py --dry-run              # count without writing
 """
 
 import argparse
