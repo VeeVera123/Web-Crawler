@@ -1,0 +1,71 @@
+name: Discovery 
+on:
+  schedule:
+    - cron: "0 3 * * 0"   # Every Sunday at 3:00 UTC
+  workflow_dispatch:       # manual trigger
+
+# Belt-and-suspenders, same reasoning as daily_scan.yml's concurrency block —
+# GitHub already serializes same-workflow schedule/workflow_dispatch runs by
+# default, but we don't rely on that.
+concurrency:
+  group: discovery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 8-way matrix, one job per source, all running in parallel — instead of
+  # one job running all 8 sources back-to-back. Each source is already an
+  # independent fetch-and-resolve pass (bulk single download for sources
+  # 1-6, thousands of live per-company fetches for sources 7-8), so
+  # sharding BY SOURCE is the natural split here — unlike daily_scan.yml's
+  # ATS-board matrix, there's no single flat pool of "work items" to
+  # hash-shard across a fixed number of workers. Concurrent writes across
+  # different sources are safe: every source's upsert already goes through
+  # `on_conflict=ats,slug` per-row, so there's no shared mutable state
+  # between sources to race on.
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one bad source shouldn't cancel the other 7
+      matrix:
+        source:
+          - feashliaa
+          - kalil
+          - openpostings
+          - commoncrawl
+          - wayback_adp
+          - yc
+          - theirstack
+          - httparchive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv google-cloud-bigquery
+
+      - name: Write GCP service account key (for HTTP Archive/BigQuery source)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        if: ${{ env.GCP_SA_KEY != '' && matrix.source == 'httparchive' }}
+        run: echo "$GCP_SA_KEY" > "${{ runner.temp }}/gcp-key.json"
+
+      - name: "Run discovery (source: ${{ matrix.source }})"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
+        run: python discovery.py --source ${{ matrix.source }}
+        # THEIRSTACK_API_KEY and GCP_PROJECT_ID/GCP_SA_KEY are optional —
+        # discovery.py logs a one-line notice and skips that source cleanly
+        # if either isn't set, rather than failing the run. See
+        # discovery.py's module docstring (sources 7 and 8) for what each
+        # needs and how to set it up.
