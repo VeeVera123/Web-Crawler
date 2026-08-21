@@ -23,6 +23,17 @@ Sources:
      month on the free tier, so this is a small monthly trickle for
      gap-filling thin platforms, not a bulk source. Needs a free
      THEIRSTACK_API_KEY — sign up at theirstack.com, no credit card)
+  8. HTTP Archive (public BigQuery dataset — real technology-fingerprint
+     detection, i.e. the same method commercial "companies using X"
+     trackers are built on, run monthly against millions of crawled
+     URLs by Google/HTTP Archive. Catches ATS integrations embedded via
+     a JS widget with no plain <a href> at all, which link-following
+     sources can't see. Needs a free Google Cloud project with BigQuery
+     enabled (no credit card — the Sandbox tier's 1TB/month free query
+     quota easily covers this) and GCP_PROJECT_ID +
+     GOOGLE_APPLICATION_CREDENTIALS set. See fetch_httparchive_slugs
+     docstring for the full explanation of how this reuses the Y
+     Combinator resolver rather than being a separate pipeline.)
 
 Runs weekly (Sunday) via GitHub Actions. The daily scanner
 reads from Supabase slug_registry — no local .txt files needed.
@@ -36,6 +47,7 @@ Usage:
     python enrich_slugs.py --source wayback_adp   # Wayback CDX (ADP) only
     python enrich_slugs.py --source yc            # Y Combinator only
     python enrich_slugs.py --source theirstack    # TheirStack only
+    python enrich_slugs.py --source httparchive   # HTTP Archive (BigQuery) only
     python enrich_slugs.py --dry-run              # count without writing
 """
 
@@ -144,6 +156,47 @@ THEIRSTACK_ATS_SLUGS = {
     # to track this platform at all (FolksHR/Glow Talents is a small,
     # UK/Ireland-focused ATS). Not worth spending a query on a guaranteed
     # empty result every run.
+}
+
+# HTTP Archive — public BigQuery dataset of Wappalyzer technology-detection
+# results, run monthly against millions of crawled URLs (Chrome UX Report's
+# popular-site list). Needs a Google Cloud project with BigQuery enabled
+# (free Sandbox tier — no credit card — covers this easily: a full query
+# here costs ~1-2GB against a 1TB/month free allowance) and a service
+# account key for programmatic access.
+HTTPARCHIVE_GCP_PROJECT = os.environ.get("GCP_PROJECT_ID", "")
+# google-cloud-bigquery bills/quotas against YOUR project but queries
+# Google's own public `httparchive` dataset — you don't need write access
+# to httparchive itself, just any GCP project with BigQuery turned on.
+
+# Map our ATS keys -> the exact Wappalyzer technology name, VERIFIED
+# 2026-08 by downloading the actual fingerprint files from the actively
+# maintained Wappalyzer fork (github.com/enthec/webappanalyzer) and
+# confirming each key exists verbatim. Platforms with no confirmed
+# fingerprint are left out entirely rather than guessed at.
+HTTPARCHIVE_ATS_TECH_NAMES = {
+    "greenhouse": "Greenhouse",
+    "lever": "Lever",
+    "workday": "Workday",
+    "bamboohr": "BambooHR",
+    "icims": "iCIMS",
+    "smartrecruiters": "SmartRecruiters",
+    "workable": "Workable",
+    "recruitee": "Recruitee",
+    "teamtailor": "Teamtailor",
+    "personio": "Personio",
+    "zoho": "Zoho Recruit",
+    "paylocity": "Paylocity",
+    "jobadder": "JobAdder",
+    "avature": "Avature",
+    "jobvite": "Jobvite",
+    "eploy": "Eploy",
+    "breezyhr": "Breezy HR",
+    # Confirmed NOT present in the fingerprint set (checked directly, not
+    # assumed): Ashby, Rippling, Folks HR, Softgarden, ClearCompany/
+    # HRMDirect, ADP, Taleo, SuccessFactors, BrassRing, ApplyToJob,
+    # join.com. These platforms just aren't in Wappalyzer's ruleset —
+    # this source can't help with them regardless of query design.
 }
 
 # ATS platforms we have working scrapers for (21 active)
@@ -1493,6 +1546,169 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 8: HTTP Archive (public BigQuery — Wappalyzer detection at scale)
+# ══════════════════════════════════════════════════════════
+#
+# This is a fundamentally different kind of source from everything above:
+# it's real technology-FINGERPRINT detection (script-src, DOM, JS globals
+# — the same method commercial "companies using X" trackers are built on)
+# run by Google/HTTP Archive against millions of crawled URLs every
+# month, rather than us following literal <a href> links ourselves. That
+# matters because some ATS integrations are embedded via a pure JS widget
+# with no visible link at all (this project already hit exactly that
+# problem with ADP — see the Wayback Machine source above) — a
+# fingerprint-based detector catches those where link-following can't.
+#
+# What comes back from this query is the COMPANY'S OWN page where the
+# technology was detected (e.g. https://acme.com), not necessarily the
+# ATS's own URL (e.g. boards.greenhouse.io/acme) — Wappalyzer flags a
+# page because it embeds a matching script/DOM pattern, which usually
+# means the company's careers page links to or embeds the ATS, but the
+# literal ATS URL/slug still needs to be extracted. So rather than
+# building a second URL-to-slug pipeline, this reuses the exact same
+# resolve_company_to_ats_slug() written for the Y Combinator source
+# (fetch the page, scan its links against every URL_TO_SLUG resolver,
+# follow one hop to a careers-page link if nothing's found directly) —
+# HTTP Archive is really just a much bigger, pre-filtered candidate list
+# of "pages that likely link to one of our ATS platforms" than YC's
+# company list is.
+
+def fetch_httparchive_candidate_urls(limit_per_tech: int = 200) -> dict[str, list[str]]:
+    """Query HTTP Archive's public BigQuery dataset for pages where a
+    known ATS technology was detected. Returns {ats: [urls]}, ranked by
+    CrUX popularity (most popular/reliable first) within limit_per_tech.
+
+    Requires `pip install google-cloud-bigquery` and a GCP project with
+    BigQuery enabled (GCP_PROJECT_ID env var + standard Google
+    Application Default Credentials, e.g. GOOGLE_APPLICATION_CREDENTIALS
+    pointing at a service account key). Returns {} and logs a one-line
+    notice — never raises — if either isn't available, same pattern as
+    the TheirStack source above.
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError:
+        log.info("HTTP Archive: google-cloud-bigquery not installed — skipping "
+                 "(pip install google-cloud-bigquery to enable this source).")
+        return {}
+
+    if not HTTPARCHIVE_GCP_PROJECT:
+        log.info("HTTP Archive: GCP_PROJECT_ID not set — skipping "
+                 "(needs a free Google Cloud project with BigQuery enabled).")
+        return {}
+
+    try:
+        client = bigquery.Client(project=HTTPARCHIVE_GCP_PROJECT)
+    except Exception as e:
+        log.warning(f"HTTP Archive: couldn't create BigQuery client "
+                    f"(check GOOGLE_APPLICATION_CREDENTIALS): {e}")
+        return {}
+
+    # Find the most recent available monthly crawl partition first —
+    # hardcoding a date would silently go stale as new crawls land.
+    try:
+        date_rows = list(client.query(
+            "SELECT MAX(date) AS latest FROM `httparchive.crawl.pages` "
+            "WHERE date > DATE_SUB(CURRENT_DATE(), INTERVAL 4 MONTH)"
+        ).result())
+        latest_date = date_rows[0].latest if date_rows else None
+    except Exception as e:
+        log.warning(f"HTTP Archive: failed to find latest crawl date: {e}")
+        return {}
+
+    if not latest_date:
+        log.warning("HTTP Archive: no recent crawl partition found — skipping.")
+        return {}
+
+    log.info(f"HTTP Archive: querying {latest_date} crawl for "
+             f"{len(HTTPARCHIVE_ATS_TECH_NAMES)} known ATS fingerprints...")
+
+    urls_by_ats: dict[str, list[str]] = {}
+    tech_to_ats = {v: k for k, v in HTTPARCHIVE_ATS_TECH_NAMES.items()}
+
+    query = """
+        SELECT tech.name AS tech_name, page, rank
+        FROM `httparchive.crawl.pages`,
+        UNNEST(technologies) AS tech
+        WHERE date = @crawl_date
+          AND client = 'desktop'
+          AND tech.name IN UNNEST(@tech_names)
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY tech.name ORDER BY rank ASC
+        ) <= @limit_per_tech
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("crawl_date", "DATE", latest_date),
+        bigquery.ArrayQueryParameter("tech_names", "STRING",
+                                       list(HTTPARCHIVE_ATS_TECH_NAMES.values())),
+        bigquery.ScalarQueryParameter("limit_per_tech", "INT64", limit_per_tech),
+    ])
+
+    try:
+        rows = list(client.query(query, job_config=job_config).result())
+    except Exception as e:
+        log.warning(f"HTTP Archive: query failed: {e}")
+        return {}
+
+    for row in rows:
+        ats = tech_to_ats.get(row.tech_name)
+        if ats and row.page:
+            urls_by_ats.setdefault(ats, []).append(row.page)
+
+    for ats, urls in urls_by_ats.items():
+        log.info(f"  {ats}: {len(urls)} candidate pages from HTTP Archive")
+
+    return urls_by_ats
+
+
+def fetch_httparchive_slugs(limit_per_tech: int = 200,
+                             max_workers: int = 15) -> dict[str, dict[str, str]]:
+    """Resolve HTTP Archive's candidate pages to real ATS slugs, reusing
+    the exact same resolver built for the Y Combinator source."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    urls_by_ats = fetch_httparchive_candidate_urls(limit_per_tech)
+    if not urls_by_ats:
+        return {}
+
+    all_urls = [(ats, url) for ats, urls in urls_by_ats.items() for url in urls]
+    log.info(f"HTTP Archive: resolving {len(all_urls)} candidate pages...")
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    resolved = 0
+
+    def _resolve_one(item):
+        expected_ats, url = item
+        result = resolve_company_to_ats_slug(url)
+        time.sleep(0.1)
+        return expected_ats, result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_resolve_one, item) for item in all_urls]
+        for future in as_completed(futures):
+            try:
+                expected_ats, result = future.result()
+            except Exception:
+                continue
+            if result:
+                actual_ats, slug = result
+                # Trust what we actually found on the page over what the
+                # fingerprint hinted at — a company page can legitimately
+                # link to a DIFFERENT ATS than the one HTTP Archive
+                # flagged (e.g. a stale/removed integration, or Wappalyzer
+                # matching a leftover script tag), so this still counts,
+                # just filed under the platform actually confirmed.
+                slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+                resolved += 1
+
+    log.info(f"HTTP Archive: resolved {resolved}/{len(all_urls)} candidate pages")
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} companies from HTTP Archive")
+
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
@@ -1675,12 +1891,12 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich Supabase slug_registry from 7 sources"
+        description="Enrich Supabase slug_registry from 8 sources"
     )
     parser.add_argument(
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
-                 "wayback_adp", "yc", "theirstack", "all"],
+                 "wayback_adp", "yc", "theirstack", "httparchive", "all"],
         default="all",
         help="Which source to pull from (default: all)",
     )
@@ -1700,6 +1916,13 @@ def main():
              "platforms (default: 40, under the free tier's 50/month)",
     )
     parser.add_argument(
+        "--httparchive-limit", type=int, default=200,
+        help="Max candidate pages to pull PER ATS platform from HTTP "
+             "Archive's BigQuery dataset, ranked by popularity (default: "
+             "200 — the resolve step is 1-2 live fetches per candidate, "
+             "same cost profile as --yc-limit)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Count slugs without writing to Supabase",
     )
@@ -1709,6 +1932,7 @@ def main():
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("           + Wayback CDX (ADP) + Y Combinator + TheirStack")
+    log.info("           + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
     grand_total = 0
@@ -1816,6 +2040,23 @@ def main():
             grand_total += upserted
         else:
             grand_total += ts_total
+
+    # Source 8: HTTP Archive (BigQuery — real technology-fingerprint
+    # detection at scale, see fetch_httparchive_slugs docstring)
+    if args.source in ("httparchive", "all"):
+        log.info("\n--- HTTP ARCHIVE (BigQuery, technology-fingerprint detection) ---")
+        ha_slugs = fetch_httparchive_slugs(limit_per_tech=args.httparchive_limit)
+        ha_total = sum(len(s) for s in ha_slugs.values())
+        if ha_total:
+            log.info(f"HTTP Archive total: {ha_total} slugs across "
+                     f"{sum(1 for s in ha_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(ha_slugs, source="httparchive",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ha_total
 
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")
