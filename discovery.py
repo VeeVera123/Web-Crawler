@@ -3,7 +3,7 @@ Slug Enrichment — Supabase as Single Source of Truth
 =====================================================
 Pulls company slugs from multiple sources and upserts them
 into the Supabase slug_registry table.
- 
+
 Sources:
   1. Feashliaa GitHub (50k+ slugs for 6 platforms — greenhouse,
      lever, ashby, bamboohr, icims, workday)
@@ -50,7 +50,7 @@ Sources:
      sandbox outright — untested from GitHub Actions as of first ship,
      so it fails cleanly (skip + one-line notice) rather than crash if
      that host blocks CI runner IPs too.)
- 
+
 Runs weekly (Sunday) via GitHub Actions, as a 9-way matrix — one job per
 source, all in parallel (see .github/workflows/discovery.yml) — rather
 than one job running all 9 back-to-back. Each source is already an
@@ -58,10 +58,10 @@ independent fetch-and-resolve pass with its own cost profile (bulk single
 download vs. thousands of live per-company fetches), so sharding by
 source is the natural split here — there's no single flat pool of "work
 items" to hash-shard the way main.py splits ATS boards across its matrix.
- 
+
 The daily scanner reads from Supabase slug_registry — no local .txt files
 needed.
- 
+
 Usage:
     python discovery.py                        # full enrichment (all sources, sequential)
     python discovery.py --source feashliaa     # Feashliaa only
@@ -75,7 +75,7 @@ Usage:
     python discovery.py --source wdc           # Web Data Commons only
     python discovery.py --dry-run              # count without writing
 """
- 
+
 import argparse
 import gzip
 import json
@@ -86,27 +86,27 @@ import sqlite3
 import tempfile
 import time
 from urllib.parse import urlparse, parse_qs, urljoin
- 
+
 import requests
 from dotenv import load_dotenv
- 
+
 load_dotenv()
- 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
- 
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
- 
+
 # OpenPostings raw download (SQLite database)
 OPENPOSTINGS_DB_URL = (
     "https://github.com/Masterjx9/OpenPostings/raw/main/jobs.db"
 )
- 
+
 # Feashliaa GitHub (JSON arrays of slugs — no URL conversion needed)
 FEASHLIAA_BASE = (
     "https://raw.githubusercontent.com/Feashliaa/"
@@ -120,7 +120,7 @@ FEASHLIAA_SOURCES = {
     "icims":      f"{FEASHLIAA_BASE}/icims_companies.json",
     "workday":    f"{FEASHLIAA_BASE}/workday_companies.json",
 }
- 
+
 # kalil0321/ats-scrapers (CSV inventories for many platforms)
 KALIL_BASE = (
     "https://raw.githubusercontent.com/kalil0321/"
@@ -142,14 +142,14 @@ KALIL_SOURCES = {
     # Disabled (JS-rendered / auth-required / blocked):
     # "taleo", "successfactors", "softgarden"
 }
- 
+
 # Common Crawl
 CC_INDEX_URL = "https://index.commoncrawl.org"
 CC_COLLINFO = f"{CC_INDEX_URL}/collinfo.json"
- 
+
 # Y Combinator (yc-oss/api — free, static JSON, no auth, GitHub Pages-hosted)
 YC_ALL_COMPANIES_URL = "https://yc-oss.github.io/api/companies/all.json"
- 
+
 # TheirStack (freemium technology-usage API)
 THEIRSTACK_API_URL = "https://api.theirstack.com/v1/companies/search"
 THEIRSTACK_API_KEY = os.environ.get("THEIRSTACK_API_KEY", "")
@@ -183,7 +183,7 @@ THEIRSTACK_ATS_SLUGS = {
     # UK/Ireland-focused ATS). Not worth spending a query on a guaranteed
     # empty result every run.
 }
- 
+
 # HTTP Archive — public BigQuery dataset of Wappalyzer technology-detection
 # results, run monthly against millions of crawled URLs (Chrome UX Report's
 # popular-site list). Needs a Google Cloud project with BigQuery enabled
@@ -194,7 +194,7 @@ HTTPARCHIVE_GCP_PROJECT = os.environ.get("GCP_PROJECT_ID", "")
 # google-cloud-bigquery bills/quotas against YOUR project but queries
 # Google's own public `httparchive` dataset — you don't need write access
 # to httparchive itself, just any GCP project with BigQuery turned on.
- 
+
 # Map our ATS keys -> the exact Wappalyzer technology name, VERIFIED
 # 2026-08 by downloading the actual fingerprint files from the actively
 # maintained Wappalyzer fork (github.com/enthec/webappanalyzer) and
@@ -224,7 +224,7 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     # join.com. These platforms just aren't in Wappalyzer's ruleset —
     # this source can't help with them regardless of query design.
 }
- 
+
 # ATS platforms we have working scrapers for (21 active)
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
@@ -236,7 +236,7 @@ SUPPORTED_ATS = {
     # now scrapes correctly (see ats_scrapers.py):
     "softgarden",
 }
- 
+
 # Eploy / Folks HR / JobAdder / Jobvite / ADP / Avature (added 2026-08) are
 # NOT in SUPPORTED_ATS yet: none of them appear in the OpenPostings dataset
 # this file enriches from, and JobAdder/ADP additionally need composite
@@ -245,12 +245,12 @@ SUPPORTED_ATS = {
 # (or via discover_slugs.py, if/when Common Crawl query patterns are added
 # for them) — they scrape fine once a slug row exists, this file just
 # doesn't discover new ones for them yet.
- 
+
 # BLACKLISTED — scrapers exist but don't work (robots.txt / JS-rendered):
 # brassring, successfactors
 # ycombinator is no longer per-company here — it moved to
 # job_board_scrapers.py as a multi-company aggregator (see there).
- 
+
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
 _OPENPOSTINGS_ATS_MAP_RAW = {
@@ -293,23 +293,23 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     # "brassring", "successfactors"
     # ycombinator moved to job_board_scrapers.py — no longer mapped here.
 }
- 
+
 def _map_ats_name(name: str) -> str | None:
     """Case-insensitive ATS name lookup."""
     return _OPENPOSTINGS_ATS_MAP_RAW.get(name.lower().strip())
- 
+
 # Slugs to skip
 SKIP_SLUGS = {
     "api", "www", "app", "static", "assets", "cdn", "docs", "help",
     "support", "blog", "login", "register", "test", "demo", "example",
     "staging", "dev", "sandbox", "admin", "",
 }
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # URL → SLUG CONVERTERS (OpenPostings stores full URLs)
 # ══════════════════════════════════════════════════════════
- 
+
 def _url_to_slug_greenhouse(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -319,8 +319,8 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
         if slug and slug.lower() not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_lever(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -337,8 +337,8 @@ def _url_to_slug_lever(url: str) -> str | None:
         if slug and slug.lower() not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_ashby(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -348,8 +348,8 @@ def _url_to_slug_ashby(url: str) -> str | None:
         if slug and slug.lower() not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_bamboohr(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -358,8 +358,8 @@ def _url_to_slug_bamboohr(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_icims(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -370,8 +370,8 @@ def _url_to_slug_icims(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_workday(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -385,8 +385,8 @@ def _url_to_slug_workday(url: str) -> str | None:
         if company and wd and site_id:
             return f"{company}|{wd}|{site_id}"
     return None
- 
- 
+
+
 def _url_to_slug_rippling(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -400,8 +400,8 @@ def _url_to_slug_rippling(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "ats"):
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_workable(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -413,8 +413,8 @@ def _url_to_slug_workable(url: str) -> str | None:
             if slug and slug not in SKIP_SLUGS:
                 return slug
     return None
- 
- 
+
+
 def _url_to_slug_recruitee(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -423,8 +423,8 @@ def _url_to_slug_recruitee(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_smartrecruiters(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -441,8 +441,8 @@ def _url_to_slug_smartrecruiters(url: str) -> str | None:
         if sub and sub not in SKIP_SLUGS and sub not in ("jobs", "careers", "www"):
             return sub
     return None
- 
- 
+
+
 def _url_to_slug_taleo(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -454,8 +454,8 @@ def _url_to_slug_taleo(url: str) -> str | None:
             if section.lower() not in ("rest", "api", "admin"):
                 return f"{company}|{section}"
     return None
- 
- 
+
+
 def _url_to_slug_oracle_cloud(url: str) -> str | None:
     """Extract slug from Oracle Cloud HCM URLs.
     URL format: {tenant}.fa.{region}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{site}/...
@@ -475,8 +475,8 @@ def _url_to_slug_oracle_cloud(url: str) -> str | None:
         return f"{host_prefix}|{site_match.group(1)}"
     # Fallback: host prefix only (site can be discovered later)
     return host_prefix
- 
- 
+
+
 def _url_to_slug_brassring(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -492,8 +492,8 @@ def _url_to_slug_brassring(url: str) -> str | None:
         if pid and sid and pid.isdigit() and sid.isdigit():
             return f"{pid}|{sid}"
     return None
- 
- 
+
+
 def _url_to_slug_teamtailor(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -502,8 +502,8 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug not in ("www", "app"):
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_successfactors(url: str) -> str | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -526,8 +526,8 @@ def _url_to_slug_successfactors(url: str) -> str | None:
                 return f"{instance}|{path_match.group(1)}"
             return instance
     return None
- 
- 
+
+
 def _url_to_slug_breezyhr(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -536,8 +536,8 @@ def _url_to_slug_breezyhr(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_applytojob(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -546,8 +546,8 @@ def _url_to_slug_applytojob(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_hrmdirect(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -556,8 +556,8 @@ def _url_to_slug_hrmdirect(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_softgarden(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -571,8 +571,8 @@ def _url_to_slug_softgarden(url: str) -> str | None:
         if path_match:
             return path_match.group(1)
     return None
- 
- 
+
+
 def _url_to_slug_zoho(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -581,8 +581,8 @@ def _url_to_slug_zoho(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_paylocity(url: str) -> str | None:
     """Extract slug from Paylocity URLs.
     Pattern: recruiting.paylocity.com/recruiting/jobs/All/{uuid}/{company_name}
@@ -605,8 +605,8 @@ def _url_to_slug_paylocity(url: str) -> str | None:
         ):
             return f"{company_id}|{company_name}"
     return None
- 
- 
+
+
 def _url_to_slug_joincom(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -619,8 +619,8 @@ def _url_to_slug_joincom(url: str) -> str | None:
         if slug and slug not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_personio(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -630,8 +630,8 @@ def _url_to_slug_personio(url: str) -> str | None:
             if slug and slug not in SKIP_SLUGS and slug != "www":
                 return slug
     return None
- 
- 
+
+
 def _url_to_slug_ycombinator(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -655,8 +655,8 @@ def _url_to_slug_ycombinator(url: str) -> str | None:
             if slug and slug.lower() not in SKIP_SLUGS:
                 return slug
     return None
- 
- 
+
+
 def _url_to_slug_eploy(url: str) -> str | None:
     """Extract slug from Eploy URLs.
     Pattern: {slug}.eploy.net/candidate/jobboard/..."""
@@ -668,8 +668,8 @@ def _url_to_slug_eploy(url: str) -> str | None:
     if slug and slug not in SKIP_SLUGS and slug != "www":
         return slug
     return None
- 
- 
+
+
 def _url_to_slug_folkshr(url: str) -> str | None:
     """Extract slug from Folks HR URLs.
     Pattern: jobs.folksats.app/{company}/... (post-2025-rebrand domain) or
@@ -687,8 +687,8 @@ def _url_to_slug_folkshr(url: str) -> str | None:
         if slug not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_jobadder(url: str) -> str | None:
     """Extract slug from JobAdder URLs.
     Pattern: clientapps.jobadder.com/{client_id}/{board_slug}/...
@@ -705,8 +705,8 @@ def _url_to_slug_jobadder(url: str) -> str | None:
         if client_id.lower() not in SKIP_SLUGS and board_slug.lower() not in SKIP_SLUGS:
             return f"{client_id}|{board_slug}"
     return None
- 
- 
+
+
 def _url_to_slug_jobvite(url: str) -> str | None:
     """Extract slug from Jobvite URLs.
     Pattern: jobs.jobvite.com/{company}[/jobs|/job/{id}|/...] — the board
@@ -725,8 +725,8 @@ def _url_to_slug_jobvite(url: str) -> str | None:
         if slug not in SKIP_SLUGS:
             return slug
     return None
- 
- 
+
+
 def _url_to_slug_adp(url: str) -> str | None:
     """Extract slug from ADP Workforce Now career-center URLs.
     Both 'cid' and 'ccId' query params are required to hit the public
@@ -741,8 +741,8 @@ def _url_to_slug_adp(url: str) -> str | None:
     if cid and cc_id:
         return f"{cid}|{cc_id}"
     return None
- 
- 
+
+
 def _extract_adp_legacy_client(url: str) -> str | None:
     """Pure parse (no network): pull the 'client' shortname out of ADP's
     legacy job-posting URL family (jobs/apply/posting.html?client=...).
@@ -756,8 +756,8 @@ def _extract_adp_legacy_client(url: str) -> str | None:
     qs = parse_qs(parsed.query)
     client = (qs.get("client") or [None])[0]
     return client or None
- 
- 
+
+
 def _resolve_adp_legacy_client(client: str) -> str | None:
     """ONE live HTTP call: follow the legacy posting.html URL's redirect
     chain to pick up the modern cid (ADP's own server-side lookup — no
@@ -780,16 +780,16 @@ def _resolve_adp_legacy_client(client: str) -> str | None:
     except Exception as e:
         log.debug(f"ADP legacy client resolve failed for '{client}': {e}")
     return None
- 
- 
+
+
 # Cap live resolve calls per run — this platform's legacy URL family is
 # deprecated and rare, and each hit costs one real HTTP round-trip against
 # ADP's own server (unlike the pure-parse extractors above), so we bound
 # it rather than risk hammering their server if a crawl surfaces a lot of
 # stale legacy links at once.
 _ADP_LEGACY_RESOLVE_CAP = 200
- 
- 
+
+
 def _url_to_slug_adp_discovery(url: str) -> str | None:
     """Combined extractor for CC/Wayback ADP discovery: pure-parses the
     modern cid/ccId URL family, and resolves the deprecated legacy
@@ -811,11 +811,11 @@ def _url_to_slug_adp_discovery(url: str) -> str | None:
     _url_to_slug_adp_discovery._resolved_clients[client] = resolved
     time.sleep(0.5)  # be polite — this is a live call against ADP's own server
     return resolved
- 
- 
+
+
 _url_to_slug_adp_discovery._resolved_clients = {}
- 
- 
+
+
 def _url_to_slug_avature(url: str) -> str | None:
     """Extract slug from Avature URLs.
     Pattern: {subdomain}.avature.net/... — path structure varies a lot in
@@ -831,8 +831,8 @@ def _url_to_slug_avature(url: str) -> str | None:
     if slug and slug not in SKIP_SLUGS and slug != "www":
         return slug
     return None
- 
- 
+
+
 URL_TO_SLUG = {
     "greenhouse": _url_to_slug_greenhouse,
     "lever": _url_to_slug_lever,
@@ -866,18 +866,18 @@ URL_TO_SLUG = {
     "adp": _url_to_slug_adp,
     "avature": _url_to_slug_avature,
 }
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 1: Feashliaa GitHub
 # ══════════════════════════════════════════════════════════
- 
+
 def fetch_feashliaa_slugs() -> dict[str, set[str]]:
     """Download slug lists from Feashliaa's job-board-aggregator repo.
     Returns JSON arrays of slugs directly — no URL conversion needed.
     Covers 6 platforms: greenhouse, lever, ashby, bamboohr, icims, workday."""
     slugs_by_ats: dict[str, set[str]] = {}
- 
+
     for ats, url in FEASHLIAA_SOURCES.items():
         try:
             r = requests.get(url, timeout=60)
@@ -895,16 +895,16 @@ def fetch_feashliaa_slugs() -> dict[str, set[str]]:
         except Exception as e:
             log.error(f"  {ats}: failed to fetch from Feashliaa: {e}")
             slugs_by_ats[ats] = set()
- 
+
     total = sum(len(s) for s in slugs_by_ats.values())
     log.info(f"Feashliaa total: {total} slugs across {len(slugs_by_ats)} platforms")
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 2: kalil0321/ats-scrapers (CSV inventories)
 # ══════════════════════════════════════════════════════════
- 
+
 def _parse_csv_line(line: str) -> tuple[str, str, str] | None:
     """Parse a CSV line with possible quoted fields. Returns (name, slug, url)."""
     line = line.strip()
@@ -926,84 +926,84 @@ def _parse_csv_line(line: str) -> tuple[str, str, str] | None:
     if len(parts) >= 3:
         return parts[0].strip(), parts[1].strip(), parts[2].strip()
     return None
- 
- 
+
+
 def fetch_kalil_slugs() -> dict[str, dict[str, str]]:
     """Download CSV company lists from kalil0321/ats-scrapers repo.
     CSVs have format: name,slug,url
     Returns {ats: {slug: company_name}}."""
     slugs_by_ats: dict[str, dict[str, str]] = {}
- 
+
     # Platforms where the CSV slug column can be used directly
     DIRECT_SLUG_PLATFORMS = {
         "greenhouse", "lever", "ashby", "workable", "recruitee",
         "smartrecruiters", "teamtailor", "breezyhr", "softgarden",
     }
- 
+
     for ats, csv_url in KALIL_SOURCES.items():
         converter = URL_TO_SLUG.get(ats)
         found: dict[str, str] = {}
- 
+
         try:
             r = requests.get(csv_url, timeout=60)
             r.raise_for_status()
             lines = r.text.strip().split("\n")
- 
+
             for line in lines[1:]:
                 parsed = _parse_csv_line(line)
                 if not parsed:
                     continue
                 name, raw_slug, url = parsed
- 
+
                 slug = None
                 if converter and url:
                     slug = converter(url)
- 
+
                 if not slug and ats in DIRECT_SLUG_PLATFORMS:
                     if raw_slug and raw_slug.lower() not in SKIP_SLUGS:
                         slug = raw_slug
- 
+
                 if slug:
                     found[slug] = name.strip() if name else ""
- 
+
             slugs_by_ats[ats] = found
             if found:
                 log.info(f"  {ats}: {len(found)} slugs from kalil0321")
- 
+
         except Exception as e:
             log.error(f"  {ats}: failed to fetch from kalil0321: {e}")
             slugs_by_ats[ats] = {}
- 
+
     total = sum(len(s) for s in slugs_by_ats.values())
     log.info(f"kalil0321 total: {total} slugs across "
              f"{sum(1 for s in slugs_by_ats.values() if s)} platforms")
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 3: OpenPostings
 # ══════════════════════════════════════════════════════════
- 
+
 def fetch_openpostings_slugs() -> dict[str, dict[str, str]]:
     """Download OpenPostings jobs.db and extract company slugs
     for platforms we support. Returns {ats: {slug: company_name}}."""
     log.info("Downloading OpenPostings jobs.db...")
     slugs_by_ats: dict[str, dict[str, str]] = {ats: {} for ats in SUPPORTED_ATS}
     skipped_ats = {}
- 
+
     try:
         r = requests.get(OPENPOSTINGS_DB_URL, timeout=120, stream=True)
         r.raise_for_status()
     except Exception as e:
         log.error(f"Failed to download OpenPostings DB: {e}")
         return slugs_by_ats
- 
+
     # Write to temp file and open as SQLite
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         tmp_path = tmp.name
         for chunk in r.iter_content(chunk_size=8192):
             tmp.write(chunk)
- 
+
     try:
         conn = sqlite3.connect(tmp_path)
         cursor = conn.execute(
@@ -1011,21 +1011,21 @@ def fetch_openpostings_slugs() -> dict[str, dict[str, str]]:
         )
         total = 0
         matched = 0
- 
+
         # Track conversion failures per ATS for debugging
         conversion_failures: dict[str, list[str]] = {}
- 
+
         for company_name, url_string, ats_name in cursor:
             total += 1
             our_ats = _map_ats_name(ats_name)
             if not our_ats:
                 skipped_ats[ats_name] = skipped_ats.get(ats_name, 0) + 1
                 continue
- 
+
             converter = URL_TO_SLUG.get(our_ats)
             if not converter:
                 continue
- 
+
             slug = converter(url_string)
             if slug:
                 # Keep company name (first one wins if duplicates)
@@ -1038,40 +1038,40 @@ def fetch_openpostings_slugs() -> dict[str, dict[str, str]]:
                     conversion_failures[our_ats] = []
                 if len(conversion_failures[our_ats]) < 3:
                     conversion_failures[our_ats].append(url_string)
- 
+
         conn.close()
         log.info(f"OpenPostings: {total} total companies, "
                  f"{matched} matched to our {len(SUPPORTED_ATS)} platforms")
- 
+
         # Log unmapped ATSs (for future expansion)
         if skipped_ats:
             top_skipped = sorted(skipped_ats.items(), key=lambda x: -x[1])[:10]
             log.info(f"Top unmapped ATSs: {', '.join(f'{k}({v})' for k, v in top_skipped)}")
- 
+
         for ats in sorted(SUPPORTED_ATS):
             count = len(slugs_by_ats.get(ats, {}))
             if count:
                 log.info(f"  {ats}: {count} companies")
- 
+
         # Log sample failing URLs for platforms with 0 matches
         if conversion_failures:
             log.info("URL conversion failures (sample URLs):")
             for ats, samples in sorted(conversion_failures.items()):
                 if not slugs_by_ats.get(ats):
                     log.info(f"  {ats}: {samples}")
- 
+
     except Exception as e:
         log.error(f"Failed to parse OpenPostings DB: {e}")
     finally:
         os.unlink(tmp_path)
- 
+
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 4: Common Crawl (ongoing discovery)
 # ══════════════════════════════════════════════════════════
- 
+
 CC_PLATFORM_PATTERNS = {
     # ADDED 2026-08: these 6 already have their bulk needs met by Feashliaa
     # (single static JSON dump per platform, much faster than a CDX
@@ -1148,7 +1148,7 @@ CC_PLATFORM_PATTERNS = {
     # instead of just guessing at path segments one at a time.
     "avature": ["*.avature.net/*"],
 }
- 
+
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
 CC_EXTRACTORS = {
     # Added 2026-08 alongside the same 6 platforms' CC_PLATFORM_PATTERNS
@@ -1186,8 +1186,8 @@ CC_EXTRACTORS = {
     "adp": _url_to_slug_adp_discovery,  # combined modern + legacy-resolve, see above
     "avature": _url_to_slug_avature,
 }
- 
- 
+
+
 def get_latest_crawl_ids(n: int = 3) -> list[str]:
     try:
         r = requests.get(CC_COLLINFO, timeout=30)
@@ -1196,13 +1196,13 @@ def get_latest_crawl_ids(n: int = 3) -> list[str]:
     except Exception as e:
         log.error(f"Failed to fetch CC crawl list: {e}")
         return []
- 
- 
+
+
 def query_cc_index(crawl_id: str, url_pattern: str) -> list[str]:
     endpoint = f"{CC_INDEX_URL}/{crawl_id}-index"
     all_urls = []
     page = 0
- 
+
     while page < 100:
         params = {
             "url": url_pattern,
@@ -1234,21 +1234,21 @@ def query_cc_index(crawl_id: str, url_pattern: str) -> list[str]:
         except Exception as e:
             log.warning(f"CC query error ({crawl_id}, {url_pattern}): {e}")
             break
- 
+
     return all_urls
- 
- 
+
+
 def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
     """Discover slugs from Common Crawl for platforms not well-covered
     by OpenPostings."""
     slugs_by_ats: dict[str, set[str]] = {ats: set() for ats in CC_PLATFORM_PATTERNS}
- 
+
     crawl_ids = get_latest_crawl_ids(n_crawls)
     if not crawl_ids:
         return slugs_by_ats
- 
+
     log.info(f"Common Crawl: querying {len(crawl_ids)} crawls")
- 
+
     for ats, patterns in CC_PLATFORM_PATTERNS.items():
         extractor = CC_EXTRACTORS[ats]
         for crawl_id in crawl_ids:
@@ -1261,14 +1261,14 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
                     if slug:
                         slugs_by_ats[ats].add(slug)
                 time.sleep(1)
- 
+
         count = len(slugs_by_ats[ats])
         if count:
             log.info(f"  {ats}: {count} companies from Common Crawl")
- 
+
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # WAYBACK MACHINE CDX — ADP-only supplemental discovery
 # ══════════════════════════════════════════════════════════
@@ -1289,7 +1289,7 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3) -> dict[str, set[str]]:
 # URL-pattern lookup — not a scrape of a page meant for browsers — but
 # per this project's non-negotiable robots.txt policy we still check
 # web.archive.org/robots.txt live before every run rather than assume.
- 
+
 WAYBACK_CDX_URL = "http://web.archive.org/cdx/search/cdx"
 _ADP_WAYBACK_PATTERNS = [
     "workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html*",
@@ -1299,17 +1299,17 @@ _ADP_WAYBACK_PATTERNS = [
     # _url_to_slug_adp_discovery.
     "workforcenow.adp.com/jobs/apply/posting.html*",
 ]
- 
+
 _ROBOTS_UA = "ATS-Global-Scanner/1.0"
- 
+
 # Running tallies of *why* a robots.txt check came back "disallowed" —
 # incremented by _robots_allows(), read/reset by callers that want a
 # one-line end-of-run summary instead of a warning log per dead domain
 # (most failures here are just dead/unreachable company sites, not actual
 # robots.txt disallow rules — see fetch_yc_slugs for the summary log).
 _robots_check_stats = {"unreachable": 0, "disallowed_by_rule": 0}
- 
- 
+
+
 def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bool:
     """Minimal robots.txt check: fetch {base_url}/robots.txt and verify
     `path` isn't disallowed for '*' or our own UA. Fails CLOSED (returns
@@ -1350,8 +1350,8 @@ def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bo
         _robots_check_stats["unreachable"] += 1
         log.debug(f"robots.txt check failed for {base_url}: {e} — treating as disallowed")
         return False
- 
- 
+
+
 def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
     """Query the Wayback Machine CDX index for archived ADP career pages
     (both the modern cid/ccId family and the deprecated legacy client=
@@ -1359,12 +1359,12 @@ def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
     the query string, legacy ones resolve via one live redirect-follow
     each (capped, see _ADP_LEGACY_RESOLVE_CAP)."""
     slugs: set[str] = set()
- 
+
     if not _robots_allows("https://web.archive.org", "/cdx/"):
         log.warning("Wayback CDX: /cdx/ disallowed by web.archive.org/robots.txt "
                      "(or robots.txt unreachable) — skipping ADP Wayback discovery.")
         return {"adp": slugs}
- 
+
     for pattern in _ADP_WAYBACK_PATTERNS:
         log.info(f"Wayback CDX: querying archived snapshots of {pattern}")
         try:
@@ -1380,21 +1380,21 @@ def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
         except Exception as e:
             log.warning(f"Wayback CDX query failed for {pattern}: {e}")
             continue
- 
+
         # First row is the column header (["original"]) when output=json
         urls = [row[0] for row in rows[1:]] if rows and isinstance(rows, list) else []
         log.info(f"  Wayback CDX: {len(urls)} archived snapshot URLs")
- 
+
         for url in urls:
             slug = _url_to_slug_adp_discovery(url)
             if slug:
                 slugs.add(slug)
- 
+
     if slugs:
         log.info(f"  adp: {len(slugs)} companies from Wayback Machine")
     return {"adp": slugs}
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 6: Y Combinator (yc-oss/api)
 # ══════════════════════════════════════════════════════════
@@ -1411,15 +1411,15 @@ def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
 # Lever, Ashby, Rippling), but skews toward companies too new or small to
 # have shown up in the bigger static dumps (Feashliaa/kalil/OpenPostings)
 # yet — so it's net-new companies, not just the same ones again.
- 
+
 YC_USER_AGENT = _ROBOTS_UA
 _YC_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.I)
 _YC_CAREER_LINK_RE = re.compile(
     r"\b(careers?|jobs?|join[\s\-]?us|we[\s\-]?re[\s\-]?hiring|work[\s\-]?with[\s\-]?us)\b",
     re.I,
 )
- 
- 
+
+
 def fetch_yc_companies() -> list[dict]:
     """Download the full YC company list (~6k companies, free, no auth)."""
     try:
@@ -1430,8 +1430,8 @@ def fetch_yc_companies() -> list[dict]:
     except Exception as e:
         log.error(f"Failed to fetch YC company list: {e}")
         return []
- 
- 
+
+
 def _scan_html_for_ats_slug(html: str, base_url: str) -> tuple[str, str] | None:
     """Scan every href in `html` (resolved to absolute against `base_url`)
     against all known ATS URL patterns. Returns (ats, slug) on first hit."""
@@ -1445,8 +1445,8 @@ def _scan_html_for_ats_slug(html: str, base_url: str) -> tuple[str, str] | None:
             if slug:
                 return ats, slug
     return None
- 
- 
+
+
 def _find_career_page_link(html: str, base_url: str) -> str | None:
     """Find the first link on the page that looks like a careers page."""
     for href in _YC_HREF_RE.findall(html):
@@ -1456,8 +1456,8 @@ def _find_career_page_link(html: str, base_url: str) -> str | None:
             except Exception:
                 continue
     return None
- 
- 
+
+
 def resolve_company_to_ats_slug(website: str, timeout: int = 15) -> tuple[str, str] | None:
     """Given a company's own homepage URL, try to find which ATS it uses
     and that ATS's slug for it. Checks robots.txt before fetching each
@@ -1467,10 +1467,10 @@ def resolve_company_to_ats_slug(website: str, timeout: int = 15) -> tuple[str, s
     if not parsed.hostname:
         return None
     base = f"{parsed.scheme}://{parsed.hostname}"
- 
+
     if not _robots_allows(base, "/"):
         return None
- 
+
     try:
         r = requests.get(base, timeout=timeout,
                           headers={"User-Agent": YC_USER_AGENT})
@@ -1479,24 +1479,24 @@ def resolve_company_to_ats_slug(website: str, timeout: int = 15) -> tuple[str, s
         html = r.text
     except Exception:
         return None
- 
+
     # Most modern startups link straight to their ATS from the homepage
     # nav/footer — check that first, no second fetch needed.
     hit = _scan_html_for_ats_slug(html, base)
     if hit:
         return hit
- 
+
     # Otherwise, follow one hop to whatever looks like a careers page and
     # check again there.
     career_url = _find_career_page_link(html, base)
     if not career_url:
         return None
- 
+
     career_parsed = urlparse(career_url)
     career_base = f"{career_parsed.scheme}://{career_parsed.hostname}"
     if career_base != base and not _robots_allows(career_base, career_parsed.path or "/"):
         return None
- 
+
     try:
         r2 = requests.get(career_url, timeout=timeout,
                            headers={"User-Agent": YC_USER_AGENT})
@@ -1505,11 +1505,11 @@ def resolve_company_to_ats_slug(website: str, timeout: int = 15) -> tuple[str, s
         return _scan_html_for_ats_slug(r2.text, career_url)
     except Exception:
         return None
- 
- 
+
+
 def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[str, str]]:
     """Resolve YC companies' own websites to an ATS slug where possible.
- 
+
     `limit` caps how many companies are attempted per run (default 2000,
     not the full ~6k) — this source does 1-2 live HTTP fetches PER
     COMPANY (unlike the other sources, which are single bulk downloads),
@@ -1519,18 +1519,18 @@ def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[s
     weekly runs still converges on full coverage over time.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
- 
+
     all_companies = fetch_yc_companies()
     companies = all_companies[:limit] if limit else all_companies
     log.info(f"Y Combinator: resolving ATS slug for {len(companies)} of "
              f"{len(all_companies)} total companies...")
- 
+
     _robots_check_stats["unreachable"] = 0
     _robots_check_stats["disallowed_by_rule"] = 0
- 
+
     slugs_by_ats: dict[str, dict[str, str]] = {}
     resolved = 0
- 
+
     def _resolve_one(company):
         website = company.get("website", "")
         if not website:
@@ -1540,7 +1540,7 @@ def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[s
         if result:
             return company.get("name", ""), result
         return None
- 
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_resolve_one, c): c for c in companies}
         for i, future in enumerate(as_completed(futures), 1):
@@ -1554,30 +1554,30 @@ def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[s
                 resolved += 1
             if i % 500 == 0:
                 log.info(f"  ...{i}/{len(companies)} checked, {resolved} resolved so far")
- 
+
     for ats, slugs in slugs_by_ats.items():
         log.info(f"  {ats}: {len(slugs)} companies from Y Combinator")
- 
+
     skipped = len(companies) - resolved
     log.info(f"  Y Combinator summary: {resolved} resolved, {skipped} skipped "
              f"({_robots_check_stats['unreachable']} unreachable sites, "
              f"{_robots_check_stats['disallowed_by_rule']} disallowed by "
              f"robots.txt, rest had no detectable ATS link) — run with "
              f"-v/--verbose for the per-site detail.")
- 
+
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 7: TheirStack (freemium technology-usage API)
 # ══════════════════════════════════════════════════════════
- 
+
 def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]:
     """Pull companies for the thinner platforms from TheirStack's free
     tier. Requires THEIRSTACK_API_KEY (free signup, no credit card) —
     returns empty and logs a one-line notice if it's not set, rather than
     failing the whole enrichment run.
- 
+
     `max_companies` caps TOTAL companies fetched across all platforms
     this run (default 40, under the free tier's 50 company-credits/month
     so a couple of runs a month stay comfortably inside the free budget —
@@ -1587,23 +1587,23 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
         log.info("TheirStack: THEIRSTACK_API_KEY not set — skipping "
                  "(free signup at https://theirstack.com, no credit card needed).")
         return {}
- 
+
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {THEIRSTACK_API_KEY}",
     }
- 
+
     slugs_by_ats: dict[str, dict[str, str]] = {}
     spent = 0
- 
+
     for ats, ts_slug in THEIRSTACK_ATS_SLUGS.items():
         if spent >= max_companies:
             log.info(f"TheirStack: hit max_companies budget ({max_companies}) — stopping.")
             break
         remaining = max_companies - spent
         page_limit = min(25, remaining)
- 
+
         try:
             r = requests.post(
                 THEIRSTACK_API_URL,
@@ -1624,7 +1624,7 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
             log.warning(f"TheirStack query failed for {ats} (slug={ts_slug!r}): {e}")
             time.sleep(0.6)  # stay under the 2 req/sec free-tier rate limit
             continue
- 
+
         companies = data.get("data") or data.get("companies") or []
         added = 0
         for c in companies:
@@ -1637,19 +1637,19 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
             if slug and slug.lower() not in SKIP_SLUGS:
                 slugs_by_ats.setdefault(ats, {})[slug] = name
                 added += 1
- 
+
         if added:
             log.info(f"  {ats}: {added} companies from TheirStack (slug={ts_slug!r})")
         elif companies == [] and not added:
             log.info(f"  {ats}: 0 results for TheirStack slug {ts_slug!r} — "
                       f"double-check it against theirstack.com/en/technology/{ts_slug}")
- 
+
         spent += added
         time.sleep(0.6)
- 
+
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 8: HTTP Archive (public BigQuery — Wappalyzer detection at scale)
 # ══════════════════════════════════════════════════════════
@@ -1677,13 +1677,13 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
 # HTTP Archive is really just a much bigger, pre-filtered candidate list
 # of "pages that likely link to one of our ATS platforms" than YC's
 # company list is.
- 
+
 def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
                                       months: int = 6) -> dict[str, list[str]]:
     """Query HTTP Archive's public BigQuery dataset for pages where a
     known ATS technology was detected. Returns {ats: [urls]}, ranked by
     CrUX popularity (most popular/reliable first) within limit_per_tech.
- 
+
     Widened 2026-08 from a single-month/desktop-only query (limit_per_tech
     200) to querying the last `months` monthly crawl partitions AND both
     `desktop`+`mobile` clients, unioned and deduped — this is the real,
@@ -1697,7 +1697,7 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
     higher score against the same pool. Still cheap: ~1-2GB per
     month/client scanned against BigQuery Sandbox's 1TB/month free
     allowance, so even months=6 (12 scans) is well under 1% of quota.
- 
+
     NOTE: this does NOT change what HTTP Archive's crawl universe covers
     in the first place (Chrome UX Report's popular-site list) — it only
     recovers the extra names that ARE in that universe but were missed by
@@ -1705,7 +1705,7 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
     ever crawl still won't appear here no matter how wide this query gets;
     see the module docstring for why this source is a supplemental
     trickle, not a bulk source like Feashliaa/OpenPostings/Common Crawl.
- 
+
     Requires `pip install google-cloud-bigquery` and a GCP project with
     BigQuery enabled (GCP_PROJECT_ID env var + standard Google
     Application Default Credentials, e.g. GOOGLE_APPLICATION_CREDENTIALS
@@ -1719,19 +1719,19 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
         log.info("HTTP Archive: google-cloud-bigquery not installed — skipping "
                  "(pip install google-cloud-bigquery to enable this source).")
         return {}
- 
+
     if not HTTPARCHIVE_GCP_PROJECT:
         log.info("HTTP Archive: GCP_PROJECT_ID not set — skipping "
                  "(needs a free Google Cloud project with BigQuery enabled).")
         return {}
- 
+
     try:
         client = bigquery.Client(project=HTTPARCHIVE_GCP_PROJECT)
     except Exception as e:
         log.warning(f"HTTP Archive: couldn't create BigQuery client "
                     f"(check GOOGLE_APPLICATION_CREDENTIALS): {e}")
         return {}
- 
+
     # Find the available monthly crawl partitions first — hardcoding dates
     # would silently go stale as new crawls land / old ones age out.
     try:
@@ -1748,18 +1748,18 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
     except Exception as e:
         log.warning(f"HTTP Archive: failed to find recent crawl dates: {e}")
         return {}
- 
+
     if not crawl_dates:
         log.warning("HTTP Archive: no recent crawl partitions found — skipping.")
         return {}
- 
+
     log.info(f"HTTP Archive: querying {len(crawl_dates)} crawl(s) "
              f"({crawl_dates[-1]} .. {crawl_dates[0]}), both desktop+mobile, "
              f"for {len(HTTPARCHIVE_ATS_TECH_NAMES)} known ATS fingerprints...")
- 
+
     urls_by_ats: dict[str, list[str]] = {}
     tech_to_ats = {v: k for k, v in HTTPARCHIVE_ATS_TECH_NAMES.items()}
- 
+
     # NOTE 2026-08: `technologies` is UNNESTed into a STRUCT whose field is
     # named `technology` (STRUCT<technology STRING, categories ARRAY<STRING>,
     # info ARRAY<STRING>>) — NOT `name`. Confirmed live via BigQuery's own
@@ -1791,29 +1791,29 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
                                        list(HTTPARCHIVE_ATS_TECH_NAMES.values())),
         bigquery.ScalarQueryParameter("limit_per_tech", "INT64", limit_per_tech),
     ])
- 
+
     try:
         rows = list(client.query(query, job_config=job_config).result())
     except Exception as e:
         log.warning(f"HTTP Archive: query failed: {e}")
         return {}
- 
+
     for row in rows:
         ats = tech_to_ats.get(row.tech_name)
         if ats and row.page:
             urls_by_ats.setdefault(ats, []).append(row.page)
- 
+
     for ats, urls in urls_by_ats.items():
         log.info(f"  {ats}: {len(urls)} candidate pages from HTTP Archive")
- 
+
     return urls_by_ats
- 
- 
+
+
 def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
                              max_workers: int = 30) -> dict[str, dict[str, str]]:
     """Resolve HTTP Archive's candidate pages to real ATS slugs, reusing
     the exact same resolver built for the Y Combinator source.
- 
+
     max_workers raised 15->30 alongside the higher default limit_per_tech
     (200->2000) and months (1->6) — those changes can produce roughly
     10x+ as many candidate pages to resolve per run, so resolve
@@ -1822,26 +1822,26 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
     is still well within what a single GitHub Actions runner handles fine.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
- 
+
     urls_by_ats = fetch_httparchive_candidate_urls(limit_per_tech, months)
     if not urls_by_ats:
         return {}
- 
+
     all_urls = [(ats, url) for ats, urls in urls_by_ats.items() for url in urls]
     log.info(f"HTTP Archive: resolving {len(all_urls)} candidate pages...")
- 
+
     _robots_check_stats["unreachable"] = 0
     _robots_check_stats["disallowed_by_rule"] = 0
- 
+
     slugs_by_ats: dict[str, dict[str, str]] = {}
     resolved = 0
- 
+
     def _resolve_one(item):
         expected_ats, url = item
         result = resolve_company_to_ats_slug(url)
         time.sleep(0.1)
         return expected_ats, result
- 
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_resolve_one, item) for item in all_urls]
         for future in as_completed(futures):
@@ -1859,21 +1859,21 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
                 # just filed under the platform actually confirmed.
                 slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
                 resolved += 1
- 
+
     log.info(f"HTTP Archive: resolved {resolved}/{len(all_urls)} candidate pages")
     for ats, slugs in slugs_by_ats.items():
         log.info(f"  {ats}: {len(slugs)} companies from HTTP Archive")
- 
+
     skipped = len(all_urls) - resolved
     log.info(f"  HTTP Archive summary: {resolved} resolved, {skipped} skipped "
              f"({_robots_check_stats['unreachable']} unreachable sites, "
              f"{_robots_check_stats['disallowed_by_rule']} disallowed by "
              f"robots.txt, rest had no detectable ATS link) — run with "
              f"-v/--verbose for the per-site detail.")
- 
+
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 9: Web Data Commons (free bulk schema.org JobPosting extract)
 # ══════════════════════════════════════════════════════════
@@ -1929,17 +1929,17 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
 # CLOSED per-file (skip + warning) rather than crash if a file 403s/times
 # out, same defensive pattern as every source above — so a first real run
 # on GitHub Actions is the actual test of reachability, not this dev box.
- 
+
 WDC_JOBPOSTING_BASE_URL = (
     "https://data.dws.informatik.uni-mannheim.de/structureddata/"
     "2024-12/quads/classspecific/JobPosting"
 )
 WDC_NUM_PART_FILES = 14   # part_0.gz .. part_13.gz, ~250-590MB each, confirmed live 2026-08
- 
+
 _WDC_TYPE_PREDICATE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
 _WDC_JOBPOSTING_OBJECT = "<https://schema.org/JobPosting>"
- 
- 
+
+
 def _extract_wdc_job_urls(part_url: str, timeout: int = 300) -> set[str]:
     """Stream-download one WDC part_N.gz file and pull out just the
     distinct page URLs (N-Quads graph element) for JobPosting-typed
@@ -1968,20 +1968,20 @@ def _extract_wdc_job_urls(part_url: str, timeout: int = 300) -> set[str]:
     except Exception as e:
         log.warning(f"WDC: failed to stream {part_url}: {e} — skipping this part file.")
     return urls
- 
- 
+
+
 def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES) -> dict[str, set[str]]:
     """Download WDC's JobPosting N-Quads part files, extract distinct
     page URLs, and run each straight through URL_TO_SLUG (no live fetches
     needed — see module-level Source 9 docstring above for why).
- 
+
     max_parts caps how many of the 14 part files to download per run
     (default: all 14) — pass a smaller number for a quicker/cheaper test
     run while confirming this host is reachable from GitHub Actions.
     """
     all_job_urls: set[str] = set()
     parts_ok = 0
- 
+
     for i in range(max_parts):
         part_url = f"{WDC_JOBPOSTING_BASE_URL}/part_{i}.gz"
         log.info(f"WDC: downloading part_{i}.gz ({i + 1}/{max_parts})...")
@@ -1991,17 +1991,17 @@ def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES) -> dict[str, set[str]]:
         all_job_urls |= urls
         log.info(f"  part_{i}.gz: {len(urls)} job-posting URLs "
                  f"({len(all_job_urls)} distinct so far)")
- 
+
     if not all_job_urls:
         log.warning("WDC: no job-posting URLs recovered from any part file — "
                     "likely a host-reachability issue (see Source 9 docstring's "
                     "KNOWN RISK note). Skipping this source for this run.")
         return {}
- 
+
     log.info(f"WDC: {len(all_job_urls)} distinct job-posting URLs from "
              f"{parts_ok}/{max_parts} part files — resolving against "
              f"{len(URL_TO_SLUG)} known ATS URL patterns...")
- 
+
     slugs_by_ats: dict[str, set[str]] = {}
     for url in all_job_urls:
         for ats, extractor in URL_TO_SLUG.items():
@@ -2009,36 +2009,36 @@ def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES) -> dict[str, set[str]]:
             if slug:
                 slugs_by_ats.setdefault(ats, set()).add(slug)
                 break   # one URL matches at most one platform
- 
+
     for ats, slugs in slugs_by_ats.items():
         if slugs:
             log.info(f"  {ats}: {len(slugs)} companies from Web Data Commons")
- 
+
     return slugs_by_ats
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
- 
+
 def _oracle_tenant(slug: str) -> str:
     """Extract the bare tenant name from an oracle_cloud_hcm slug, resolved
     or not. 'eeho|CX_1' -> 'eeho'; 'eeho.fa.us2|CX_1' -> 'eeho'; 'eeho' -> 'eeho'."""
     host_prefix = slug.split("|", 1)[0]
     return host_prefix.split(".", 1)[0]
- 
- 
+
+
 def _is_resolved_oracle_slug(slug: str) -> bool:
     """True if the slug already carries a discovered '.fa.<region>' domain."""
     host_prefix = slug.split("|", 1)[0]
     return ".fa." in host_prefix
- 
- 
+
+
 def _fetch_resolved_oracle_tenants() -> set[str]:
     """
     Tenants that already have a resolved oracle_cloud_hcm slug in
     slug_registry (e.g. 'eeho.fa.us2|CX_1' -> tenant 'eeho').
- 
+
     scrape_oracle_cloud_hcm() persists the resolved slug once it discovers a
     legacy tenant's real domain (see supabase_handler.resolve_oracle_slug).
     Sources like OpenPostings/Common Crawl only ever know the legacy,
@@ -2049,7 +2049,7 @@ def _fetch_resolved_oracle_tenants() -> set[str]:
     """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return set()
- 
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -2082,10 +2082,10 @@ def _fetch_resolved_oracle_tenants() -> set[str]:
     except Exception as e:
         log.error(f"Failed to fetch existing oracle_cloud_hcm slugs for de-dup check: {e}")
         return set()
- 
+
     return tenants
- 
- 
+
+
 def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
     """
     Drop legacy (unresolved) oracle_cloud_hcm slugs whose tenant already has
@@ -2097,7 +2097,7 @@ def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
     resolved_tenants = _fetch_resolved_oracle_tenants()
     if not resolved_tenants:
         return slug_dict
- 
+
     filtered = {}
     skipped = 0
     for slug, name in slug_dict.items():
@@ -2105,17 +2105,17 @@ def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
             skipped += 1
             continue
         filtered[slug] = name
- 
+
     if skipped:
         log.info(f"  oracle_cloud_hcm: skipped {skipped} legacy slugs already resolved in slug_registry")
- 
+
     return filtered
- 
- 
+
+
 def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                         dry_run: bool = False) -> int:
     """Upsert slugs to Supabase slug_registry. Returns total upserted.
- 
+
     slugs_by_ats values can be:
       - set[str]          → slugs only (no company name)
       - dict[str, str]    → {slug: company_name}
@@ -2123,37 +2123,37 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
     if not SUPABASE_URL or not SUPABASE_KEY:
         log.error("SUPABASE_URL or SUPABASE_KEY not set")
         return 0
- 
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=minimal,resolution=merge-duplicates",
     }
- 
+
     total = 0
     chunk_size = 500
- 
+
     for ats, slugs in slugs_by_ats.items():
         if not slugs:
             continue
- 
+
         # Normalize: set → dict with empty names, dict stays as-is
         if isinstance(slugs, set):
             slug_dict = {s: "" for s in slugs}
         else:
             slug_dict = slugs
- 
+
         # Oracle Cloud HCM: don't re-add a legacy tenant slug that's already
         # been resolved to its real domain — see _filter_oracle_slugs.
         if ats == "oracle_cloud_hcm" and not dry_run:
             slug_dict = _filter_oracle_slugs(slug_dict)
             if not slug_dict:
                 continue
- 
+
         items = list(slug_dict.items())
         ats_total = 0
- 
+
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i + chunk_size]
             rows = []
@@ -2162,11 +2162,11 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                 if name:
                     row["name"] = name[:300]
                 rows.append(row)
- 
+
             if dry_run:
                 ats_total += len(chunk)
                 continue
- 
+
             r = None
             try:
                 r = requests.post(
@@ -2186,18 +2186,18 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                 # to a transient network blip. Always log it when we have it.
                 body = f" — response: {r.text[:500]}" if r is not None else ""
                 log.error(f"Supabase upsert failed for {ats}: {e}{body}")
- 
+
         if ats_total:
             log.info(f"  {ats}: upserted {ats_total} slugs ({source})")
         total += ats_total
- 
+
     return total
- 
- 
+
+
 # ══════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════
- 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Enrich Supabase slug_registry from 8 sources"
@@ -2259,45 +2259,45 @@ def main():
              "company domains, not real problems — see fetch_yc_slugs.",
     )
     args = parser.parse_args()
- 
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
- 
+
     log.info("=" * 60)
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("           + Wayback CDX (ADP) + Y Combinator + TheirStack")
     log.info("           + HTTP Archive (BigQuery) + Web Data Commons")
     log.info("=" * 60)
- 
+
     grand_total = 0
- 
+
     # Source 1: Feashliaa (50k+ slugs for 6 platforms)
     if args.source in ("feashliaa", "all"):
         log.info("\n--- FEASHLIAA (6 platforms, 50k+ slugs) ---")
         fa_slugs = fetch_feashliaa_slugs()
         fa_total = sum(len(s) for s in fa_slugs.values())
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(fa_slugs, source="feashliaa",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += fa_total
- 
+
     # Source 2: kalil0321/ats-scrapers (15 platforms, CSV inventories)
     if args.source in ("kalil", "all"):
         log.info("\n--- KALIL0321 (15 platforms, CSV inventories) ---")
         ka_slugs = fetch_kalil_slugs()
         ka_total = sum(len(s) for s in ka_slugs.values())
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(ka_slugs, source="kalil",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += ka_total
- 
+
     # Source 3: OpenPostings (110k+ companies across 80+ ATSs)
     if args.source in ("openpostings", "all"):
         log.info("\n--- OPENPOSTINGS (110k+ companies) ---")
@@ -2305,14 +2305,14 @@ def main():
         op_total = sum(len(s) for s in op_slugs.values())
         log.info(f"OpenPostings total: {op_total} slugs across "
                  f"{sum(1 for s in op_slugs.values() if s)} platforms")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(op_slugs, source="openpostings",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += op_total
- 
+
     # Source 4: Common Crawl (ongoing discovery for 27 platforms)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
@@ -2320,14 +2320,14 @@ def main():
         cc_total = sum(len(s) for s in cc_slugs.values())
         log.info(f"Common Crawl total: {cc_total} slugs across "
                  f"{sum(1 for s in cc_slugs.values() if s)} platforms")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(cc_slugs, source="commoncrawl",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += cc_total
- 
+
     # Source 5: Wayback Machine CDX (ADP-only — see fetch_wayback_adp_slugs
     # docstring for why ADP specifically needs a second discovery source)
     if args.source in ("wayback_adp", "all"):
@@ -2335,14 +2335,14 @@ def main():
         wb_slugs = fetch_wayback_adp_slugs()
         wb_total = sum(len(s) for s in wb_slugs.values())
         log.info(f"Wayback CDX total: {wb_total} slugs")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(wb_slugs, source="wayback_adp",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += wb_total
- 
+
     # Source 6: Y Combinator (net-new companies too small/new for the
     # bulk dumps above — see fetch_yc_slugs docstring)
     if args.source in ("yc", "all"):
@@ -2351,14 +2351,14 @@ def main():
         yc_total = sum(len(s) for s in yc_slugs.values())
         log.info(f"Y Combinator total: {yc_total} slugs across "
                  f"{sum(1 for s in yc_slugs.values() if s)} platforms")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(yc_slugs, source="yc",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += yc_total
- 
+
     # Source 7: TheirStack (freemium — small monthly trickle for thin
     # platforms, see fetch_theirstack_slugs docstring)
     if args.source in ("theirstack", "all"):
@@ -2368,14 +2368,14 @@ def main():
         if ts_total:
             log.info(f"TheirStack total: {ts_total} slugs across "
                      f"{sum(1 for s in ts_slugs.values() if s)} platforms")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(ts_slugs, source="theirstack",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += ts_total
- 
+
     # Source 8: HTTP Archive (BigQuery — real technology-fingerprint
     # detection at scale, see fetch_httparchive_slugs docstring)
     if args.source in ("httparchive", "all"):
@@ -2386,14 +2386,14 @@ def main():
         if ha_total:
             log.info(f"HTTP Archive total: {ha_total} slugs across "
                      f"{sum(1 for s in ha_slugs.values() if s)} platforms")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(ha_slugs, source="httparchive",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += ha_total
- 
+
     # Source 9: Web Data Commons (free bulk schema.org JobPosting extract —
     # broader domain universe than HTTP Archive, no live fetches needed,
     # see fetch_wdc_slugs docstring for the KNOWN RISK note on host
@@ -2405,18 +2405,17 @@ def main():
         if wdc_total:
             log.info(f"Web Data Commons total: {wdc_total} slugs across "
                      f"{sum(1 for s in wdc_slugs.values() if s)} platforms")
- 
+
         if not args.dry_run:
             upserted = upsert_to_supabase(wdc_slugs, source="wdc",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
             grand_total += wdc_total
- 
+
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")
- 
- 
+
+
 if __name__ == "__main__":
     main()
- 
