@@ -1,4 +1,4 @@
-name: Discovery (Slug Registry Enrichment)
+name: Discovery
 
 on:
   schedule:
