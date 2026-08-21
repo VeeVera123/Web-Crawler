@@ -1,31 +1,33 @@
 name: Enrich Slug Registry
-
+ 
 on:
   schedule:
     - cron: "0 3 * * 0"   # Every Sunday at 3:00 UTC
   workflow_dispatch:       # manual trigger
-
+ 
 jobs:
   enrich:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
+ 
       - name: Install dependencies
         run: pip install requests python-dotenv google-cloud-bigquery
-
+ 
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
-        if: ${{ secrets.GCP_SA_KEY != '' }}
-        run: echo '${{ secrets.GCP_SA_KEY }}' > "${{ runner.temp }}/gcp-key.json"
-
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        if: ${{ env.GCP_SA_KEY != '' }}
+        run: echo "$GCP_SA_KEY" > "${{ runner.temp }}/gcp-key.json"
+ 
       - name: Enrich slug registry (8 sources)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -39,3 +41,4 @@ jobs:
         # cleanly if either isn't set, rather than failing the run. See
         # enrich_slugs.py's module docstring (sources 7 and 8) for what
         # each needs and how to set it up.
+ 
