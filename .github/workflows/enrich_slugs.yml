@@ -20,10 +20,22 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests python-dotenv
+        run: pip install requests python-dotenv google-cloud-bigquery
 
-      - name: Enrich slug registry (4 sources)
+      - name: Write GCP service account key (for HTTP Archive/BigQuery source)
+        if: ${{ secrets.GCP_SA_KEY != '' }}
+        run: echo '${{ secrets.GCP_SA_KEY }}' > "${{ runner.temp }}/gcp-key.json"
+
+      - name: Enrich slug registry (8 sources)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python enrich_slugs.py --source all --crawls 3
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
+        run: python enrich_slugs.py --source all
+        # THEIRSTACK_API_KEY and GCP_PROJECT_ID/GCP_SA_KEY are optional —
+        # enrich_slugs.py logs a one-line notice and skips that source
+        # cleanly if either isn't set, rather than failing the run. See
+        # enrich_slugs.py's module docstring (sources 7 and 8) for what
+        # each needs and how to set it up.
