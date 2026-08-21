@@ -34,10 +34,24 @@ Sources:
      GOOGLE_APPLICATION_CREDENTIALS set. See fetch_httparchive_slugs
      docstring for the full explanation of how this reuses the Y
      Combinator resolver rather than being a separate pipeline.)
+  9. Web Data Commons (free bulk N-Quads extract of schema.org structured
+     data parsed out of EVERY Common Crawl page, not just CrUX-popular
+     ones — genuinely broader domain universe than source 8's HTTP
+     Archive, since it isn't popularity-gated. Pulls the JobPosting-class
+     subset specifically: ~3.6M job-posting page URLs across ~63k hosts
+     as of the 2024-12 release. No signup, no API key, no cost. Each
+     page URL is run straight through the SAME URL_TO_SLUG extractors
+     already built for Common Crawl/YC/HTTP Archive — zero live fetches
+     needed, since we only need the URL itself, not page content. See
+     fetch_wdc_slugs docstring for format details and the one caveat:
+     this source's host (uni-mannheim.de) 403'd this project's own dev
+     sandbox outright — untested from GitHub Actions as of first ship,
+     so it fails cleanly (skip + one-line notice) rather than crash if
+     that host blocks CI runner IPs too.)
 
-Runs weekly (Sunday) via GitHub Actions, as an 8-way matrix — one job per
+Runs weekly (Sunday) via GitHub Actions, as a 9-way matrix — one job per
 source, all in parallel (see .github/workflows/discovery.yml) — rather
-than one job running all 8 back-to-back. Each source is already an
+than one job running all 9 back-to-back. Each source is already an
 independent fetch-and-resolve pass with its own cost profile (bulk single
 download vs. thousands of live per-company fetches), so sharding by
 source is the natural split here — there's no single flat pool of "work
@@ -56,10 +70,12 @@ Usage:
     python discovery.py --source yc            # Y Combinator only
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
+    python discovery.py --source wdc           # Web Data Commons only
     python discovery.py --dry-run              # count without writing
 """
 
 import argparse
+import gzip
 import json
 import logging
 import os
@@ -1805,6 +1821,149 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 9: Web Data Commons (free bulk schema.org JobPosting extract)
+# ══════════════════════════════════════════════════════════
+#
+# WDC (webdatacommons.org, University of Mannheim) runs schema.org/
+# microdata/JSON-LD extraction over every single Common Crawl release and
+# republishes the result as structured N-Quads — free, no signup, no API
+# key. The JobPosting-class subset is split out as its own dedicated
+# directory (no need to filter the full corpus ourselves): 14 gzip files,
+# ~3.6M distinct job-posting page URLs across ~63k hosts, as of the
+# 2024-12 release (verified live 2026-08 — see WDC_JOBPOSTING_BASE_URL).
+#
+# Why this is a genuinely different (not just redundant) source from
+# Common Crawl (source 4) or HTTP Archive (source 8): Common Crawl's CDX
+# index above is queried by URL PATTERN per-platform (we already know
+# what a Greenhouse/Lever/etc. URL looks like and search for it), so it
+# only ever finds companies on platforms we've already thought to write a
+# pattern for. HTTP Archive is broader in HOW it detects (fingerprinting,
+# not just URL-pattern matching) but is gated to CrUX's popular-site
+# list — a smaller, popularity-biased slice of the web. WDC sits in
+# between: it rides on Common Crawl's FULL domain universe (tens of
+# millions of domains, not just popular ones) like source 4, but instead
+# of us guessing URL patterns, it hands back every page ANYONE marked up
+# with schema.org JobPosting data — including companies on platforms we
+# have no pattern for yet, or self-hosted career pages that happen to
+# link out to an ATS elsewhere on the same page. In practice most of
+# what comes back here will still resolve to platforms already covered
+# (large ATS platforms are exactly the sites most likely to have JobPosting
+# markup, since the ATS vendor itself usually injects it) — so treat this
+# as a high-precision, low-maintenance top-up on top of source 4, not a
+# replacement for it.
+#
+# Format note: N-Quads, one line per RDF triple/quad:
+#   <subject> <predicate> <object-or-literal> <graph-url> .
+# The 4th element (graph) is the URL of the page the data was extracted
+# from — this is ALL we need. We don't need the nested Organization/Place
+# data WDC also extracts (hiringOrganization, jobLocation, etc.) since
+# URL_TO_SLUG only needs the URL itself to extract a slug, exactly like
+# every Common Crawl candidate URL above. So parsing is deliberately
+# minimal: pull out just the graph URL from lines whose predicate is
+# rdf-syntax-ns#type and object is schema.org/JobPosting, dedupe, and run
+# each straight through URL_TO_SLUG — zero live HTTP fetches needed here,
+# unlike the YC/HTTP Archive sources, since we're not resolving a
+# COMPANY'S homepage to find its ATS link; the URL WDC gives us often
+# already IS the ATS-hosted URL itself (e.g. boards.greenhouse.io/acme).
+#
+# KNOWN RISK, flagged honestly: data.dws.informatik.uni-mannheim.de
+# returned HTTP 403 to this project's own dev sandbox on every attempt
+# (both a plain HTTP client and a real Chrome browser), while a separate
+# research fetch reached it fine minutes earlier — inconsistent enough
+# that this may be an IP/ASN-range block rather than a hard ban, and
+# GitHub Actions runner IPs may or may not fare better. This source fails
+# CLOSED per-file (skip + warning) rather than crash if a file 403s/times
+# out, same defensive pattern as every source above — so a first real run
+# on GitHub Actions is the actual test of reachability, not this dev box.
+
+WDC_JOBPOSTING_BASE_URL = (
+    "https://data.dws.informatik.uni-mannheim.de/structureddata/"
+    "2024-12/quads/classspecific/JobPosting"
+)
+WDC_NUM_PART_FILES = 14   # part_0.gz .. part_13.gz, ~250-590MB each, confirmed live 2026-08
+
+_WDC_TYPE_PREDICATE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
+_WDC_JOBPOSTING_OBJECT = "<https://schema.org/JobPosting>"
+
+
+def _extract_wdc_job_urls(part_url: str, timeout: int = 300) -> set[str]:
+    """Stream-download one WDC part_N.gz file and pull out just the
+    distinct page URLs (N-Quads graph element) for JobPosting-typed
+    subjects. Streams + decompresses on the fly rather than loading the
+    full ~250-590MB file into memory at once."""
+    urls: set[str] = set()
+    try:
+        with requests.get(part_url, timeout=timeout, stream=True,
+                           headers={"User-Agent": _ROBOTS_UA}) as r:
+            if r.status_code >= 400:
+                log.warning(f"WDC: {part_url} returned HTTP {r.status_code} — "
+                            f"skipping this part file.")
+                return urls
+            with gzip.open(r.raw, mode="rt", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    # Fast pre-filter before the (relatively) expensive split —
+                    # every line we actually want contains both substrings.
+                    if _WDC_TYPE_PREDICATE not in line or _WDC_JOBPOSTING_OBJECT not in line:
+                        continue
+                    parts = line.strip().rstrip(" .").split(" ", 3)
+                    if len(parts) < 4:
+                        continue
+                    graph = parts[3].strip()
+                    if graph.startswith("<") and graph.endswith(">"):
+                        urls.add(graph[1:-1])
+    except Exception as e:
+        log.warning(f"WDC: failed to stream {part_url}: {e} — skipping this part file.")
+    return urls
+
+
+def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES) -> dict[str, set[str]]:
+    """Download WDC's JobPosting N-Quads part files, extract distinct
+    page URLs, and run each straight through URL_TO_SLUG (no live fetches
+    needed — see module-level Source 9 docstring above for why).
+
+    max_parts caps how many of the 14 part files to download per run
+    (default: all 14) — pass a smaller number for a quicker/cheaper test
+    run while confirming this host is reachable from GitHub Actions.
+    """
+    all_job_urls: set[str] = set()
+    parts_ok = 0
+
+    for i in range(max_parts):
+        part_url = f"{WDC_JOBPOSTING_BASE_URL}/part_{i}.gz"
+        log.info(f"WDC: downloading part_{i}.gz ({i + 1}/{max_parts})...")
+        urls = _extract_wdc_job_urls(part_url)
+        if urls:
+            parts_ok += 1
+        all_job_urls |= urls
+        log.info(f"  part_{i}.gz: {len(urls)} job-posting URLs "
+                 f"({len(all_job_urls)} distinct so far)")
+
+    if not all_job_urls:
+        log.warning("WDC: no job-posting URLs recovered from any part file — "
+                    "likely a host-reachability issue (see Source 9 docstring's "
+                    "KNOWN RISK note). Skipping this source for this run.")
+        return {}
+
+    log.info(f"WDC: {len(all_job_urls)} distinct job-posting URLs from "
+             f"{parts_ok}/{max_parts} part files — resolving against "
+             f"{len(URL_TO_SLUG)} known ATS URL patterns...")
+
+    slugs_by_ats: dict[str, set[str]] = {}
+    for url in all_job_urls:
+        for ats, extractor in URL_TO_SLUG.items():
+            slug = extractor(url)
+            if slug:
+                slugs_by_ats.setdefault(ats, set()).add(slug)
+                break   # one URL matches at most one platform
+
+    for ats, slugs in slugs_by_ats.items():
+        if slugs:
+            log.info(f"  {ats}: {len(slugs)} companies from Web Data Commons")
+
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
@@ -1992,7 +2151,7 @@ def main():
     parser.add_argument(
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
-                 "wayback_adp", "yc", "theirstack", "httparchive", "all"],
+                 "wayback_adp", "yc", "theirstack", "httparchive", "wdc", "all"],
         default="all",
         help="Which source to pull from (default: all)",
     )
@@ -2027,6 +2186,14 @@ def main():
              "coverage here, not just a bigger --httparchive-limit alone",
     )
     parser.add_argument(
+        "--wdc-parts", type=int, default=WDC_NUM_PART_FILES,
+        help=f"Number of Web Data Commons JobPosting part_N.gz files to "
+             f"download per run (default: all {WDC_NUM_PART_FILES}) — pass "
+             f"a smaller number (e.g. 1) for a quick test run while "
+             f"confirming this host is reachable from GitHub Actions, see "
+             f"Source 9's KNOWN RISK docstring note",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Count slugs without writing to Supabase",
     )
@@ -2046,7 +2213,7 @@ def main():
     log.info("SLUG ENRICHMENT — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("           + Wayback CDX (ADP) + Y Combinator + TheirStack")
-    log.info("           + HTTP Archive (BigQuery)")
+    log.info("           + HTTP Archive (BigQuery) + Web Data Commons")
     log.info("=" * 60)
 
     grand_total = 0
@@ -2172,6 +2339,25 @@ def main():
             grand_total += upserted
         else:
             grand_total += ha_total
+
+    # Source 9: Web Data Commons (free bulk schema.org JobPosting extract —
+    # broader domain universe than HTTP Archive, no live fetches needed,
+    # see fetch_wdc_slugs docstring for the KNOWN RISK note on host
+    # reachability from GitHub Actions)
+    if args.source in ("wdc", "all"):
+        log.info("\n--- WEB DATA COMMONS (bulk schema.org JobPosting extract) ---")
+        wdc_slugs = fetch_wdc_slugs(max_parts=args.wdc_parts)
+        wdc_total = sum(len(s) for s in wdc_slugs.values())
+        if wdc_total:
+            log.info(f"Web Data Commons total: {wdc_total} slugs across "
+                     f"{sum(1 for s in wdc_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(wdc_slugs, source="wdc",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += wdc_total
 
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")
