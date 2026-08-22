@@ -183,10 +183,23 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set +e
+          # 2>&1 is required here — Python's logging module writes to
+          # STDERR by default (log.info/.warning/.error, including the
+          # "Seed complete: N hosts written" line this step greps for
+          # below), and a bare `| tee` only pipes STDOUT. Without this
+          # redirect, seed_output.log only ever contains the bare
+          # print()'d ONE_FILE_RESULT line — every log.info() line,
+          # including "Seed complete: ...", silently never reaches the
+          # file, so the "seeded" grep below always failed to match even
+          # when hosts really were written, permanently starving
+          # crawl_batch's `if: needs.seed.outputs.seeded == 'true'` gate
+          # (confirmed live: host_file_seeded was accumulating rows while
+          # host_seed/host_visited/host_slug stayed empty — seeding was
+          # working, crawl_batch just never ran).
           python host_crawl_seed.py \
             --one-file \
             --limit ${{ github.event.inputs.seed_limit_per_batch || '100000' }} \
-            | tee seed_output.log
+            2>&1 | tee seed_output.log
           exit_code=${PIPESTATUS[0]}
           set -e
 
