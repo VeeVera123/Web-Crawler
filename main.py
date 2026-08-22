@@ -38,7 +38,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import LLM_PROVIDER, LOCATION_PROVIDERS
-from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions
+from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions, SCRAPERS
 from job_board_scrapers import scrape_all_job_boards, get_discovered_slugs
 from classifier import (
     keyword_classify_role, ai_classify_roles,
@@ -152,6 +152,26 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
         log.warning("No slugs found in Supabase slug_registry!")
         log.warning("Run discovery.py first to populate the registry.")
         return []
+
+    # Drop rows for ATSs with no registered scraper BEFORE sharding/dispatch,
+    # not one-by-one inside scrape_board() — a retired ATS (e.g. applytojob,
+    # removed 2026-08) can leave thousands of stale rows in slug_registry
+    # from before its discovery.py sources were also updated, and dispatching
+    # each one individually just to log "Unknown ATS" per row is wasted
+    # per-row overhead across a whole scan, not just log noise. One summary
+    # line here instead of one warning per stale row.
+    supported = [(a, s) for a, s in pairs if a.lower() in SCRAPERS]
+    unsupported_counts: dict[str, int] = {}
+    for ats, _ in pairs:
+        if ats.lower() not in SCRAPERS:
+            unsupported_counts[ats] = unsupported_counts.get(ats, 0) + 1
+    if unsupported_counts:
+        for ats, count in sorted(unsupported_counts.items(), key=lambda kv: -kv[1]):
+            log.warning(f"Skipping {count} slug_registry rows for unsupported "
+                        f"ATS '{ats}' (no scraper registered — stale rows from "
+                        f"a retired/renamed ATS? consider deleting them from "
+                        f"Supabase directly).")
+    pairs = supported
 
     if total_shards > 1:
         pairs = [(a, s) for a, s in pairs if _shard_of(a, s, total_shards) == shard]
