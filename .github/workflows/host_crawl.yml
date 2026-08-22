@@ -301,6 +301,14 @@ jobs:
       - name: Re-trigger — same file if not drained, next file if it is
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh CLI's repo-inference normally comes from a git remote in the
+          # current working directory — this job never checks the repo out
+          # (it has no other need to), so without an explicit -R it fails
+          # with "fatal: not a git repository (or any of the parent
+          # directories): .git". Passing --repo explicitly (from the
+          # always-available github.repository context) sidesteps git
+          # entirely — no checkout step needed for this alone.
+          GH_REPO: ${{ github.repository }}
         run: |
           file_done="${{ needs.seed.outputs.file_done }}"
           current_batch_count="${{ github.event.inputs.batch_count || '1' }}"
@@ -316,6 +324,7 @@ jobs:
           if [ "$remaining" -gt 0 ]; then
             echo "Re-dispatching..."
             gh workflow run "host_crawl.yml" \
+              --repo "${{ github.repository }}" \
               --ref "${{ github.ref_name }}" \
               -f batch_count="$remaining" \
               -f seed_limit_per_batch="${{ github.event.inputs.seed_limit_per_batch || '100000' }}" \
