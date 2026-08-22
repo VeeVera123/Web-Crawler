@@ -2,59 +2,68 @@
 Host Crawl — Seed Step
 =======================
 Populates host_crawl_queue with candidate hostnames from Common Crawl's
-COLUMNAR INDEX (the URL-level Parquet index of every page CC has crawled).
+HOST INDEX, re-hosted by Common Crawl's own official org on Hugging Face
+(huggingface.co/datasets/commoncrawl/host-index-testing-v2), queried
+directly via DuckDB's native `hf://` support — no AWS account, no
+billing, no robots.txt wall, genuinely free.
 
-RETHOUGHT 2026-08 (v1): switched from the Host Index to the columnar
-index, since the Host Index has NO free access path at all (its only
-free HTTPS mirror, data.commoncrawl.org, blanket-disallows every
-crawler in robots.txt — confirmed live).
+FULL HISTORY (why this is v5 — see BULK_DOMAIN_DISCOVERY_NOTES.md for the
+complete write-up of every path tried, with live error messages):
+  v1 — Host Index via data.commoncrawl.org (HTTPS mirror). DEAD: that
+       host's robots.txt blanket-disallows "/" for every crawler
+       (confirmed live).
+  v2 — Columnar index via DuckDB's httpfs reading s3://commoncrawl
+       directly, assuming no-credentials meant unsigned-like-the-AWS-CLI.
+       DEAD: DuckDB's S3 client always signs requests; no anonymous
+       provider exists. Real 403 AccessDenied on a live GitHub Actions run.
+  v3 — Columnar index via the actual AWS CLI's --no-sign-request
+       (genuinely unsigned). DEAD: anonymous GetObject on a KNOWN key
+       works, but anonymous ListObjectsV2 (browsing/discovering what
+       files exist) is denied, and Parquet part-file names include a
+       random Spark-generated UUID with no published manifest — so there
+       was no way to discover what to fetch. Real AccessDenied on a live
+       GitHub Actions run.
+  v4 — Columnar index via real AWS Athena (a genuine, working fix, since
+       Athena's own Glue/metastore does file discovery server-side,
+       sidestepping the ListObjects restriction entirely). WORKS, but
+       requires a real, billed AWS account (~$1-1.50/query-run) — user
+       decided not to open one for this right now. Code kept, dormant,
+       for if that changes (see git history / the workflow's comments).
+  v5 (THIS VERSION) — a second opinion (Gemini) surfaced that Common
+       Crawl's own org re-hosts the HOST INDEX (the same dataset v1
+       tried and failed to reach) on Hugging Face, where anonymous file
+       LISTING genuinely works (unlike S3's ListObjectsV2) — confirmed
+       live via a direct, unauthenticated fetch of
+       https://huggingface.co/api/datasets/commoncrawl/host-index-testing-v2/tree/main/data,
+       which returned a real directory listing of 26 crawl= partitions,
+       no token, no account. DuckDB has NATIVE, documented `hf://` read
+       support (shipped in httpfs since v0.10.3, confirmed via DuckDB's
+       own docs and Hugging Face's own docs) — no separate extension, no
+       auth for public datasets, glob patterns work. This is free, no
+       AWS account, no billing, no robots.txt issue (this access path
+       never touches data.commoncrawl.org or S3 at all), and it's the
+       HOST-level aggregated index (fetch-status counts, rank scores)
+       rather than the raw per-URL columnar index — meaning the
+       dead-domain filtering logic this project designed back in v1
+       (see _looks_dead below) is directly usable again, unmodified.
 
-RETHOUGHT 2026-08 (v2): the first columnar-index attempt tried to have
-DuckDB's httpfs extension read s3://commoncrawl directly, assuming "no
-CREATE SECRET configured" would mean "send an unsigned request",
-matching `aws s3 --no-sign-request`. A live GitHub Actions run proved
-that assumption wrong: DuckDB's S3 client always attempts to sign
-requests once httpfs is loaded (confirmed against DuckDB's own docs —
-there is no documented anonymous/unsigned secret provider, only `config`
-with explicit keys or `credential_chain`), so it hit a real 403
-AccessDenied even though the bucket itself is genuinely open to
-anonymous reads.
-
-Fix: stop asking DuckDB to talk to S3 at all. Use the AWS CLI instead
-(`aws s3 ... --no-sign-request`), which sends a genuinely unsigned
-request and is Common Crawl's own documented anonymous-access method.
-
-RETHOUGHT 2026-08 (v3 — THIS VERSION): v2's design downloaded every
-Parquet part file for a crawl BEFORE querying any of them. Each monthly
-crawl's subset=warc/ folder is ~300 files averaging ~700MB each — a full
-crawl is ~200-300GB. GitHub Actions' standard runners only have ~14GB of
-disk, so a real (non-testing, no --max-files cap) run would have failed
-outright by filling the disk, not just been slow. Fixed by processing
-ONE FILE AT A TIME: download a part file, query+filter it locally with
-DuckDB, accumulate the (small) list of matching domains, delete the
-Parquet file, move to the next. Disk usage stays bounded to ~1 file
-(under ~1GB) at any moment regardless of how many files or crawls are
-scanned — this is the only change from v2; the access method (AWS CLI
---no-sign-request) is unchanged and was already correct.
-
-TLDs cover .com, .net, .us, .uk, .co.uk, .ca, .de, .au, .com.au, .ie,
-.mt, plus generic .io/.co/.app/.dev in ONE pass — see TARGET_TLDS.
+Trade-off versus the abandoned columnar/Athena approach: this is
+per-HOST (one row per known host, aggregated), not per-URL — slightly
+less granular, but genuinely sufficient for seeding a "visit this host
+and look for an ATS link" crawl queue, which is exactly what this is for.
 
 Usage:
     python host_crawl_seed.py                       # seed from latest crawl
     python host_crawl_seed.py --dry-run             # count without writing
     python host_crawl_seed.py --limit 500000        # cap rows written (testing)
-    python host_crawl_seed.py --crawl CC-MAIN-2026-30   # pin a specific crawl
-    python host_crawl_seed.py --max-files 5          # cap Parquet files downloaded (testing)
+    python host_crawl_seed.py --crawl CC-MAIN-2025-18   # pin a specific crawl
+    python host_crawl_seed.py --months 3            # scan the 3 most recent crawls
 """
 
 import argparse
 import logging
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 import requests
 from dotenv import load_dotenv
@@ -71,13 +80,18 @@ log = logging.getLogger(__name__)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-CC_S3_BUCKET = "commoncrawl"
-CC_INDEX_BASE = "cc-index/table/cc-main/warc"
+# Optional: a Hugging Face token, purely to get the higher authenticated
+# rate-limit tier (HF's docs note anonymous CI traffic from shared IP
+# pools like GitHub Actions runners is more exposed to rate-limiting than
+# a token'd request) — NOT required for functionality, this dataset is
+# fully public. Left empty, DuckDB just queries anonymously.
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-# Used only if live discovery via `aws s3 ls` fails — logged loudly, so a
-# stale value here never silently queries a partition that no longer
-# exists without the operator knowing why.
-_FALLBACK_CRAWL = "CC-MAIN-2026-30"
+HF_DATASET = "commoncrawl/host-index-testing-v2"
+HF_BASE = f"hf://datasets/{HF_DATASET}/data"
+
+# Used only if live discovery of available crawl= partitions fails.
+_FALLBACK_CRAWL = "CC-MAIN-2025-18"
 
 # ── TLD allowlist ────────────────────────────────────────
 # Per-country ccTLDs for the target markets, PLUS the generic/startup
@@ -97,108 +111,73 @@ def _build_tld_filter() -> str:
     return ",".join(parts)
 
 
-def _check_aws_cli() -> bool:
-    if shutil.which("aws") is None:
-        log.error("aws CLI not found on PATH — install it (e.g. `pip install awscli` "
-                   "or apt/brew) to run this step. DuckDB's own S3 client can't do "
-                   "genuinely anonymous/unsigned reads (confirmed via a live 403 "
-                   "AccessDenied against s3://commoncrawl even with no credentials "
-                   "configured) — only the AWS CLI's --no-sign-request flag sends a "
-                   "truly unsigned request, which is what this public bucket needs.")
+# ── Liveness filter ──────────────────────────────────────
+# A host is treated as likely-dead if Common Crawl's own crawl attempts
+# never got a single 2xx response for it. This costs nothing extra (the
+# data's already in the index) and only excludes hosts CC itself could
+# never successfully fetch — a real small/quiet company that returned
+# 200 even once still passes, regardless of how low its rank is.
+# Deliberately conservative (biased toward keeping a host if in doubt),
+# matching this project's "inclusive not exclusive" instruction.
+def _looks_dead(fetch_200: int, fetch_4xx: int, fetch_5xx: int,
+                 fetch_gone: int, nutch_gone: int) -> bool:
+    if fetch_200 and fetch_200 > 0:
         return False
-    return True
+    return (fetch_4xx or 0) + (fetch_5xx or 0) + (fetch_gone or 0) + (nutch_gone or 0) > 0
 
 
-def _list_crawl_partitions() -> list[str]:
-    """List available crawl= partitions via anonymous `aws s3 ls`. Returns
-    names sorted newest-first (crawl names sort correctly as strings:
-    CC-MAIN-2026-30 > CC-MAIN-2026-25 lexicographically, since year/week
-    are both fixed-width zero-padded)."""
-    try:
-        result = subprocess.run(
-            ["aws", "s3", "ls", f"s3://{CC_S3_BUCKET}/{CC_INDEX_BASE}/",
-             "--no-sign-request"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode != 0:
-            log.warning(f"`aws s3 ls` failed (exit {result.returncode}): "
-                        f"{result.stderr.strip()[:300]}")
-            return []
-        names = []
-        for line in result.stdout.splitlines():
-            # Lines look like "                           PRE crawl=CC-MAIN-2026-30/"
-            line = line.strip()
-            if line.startswith("PRE ") and "crawl=" in line:
-                name = line.split("crawl=", 1)[1].rstrip("/")
-                if name:
-                    names.append(name)
-        names.sort(reverse=True)
-        return names
-    except Exception as e:
-        log.warning(f"Failed to list crawl partitions via aws s3 ls: {e}")
-        return []
-
-
-def _list_parquet_files(crawl: str) -> list[str]:
-    """List the actual .parquet object keys under one crawl partition's
-    subset=warc/ folder, via anonymous `aws s3 ls`."""
-    prefix = f"{CC_INDEX_BASE}/crawl={crawl}/subset=warc/"
-    try:
-        result = subprocess.run(
-            ["aws", "s3", "ls", f"s3://{CC_S3_BUCKET}/{prefix}",
-             "--no-sign-request"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode != 0:
-            log.warning(f"`aws s3 ls` failed for {crawl}: {result.stderr.strip()[:300]}")
-            return []
-        files = []
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if parts and parts[-1].endswith(".parquet"):
-                files.append(prefix + parts[-1])
-        return files
-    except Exception as e:
-        log.warning(f"Failed to list Parquet files for {crawl}: {e}")
-        return []
-
-
-def _download_one_file(key: str, local_path: str) -> bool:
-    """Anonymously download one S3 object key to local disk via the AWS
-    CLI. Returns True on success — failures are logged and the caller
-    skips this file rather than aborting the whole run."""
-    try:
-        result = subprocess.run(
-            ["aws", "s3", "cp", f"s3://{CC_S3_BUCKET}/{key}", local_path,
-             "--no-sign-request"],
-            capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode != 0:
-            log.warning(f"Failed to download {key}: {result.stderr.strip()[:300]}")
-            return False
-        return True
-    except Exception as e:
-        log.warning(f"Failed to download {key}: {e}")
-        return False
-
-
-def seed(limit: int | None = None, dry_run: bool = False,
-         crawl: str | None = None, months: int = 1,
-         max_files: int | None = None) -> int:
-    if not _check_aws_cli():
-        return 0
-
+def _get_duckdb_connection():
     try:
         import duckdb
     except ImportError:
         log.error("duckdb not installed — pip install duckdb to run this step.")
+        return None
+
+    con = duckdb.connect()
+    try:
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+    except Exception as e:
+        log.error(f"Failed to load DuckDB's httpfs extension (needed for hf:// "
+                  f"reads): {e}")
+        return None
+
+    if HF_TOKEN:
+        try:
+            con.execute(f"CREATE SECRET hf_token (TYPE huggingface, TOKEN '{HF_TOKEN}');")
+            log.info("Using HF_TOKEN for authenticated (higher rate-limit) access.")
+        except Exception as e:
+            log.warning(f"Failed to configure HF_TOKEN secret (continuing "
+                        f"anonymously): {e}")
+    return con
+
+
+def _list_available_crawls(con) -> list[str]:
+    """Ask Hugging Face's (genuinely anonymous, unlike S3) directory
+    listing API which crawl= partitions exist, via DuckDB's glob()."""
+    try:
+        rows = con.execute(
+            f"SELECT DISTINCT regexp_extract(file, 'crawl=([^/]+)', 1) AS crawl "
+            f"FROM glob('{HF_BASE}/crawl=*/') "
+            f"ORDER BY crawl DESC"
+        ).fetchall()
+        names = [r[0] for r in rows if r[0]]
+        if names:
+            return names
+    except Exception as e:
+        log.warning(f"Could not list crawl partitions via hf:// glob: {e}")
+    return []
+
+
+def seed(limit: int | None = None, dry_run: bool = False,
+         crawl: str | None = None, months: int = 1) -> int:
+    con = _get_duckdb_connection()
+    if con is None:
         return 0
 
-    crawls: list[str] = []
     if crawl:
         crawls = [crawl]
     else:
-        available = _list_crawl_partitions()
+        available = _list_available_crawls(con)
         if not available:
             log.warning(f"Could not list crawl partitions live — falling back to "
                         f"hardcoded {_FALLBACK_CRAWL!r} (may be stale).")
@@ -209,85 +188,65 @@ def seed(limit: int | None = None, dry_run: bool = False,
 
     log.info(f"Seeding from crawl partition(s): {crawls}")
 
-    # ── Discover + download the actual Parquet files ────
-    all_keys: list[str] = []
-    for c in crawls:
-        keys = _list_parquet_files(c)
-        if not keys:
-            log.warning(f"No Parquet files found for crawl {c} — skipping it.")
-            continue
-        log.info(f"  {c}: {len(keys)} Parquet part files available")
-        all_keys.extend(keys)
+    tld_filter = _build_tld_filter()
+    crawl_filter = ",".join(f"'{c}'" for c in crawls)
 
-    if not all_keys:
-        log.error("No Parquet files found across any crawl partition — aborting seed.")
+    # hive_partitioning explicitly forced true rather than relying on
+    # auto-detection over a remote hf:// path (unconfirmed in DuckDB's
+    # own docs for this specific backend — safer to be explicit).
+    query = f"""
+        SELECT
+            surt_host_name,
+            url_host_tld,
+            hcrank,
+            fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
+        FROM read_parquet(
+            '{HF_BASE}/crawl=*/*.parquet',
+            hive_partitioning=true
+        )
+        WHERE crawl IN ({crawl_filter})
+          AND url_host_tld IN ({tld_filter})
+    """
+    if limit:
+        # NOTE: LIMIT here caps ROWS READ BEFORE the dead-domain filter
+        # below, not final written rows — kept generous by the caller
+        # for that reason (see main()'s --limit help text).
+        query += f" LIMIT {int(limit) * 2}"
+
+    log.info("Querying Common Crawl's Host Index via Hugging Face (hf://) — "
+             "free, no AWS account, no billing...")
+    try:
+        result = con.execute(query).fetchall()
+    except Exception as e:
+        log.error(f"DuckDB query against {HF_BASE} failed: {e}")
         return 0
 
-    if max_files:
-        all_keys = all_keys[:max_files]
-        log.info(f"Capped to {len(all_keys)} files via --max-files (testing mode).")
+    log.info(f"Host Index: {len(result)} rows matched target TLDs, "
+             f"filtering dead hosts...")
 
-    log.info(f"Processing {len(all_keys)} Parquet file(s) ONE AT A TIME "
-             f"(download -> filter -> delete) to keep disk usage bounded to "
-             f"a single file (~700MB) regardless of total file/crawl count.")
+    rows_to_insert = []
+    seen = set()
+    dead_skipped = 0
+    for surt_host, tld, hcrank, f200, f4xx, f5xx, fgone, ngone in result:
+        if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
+            dead_skipped += 1
+            continue
+        # surt_host_name is reversed (org,commoncrawl,www) — un-reverse to
+        # a normal hostname for the crawl step.
+        host = ".".join(reversed(surt_host.split(",")))
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        rows_to_insert.append({
+            "host": host,
+            "tld": tld,
+            "hcrank": float(hcrank) if hcrank is not None else None,
+        })
+        if limit and len(rows_to_insert) >= limit:
+            break
 
-    tld_filter = _build_tld_filter()
-    con = duckdb.connect()
-    seen: set[str] = set()
-    rows_to_insert: list[dict] = []
-    files_ok = 0
-
-    tmp_dir = tempfile.mkdtemp(prefix="cc_columnar_")
-    try:
-        for i, key in enumerate(all_keys):
-            local_path = os.path.join(tmp_dir, "part.parquet")
-            if os.path.exists(local_path):
-                os.remove(local_path)  # belt-and-suspenders before each download
-
-            if not _download_one_file(key, local_path):
-                continue
-
-            query = f"""
-                SELECT DISTINCT
-                    url_host_registered_domain,
-                    url_host_tld
-                FROM read_parquet('{local_path}')
-                WHERE url_host_tld IN ({tld_filter})
-                  AND fetch_status = 200
-                  AND url_host_registered_domain IS NOT NULL
-            """
-            try:
-                for domain, tld in con.execute(query).fetchall():
-                    if domain and domain not in seen:
-                        seen.add(domain)
-                        rows_to_insert.append({"host": domain, "tld": tld, "hcrank": None})
-            except Exception as e:
-                log.warning(f"Query failed for {key}: {e}")
-            finally:
-                # Delete immediately — this is the whole point: never hold
-                # more than one part file on disk at once.
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-
-            files_ok += 1
-            if (i + 1) % 5 == 0 or i == len(all_keys) - 1:
-                log.info(f"  processed {i + 1}/{len(all_keys)} files "
-                         f"({files_ok} downloaded OK) — "
-                         f"{len(rows_to_insert)} distinct domains so far")
-
-            if limit and len(rows_to_insert) >= limit:
-                log.info(f"Hit --limit {limit} — stopping early "
-                         f"({i + 1}/{len(all_keys)} files processed).")
-                break
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    if limit:
-        rows_to_insert = rows_to_insert[:limit]
-
-    log.info(f"Columnar index: {len(rows_to_insert)} distinct registered domains "
-             f"matched target TLDs with a successful fetch "
-             f"(from {files_ok}/{len(all_keys)} files processed successfully).")
+    log.info(f"Seed candidates: {len(rows_to_insert)} hosts "
+             f"({dead_skipped} skipped as likely-dead)")
 
     if dry_run:
         log.info("Dry run — not writing to Supabase.")
@@ -326,28 +285,27 @@ def seed(limit: int | None = None, dry_run: bool = False,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Seed host_crawl_queue from Common Crawl's columnar index "
-                    "(anonymous AWS CLI download + local DuckDB query)"
+        description="Seed host_crawl_queue from Common Crawl's Host Index "
+                    "(via Hugging Face + DuckDB, free)"
     )
     parser.add_argument("--limit", type=int, default=None,
-                         help="Cap total rows written (testing)")
+                         help="Cap total rows written (testing) — the underlying "
+                              "query reads more rows than this to account for "
+                              "dead-host filtering, then stops once this many "
+                              "survive")
     parser.add_argument("--dry-run", action="store_true",
                          help="Count without writing to Supabase")
     parser.add_argument("--crawl", type=str, default=None,
-                         help="Pin a specific crawl partition, e.g. CC-MAIN-2026-30 "
+                         help="Pin a specific crawl partition, e.g. CC-MAIN-2025-18 "
                               "(default: auto-detect latest available)")
     parser.add_argument("--months", type=int, default=1,
-                         help="Number of recent monthly crawl partitions to scan "
-                              "(default: 1 — more months = more files to download)")
-    parser.add_argument("--max-files", type=int, default=None,
-                         help="Cap the number of Parquet part files downloaded "
-                              "(testing — a full crawl partition can be dozens of "
-                              "files, each potentially GBs)")
+                         help="Number of recent crawl partitions to scan "
+                              "(default: 1 — more = broader coverage, longer runtime, "
+                              "still free)")
     args = parser.parse_args()
 
     written = seed(limit=args.limit, dry_run=args.dry_run,
-                   crawl=args.crawl, months=args.months,
-                   max_files=args.max_files)
+                   crawl=args.crawl, months=args.months)
     if written == 0:
         sys.exit(1)
 
