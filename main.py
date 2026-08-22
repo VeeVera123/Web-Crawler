@@ -1,9 +1,12 @@
 """
 ATS Global Scanner — Main Orchestrator
 =======================================
-Scans 87,000+ company boards across 20 ATS platforms,
-plus 9 remote job boards (RemoteOK, Remotive, Himalayas, Arbeitnow, Jobicy,
-WeWorkRemotely, Working Nomads, FreeHire, Jooble).
+Scans 87,000+ company boards across 20+ ATS platforms (ApplyToJob retired
+2026-08 — see ats_scrapers.py's SCRAPERS dict for the current live list),
+plus 8 remote job boards (RemoteOK, Remotive, Himalayas, Arbeitnow,
+Jobicy, WeWorkRemotely, Working Nomads, FreeHire — Jooble retired 2026-08,
+see job_board_scrapers.py; Jobicy widened to cover the same ground with
+full, untruncated descriptions).
 
 Reads slugs from Supabase slug_registry (single source of truth,
 populated weekly by discovery.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl
@@ -100,7 +103,7 @@ PLATFORM_WORKERS = {
     "recruitee": 18,
     "teamtailor": 18,
     "breezyhr": 18,
-    "applytojob": 18,
+    # "applytojob": 18,  # REMOVED 2026-08 — ATS retired, see ats_scrapers.py
     "personio": 18,
     "taleo": 16,                 # legacy platform, slightly more cautious
     "oracle_cloud_hcm": 16,
