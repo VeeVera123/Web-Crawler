@@ -269,7 +269,7 @@ jobs:
             ${{ github.event.inputs.max_runtime_minutes && format('--max-runtime-seconds {0}', github.event.inputs.max_runtime_minutes) || '' }}
 
   # Mirrors daily_scan.yml's finalize gate: only runs once seed AND every
-  # crawl shard have finished (`needs:` + `if: always()` so it still runs
+  # crawl shard have finished (`needs:` + a broad if: so it still runs
   # even if a shard failed/timed out, same reasoning as daily_scan.yml's
   # finalize comment). Clears the h_seeding scratch table (only
   # h_slugs/h_file_count/h_total_seeded
@@ -277,6 +277,18 @@ jobs:
   # "seed ends -> shards run -> finalize clears DB -> seeding starts
   # again" happen automatically across multiple workflow runs instead of
   # needing you to manually re-dispatch each time.
+  #
+  # IMPORTANT: this is deliberately NOT `if: always()`. always() runs
+  # regardless of ANY prior job outcome, including a MANUAL CANCELLATION
+  # of the run — which meant clicking "Cancel workflow" in the Actions
+  # tab didn't actually stop anything: finalize still fired, cleared the
+  # DB, and re-dispatched a brand new run, so the pipeline kept going
+  # forever no matter how many times you cancelled it (confirmed live).
+  # `!cancelled()` runs finalize on success AND on a failed/timed-out
+  # shard (preserving the original intent — cleanup still happens after
+  # a bad shard so the DB doesn't get stuck full), but correctly skips it
+  # — and skips the re-dispatch inside it — the moment the run itself is
+  # cancelled, so Cancel workflow now actually stops the chain for good.
   #
   # batch_count MEANS "whole files to fully complete," not "number of
   # 100K-chunks" — a single Common Crawl file can hold 1M+ matches, so
@@ -295,7 +307,7 @@ jobs:
   # 100K-chunks each one actually needs — matching what was asked for.
   finalize:
     needs: [seed, crawl_batch]
-    if: always() && github.event.inputs.batch_count != '0' && github.event.inputs.seed_only != 'true'
+    if: "!cancelled() && github.event.inputs.batch_count != '0' && github.event.inputs.seed_only != 'true'"
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
