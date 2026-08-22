@@ -52,6 +52,22 @@ per-HOST (one row per known host, aggregated), not per-URL — slightly
 less granular, but genuinely sufficient for seeding a "visit this host
 and look for an ATS link" crawl queue, which is exactly what this is for.
 
+PER-BATCH DRAINING (2026-08 update, host_crawl_seed_progress +
+host_crawl_seeded_hosts): a single Common Crawl Parquet file can hold
+1.6M+ matching hosts — the batch pipeline (host_crawl_batch.py /
+host_crawl.yml's seed/crawl_batch/finalize jobs) caps each --one-file
+seed at a small --limit (default 100K) so a batch's Supabase footprint
+stays bounded. Since that means one file often needs SEVERAL batches to
+fully seed, host_crawl_seeded_hosts tracks every host already seeded from
+each file (separately from host_crawl_seed_progress's file-level
+done/not-done), so a re-run of a not-yet-drained file skips hosts already
+written and picks genuinely NEW ones each time — converging on full
+coverage of the file after enough batches, rather than repeatedly
+re-picking the same random slice. A file is only marked fully done in
+host_crawl_seed_progress once a batch finds strictly fewer new hosts left
+than the cap (proof nothing remains), not merely "this batch wrote
+something."
+
 Usage:
     python host_crawl_seed.py                       # seed from latest crawl
     python host_crawl_seed.py --dry-run             # count without writing
@@ -292,6 +308,66 @@ def _mark_file_processed(fpath: str, crawl_name: str, rows_matched: int):
                     f"may redo this file): {e}")
 
 
+def _get_seeded_hosts_for_file(fpath: str) -> set[str]:
+    """Which hosts have ALREADY been seeded from this specific file in an
+    earlier batch. Used so a re-run of a file that got trimmed by
+    --limit (not yet fully drained) picks up NEW hosts instead of
+    re-matching and potentially re-picking the same 100K again — this is
+    what makes the per-batch cap converge on full coverage of a file
+    instead of gambling on the same random slice every time. Stored
+    separately from host_crawl_seed_progress (file-level done/not-done)
+    and NOT cleared by finalize (unlike host_crawl_queue/visited, which
+    are pure per-batch scratch)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return set()
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/host_crawl_seeded_hosts",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params={"select": "host", "file": f"eq.{fpath}"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return {row["host"] for row in r.json()}
+    except Exception as e:
+        log.warning(f"Could not fetch already-seeded hosts for {fpath} (a "
+                    f"re-run of this file may re-pick some hosts already "
+                    f"seeded — not harmful, since host_crawl_queue's upsert "
+                    f"on_conflict=host just no-ops on a duplicate, but wastes "
+                    f"some of this batch's cap on hosts already written): {e}")
+        return set()
+
+
+def _record_seeded_hosts(fpath: str, hosts: list[str]):
+    """Record hosts as seeded from this file, right after they're
+    successfully written to host_crawl_queue — so the NEXT batch (if this
+    file isn't fully drained yet) knows to skip them and pick genuinely
+    new ones instead."""
+    if not SUPABASE_URL or not SUPABASE_KEY or not hosts:
+        return
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates",
+    }
+    batch_size = 5000
+    for i in range(0, len(hosts), batch_size):
+        batch = [{"host": h, "file": fpath} for h in hosts[i:i + batch_size]]
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/host_crawl_seeded_hosts",
+                headers=headers, json=batch, timeout=60,
+                params={"on_conflict": "host"},
+            )
+            r.raise_for_status()
+        except Exception as e:
+            log.warning(f"Could not record {len(batch)} seeded hosts for "
+                        f"{fpath} (a future re-run of this file may re-pick "
+                        f"some of these — not harmful, just some wasted cap "
+                        f"budget): {e}")
+
+
 def _list_available_crawls(con) -> list[str]:
     """Ask Hugging Face's (genuinely anonymous, unlike S3) directory
     listing API which crawl= partitions exist, via DuckDB's glob()."""
@@ -472,6 +548,16 @@ def seed(limit: int | None = None, dry_run: bool = False,
 
             total_matched += len(file_result)
 
+            # Hosts already seeded from THIS file in an earlier batch (only
+            # relevant/populated when one_file mode previously trimmed this
+            # same file) — skipping them here is what makes repeated
+            # --one-file batches converge on covering the WHOLE file
+            # instead of gambling on the same random slice each time.
+            already_seeded_this_file = (
+                _get_seeded_hosts_for_file(fpath) if one_file else set()
+            )
+            skipped_already_seeded = 0
+
             file_rows = []
             for surt_host, tld, hcrank, f200, f4xx, f5xx, fgone, ngone in file_result:
                 if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
@@ -482,6 +568,9 @@ def seed(limit: int | None = None, dry_run: bool = False,
                 host = ".".join(reversed(surt_host.split(",")))
                 if not host or host in seen:
                     continue
+                if host in already_seeded_this_file:
+                    skipped_already_seeded += 1
+                    continue
                 seen.add(host)
                 file_rows.append({
                     "host": host,
@@ -489,6 +578,12 @@ def seed(limit: int | None = None, dry_run: bool = False,
                     "hcrank": float(hcrank) if hcrank is not None else None,
                 })
             del file_result  # free this file's raw result before moving on
+
+            if skipped_already_seeded:
+                log.info(f"  [{file_num}/{total_files}] {skipped_already_seeded} "
+                         f"hosts already seeded from this file in an earlier "
+                         f"batch — skipped, only NEW hosts count toward this "
+                         f"batch's cap")
 
             # Trim to whatever's left of --limit BEFORE writing — a single
             # file can contain far more matches than the whole limit (a
@@ -503,22 +598,34 @@ def seed(limit: int | None = None, dry_run: bool = False,
             # budget on its own. one_file mode (used by
             # host_crawl_batch.py) now always passes a --limit (default
             # 100K, see host_crawl_batch.py's DEFAULT_SEED_LIMIT_PER_BATCH)
-            # specifically so a batch's seed step can't do this again. A
-            # trimmed file is deliberately left unmarked (see below) so a
-            # LATER run can pick up the rest of it.
+            # specifically so a batch's seed step can't do this again.
+            #
+            # Whether this file counts as FULLY drained after this pass:
+            # true only if what's left (post already-seeded-hosts filter,
+            # pre-trim) fits inside the remaining cap with room to spare —
+            # i.e. this batch saw every remaining new host in the file and
+            # still didn't need to trim. If it's an exact/over fit, treat
+            # it as NOT yet confirmed drained (a later batch will re-check,
+            # find zero new hosts left, and mark it done then — one extra
+            # cheap query, never a risk of leaving hosts unseeded).
             if limit:
                 already_have = total_written if not dry_run else len(dry_run_rows)
                 remaining = max(0, limit - already_have)
                 file_was_trimmed = len(file_rows) > remaining
+                file_fully_drained_this_pass = not file_was_trimmed
                 if file_was_trimmed:
                     log.info(f"  [{file_num}/{total_files}] trimming this file's "
-                             f"{len(file_rows)} matches down to {remaining} to "
-                             f"respect --limit={limit} — this file will NOT be "
-                             f"marked fully processed, so a future uncapped/"
-                             f"higher-limit run can pick up the rest of it")
+                             f"{len(file_rows)} new matches down to {remaining} to "
+                             f"respect --limit={limit} — this file is NOT yet "
+                             f"fully drained, a later batch will pick up the rest")
                     file_rows = file_rows[:remaining]
+                elif len(file_rows) == 0 and skipped_already_seeded > 0:
+                    log.info(f"  [{file_num}/{total_files}] no NEW hosts left in "
+                             f"this file (all {skipped_already_seeded} remaining "
+                             f"matches were already seeded in earlier batches) — "
+                             f"file is now fully drained")
             else:
-                file_was_trimmed = False
+                file_fully_drained_this_pass = True
 
             log.info(f"  [{file_num}/{total_files}] {len(file_rows)} live hosts "
                      f"from this file ({total_matched} rows matched so far)")
@@ -533,6 +640,7 @@ def seed(limit: int | None = None, dry_run: bool = False,
                 # already-completed files written and marked, instead of
                 # losing everything back to the start.
                 file_written = 0
+                written_hosts = []
                 batch_size = 5000
                 write_failed = False
                 for i in range(0, len(file_rows), batch_size):
@@ -545,14 +653,26 @@ def seed(limit: int | None = None, dry_run: bool = False,
                         )
                         r.raise_for_status()
                         file_written += len(batch)
+                        written_hosts.extend(row["host"] for row in batch)
                     except Exception as e:
                         log.error(f"  Failed to write batch from {fpath}: {e}")
                         write_failed = True
                 total_written += file_written
-                if not write_failed and not file_was_trimmed:
+
+                # Record exactly the hosts that were actually written (not
+                # the whole file_rows list — if a later batch write
+                # failed partway, only what genuinely landed should count
+                # as "already seeded" for next time) so a future re-run of
+                # this same file, if it's not yet fully drained, skips
+                # these and picks new ones instead of re-matching them.
+                if one_file and written_hosts:
+                    _record_seeded_hosts(fpath, written_hosts)
+
+                if not write_failed and file_fully_drained_this_pass:
                     _mark_file_processed(fpath, c, len(file_rows))
-                elif file_was_trimmed:
-                    pass  # already logged above — deliberately left unmarked
+                elif not file_fully_drained_this_pass:
+                    pass  # already logged above — deliberately left unmarked,
+                          # a later batch will pick up the remaining hosts
                 else:
                     log.warning(f"  {fpath} had a write failure — NOT marked "
                                 f"done, will be retried on the next run.")
