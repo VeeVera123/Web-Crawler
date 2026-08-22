@@ -26,7 +26,7 @@ name: Host Crawl (Bulk Discovery)
 # — seed (one file, capped at seed_limit_per_batch hosts) -> crawl (16
 # shards, same look as the old unsharded crawl workflow, but draining a
 # small capped queue instead of millions of hosts) -> finalize (clears
-# host_crawl_queue/host_crawl_visited — only host_crawl_results survives
+# host_seed/host_visited — only host_slug survives
 # — then re-dispatches this SAME workflow for the next file, decrementing
 # batch_count by one). Each file's cycle shows up as its own clean
 # seed->crawl->finalize run in the Actions tab, same shape as
@@ -259,7 +259,7 @@ jobs:
   # crawl shard have finished (`needs:` + `if: always()` so it still runs
   # even if a shard failed/timed out, same reasoning as daily_scan.yml's
   # finalize comment). Clears the two scratch tables (only
-  # host_crawl_results/host_crawl_seed_progress/host_crawl_seeded_hosts
+  # host_slug/host_file/host_file_seeded
   # survive), then re-triggers this SAME workflow — this is what makes
   # "seed ends -> shards run -> finalize clears DB -> seeding starts
   # again" happen automatically across multiple workflow runs instead of
@@ -287,16 +287,16 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Clear host_crawl_queue and host_crawl_visited (keep results)
+      - name: Clear host_seed and host_visited (keep results)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_crawl_queue?host=neq.__never_matches__" \
+          curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_seed?host=neq.__never_matches__" \
             -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY"
-          curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_crawl_visited?host=neq.__never_matches__" \
+          curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_visited?host=neq.__never_matches__" \
             -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY"
-          echo "Cleared host_crawl_queue and host_crawl_visited. host_crawl_results, host_crawl_seed_progress, and host_crawl_seeded_hosts were left untouched."
+          echo "Cleared host_seed and host_visited. host_slug, host_file, and host_file_seeded were left untouched (host_file_seeded is cleared per-file by host_crawl_seed.py itself once that file is marked done in host_file)."
 
       - name: Re-trigger — same file if not drained, next file if it is
         env:
