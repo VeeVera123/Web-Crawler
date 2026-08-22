@@ -61,6 +61,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import logging
 import os
 import sys
@@ -92,6 +93,26 @@ HF_BASE = f"hf://datasets/{HF_DATASET}/data"
 
 # Used only if live discovery of available crawl= partitions fails.
 _FALLBACK_CRAWL = "CC-MAIN-2025-18"
+
+# Belt-and-suspenders wall-clock cap for any single DuckDB/hf:// call, on
+# top of the http_timeout/http_retries settings in _get_duckdb_connection.
+# DuckDB's own C++ core can, in rare cases, still block past its httpfs
+# settings (e.g. during DNS resolution or TLS handshake before the HTTP
+# layer's timeout logic ever engages). Running each call in a worker
+# thread with .result(timeout=...) means a stall raises a clean Python
+# TimeoutError this script can log and act on, instead of ever needing an
+# external process (GitHub's runner) to be the one that kills it.
+_DUCKDB_CALL_TIMEOUT_SECONDS = 180
+
+
+def _run_with_timeout(fn, *args, timeout=_DUCKDB_CALL_TIMEOUT_SECONDS, **kwargs):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn, *args, **kwargs)
+        return future.result(timeout=timeout)
+        # NOTE: on TimeoutError, the DuckDB call keeps running in its
+        # thread in the background (Python can't forcibly kill a thread),
+        # but the pool is a context manager for exactly one call and this
+        # process exits/moves on right after — it doesn't leak across runs.
 
 # ── TLD allowlist ────────────────────────────────────────
 # Per-country ccTLDs for the target markets, PLUS the generic/startup
@@ -141,6 +162,30 @@ def _get_duckdb_connection():
                   f"reads): {e}")
         return None
 
+    # IMPORTANT: without HF_TOKEN, every request against huggingface.co is
+    # fully anonymous and shares a rate-limit/throttling bucket with every
+    # other anonymous request from the SAME source IP range — and GitHub
+    # Actions runners come from a small, well-known, heavily-shared IP
+    # pool. HF's own docs note anonymous traffic from shared-IP CI runners
+    # is more exposed to throttling than token'd traffic. Critically, this
+    # can manifest as a SILENT STALL (the connection hangs, never a clean
+    # 429) rather than an error DuckDB can retry around — which matches
+    # the observed symptom exactly: the log stops right after "Querying
+    # Common Crawl's Host Index..." with no Python-level error at all,
+    # then GitHub's own runner reports "The operation was canceled" —
+    # i.e. something upstream of this process is what ended it, not a
+    # try/except inside seed(). Setting HF_TOKEN (free, just needs a HF
+    # account) moves this run onto the authenticated tier and is the
+    # single highest-leverage fix available. See BULK_DOMAIN_DISCOVERY_NOTES.md.
+    if not HF_TOKEN:
+        log.warning("HF_TOKEN is not set — running fully anonymous against "
+                     "huggingface.co from a shared GitHub Actions IP pool. "
+                     "This is the most likely cause of silent hangs/timeouts "
+                     "('Error: The operation was canceled.' with no Python-level "
+                     "error). Strongly recommend setting the HF_TOKEN secret "
+                     "(free — generate at huggingface.co/settings/tokens with "
+                     "'read' scope) to move onto the authenticated rate-limit tier.")
+
     if HF_TOKEN:
         try:
             con.execute(f"CREATE SECRET hf_token (TYPE huggingface, TOKEN '{HF_TOKEN}');")
@@ -148,21 +193,64 @@ def _get_duckdb_connection():
         except Exception as e:
             log.warning(f"Failed to configure HF_TOKEN secret (continuing "
                         f"anonymously): {e}")
+
+    # DuckDB's httpfs has NO default timeout on hf:// (HTTP) requests — if
+    # the remote end stalls (as anonymous/throttled requests can), the
+    # query blocks forever with nothing for Python to catch or log. These
+    # settings give it explicit, finite bounds so a stall becomes a loud
+    # DuckDB IOException (caught below) instead of a silent hang that only
+    # GitHub's own infrastructure eventually kills from the outside.
+    try:
+        con.execute("SET http_timeout = 30000;")     # 30s per HTTP request
+        con.execute("SET http_retries = 3;")
+        con.execute("SET http_retry_wait_ms = 2000;")
+        con.execute("SET http_retry_backoff = 2;")
+    except Exception as e:
+        log.warning(f"Could not set httpfs timeout/retry options (continuing "
+                    f"with DuckDB defaults, which may hang indefinitely on a "
+                    f"stalled connection): {e}")
+
+    # A single Host Index crawl partition is ~7GB (confirmed via Common
+    # Crawl's own blog post announcing the Host Index) — reading that over
+    # a remote hf:// HTTP filesystem can make DuckDB buffer far more in
+    # memory than a local-disk read would, especially before predicate
+    # pushdown narrows anything down. GitHub-hosted runners' free tier
+    # defaults to 7GB RAM total. An uncapped DuckDB can get OOM-killed by
+    # the OS — which the Actions runner then reports as the generic
+    # "Error: The operation was canceled." with NO Python-level exception
+    # ever raised, because SIGKILL from the OOM killer can't be caught,
+    # unlike a DuckDB-level error. Explicitly capping DuckDB's memory
+    # forces it to spill to disk instead of growing unbounded, trading
+    # some speed for actually finishing instead of being killed.
+    try:
+        con.execute("SET memory_limit = '3GB';")
+        con.execute("PRAGMA threads=2;")  # fewer parallel readers = lower peak memory
+    except Exception as e:
+        log.warning(f"Could not set DuckDB memory_limit (continuing with "
+                    f"DuckDB's default, unbounded-by-us memory usage): {e}")
+
     return con
 
 
 def _list_available_crawls(con) -> list[str]:
     """Ask Hugging Face's (genuinely anonymous, unlike S3) directory
     listing API which crawl= partitions exist, via DuckDB's glob()."""
-    try:
-        rows = con.execute(
+    def _do_glob():
+        return con.execute(
             f"SELECT DISTINCT regexp_extract(file, 'crawl=([^/]+)', 1) AS crawl "
             f"FROM glob('{HF_BASE}/crawl=*/') "
             f"ORDER BY crawl DESC"
         ).fetchall()
+
+    try:
+        rows = _run_with_timeout(_do_glob, timeout=60)
         names = [r[0] for r in rows if r[0]]
         if names:
             return names
+    except concurrent.futures.TimeoutError:
+        log.warning("Listing crawl partitions via hf:// glob timed out after 60s "
+                    "(likely a stalled/throttled anonymous connection to "
+                    "huggingface.co — see the HF_TOKEN warning above).")
     except Exception as e:
         log.warning(f"Could not list crawl partitions via hf:// glob: {e}")
     return []
@@ -192,58 +280,130 @@ def seed(limit: int | None = None, dry_run: bool = False,
 
     # IMPORTANT: glob ONLY the specific crawl=X folders actually requested
     # — NOT 'crawl=*/*.parquet' filtered afterward with WHERE crawl IN
-    # (...). A live run timed out (cancelled after 7 minutes) doing
-    # exactly that: globbing all 26 crawl partitions over a remote hf://
-    # connection before the WHERE clause ever got a chance to prune
-    # anything, since DuckDB has to resolve the glob (a directory listing
-    # round-trip per partition) before it can plan the scan at all. This
-    # version builds the glob from only the requested crawl names, so a
-    # single-crawl seed run only ever globs ONE folder.
-    query = "\nUNION ALL\n".join(
-        f"""SELECT surt_host_name, url_host_tld, hcrank,
-                   fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
-            FROM read_parquet('{HF_BASE}/crawl={c}/*.parquet')
-            WHERE url_host_tld IN ({tld_filter})"""
-        for c in crawls
-    )
-    if limit:
-        # NOTE: LIMIT here caps ROWS READ BEFORE the dead-domain filter
-        # below, not final written rows — kept generous by the caller
-        # for that reason (see main()'s --limit help text).
-        query = f"SELECT * FROM ({query}) LIMIT {int(limit) * 2}"
+    # (...). An earlier run timed out doing exactly that: globbing all 26
+    # crawl partitions over a remote hf:// connection before the WHERE
+    # clause ever got a chance to prune anything.
+    #
+    # SECOND, MORE SERIOUS issue found after that fix still didn't resolve
+    # a live "Error: The operation was canceled." (even with HF_TOKEN set
+    # and authenticating correctly, ruling out anonymous throttling as the
+    # cause): a single Host Index crawl partition is ~7GB (Common Crawl's
+    # own blog post). The prior version of this function ran ONE big
+    # UNION ALL query over read_parquet('crawl={c}/*.parquet') — i.e. every
+    # file in the partition at once — then called .fetchall(), which
+    # materializes the ENTIRE filtered result as Python objects in memory
+    # on top of whatever DuckDB itself buffers while streaming/decoding
+    # Parquet over hf://'s HTTP layer. On a GitHub-hosted runner (7GB RAM
+    # on the free tier), this is a real, plausible way to get OOM-killed by
+    # the OS — which the Actions runner reports as the generic "Error: The
+    # operation was canceled." with NO Python-level exception ever raised
+    # (a SIGKILL from the OOM killer can't be caught), exactly matching the
+    # observed symptom (log stops mid-query, no logged error before the
+    # runner's own cancellation message).
+    #
+    # Fix: enumerate the individual Parquet files inside each crawl
+    # partition first (a cheap glob, not a full read), then process ONE
+    # FILE AT A TIME — query it, write its matching rows to Supabase, and
+    # let DuckDB/Python release that file's memory before moving to the
+    # next. Peak memory now scales with ONE file's size, not the whole
+    # ~7GB partition. Combined with the memory_limit set in
+    # _get_duckdb_connection, this should keep peak RSS well under the
+    # runner's ceiling regardless of how large a partition is.
+    def _list_partition_files(crawl_name: str) -> list[str]:
+        try:
+            rows = _run_with_timeout(
+                lambda: con.execute(
+                    f"SELECT file FROM glob('{HF_BASE}/crawl={crawl_name}/*.parquet')"
+                ).fetchall(),
+                timeout=60,
+            )
+            return [r[0] for r in rows]
+        except concurrent.futures.TimeoutError:
+            log.warning(f"Listing files in crawl={crawl_name} timed out after 60s.")
+            return []
+        except Exception as e:
+            log.warning(f"Could not list files in crawl={crawl_name}: {e}")
+            return []
 
-    log.info("Querying Common Crawl's Host Index via Hugging Face (hf://) — "
-             "free, no AWS account, no billing (globbing only the "
-             f"{len(crawls)} requested crawl partition(s), not all of them)...")
-    try:
-        result = con.execute(query).fetchall()
-    except Exception as e:
-        log.error(f"DuckDB query against {HF_BASE} failed: {e}")
-        return 0
+    files_by_crawl = {}
+    for c in crawls:
+        files = _list_partition_files(c)
+        if not files:
+            # Fall back to the old single-glob-string approach for this
+            # crawl if per-file listing failed for some reason — still
+            # scoped to one crawl, so not the original all-26-partitions
+            # bug, just less memory-safe.
+            files = [f"{HF_BASE}/crawl={c}/*.parquet"]
+        log.info(f"crawl={c}: {len(files)} Parquet file(s) to scan")
+        files_by_crawl[c] = files
 
-    log.info(f"Host Index: {len(result)} rows matched target TLDs, "
-             f"filtering dead hosts...")
+    total_files = sum(len(f) for f in files_by_crawl.values())
+    log.info(f"Querying Common Crawl's Host Index via Hugging Face (hf://) — "
+             f"free, no AWS account, no billing — processing {total_files} "
+             f"file(s) one at a time to bound memory use...")
 
     rows_to_insert = []
     seen = set()
     dead_skipped = 0
-    for surt_host, tld, hcrank, f200, f4xx, f5xx, fgone, ngone in result:
-        if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
-            dead_skipped += 1
-            continue
-        # surt_host_name is reversed (org,commoncrawl,www) — un-reverse to
-        # a normal hostname for the crawl step.
-        host = ".".join(reversed(surt_host.split(",")))
-        if not host or host in seen:
-            continue
-        seen.add(host)
-        rows_to_insert.append({
-            "host": host,
-            "tld": tld,
-            "hcrank": float(hcrank) if hcrank is not None else None,
-        })
+    total_matched = 0
+    query_timeout = 300  # per FILE now, not per whole partition — 5 min is generous
+    file_num = 0
+
+    for c, files in files_by_crawl.items():
+        for fpath in files:
+            file_num += 1
+            per_file_query = f"""
+                SELECT surt_host_name, url_host_tld, hcrank,
+                       fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
+                FROM read_parquet('{fpath}')
+                WHERE url_host_tld IN ({tld_filter})
+            """
+
+            def _do_query(q=per_file_query):
+                return con.execute(q).fetchall()
+
+            try:
+                file_result = _run_with_timeout(_do_query, timeout=query_timeout)
+            except concurrent.futures.TimeoutError:
+                log.warning(f"  [{file_num}/{total_files}] query timed out after "
+                            f"{query_timeout}s on {fpath} — skipping this file, "
+                            f"continuing with the rest.")
+                continue
+            except Exception as e:
+                log.warning(f"  [{file_num}/{total_files}] query failed on "
+                            f"{fpath}: {e} — skipping this file, continuing.")
+                continue
+
+            total_matched += len(file_result)
+            log.info(f"  [{file_num}/{total_files}] {len(file_result)} rows matched "
+                     f"in this file ({total_matched} total so far)")
+
+            for surt_host, tld, hcrank, f200, f4xx, f5xx, fgone, ngone in file_result:
+                if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
+                    dead_skipped += 1
+                    continue
+                # surt_host_name is reversed (org,commoncrawl,www) — un-reverse
+                # to a normal hostname for the crawl step.
+                host = ".".join(reversed(surt_host.split(",")))
+                if not host or host in seen:
+                    continue
+                seen.add(host)
+                rows_to_insert.append({
+                    "host": host,
+                    "tld": tld,
+                    "hcrank": float(hcrank) if hcrank is not None else None,
+                })
+                if limit and len(rows_to_insert) >= limit:
+                    break
+            # free this file's raw result before moving to the next
+            del file_result
+            if limit and len(rows_to_insert) >= limit:
+                break
         if limit and len(rows_to_insert) >= limit:
             break
+
+    log.info(f"Host Index: {total_matched} rows matched target TLDs across "
+             f"{file_num} file(s), filtering dead hosts...")
 
     log.info(f"Seed candidates: {len(rows_to_insert)} hosts "
              f"({dead_skipped} skipped as likely-dead)")
