@@ -189,32 +189,32 @@ def seed(limit: int | None = None, dry_run: bool = False,
     log.info(f"Seeding from crawl partition(s): {crawls}")
 
     tld_filter = _build_tld_filter()
-    crawl_filter = ",".join(f"'{c}'" for c in crawls)
 
-    # hive_partitioning explicitly forced true rather than relying on
-    # auto-detection over a remote hf:// path (unconfirmed in DuckDB's
-    # own docs for this specific backend — safer to be explicit).
-    query = f"""
-        SELECT
-            surt_host_name,
-            url_host_tld,
-            hcrank,
-            fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
-        FROM read_parquet(
-            '{HF_BASE}/crawl=*/*.parquet',
-            hive_partitioning=true
-        )
-        WHERE crawl IN ({crawl_filter})
-          AND url_host_tld IN ({tld_filter})
-    """
+    # IMPORTANT: glob ONLY the specific crawl=X folders actually requested
+    # — NOT 'crawl=*/*.parquet' filtered afterward with WHERE crawl IN
+    # (...). A live run timed out (cancelled after 7 minutes) doing
+    # exactly that: globbing all 26 crawl partitions over a remote hf://
+    # connection before the WHERE clause ever got a chance to prune
+    # anything, since DuckDB has to resolve the glob (a directory listing
+    # round-trip per partition) before it can plan the scan at all. This
+    # version builds the glob from only the requested crawl names, so a
+    # single-crawl seed run only ever globs ONE folder.
+    query = "\nUNION ALL\n".join(
+        f"""SELECT surt_host_name, url_host_tld, hcrank,
+                   fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
+            FROM read_parquet('{HF_BASE}/crawl={c}/*.parquet')
+            WHERE url_host_tld IN ({tld_filter})"""
+        for c in crawls
+    )
     if limit:
         # NOTE: LIMIT here caps ROWS READ BEFORE the dead-domain filter
         # below, not final written rows — kept generous by the caller
         # for that reason (see main()'s --limit help text).
-        query += f" LIMIT {int(limit) * 2}"
+        query = f"SELECT * FROM ({query}) LIMIT {int(limit) * 2}"
 
     log.info("Querying Common Crawl's Host Index via Hugging Face (hf://) — "
-             "free, no AWS account, no billing...")
+             "free, no AWS account, no billing (globbing only the "
+             f"{len(crawls)} requested crawl partition(s), not all of them)...")
     try:
         result = con.execute(query).fetchall()
     except Exception as e:
