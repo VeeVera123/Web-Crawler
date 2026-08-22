@@ -3,14 +3,14 @@ Host Crawl — Batch Mode (seed one file -> crawl it fully -> clear -> repeat)
 ==============================================================================
 Runs the whole host-crawl pipeline in file-sized batches instead of one
 huge seed + one huge crawl. Each batch:
-  1. Seeds host_crawl_queue from exactly ONE unprocessed Common Crawl
+  1. Seeds host_seed from exactly ONE unprocessed Common Crawl
      Parquet file (host_crawl_seed.py's --one-file mode).
   2. Crawls that queue to exhaustion (host_crawl.py's run(), single
      shard = 100% of the queue since a batch's queue is only one file's
      worth of hosts, not the millions a full unsharded run would see).
-  3. Wipes host_crawl_queue and host_crawl_visited back to empty —
-     ONLY host_crawl_results (the actual ats/slug hits) survives between
-     batches. host_crawl_seed_progress also survives, so a re-run of this
+  3. Wipes host_seed and host_visited back to empty —
+     ONLY host_slug (the actual ats/slug hits) survives between
+     batches. host_file also survives, so a re-run of this
      script (or a plain host_crawl_seed.py run later) still knows which
      files are already done.
   4. Repeats for --batches files total (default 30 — a full crawl
@@ -19,9 +19,9 @@ huge seed + one huge crawl. Each batch:
 WHY: a single Common Crawl Parquet file can contain 1.6M+ matching hosts
 (confirmed on a live run) — seeding/crawling/storing all 30 files' worth
 at once would blow past Supabase's free-tier storage many times over (see
-BULK_DOMAIN_DISCOVERY_NOTES.md's storage math). Since host_crawl_queue and
-host_crawl_visited are pure scratch state (nothing worth keeping — the
-actual product is host_crawl_results), there's no reason to keep them
+BULK_DOMAIN_DISCOVERY_NOTES.md's storage math). Since host_seed and
+host_visited are pure scratch state (nothing worth keeping — the
+actual product is host_slug), there's no reason to keep them
 around after a batch is fully crawled. This keeps Supabase usage bounded
 to "one file's worth" at any given moment, indefinitely, regardless of
 how many batches you run in total.
@@ -71,24 +71,24 @@ DEFAULT_MAX_RUNTIME_PER_BATCH = 5.5 * 3600
 
 # How many hosts to seed PER BATCH (i.e. per file). A live run showed a
 # SINGLE Common Crawl file can contain 1.66M+ matching hosts — writing all
-# of that to host_crawl_queue in one shot is ~370MB, which alone nearly
+# of that to host_seed in one shot is ~370MB, which alone nearly
 # filled Supabase's 500MB free tier and made further writes start failing
 # with 500 errors mid-batch. This cap keeps each batch's footprint small
 # and predictable regardless of how large the underlying file is — the
 # leftover, untrimmed part of an oversized file is automatically picked
 # up by a LATER batch (host_crawl_seed.py's --one-file mode leaves a
-# trimmed file unmarked in host_crawl_seed_progress specifically so this
+# trimmed file unmarked in host_file specifically so this
 # works). Override with --seed-limit-per-batch if you want a different
 # size (e.g. larger once you've moved to a bigger-capacity DB like Turso).
 DEFAULT_SEED_LIMIT_PER_BATCH = 100_000
 
 
 def _clear_queue_and_visited(dry_run: bool) -> tuple[int, int]:
-    """Wipe host_crawl_queue and host_crawl_visited back to empty.
-    host_crawl_results and host_crawl_seed_progress are NEVER touched —
+    """Wipe host_seed and host_visited back to empty.
+    host_slug and host_file are NEVER touched —
     those are the two tables meant to survive across batches."""
     if dry_run:
-        log.info("Dry run — not clearing host_crawl_queue/host_crawl_visited.")
+        log.info("Dry run — not clearing host_seed/host_visited.")
         return (0, 0)
     if not (SUPABASE_URL and SUPABASE_KEY):
         log.error("SUPABASE_URL/SUPABASE_KEY not set — cannot clear tables.")
@@ -96,7 +96,7 @@ def _clear_queue_and_visited(dry_run: bool) -> tuple[int, int]:
 
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     cleared = {}
-    for table, pk_col in [("host_crawl_queue", "host"), ("host_crawl_visited", "host")]:
+    for table, pk_col in [("host_seed", "host"), ("host_visited", "host")]:
         try:
             # PostgREST requires a filter on DELETE — "not equal to
             # impossible value" deletes everything without needing to
@@ -113,7 +113,7 @@ def _clear_queue_and_visited(dry_run: bool) -> tuple[int, int]:
             log.error(f"Failed to clear {table}: {e}")
             cleared[table] = False
 
-    return cleared.get("host_crawl_queue", False), cleared.get("host_crawl_visited", False)
+    return cleared.get("host_seed", False), cleared.get("host_visited", False)
 
 
 def _get_results_count() -> int:
@@ -121,7 +121,7 @@ def _get_results_count() -> int:
         return -1
     try:
         r = requests.head(
-            f"{SUPABASE_URL}/rest/v1/host_crawl_results",
+            f"{SUPABASE_URL}/rest/v1/host_slug",
             headers={
                 "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
                 "Prefer": "count=exact",
@@ -134,7 +134,7 @@ def _get_results_count() -> int:
         if "/" in content_range:
             return int(content_range.split("/")[-1])
     except Exception as e:
-        log.warning(f"Could not fetch host_crawl_results count: {e}")
+        log.warning(f"Could not fetch host_slug count: {e}")
     return -1
 
 
@@ -168,9 +168,9 @@ def run_batches(num_batches: int, max_runtime_per_batch: float,
         host_crawl.run(shard=0, total_shards=1,
                        max_runtime=max_runtime_per_batch, dry_run=dry_run)
 
-        # 3. Clear queue + visited — only host_crawl_results survives.
-        log.info("Step 3/3: clearing host_crawl_queue/host_crawl_visited "
-                 "(host_crawl_results is kept)...")
+        # 3. Clear queue + visited — only host_slug survives.
+        log.info("Step 3/3: clearing host_seed/host_visited "
+                 "(host_slug is kept)...")
         q_ok, v_ok = _clear_queue_and_visited(dry_run)
         if not dry_run and not (q_ok and v_ok):
             log.error("Clearing failed for at least one table — stopping "
@@ -184,7 +184,7 @@ def run_batches(num_batches: int, max_runtime_per_batch: float,
             total_found_this_session = results_now - results_before
             log.info(f"Batch {batch_num} complete — {this_batch_found} new ATS "
                      f"hits this batch, {total_found_this_session} total this "
-                     f"session, {results_now} all-time in host_crawl_results.")
+                     f"session, {results_now} all-time in host_slug.")
 
     log.info(f"\nAll requested batches done — {total_found_this_session} new "
              f"ATS hits found this session.")
@@ -194,7 +194,7 @@ def run_batches(num_batches: int, max_runtime_per_batch: float,
 def main():
     parser = argparse.ArgumentParser(
         description="Seed-crawl-clear one Common Crawl Parquet file at a "
-                    "time, keeping only host_crawl_results between batches."
+                    "time, keeping only host_slug between batches."
     )
     parser.add_argument("--batches", type=int, default=1,
                          help="How many files to process in a row (default: 1 "
