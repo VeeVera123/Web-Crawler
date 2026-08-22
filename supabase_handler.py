@@ -305,7 +305,20 @@ def _safe_str(val, max_len: int = 500) -> str:
 
 
 def _build_row(job: dict, location_confidence: str) -> dict:
-    """Build a Supabase row dict from a job dict."""
+    """Build a Supabase row dict from a job dict.
+
+    NOTE 2026-08: country/department/workplace_type/employment_type/
+    source_board/location_confidence were dropped from the `jobs` table
+    (space-saving — see migration `drop_unused_jobs_columns`). The upstream
+    scraper dicts in ats_scrapers.py still populate these keys on `job`
+    (classifier.py and geo.py still use job.get("country") etc. as
+    in-memory signals for Global/Africa/EMEA classification) — only the
+    Supabase persistence step here was trimmed, so no scraper changes were
+    needed. `location_confidence` (the function's own parameter) is now
+    unused for the same reason — kept as a parameter rather than removed
+    from every call site, since add_jobs_batch()/_touch_last_seen() zip it
+    in from filter_locations() output.
+    """
     today = date.today().isoformat()
     return {
         "title": _safe_str(job.get("title"), 500),
@@ -313,15 +326,9 @@ def _build_row(job: dict, location_confidence: str) -> dict:
         "company_name": _safe_str(job.get("company"), 300),
         "ats": job.get("source_ats", "unknown"),
         "location": _safe_str(job.get("location"), 500),
-        "country": _safe_str(job.get("country"), 100),
-        "department": _safe_str(job.get("department"), 200),
-        "workplace_type": _safe_str(job.get("workplace_type"), 100),
-        "employment_type": _safe_str(job.get("employment_type"), 100),
         "salary": _safe_str(job.get("salary"), 200),
         "visa_sponsorship": _safe_str(job.get("visa_sponsorship") or "unknown", 50),
-        "location_confidence": location_confidence.capitalize(),
         "clearance": job.get("clearance", ""),
-        "source_board": _safe_str(job.get("source_type"), 50),
         "date_added": today,
         "last_seen": today,
         "is_active": True,
