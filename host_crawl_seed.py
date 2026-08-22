@@ -492,13 +492,21 @@ def seed(limit: int | None = None, dry_run: bool = False,
 
             # Trim to whatever's left of --limit BEFORE writing — a single
             # file can contain far more matches than the whole limit (a
-            # live run saw 1.66M live hosts from just ONE of 30 files), so
-            # checking the limit only between files isn't enough to
-            # actually enforce a cap. Skipped entirely in one_file mode —
-            # the whole point there is "this exact file, complete, no
-            # truncation" (used by the batch-processing workflow, where
-            # queue+visited get wiped between files anyway).
-            if limit and not one_file:
+            # live run saw 1.66M live hosts from just ONE of 30 files —
+            # ~370MB written in one shot, which alone nearly filled
+            # Supabase's 500MB free tier and started throwing 500 errors
+            # mid-write). This ALSO applies in one_file mode — an earlier
+            # version of this comment argued one_file should skip trimming
+            # since "the whole point is this exact file, complete, no
+            # truncation," but that reasoning was wrong: it didn't account
+            # for a SINGLE file being large enough to blow the storage
+            # budget on its own. one_file mode (used by
+            # host_crawl_batch.py) now always passes a --limit (default
+            # 100K, see host_crawl_batch.py's DEFAULT_SEED_LIMIT_PER_BATCH)
+            # specifically so a batch's seed step can't do this again. A
+            # trimmed file is deliberately left unmarked (see below) so a
+            # LATER run can pick up the rest of it.
+            if limit:
                 already_have = total_written if not dry_run else len(dry_run_rows)
                 remaining = max(0, limit - already_have)
                 file_was_trimmed = len(file_rows) > remaining
@@ -596,10 +604,12 @@ def main():
                               "(default: 1 — more = broader coverage, longer runtime, "
                               "still free)")
     parser.add_argument("--one-file", action="store_true",
-                         help="Seed exactly ONE full unprocessed Parquet file "
-                              "(ignores --limit truncation) and stop. Used by "
-                              "host_crawl_batch.py's seed-crawl-clear cycle, "
-                              "where each batch = one file's worth of hosts.")
+                         help="Seed from exactly ONE unprocessed Parquet file "
+                              "and stop, still respecting --limit (a single file "
+                              "can contain 1M+ matches on its own — trimmed if "
+                              "needed, and left unmarked so a later run can "
+                              "finish it). Used by host_crawl_batch.py's "
+                              "seed-crawl-clear cycle.")
     args = parser.parse_args()
 
     if args.limit is None:
