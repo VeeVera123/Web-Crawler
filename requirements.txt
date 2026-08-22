@@ -5,8 +5,14 @@ anthropic>=0.34
 groq>=0.4
 beautifulsoup4>=4.12
 
-# host_crawl.py / host_crawl_seed.py (bulk async discovery — see
-# .github/workflows/host_crawl.yml) — not needed by main.py/discovery.py
+# host_crawl.py (bulk async crawl — see .github/workflows/host_crawl.yml)
+# — not needed by main.py/discovery.py
 aiohttp>=3.9
 selectolax>=0.3
-duckdb>=0.10
+# host_crawl_seed.py queries Common Crawl's columnar index via AWS
+# Athena — requires a real AWS account, see the workflow's own comments
+# and the setup checklist. (duckdb removed 2026-08 — no longer used by
+# any file in this project after host_crawl_seed.py moved from a
+# DuckDB/S3 approach to boto3/Athena; see that file's module docstring
+# for why.)
+boto3>=1.34
