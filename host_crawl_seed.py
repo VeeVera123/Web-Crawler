@@ -94,6 +94,17 @@ HF_BASE = f"hf://datasets/{HF_DATASET}/data"
 # Used only if live discovery of available crawl= partitions fails.
 _FALLBACK_CRAWL = "CC-MAIN-2025-18"
 
+# SAFE DEFAULT CAP — applies whenever --limit isn't passed explicitly.
+# A live run showed ~1.66M live hosts matched from JUST ONE of 30 files in
+# a single crawl partition — the full partition could plausibly yield
+# tens of millions, which would blow well past Supabase's 500MB free tier
+# (measured: host_crawl_queue ≈167 bytes/row, host_crawl_visited ≈175
+# bytes/row — see BULK_DOMAIN_DISCOVERY_NOTES.md's 2026-08-22 update for
+# the full math). ~900K total hosts keeps steady-state usage comfortably
+# under budget. This is a DEFAULT, not a hard ceiling — pass
+# --limit 0 (or any explicit --limit) to override it.
+_DEFAULT_SAFE_LIMIT = 900_000
+
 # Belt-and-suspenders wall-clock cap for any single DuckDB/hf:// call, on
 # top of the http_timeout/http_retries settings in _get_duckdb_connection.
 # DuckDB's own C++ core can, in rare cases, still block past its httpfs
@@ -306,7 +317,8 @@ def _list_available_crawls(con) -> list[str]:
 
 
 def seed(limit: int | None = None, dry_run: bool = False,
-         crawl: str | None = None, months: int = 1) -> int:
+         crawl: str | None = None, months: int = 1,
+         one_file: bool = False) -> int:
     con = _get_duckdb_connection()
     if con is None:
         return 0
@@ -425,8 +437,12 @@ def seed(limit: int | None = None, dry_run: bool = False,
     file_num = 0
     dry_run_rows = []  # only accumulated in --dry-run mode, for a final count
 
+    one_file_done = False  # set once, when one_file=True, to stop after 1 real file
+
     for c, files in files_by_crawl.items():
         for fpath in files:
+            if one_file_done:
+                break
             file_num += 1
             if fpath in already_done:
                 log.info(f"  [{file_num}/{total_files}] already processed — skipping")
@@ -474,6 +490,28 @@ def seed(limit: int | None = None, dry_run: bool = False,
                 })
             del file_result  # free this file's raw result before moving on
 
+            # Trim to whatever's left of --limit BEFORE writing — a single
+            # file can contain far more matches than the whole limit (a
+            # live run saw 1.66M live hosts from just ONE of 30 files), so
+            # checking the limit only between files isn't enough to
+            # actually enforce a cap. Skipped entirely in one_file mode —
+            # the whole point there is "this exact file, complete, no
+            # truncation" (used by the batch-processing workflow, where
+            # queue+visited get wiped between files anyway).
+            if limit and not one_file:
+                already_have = total_written if not dry_run else len(dry_run_rows)
+                remaining = max(0, limit - already_have)
+                file_was_trimmed = len(file_rows) > remaining
+                if file_was_trimmed:
+                    log.info(f"  [{file_num}/{total_files}] trimming this file's "
+                             f"{len(file_rows)} matches down to {remaining} to "
+                             f"respect --limit={limit} — this file will NOT be "
+                             f"marked fully processed, so a future uncapped/"
+                             f"higher-limit run can pick up the rest of it")
+                    file_rows = file_rows[:remaining]
+            else:
+                file_was_trimmed = False
+
             log.info(f"  [{file_num}/{total_files}] {len(file_rows)} live hosts "
                      f"from this file ({total_matched} rows matched so far)")
 
@@ -503,15 +541,24 @@ def seed(limit: int | None = None, dry_run: bool = False,
                         log.error(f"  Failed to write batch from {fpath}: {e}")
                         write_failed = True
                 total_written += file_written
-                if not write_failed:
+                if not write_failed and not file_was_trimmed:
                     _mark_file_processed(fpath, c, len(file_rows))
+                elif file_was_trimmed:
+                    pass  # already logged above — deliberately left unmarked
                 else:
                     log.warning(f"  {fpath} had a write failure — NOT marked "
                                 f"done, will be retried on the next run.")
 
+            if one_file:
+                one_file_done = True
+                log.info(f"--one-file: {fpath} fully processed, stopping "
+                         f"(this is the batch-workflow mode).")
+                break
             if limit and (total_written if not dry_run else len(dry_run_rows)) >= limit:
                 log.info(f"Reached --limit={limit}, stopping early.")
                 break
+        if one_file_done:
+            break
         if limit and (total_written if not dry_run else len(dry_run_rows)) >= limit:
             break
 
@@ -532,10 +579,13 @@ def main():
                     "(via Hugging Face + DuckDB, free)"
     )
     parser.add_argument("--limit", type=int, default=None,
-                         help="Cap total rows written (testing) — the underlying "
-                              "query reads more rows than this to account for "
-                              "dead-host filtering, then stops once this many "
-                              "survive")
+                         help=f"Cap total rows written. Defaults to "
+                              f"{_DEFAULT_SAFE_LIMIT:,} if not passed — a single "
+                              f"crawl partition can contain tens of millions of "
+                              f"matching hosts, well past Supabase's free-tier "
+                              f"storage budget, so this script refuses to run "
+                              f"fully unbounded by accident. Pass --limit 0 to "
+                              f"disable the cap and seed everything.")
     parser.add_argument("--dry-run", action="store_true",
                          help="Count without writing to Supabase")
     parser.add_argument("--crawl", type=str, default=None,
@@ -545,10 +595,29 @@ def main():
                          help="Number of recent crawl partitions to scan "
                               "(default: 1 — more = broader coverage, longer runtime, "
                               "still free)")
+    parser.add_argument("--one-file", action="store_true",
+                         help="Seed exactly ONE full unprocessed Parquet file "
+                              "(ignores --limit truncation) and stop. Used by "
+                              "host_crawl_batch.py's seed-crawl-clear cycle, "
+                              "where each batch = one file's worth of hosts.")
     args = parser.parse_args()
 
-    written = seed(limit=args.limit, dry_run=args.dry_run,
-                   crawl=args.crawl, months=args.months)
+    if args.limit is None:
+        effective_limit = _DEFAULT_SAFE_LIMIT
+        log.info(f"No --limit passed — defaulting to the safe cap of "
+                 f"{_DEFAULT_SAFE_LIMIT:,} hosts (pass --limit 0 to seed "
+                 f"everything instead).")
+    elif args.limit == 0:
+        effective_limit = None
+        log.warning("--limit 0 — cap disabled, this run will seed EVERY "
+                    "matching host with no ceiling. Make sure that's really "
+                    "what you want (see BULK_DOMAIN_DISCOVERY_NOTES.md's "
+                    "storage math before doing this on the free Supabase tier).")
+    else:
+        effective_limit = args.limit
+
+    written = seed(limit=effective_limit, dry_run=args.dry_run,
+                   crawl=args.crawl, months=args.months, one_file=args.one_file)
     if written == 0:
         sys.exit(1)
 
