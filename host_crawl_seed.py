@@ -232,6 +232,55 @@ def _get_duckdb_connection():
     return con
 
 
+def _get_processed_files() -> set[str]:
+    """Which Parquet files have already been fully processed (queried AND
+    successfully written to Supabase) in a prior run — lets a re-run skip
+    straight past them instead of re-downloading/re-querying files that
+    already made it into host_crawl_queue. Stored in Supabase (not a local
+    file) because GitHub Actions runners are ephemeral — nothing written
+    to local disk survives between separate workflow runs."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return set()
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/host_crawl_seed_progress",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params={"select": "file"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return {row["file"] for row in r.json()}
+    except Exception as e:
+        log.warning(f"Could not fetch already-processed file list (will "
+                    f"re-process everything this run): {e}")
+        return set()
+
+
+def _mark_file_processed(fpath: str, crawl_name: str, rows_matched: int):
+    """Record a file as done immediately after ITS rows are successfully
+    written to Supabase — not merely queried — so a Supabase write
+    failure doesn't falsely mark progress that didn't actually land."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/host_crawl_seed_progress",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=ignore-duplicates",
+            },
+            json={"file": fpath, "crawl": crawl_name, "rows_matched": rows_matched},
+            params={"on_conflict": "file"},
+            timeout=30,
+        )
+        r.raise_for_status()
+    except Exception as e:
+        log.warning(f"Could not record {fpath} as processed (a future re-run "
+                    f"may redo this file): {e}")
+
+
 def _list_available_crawls(con) -> list[str]:
     """Ask Hugging Face's (genuinely anonymous, unlike S3) directory
     listing API which crawl= partitions exist, via DuckDB's glob()."""
@@ -337,21 +386,52 @@ def seed(limit: int | None = None, dry_run: bool = False,
         log.info(f"crawl={c}: {len(files)} Parquet file(s) to scan")
         files_by_crawl[c] = files
 
-    total_files = sum(len(f) for f in files_by_crawl.values())
-    log.info(f"Querying Common Crawl's Host Index via Hugging Face (hf://) — "
-             f"free, no AWS account, no billing — processing {total_files} "
-             f"file(s) one at a time to bound memory use...")
+    # Skip files a PRIOR run already fully processed (queried AND written
+    # to Supabase) — recorded in host_crawl_seed_progress. This is what
+    # makes a re-run resume instead of re-doing the whole partition from
+    # scratch: Common Crawl's Parquet files aren't row-numbered in any way
+    # that supports a "resume from row N" checkpoint (rows within a file
+    # aren't in a stable/meaningful order), but tracking completed FILES
+    # is simple and works with how the data is actually laid out.
+    already_done = _get_processed_files()
+    if already_done:
+        log.info(f"{len(already_done)} file(s) already processed in a prior "
+                 f"run — will skip those and resume with the rest.")
 
-    rows_to_insert = []
+    total_files = sum(len(f) for f in files_by_crawl.values())
+    skipped_done = sum(1 for files in files_by_crawl.values()
+                        for f in files if f in already_done)
+    log.info(f"Querying Common Crawl's Host Index via Hugging Face (hf://) — "
+             f"free, no AWS account, no billing — {total_files} file(s) total, "
+             f"{skipped_done} already done, processing the rest one at a "
+             f"time to bound memory use...")
+
+    if not dry_run and not (SUPABASE_URL and SUPABASE_KEY):
+        log.error("SUPABASE_URL/SUPABASE_KEY not set — cannot write queue.")
+        return 0
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates",
+    }
+
     seen = set()
     dead_skipped = 0
     total_matched = 0
+    total_written = 0
     query_timeout = 300  # per FILE now, not per whole partition — 5 min is generous
     file_num = 0
+    dry_run_rows = []  # only accumulated in --dry-run mode, for a final count
 
     for c, files in files_by_crawl.items():
         for fpath in files:
             file_num += 1
+            if fpath in already_done:
+                log.info(f"  [{file_num}/{total_files}] already processed — skipping")
+                continue
+
             per_file_query = f"""
                 SELECT surt_host_name, url_host_tld, hcrank,
                        fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
@@ -366,18 +446,17 @@ def seed(limit: int | None = None, dry_run: bool = False,
                 file_result = _run_with_timeout(_do_query, timeout=query_timeout)
             except concurrent.futures.TimeoutError:
                 log.warning(f"  [{file_num}/{total_files}] query timed out after "
-                            f"{query_timeout}s on {fpath} — skipping this file, "
-                            f"continuing with the rest.")
+                            f"{query_timeout}s on {fpath} — skipping this file "
+                            f"(NOT marked done, will retry next run), continuing.")
                 continue
             except Exception as e:
                 log.warning(f"  [{file_num}/{total_files}] query failed on "
-                            f"{fpath}: {e} — skipping this file, continuing.")
+                            f"{fpath}: {e} — skipping (NOT marked done), continuing.")
                 continue
 
             total_matched += len(file_result)
-            log.info(f"  [{file_num}/{total_files}] {len(file_result)} rows matched "
-                     f"in this file ({total_matched} total so far)")
 
+            file_rows = []
             for surt_host, tld, hcrank, f200, f4xx, f5xx, fgone, ngone in file_result:
                 if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
                     dead_skipped += 1
@@ -388,59 +467,63 @@ def seed(limit: int | None = None, dry_run: bool = False,
                 if not host or host in seen:
                     continue
                 seen.add(host)
-                rows_to_insert.append({
+                file_rows.append({
                     "host": host,
                     "tld": tld,
                     "hcrank": float(hcrank) if hcrank is not None else None,
                 })
-                if limit and len(rows_to_insert) >= limit:
-                    break
-            # free this file's raw result before moving to the next
-            del file_result
-            if limit and len(rows_to_insert) >= limit:
+            del file_result  # free this file's raw result before moving on
+
+            log.info(f"  [{file_num}/{total_files}] {len(file_rows)} live hosts "
+                     f"from this file ({total_matched} rows matched so far)")
+
+            if dry_run:
+                dry_run_rows.extend(file_rows)
+                # dry runs don't write, so there's nothing to mark "done" —
+                # a real run still needs to process this file for real later
+            else:
+                # Write THIS FILE's rows now (not batched at the very end)
+                # so a crash partway through a long seed run still leaves
+                # already-completed files written and marked, instead of
+                # losing everything back to the start.
+                file_written = 0
+                batch_size = 5000
+                write_failed = False
+                for i in range(0, len(file_rows), batch_size):
+                    batch = file_rows[i:i + batch_size]
+                    try:
+                        r = requests.post(
+                            f"{SUPABASE_URL}/rest/v1/host_crawl_queue",
+                            headers=headers, json=batch, timeout=60,
+                            params={"on_conflict": "host"},
+                        )
+                        r.raise_for_status()
+                        file_written += len(batch)
+                    except Exception as e:
+                        log.error(f"  Failed to write batch from {fpath}: {e}")
+                        write_failed = True
+                total_written += file_written
+                if not write_failed:
+                    _mark_file_processed(fpath, c, len(file_rows))
+                else:
+                    log.warning(f"  {fpath} had a write failure — NOT marked "
+                                f"done, will be retried on the next run.")
+
+            if limit and (total_written if not dry_run else len(dry_run_rows)) >= limit:
+                log.info(f"Reached --limit={limit}, stopping early.")
                 break
-        if limit and len(rows_to_insert) >= limit:
+        if limit and (total_written if not dry_run else len(dry_run_rows)) >= limit:
             break
 
-    log.info(f"Host Index: {total_matched} rows matched target TLDs across "
-             f"{file_num} file(s), filtering dead hosts...")
-
-    log.info(f"Seed candidates: {len(rows_to_insert)} hosts "
-             f"({dead_skipped} skipped as likely-dead)")
-
+    dead_summary = f" ({dead_skipped} skipped as likely-dead)"
     if dry_run:
-        log.info("Dry run — not writing to Supabase.")
-        return len(rows_to_insert)
+        log.info(f"Dry run — {len(dry_run_rows)} hosts would be written"
+                 f"{dead_summary}. Not writing to Supabase.")
+        return len(dry_run_rows)
 
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        log.error("SUPABASE_URL/SUPABASE_KEY not set — cannot write queue.")
-        return 0
-
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "resolution=ignore-duplicates",
-    }
-    batch_size = 5000
-    written = 0
-    for i in range(0, len(rows_to_insert), batch_size):
-        batch = rows_to_insert[i:i + batch_size]
-        try:
-            r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/host_crawl_queue",
-                headers=headers, json=batch, timeout=60,
-                params={"on_conflict": "host"},
-            )
-            r.raise_for_status()
-            written += len(batch)
-        except Exception as e:
-            log.error(f"Failed to write batch {i}-{i+len(batch)}: {e}")
-        if (i // batch_size) % 20 == 0:
-            log.info(f"  ...{written}/{len(rows_to_insert)} written so far")
-
-    log.info(f"Seed complete: {written} hosts written to host_crawl_queue.")
-    return written
+    log.info(f"Seed complete: {total_written} hosts written to "
+             f"host_crawl_queue{dead_summary}.")
+    return total_written
 
 
 def main():
