@@ -1,19 +1,22 @@
 name: Host Crawl (Bulk Discovery)
 
-# RE-ENABLED 2026-08 — host_crawl_seed.py was rewritten to pull from
-# Common Crawl's COLUMNAR INDEX (the URL-level Parquet index) via
-# anonymous/unsigned S3 access, instead of the Host Index. The Host Index
-# had NO free, robots-compliant access path (data.commoncrawl.org's
-# robots.txt blanket-disallows "/" for every user-agent — confirmed live;
-# S3 access to that specific dataset needs real AWS credentials and is
-# only documented as free "from inside AWS", not from a GitHub runner).
-# The columnar index is different: Common Crawl's own docs state
-# "Crawl data is free to access by anyone from anywhere... no need to
-# create an AWS account... --no-sign-request allows for anonymous
-# access" — this is the S3 API, a completely separate protocol from HTTP
-# that robots.txt has no jurisdiction over. Now covers .com/.net/.us/.uk/
-# .ca/.de/.au/.ie/.mt plus generic .io/.co/.app/.dev in one pass — see
-# TARGET_TLDS in host_crawl_seed.py.
+# RE-ENABLED 2026-08 (v5 of this seed step — see
+# BULK_DOMAIN_DISCOVERY_NOTES.md for the full history of every path
+# tried). host_crawl_seed.py now queries Common Crawl's HOST INDEX via
+# its official re-hosting on Hugging Face
+# (huggingface.co/datasets/commoncrawl/host-index-testing-v2), using
+# DuckDB's native `hf://` support. This is genuinely free — no AWS
+# account, no billing, and no robots.txt issue, because Hugging Face's
+# file-listing API is openly anonymous (confirmed live), unlike Common
+# Crawl's own S3 bucket (which denies anonymous ListObjectsV2) and unlike
+# data.commoncrawl.org's HTTPS mirror (which blanket-disallows every
+# crawler in robots.txt). A second opinion (Gemini) surfaced this
+# HF-hosted mirror after this project's own investigation had concluded
+# the Host Index had no free access path at all — worth remembering that
+# a second independent pass found something this session's research missed.
+#
+# Covers .com/.net/.us/.uk/.ca/.de/.au/.ie/.mt plus generic
+# .io/.co/.app/.dev in one pass — see TARGET_TLDS in host_crawl_seed.py.
 on:
   schedule:
     - cron: "0 4 * * 1,4"   # Monday + Thursday, 4:00 UTC — separate
@@ -28,7 +31,7 @@ on:
         required: false
         default: ""
       seed_only:
-        description: "Only re-seed the host queue from Common Crawl's columnar index — skip the crawl shards this run"
+        description: "Only re-seed the host queue from Common Crawl's Host Index (via Hugging Face) — skip the crawl shards this run"
         required: false
         type: boolean
         default: false
@@ -112,25 +115,22 @@ jobs:
 
       - name: Install dependencies
         run: pip install duckdb python-dotenv requests
-        # NOTE: also needs the `aws` CLI on PATH (ubuntu-latest runners
-        # ship it preinstalled, but this is what actually does the
-        # genuinely-anonymous S3 reads via --no-sign-request — DuckDB's
-        # own S3 client can't do that, see host_crawl_seed.py's
-        # docstring). If a future runner image ever drops it, add:
-        #   pip install awscli
-        # to this step.
 
-      - name: Seed host queue from Common Crawl's columnar index
+      - name: Seed host queue from Common Crawl's Host Index (via Hugging Face)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Optional — not required, this dataset is fully public. Only
+          # helps get a higher rate-limit tier for anonymous requests
+          # from a shared-IP CI runner. Leave the secret unset and this
+          # env var is simply empty, which host_crawl_seed.py handles.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python host_crawl_seed.py
         # Run this job manually (workflow_dispatch) the first time, and
-        # again whenever you want to pull in a newer monthly crawl —
-        # NOT part of the scheduled `crawl` job above. To trigger just
+        # again whenever you want to pull in a newer Common Crawl release
+        # — NOT part of the scheduled `crawl` job above. To trigger just
         # this job without waiting for the schedule, dispatch the
         # workflow manually from the Actions tab. Add "--months N" to
         # host_crawl_seed.py's invocation above (edit this step) if you
-        # want to scan more than the single latest monthly crawl for
-        # broader coverage — costs more runtime, not money (S3 reads are
-        # free either way).
+        # want to scan more than the single latest crawl for broader
+        # coverage — free either way, just longer runtime.
