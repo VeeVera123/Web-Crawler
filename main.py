@@ -6,7 +6,7 @@ plus 9 remote job boards (RemoteOK, Remotive, Himalayas, Arbeitnow, Jobicy,
 WeWorkRemotely, Working Nomads, FreeHire, Jooble).
 
 Reads slugs from Supabase slug_registry (single source of truth,
-enriched weekly by discovery.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl
+populated weekly by discovery.py from Feashliaa + kalil0321 + OpenPostings + Common Crawl
 + Wayback CDX + Y Combinator + TheirStack + HTTP Archive — 8 sources total).
 Job boards are scraped directly via free public JSON APIs (no slugs needed).
 Filters for CSM/Account Management roles hiring globally or in Africa.
@@ -137,7 +137,7 @@ def _shard_of(ats: str, slug: str, total_shards: int) -> int:
 def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
     """
     Load (ats, slug) pairs from Supabase slug_registry.
-    Supabase is the single source of truth — enriched weekly
+    Supabase is the single source of truth — populated weekly
     by discovery.py (8 sources — see that module's docstring).
 
     When total_shards > 1, returns only this shard's slice (for GitHub
