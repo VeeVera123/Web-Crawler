@@ -17,6 +17,25 @@ name: Host Crawl (Bulk Discovery)
 #
 # Covers .com/.net/.us/.uk/.ca/.de/.au/.ie/.mt plus generic
 # .io/.co/.app/.dev in one pass — see TARGET_TLDS in host_crawl_seed.py.
+#
+# BATCH PIPELINE (2026-08 update): a live run showed a SINGLE Common
+# Crawl file can hold 1.66M+ matching hosts — seeding/crawling/storing an
+# entire file (or worse, all 30) in one shot blew past Supabase's 500MB
+# free tier and made writes start failing with 500 errors mid-batch. This
+# workflow now runs as a real, VISIBLE pipeline of separate jobs per file
+# — seed (one file, capped at seed_limit_per_batch hosts) -> crawl (16
+# shards, same look as the old unsharded crawl workflow, but draining a
+# small capped queue instead of millions of hosts) -> finalize (clears
+# host_crawl_queue/host_crawl_visited — only host_crawl_results survives
+# — then re-dispatches this SAME workflow for the next file, decrementing
+# batch_count by one). Each file's cycle shows up as its own clean
+# seed->crawl->finalize run in the Actions tab, same shape as
+# daily_scan.yml's scrape->finalize gate (see finalize's `needs:` below).
+#
+# GitHub Actions can't natively loop a single workflow run forever (that
+# would risk an unattended runaway job) — finalize re-triggering a NEW
+# run via the API is the standard, safe way to chain N cycles while
+# keeping each one bounded and independently visible/cancellable.
 on:
   schedule:
     - cron: "0 4 * * 1,4"   # Monday + Thursday, 4:00 UTC — separate
@@ -31,23 +50,25 @@ on:
         required: false
         default: ""
       seed_only:
-        description: "Only re-seed the host queue from Common Crawl's Host Index (via Hugging Face) — skip the crawl shards this run"
-        required: false
-        type: boolean
-        default: false
-      batch_mode:
-        description: "Run host_crawl_batch.py instead: seed ONE Common Crawl file, crawl it fully, clear host_crawl_queue/host_crawl_visited, repeat for batch_count files — only host_crawl_results is kept between batches. Runs on GitHub Actions, no local machine needed. Overrides seed_only/crawl shards if checked."
+        description: "Only re-seed the host queue from Common Crawl's Host Index (via Hugging Face) — skip the crawl shards this run (legacy, unsharded/uncapped mode — prefer batch_count below instead)"
         required: false
         type: boolean
         default: false
       batch_count:
-        description: "How many files to process in this batch_mode run (default 30 = a full crawl partition). A single job is capped at 6h by GitHub, so this may not finish all of them in one dispatch — re-run the same way to continue from the next unprocessed file."
+        description: "Number of file-batches to run as a chained pipeline (seed one file -> crawl -> finalize -> re-trigger for the next file). Set to e.g. 3 to run exactly 3 files across 3 auto-chained workflow runs, then stop. Set to 0 to disable batch mode and use the legacy behavior above."
         required: false
-        default: "30"
+        default: "1"
+      seed_limit_per_batch:
+        description: "Max hosts seeded per file/batch (default 100000 — a single Common Crawl file can hold 1M+ matches, this keeps each batch's Supabase footprint small; the untrimmed remainder is picked up by a later batch automatically)"
+        required: false
+        default: "100000"
 
 concurrency:
   group: host-crawl-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  actions: write   # finalize needs this to re-dispatch the workflow via the API
 
 # ── Concurrency budget, read this before changing shard count ──
 # GitHub Actions free tier's REAL hard ceiling is 20 concurrent jobs
@@ -57,17 +78,14 @@ concurrency:
 # job) and discovery.yml (9 concurrent). This workflow uses 16 shards —
 # not 20 — deliberately leaving headroom so a manual re-run of either
 # other workflow, or an unlucky schedule overlap, doesn't get jobs queued
-# behind this one. 16 was picked over a rounder number like 10 because
-# this workflow's whole point is throughput: every shard is a genuinely
-# independent slice of the host queue (see host_crawl_claim_batch's
-# hashtext(host) % total_shards sharding), so more shards = more of the
-# 6-hour window actually spent crawling in parallel, not idle.
+# behind this one.
 jobs:
+  # ── LEGACY PATH (batch_count=0): unsharded/uncapped seed + full
+  # 16-shard crawl of whatever's already in the queue, same as before the
+  # batch pipeline existed. Kept for the "just drain whatever's already
+  # queued, no new seeding" and "just re-seed everything, no cap" cases.
   crawl:
-    # Skipped when this run is dispatched with seed_only=true (a manual
-    # "just re-seed" trigger shouldn't also burn 16 crawl-shard jobs) OR
-    # batch_mode=true (that's the separate `batch` job below instead).
-    if: github.event.inputs.seed_only != 'true' && github.event.inputs.batch_mode != 'true'
+    if: github.event.inputs.batch_count == '0' && github.event.inputs.seed_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350   # 5h50m — under the 6h hard cap, leaves ~10min
                             # for setup (checkout, pip install) before the
@@ -98,19 +116,9 @@ jobs:
             --shard ${{ matrix.shard }} \
             --total-shards 16 \
             ${{ github.event.inputs.max_runtime_minutes && format('--max-runtime-seconds {0}', github.event.inputs.max_runtime_minutes) || '' }}
-        # max_runtime_minutes input, when set via workflow_dispatch, is
-        # passed straight through as SECONDS above — a deliberate quick
-        # way to run a short test shard without editing code. Leave the
-        # input blank for a real run (host_crawl.py's own 5.5h default
-        # already leaves flush headroom under this job's 350min timeout).
 
-  # Seeding is a SEPARATE, manual-only job — it doesn't run on the
-  # schedule above. The host queue only needs re-seeding when you want to
-  # pull in a newer Common Crawl monthly release (roughly monthly), not
-  # every crawl run; host_crawl.py's whole design point is draining an
-  # already-seeded queue across many runs, not re-seeding it each time.
-  seed:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.seed_only == 'true' && github.event.inputs.batch_mode != 'true'
+  legacy_seed:
+    if: github.event.inputs.batch_count == '0' && github.event.inputs.seed_only == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -130,49 +138,21 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # STRONGLY RECOMMENDED, not just optional — this dataset is
-          # fully public so a token isn't required for access, but running
-          # fully anonymous from GitHub Actions' shared IP pool is the
-          # prime suspect behind observed "Error: The operation was
-          # canceled." runs (a silent connection stall, not a Python
-          # exception — see host_crawl_seed.py's _get_duckdb_connection
-          # docstring/comments for the full diagnosis). Get a free token
-          # at huggingface.co/settings/tokens (read scope is enough), add
-          # it as a repo secret named HF_TOKEN. Leave unset and this env
-          # var is simply empty, which host_crawl_seed.py still handles
-          # (now with its own timeouts so a stall fails loud instead of
-          # hanging), but setting the token is the real fix.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python host_crawl_seed.py
-        # Run this job manually (workflow_dispatch) the first time, and
-        # again whenever you want to pull in a newer Common Crawl release
-        # — NOT part of the scheduled `crawl` job above. To trigger just
-        # this job without waiting for the schedule, dispatch the
-        # workflow manually from the Actions tab. Add "--months N" to
-        # host_crawl_seed.py's invocation above (edit this step) if you
-        # want to scan more than the single latest crawl for broader
-        # coverage — free either way, just longer runtime.
+        run: python host_crawl_seed.py --limit 0
+        # --limit 0 = legacy uncapped behavior (seed_only path predates
+        # the batch pipeline's per-file cap). Use batch_count instead of
+        # this path unless you specifically want an unbounded re-seed.
 
-  # BATCH MODE — runs entirely on GitHub Actions, no local machine
-  # involved. Seeds ONE Common Crawl file, crawls it fully, clears
-  # host_crawl_queue/host_crawl_visited, then repeats for batch_count
-  # files — only host_crawl_results (the actual ats/slug hits) survives
-  # between batches, keeping Supabase storage bounded to roughly "one
-  # file's worth" at any moment regardless of how many batches run in
-  # total, across however many separate dispatches it takes.
-  #
-  # GitHub Actions caps any single job at 6 hours — if batch_count files
-  # can't all be processed in that window, this job stops partway and
-  # whatever it already completed stays done (host_crawl_seed_progress
-  # tracks completed files; a batch that was seeded+crawled+cleared is
-  # fully committed even if the job is later cut off mid-NEXT-batch).
-  # Simply dispatch this workflow again with batch_mode checked to
-  # continue — it automatically skips files already marked done and
-  # picks up where it left off, same as everything else in this pipeline.
-  batch:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.batch_mode == 'true'
+  # ── BATCH PIPELINE (batch_count >= 1, the default) ──
+
+  seed:
+    if: github.event.inputs.batch_count != '0' && github.event.inputs.seed_only != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # 5h50m — under GitHub's 6h hard cap
+    timeout-minutes: 60
+
+    outputs:
+      seeded: ${{ steps.run_seed.outputs.seeded }}
 
     steps:
       - name: Checkout
@@ -184,21 +164,111 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install duckdb aiohttp selectolax python-dotenv requests
-        # needs BOTH host_crawl_seed.py's deps (duckdb) AND
-        # host_crawl.py's deps (aiohttp, selectolax) since batch mode
-        # calls both directly as Python functions, not subprocesses.
+        run: pip install duckdb python-dotenv requests
 
-      - name: "Run batch mode (seed one file -> crawl -> clear, repeat)"
+      - name: "Seed ONE Common Crawl file (capped at seed_limit_per_batch)"
+        id: run_seed
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python host_crawl_batch.py \
-            --batches ${{ github.event.inputs.batch_count || '30' }} \
-            --max-runtime-per-batch ${{ github.event.inputs.max_runtime_minutes && format('{0}', github.event.inputs.max_runtime_minutes) || '19800' }}
-        # max_runtime_minutes is reused here (same input as the crawl
-        # job above) but passed straight through as SECONDS per batch —
-        # 19800 = 5.5h default, matching host_crawl.py's own default so
-        # a single batch's crawl step still leaves flush headroom.
+          python host_crawl_seed.py \
+            --one-file \
+            --limit ${{ github.event.inputs.seed_limit_per_batch || '100000' }}
+          echo "seeded=true" >> "$GITHUB_OUTPUT"
+        # --one-file: exactly one unprocessed Parquet file this cycle,
+        # capped by --limit so a single oversized file (a live run showed
+        # 1.66M+ matches in ONE file) can't fill Supabase in one shot —
+        # see host_crawl_seed.py's --one-file docstring for the full story.
+
+  # Crawls whatever the seed job above just queued (one capped batch, not
+  # the full unsharded dataset) — still 16 shards so the Actions tab shows
+  # the same "shards go active" view as before, they'll just each finish
+  # fast since the queue is small (<= seed_limit_per_batch hosts total).
+  crawl_batch:
+    needs: seed
+    if: github.event.inputs.batch_count != '0' && github.event.inputs.seed_only != 'true' && needs.seed.outputs.seeded == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp selectolax python-dotenv requests
+
+      - name: "Crawl this batch (shard ${{ matrix.shard }}/16)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python host_crawl.py \
+            --shard ${{ matrix.shard }} \
+            --total-shards 16 \
+            ${{ github.event.inputs.max_runtime_minutes && format('--max-runtime-seconds {0}', github.event.inputs.max_runtime_minutes) || '' }}
+
+  # Mirrors daily_scan.yml's finalize gate: only runs once seed AND every
+  # crawl shard have finished (`needs:` + `if: always()` so it still runs
+  # even if a shard failed/timed out, same reasoning as daily_scan.yml's
+  # finalize comment). Clears the two scratch tables (only
+  # host_crawl_results/host_crawl_seed_progress survive), then re-triggers
+  # this SAME workflow for the next file if batch_count > 1 — this is what
+  # makes "seed ends -> shards run -> finalize clears DB -> seeding starts
+  # again" happen automatically across multiple workflow runs instead of
+  # needing you to manually re-dispatch each time.
+  finalize:
+    needs: [seed, crawl_batch]
+    if: always() && github.event.inputs.batch_count != '0' && github.event.inputs.seed_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Clear host_crawl_queue and host_crawl_visited (keep results)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_crawl_queue?host=neq.__never_matches__" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY"
+          curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_crawl_visited?host=neq.__never_matches__" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY"
+          echo "Cleared host_crawl_queue and host_crawl_visited. host_crawl_results and host_crawl_seed_progress were left untouched."
+
+      - name: Re-trigger for the next file, if batches remain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          remaining=$(( ${{ github.event.inputs.batch_count || '1' }} - 1 ))
+          if [ "$remaining" -gt 0 ]; then
+            echo "Re-dispatching for the next file — $remaining batch(es) left after this one."
+            gh workflow run "host_crawl.yml" \
+              --ref "${{ github.ref_name }}" \
+              -f batch_count="$remaining" \
+              -f seed_limit_per_batch="${{ github.event.inputs.seed_limit_per_batch || '100000' }}" \
+              -f max_runtime_minutes="${{ github.event.inputs.max_runtime_minutes || '' }}"
+          else
+            echo "batch_count reached 0 — this was the last requested batch, not re-triggering."
+          fi
+        # Requires no extra secret — GITHUB_TOKEN is auto-provided per run
+        # and the `permissions: actions: write` block above grants it
+        # rights to dispatch workflows in this repo.
+
+
+# NOTE: host_crawl_batch.py (the single-script seed->crawl->clear->repeat
+# version) still exists in this repo and can be run directly — either on
+# your own machine, or by adding a job that calls it if you ever want a
+# single-job version instead of this multi-job visible pipeline. It's not
+# wired into this workflow file since the jobs above give the same
+# behavior with per-file visibility in the Actions tab, which is what was
+# actually asked for.
