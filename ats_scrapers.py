@@ -1674,7 +1674,18 @@ def scrape_breezyhr(slug: str) -> list[dict]:
     return jobs
 
 
-# ── ApplyToJob ──────────────────────────────────────────
+# ── ApplyToJob (REMOVED 2026-08 — dead code, kept for reference only) ──
+#
+# No longer wired into SCRAPERS/DESCRIPTION_FETCHERS/QUESTION_FETCHERS
+# below. Removed because a live posting requiring US work authorization
+# ("Client Engagement Representative — Remote") got past the classifier
+# despite ApplyToJob being registered for full-description enrichment via
+# _fetch_generic_description — the generic JD fetch wasn't reliably
+# catching real disqualifying language on this platform's pages, and
+# ApplyToJob (JazzHR) is a small long-tail ATS, not worth debugging
+# further. Its GitHub Actions matrix slot was reassigned; see
+# job_board_scrapers.py's scrape_jobicy for the replacement approach
+# (Jobicy widened to cover full-JD remote CSM/AM discovery instead).
 
 def scrape_applytojob(slug: str) -> list[dict]:
     """ApplyToJob (JazzHR) — HTML scrape, parses job listings.
@@ -2918,7 +2929,7 @@ SCRAPERS = {
     "smartrecruiters": scrape_smartrecruiters,
     "teamtailor": scrape_teamtailor,
     "breezyhr": scrape_breezyhr,
-    "applytojob": scrape_applytojob,
+    # "applytojob": scrape_applytojob,  # REMOVED 2026-08 — see module notes below
     "personio": scrape_personio,
     "joincom": scrape_joincom,
     # ── Newly enabled (confirmed working) ──
@@ -3478,7 +3489,7 @@ DESCRIPTION_FETCHERS = {
     "SmartRecruiters": _fetch_smartrecruiters_description,
     "Taleo": _fetch_taleo_description,
     "BreezyHR": _fetch_generic_description,
-    "ApplyToJob": _fetch_generic_description,
+    # "ApplyToJob": _fetch_generic_description,  # REMOVED 2026-08 — see module notes below
     "HRMDirect": _fetch_generic_description,
     "Paylocity": _fetch_generic_description,
     "Oracle Cloud HCM": _fetch_generic_description,
@@ -4227,7 +4238,7 @@ QUESTION_FETCHERS = {
     "SmartRecruiters": _fetch_smartrecruiters_questions,
     "Teamtailor": _fetch_teamtailor_questions,
     "BreezyHR": _fetch_breezyhr_questions,
-    "ApplyToJob": _fetch_applytojob_questions,
+    # "ApplyToJob": _fetch_applytojob_questions,  # REMOVED 2026-08 — see module notes below
     "HRMDirect": _fetch_hrmdirect_questions,
     "Zoho": _fetch_zoho_questions,
     "Oracle Cloud HCM": _fetch_oracle_cloud_hcm_questions,
