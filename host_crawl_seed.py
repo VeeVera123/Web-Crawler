@@ -289,22 +289,48 @@ def _get_processed_files() -> set[str]:
     straight past them instead of re-downloading/re-querying files that
     already made it into h_seeding. Stored in Supabase (not a local
     file) because GitHub Actions runners are ephemeral — nothing written
-    to local disk survives between separate workflow runs."""
+    to local disk survives between separate workflow runs.
+
+    PAGINATED, same reason as _get_seeded_hosts_for_file(): an unpaginated
+    GET silently caps out at PostgREST's default max-rows (1000 on
+    Supabase). h_file_count only holds ~30 rows per crawl partition today
+    so this hasn't bitten in practice yet, but it's the identical bug and
+    would silently start skipping "already done" files the moment this
+    table crosses 1000 rows (e.g. once seeding runs across several crawl
+    partitions/months) — fixed the same way, by paging through Range."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return set()
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/h_file_count",
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-            params={"select": "file"},
-            timeout=30,
-        )
-        r.raise_for_status()
-        return {row["file"] for row in r.json()}
-    except Exception as e:
-        log.warning(f"Could not fetch already-processed file list (will "
-                    f"re-process everything this run): {e}")
-        return set()
+    files: set[str] = set()
+    page_size = 1000
+    offset = 0
+    while True:
+        try:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/h_file_count",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Range-Unit": "items",
+                    "Range": f"{offset}-{offset + page_size - 1}",
+                },
+                params={"select": "file", "order": "file"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            page = r.json()
+        except Exception as e:
+            log.warning(f"Could not fetch already-processed file list "
+                        f"(page starting at offset {offset} — will "
+                        f"re-process everything not already collected "
+                        f"this call): {e}")
+            break
+        if not page:
+            break
+        files.update(row["file"] for row in page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return files
 
 
 def _mark_file_processed(fpath: str, crawl_name: str, rows_matched: int):
@@ -342,25 +368,61 @@ def _get_seeded_hosts_for_file(fpath: str) -> set[str]:
     separately from h_file_count (file-level done/not-done) and cleared for
     a given file the moment that file is marked done (see
     _clear_seeded_hosts_for_file) — it only needs to hold rows for files
-    still in progress."""
+    still in progress.
+
+    PAGINATED — CRITICAL BUG FIXED HERE: PostgREST caps any single
+    request at its configured max-rows (Supabase's default is 1000) when
+    no explicit Range is given. An earlier version of this function did
+    one unpaginated GET, so once a file had more than 1000 already-seeded
+    hosts recorded (any file needing more than one 100K batch reaches
+    this immediately), every batch after the first only ever saw the
+    FIRST 1000 of them — the other 99,000+ looked "not yet seeded" and
+    got re-matched and re-queued as if new. Confirmed live: after two
+    100K-capped batches on one file, h_total_seeded correctly held
+    163,939 real rows, but the file was never marked done in h_file_count
+    even though the second batch's new-host count (63,939) was under the
+    100K cap and should have triggered that — because the "already
+    seeded" set the second batch actually filtered against was built
+    from only 1000 rows, not the true ~100,000, so the numbers never
+    lined up the way the drain-detection logic expects. Fixed by paging
+    through the full result set with Range headers instead of a single
+    unbounded GET."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return set()
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/h_total_seeded",
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-            params={"select": "host", "file": f"eq.{fpath}"},
-            timeout=30,
-        )
-        r.raise_for_status()
-        return {row["host"] for row in r.json()}
-    except Exception as e:
-        log.warning(f"Could not fetch already-seeded hosts for {fpath} (a "
-                    f"re-run of this file may re-pick some hosts already "
-                    f"seeded — not harmful, since h_seeding's upsert "
-                    f"on_conflict=host just no-ops on a duplicate, but wastes "
-                    f"some of this batch's cap on hosts already written): {e}")
-        return set()
+    hosts: set[str] = set()
+    page_size = 1000
+    offset = 0
+    while True:
+        try:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/h_total_seeded",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Range-Unit": "items",
+                    "Range": f"{offset}-{offset + page_size - 1}",
+                },
+                params={"select": "host", "file": f"eq.{fpath}", "order": "host"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            page = r.json()
+        except Exception as e:
+            log.warning(f"Could not fetch already-seeded hosts for {fpath} "
+                        f"(page starting at offset {offset} — a re-run of "
+                        f"this file may re-pick some hosts already seeded, "
+                        f"not harmful since h_seeding's upsert "
+                        f"on_conflict=host just no-ops on a duplicate, but "
+                        f"wastes some of this batch's cap on hosts already "
+                        f"written): {e}")
+            break
+        if not page:
+            break
+        hosts.update(row["host"] for row in page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return hosts
 
 
 def _record_seeded_hosts(fpath: str, hosts: list[str]):
