@@ -112,6 +112,13 @@ jobs:
 
       - name: Install dependencies
         run: pip install duckdb python-dotenv requests
+        # NOTE: also needs the `aws` CLI on PATH (ubuntu-latest runners
+        # ship it preinstalled, but this is what actually does the
+        # genuinely-anonymous S3 reads via --no-sign-request — DuckDB's
+        # own S3 client can't do that, see host_crawl_seed.py's
+        # docstring). If a future runner image ever drops it, add:
+        #   pip install awscli
+        # to this step.
 
       - name: Seed host queue from Common Crawl's columnar index
         env:
