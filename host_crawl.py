@@ -11,7 +11,7 @@ different kind of source (we do the crawling ourselves, at bulk scale,
 instead of relying on Common Crawl/HTTP Archive/WDC's own crawls) with a
 very different cost/runtime profile (hours, not minutes), so it gets its
 own workflow (host_crawl.yml) and its own results table
-(host_slug) until proven out — see the Supabase migration notes
+(h_slugs) until proven out — see the Supabase migration notes
 for the merge-into-slug_registry path once validated.
 
 WHY ASYNC, NOT THREADS: every other live-fetch source in this project
@@ -28,12 +28,13 @@ scale: less CPU spent per page means less time stealing from the event
 loop between awaits.
 
 CHECKPOINTING: this is what makes repeated runs valuable instead of
-wasteful. Every host this script attempts is written to
-host_visited immediately (found / no_match / unreachable /
-disallowed / http_error) — a future run's queue query excludes anything
-already in that table, so re-running this on a schedule keeps expanding
-coverage instead of re-crawling the same slice every time. See
-_claim_batch() / _mark_visited().
+wasteful. Every host this script attempts has its outcome (found /
+no_match / unreachable / disallowed / http_error) written back onto its
+existing h_seeding row immediately — a future run's queue query
+(_claim_batch(), via outcome IS NULL) excludes anything already
+resolved, so re-running this on a schedule keeps expanding coverage
+instead of re-crawling the same slice every time. See _claim_batch() /
+_flush_results().
 
 TIME BUDGET: GitHub Actions' free-tier hard cap is 6 hours per job. This
 script tracks its own elapsed time and stops claiming new batches with
@@ -51,6 +52,7 @@ Usage:
 
 import argparse
 import asyncio
+import datetime
 import logging
 import os
 import sys
@@ -147,7 +149,7 @@ async def _robots_allows(session: aiohttp.ClientSession, base_url: str) -> tuple
     Returns (allowed, reason) — reason is "ok", "unreachable" (DNS/timeout/
     connection/SSL failure — NOT a real robots.txt rule), or "disallowed"
     (an actual robots.txt rule blocked us). Only a real "disallowed" rule
-    should ever be recorded as outcome='disallowed' in host_visited
+    should ever be recorded as outcome='disallowed' in h_seeding
     — collapsing "the site was unreachable" into the same bucket as "the
     site explicitly disallows crawling" made the results table useless
     for telling those two very different situations apart (a live run at
@@ -226,8 +228,8 @@ def _find_career_page_link(html: str, base_url: str) -> str | None:
 
 
 async def _crawl_one(session: aiohttp.ClientSession, host: str) -> dict:
-    """Visit one host, return a result dict for host_visited (+
-    host_slug if a slug was found). Never raises — every
+    """Visit one host, return a result dict to be written back onto
+    h_seeding (+ h_slugs if a slug was found). Never raises — every
     failure mode is captured as an outcome, not an exception."""
     base = f"https://{host}"
 
@@ -296,18 +298,31 @@ def _sb_headers(prefer: str | None = None) -> dict:
     return h
 
 
+def _today_str() -> str:
+    # ISO date string for h_seeding.checked_at (a `date` column) — set the
+    # moment a host's crawl outcome is recorded, distinct from added_at
+    # (set when the host was first queued by host_crawl_seed.py).
+    return datetime.date.today().isoformat()
+
+
 def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
-    """Pull the next batch of not-yet-visited hosts assigned to this
-    shard. Sharding is done in SQL by hashing the host, so this needs no
+    """Pull the next batch of not-yet-visited hosts (outcome IS NULL)
+    assigned to this shard, from h_seeding — the single merged
+    queue+outcome table (2026-08: used to be two tables, host_seed for
+    the queue and host_visited for outcomes; since a row is in exactly
+    one of "queued" or "visited" at any time, they were merged into one).
+    Sharding is done in SQL by hashing the host, so this needs no
     coordination between concurrently-running shards — each shard only
     ever sees its own slice, so two shards claiming batches at the same
     moment can't double-claim the same host."""
-    # Using a Postgres function (host_crawl_claim_batch, created via
-    # migration) keeps the "next unvisited hosts for this shard" logic
-    # atomic and server-side rather than racy client-side pagination —
-    # two shards claiming batches at the same instant can't double-claim
-    # the same host, since the function's own UPDATE...RETURNING marks
-    # rows claimed in the same statement that selects them.
+    # Using a Postgres function (host_crawl_claim_batch — the function's
+    # NAME was kept as-is through the table rename/merge, only its body
+    # was updated to reference h_seeding and outcome IS NULL) keeps the
+    # "next unvisited hosts for this shard" logic atomic and server-side
+    # rather than racy client-side pagination — two shards claiming
+    # batches at the same instant can't double-claim the same host,
+    # since the function's own UPDATE...RETURNING marks rows claimed in
+    # the same statement that selects them.
     import requests
     try:
         r = requests.post(
@@ -325,17 +340,23 @@ def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
 
 
 def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
-    """Write this batch's outcomes. visited_rows go to host_visited
-    (the checkpoint — every host, regardless of outcome). found_rows go
-    to host_slug (only actual ATS matches). on_conflict must be
-    passed as a query param alongside the merge-duplicates Prefer header
-    — PostgREST silently no-ops the upsert semantics without it (see
-    discovery.py's upsert_to_supabase for the same pattern)."""
+    """Write this batch's outcomes. visited_rows are UPSERTED into
+    h_seeding — this fills in outcome/ats/slug/checked_at on the SAME
+    row that was already there from seeding, rather than inserting into
+    a separate "visited" table (h_seeding used to be two tables —
+    host_seed for the queue, host_visited for outcomes — merged 2026-08
+    since every row is in exactly one of those two states at any time,
+    making two tables pure duplication of the same hosts). found_rows go
+    to h_slugs (only actual ATS matches, a genuinely different,
+    permanent dataset). on_conflict must be passed as a query param
+    alongside the merge-duplicates Prefer header — PostgREST silently
+    no-ops the upsert semantics without it (see discovery.py's
+    upsert_to_supabase for the same pattern)."""
     import requests
     if visited_rows:
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/host_visited",
+                f"{SUPABASE_URL}/rest/v1/h_seeding",
                 headers=_sb_headers("resolution=merge-duplicates"),
                 json=visited_rows, timeout=60,
                 params={"on_conflict": "host"},
@@ -347,7 +368,7 @@ def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
     if found_rows:
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/host_slug",
+                f"{SUPABASE_URL}/rest/v1/h_slugs",
                 headers=_sb_headers("resolution=merge-duplicates"),
                 json=found_rows, timeout=60,
                 params={"on_conflict": "ats,slug"},
@@ -409,7 +430,8 @@ def run(shard: int, total_shards: int, max_runtime: float, dry_run: bool):
             elif outcome == "http_error":
                 stats.http_error += 1
             visited_rows.append({"host": res["host"], "outcome": outcome,
-                                  "ats": res.get("ats"), "slug": res.get("slug")})
+                                  "ats": res.get("ats"), "slug": res.get("slug"),
+                                  "checked_at": _today_str()})
 
         if not dry_run:
             _flush_results(visited_rows, found_rows)
