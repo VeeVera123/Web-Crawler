@@ -11,7 +11,7 @@ different kind of source (we do the crawling ourselves, at bulk scale,
 instead of relying on Common Crawl/HTTP Archive/WDC's own crawls) with a
 very different cost/runtime profile (hours, not minutes), so it gets its
 own workflow (host_crawl.yml) and its own results table
-(host_crawl_results) until proven out — see the Supabase migration notes
+(host_slug) until proven out — see the Supabase migration notes
 for the merge-into-slug_registry path once validated.
 
 WHY ASYNC, NOT THREADS: every other live-fetch source in this project
@@ -29,7 +29,7 @@ loop between awaits.
 
 CHECKPOINTING: this is what makes repeated runs valuable instead of
 wasteful. Every host this script attempts is written to
-host_crawl_visited immediately (found / no_match / unreachable /
+host_visited immediately (found / no_match / unreachable /
 disallowed / http_error) — a future run's queue query excludes anything
 already in that table, so re-running this on a schedule keeps expanding
 coverage instead of re-crawling the same slice every time. See
@@ -147,7 +147,7 @@ async def _robots_allows(session: aiohttp.ClientSession, base_url: str) -> tuple
     Returns (allowed, reason) — reason is "ok", "unreachable" (DNS/timeout/
     connection/SSL failure — NOT a real robots.txt rule), or "disallowed"
     (an actual robots.txt rule blocked us). Only a real "disallowed" rule
-    should ever be recorded as outcome='disallowed' in host_crawl_visited
+    should ever be recorded as outcome='disallowed' in host_visited
     — collapsing "the site was unreachable" into the same bucket as "the
     site explicitly disallows crawling" made the results table useless
     for telling those two very different situations apart (a live run at
@@ -226,8 +226,8 @@ def _find_career_page_link(html: str, base_url: str) -> str | None:
 
 
 async def _crawl_one(session: aiohttp.ClientSession, host: str) -> dict:
-    """Visit one host, return a result dict for host_crawl_visited (+
-    host_crawl_results if a slug was found). Never raises — every
+    """Visit one host, return a result dict for host_visited (+
+    host_slug if a slug was found). Never raises — every
     failure mode is captured as an outcome, not an exception."""
     base = f"https://{host}"
 
@@ -325,9 +325,9 @@ def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
 
 
 def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
-    """Write this batch's outcomes. visited_rows go to host_crawl_visited
+    """Write this batch's outcomes. visited_rows go to host_visited
     (the checkpoint — every host, regardless of outcome). found_rows go
-    to host_crawl_results (only actual ATS matches). on_conflict must be
+    to host_slug (only actual ATS matches). on_conflict must be
     passed as a query param alongside the merge-duplicates Prefer header
     — PostgREST silently no-ops the upsert semantics without it (see
     discovery.py's upsert_to_supabase for the same pattern)."""
@@ -335,7 +335,7 @@ def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
     if visited_rows:
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/host_crawl_visited",
+                f"{SUPABASE_URL}/rest/v1/host_visited",
                 headers=_sb_headers("resolution=merge-duplicates"),
                 json=visited_rows, timeout=60,
                 params={"on_conflict": "host"},
@@ -347,7 +347,7 @@ def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
     if found_rows:
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/host_crawl_results",
+                f"{SUPABASE_URL}/rest/v1/host_slug",
                 headers=_sb_headers("resolution=merge-duplicates"),
                 json=found_rows, timeout=60,
                 params={"on_conflict": "ats,slug"},
