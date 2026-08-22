@@ -1,5 +1,19 @@
 name: Host Crawl (Bulk Discovery)
 
+# RE-ENABLED 2026-08 — host_crawl_seed.py was rewritten to pull from
+# Common Crawl's COLUMNAR INDEX (the URL-level Parquet index) via
+# anonymous/unsigned S3 access, instead of the Host Index. The Host Index
+# had NO free, robots-compliant access path (data.commoncrawl.org's
+# robots.txt blanket-disallows "/" for every user-agent — confirmed live;
+# S3 access to that specific dataset needs real AWS credentials and is
+# only documented as free "from inside AWS", not from a GitHub runner).
+# The columnar index is different: Common Crawl's own docs state
+# "Crawl data is free to access by anyone from anywhere... no need to
+# create an AWS account... --no-sign-request allows for anonymous
+# access" — this is the S3 API, a completely separate protocol from HTTP
+# that robots.txt has no jurisdiction over. Now covers .com/.net/.us/.uk/
+# .ca/.de/.au/.ie/.mt plus generic .io/.co/.app/.dev in one pass — see
+# TARGET_TLDS in host_crawl_seed.py.
 on:
   schedule:
     - cron: "0 4 * * 1,4"   # Monday + Thursday, 4:00 UTC — separate
@@ -14,7 +28,7 @@ on:
         required: false
         default: ""
       seed_only:
-        description: "Only re-seed the host queue from Common Crawl's Host Index — skip the crawl shards this run"
+        description: "Only re-seed the host queue from Common Crawl's columnar index — skip the crawl shards this run"
         required: false
         type: boolean
         default: false
@@ -78,9 +92,9 @@ jobs:
         # already leaves flush headroom under this job's 350min timeout).
 
   # Seeding is a SEPARATE, manual-only job — it doesn't run on the
-  # schedule above. The host queue only needs re-seeding when Common
-  # Crawl publishes a new Host Index release (infrequent), not every
-  # crawl run; host_crawl.py's whole design point is draining an
+  # schedule above. The host queue only needs re-seeding when you want to
+  # pull in a newer Common Crawl monthly release (roughly monthly), not
+  # every crawl run; host_crawl.py's whole design point is draining an
   # already-seeded queue across many runs, not re-seeding it each time.
   seed:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.seed_only == 'true'
@@ -99,13 +113,17 @@ jobs:
       - name: Install dependencies
         run: pip install duckdb python-dotenv requests
 
-      - name: Seed host queue from Common Crawl Host Index
+      - name: Seed host queue from Common Crawl's columnar index
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python host_crawl_seed.py
         # Run this job manually (workflow_dispatch) the first time, and
-        # again whenever you want to pull in a newer Host Index release —
+        # again whenever you want to pull in a newer monthly crawl —
         # NOT part of the scheduled `crawl` job above. To trigger just
         # this job without waiting for the schedule, dispatch the
-        # workflow manually from the Actions tab.
+        # workflow manually from the Actions tab. Add "--months N" to
+        # host_crawl_seed.py's invocation above (edit this step) if you
+        # want to scan more than the single latest monthly crawl for
+        # broader coverage — costs more runtime, not money (S3 reads are
+        # free either way).
