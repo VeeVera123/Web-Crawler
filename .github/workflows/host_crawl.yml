@@ -1,0 +1,136 @@
+name: Host Crawl (Bulk Discovery)
+
+# RE-ENABLED 2026-08 (v5 of this seed step — see
+# BULK_DOMAIN_DISCOVERY_NOTES.md for the full history of every path
+# tried). host_crawl_seed.py now queries Common Crawl's HOST INDEX via
+# its official re-hosting on Hugging Face
+# (huggingface.co/datasets/commoncrawl/host-index-testing-v2), using
+# DuckDB's native `hf://` support. This is genuinely free — no AWS
+# account, no billing, and no robots.txt issue, because Hugging Face's
+# file-listing API is openly anonymous (confirmed live), unlike Common
+# Crawl's own S3 bucket (which denies anonymous ListObjectsV2) and unlike
+# data.commoncrawl.org's HTTPS mirror (which blanket-disallows every
+# crawler in robots.txt). A second opinion (Gemini) surfaced this
+# HF-hosted mirror after this project's own investigation had concluded
+# the Host Index had no free access path at all — worth remembering that
+# a second independent pass found something this session's research missed.
+#
+# Covers .com/.net/.us/.uk/.ca/.de/.au/.ie/.mt plus generic
+# .io/.co/.app/.dev in one pass — see TARGET_TLDS in host_crawl_seed.py.
+on:
+  schedule:
+    - cron: "0 4 * * 1,4"   # Monday + Thursday, 4:00 UTC — separate
+                             # schedule from discovery.yml (Sunday) and
+                             # daily_scan.yml (daily), so none of the
+                             # three ever compete for the same 20-job
+                             # account-wide concurrent-job ceiling.
+  workflow_dispatch:
+    inputs:
+      max_runtime_minutes:
+        description: "Cap runtime per shard, in minutes (default: full 5.5h budget)"
+        required: false
+        default: ""
+      seed_only:
+        description: "Only re-seed the host queue from Common Crawl's Host Index (via Hugging Face) — skip the crawl shards this run"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: host-crawl-${{ github.ref }}
+  cancel-in-progress: false
+
+# ── Concurrency budget, read this before changing shard count ──
+# GitHub Actions free tier's REAL hard ceiling is 20 concurrent jobs
+# ACCOUNT-WIDE (public repos only lift the *minutes* cap, not this one —
+# confirmed against GitHub's own docs before building this). This repo
+# already runs daily_scan.yml (9 concurrent: 8 ATS shards + 1 job-boards
+# job) and discovery.yml (9 concurrent). This workflow uses 16 shards —
+# not 20 — deliberately leaving headroom so a manual re-run of either
+# other workflow, or an unlucky schedule overlap, doesn't get jobs queued
+# behind this one. 16 was picked over a rounder number like 10 because
+# this workflow's whole point is throughput: every shard is a genuinely
+# independent slice of the host queue (see host_crawl_claim_batch's
+# hashtext(host) % total_shards sharding), so more shards = more of the
+# 6-hour window actually spent crawling in parallel, not idle.
+jobs:
+  crawl:
+    # Skipped when this run is dispatched with seed_only=true — a manual
+    # "just re-seed" trigger shouldn't also burn 16 crawl-shard jobs.
+    if: github.event.inputs.seed_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 5h50m — under the 6h hard cap, leaves ~10min
+                            # for setup (checkout, pip install) before the
+                            # job itself would be force-killed
+    strategy:
+      fail-fast: false     # one bad/slow shard shouldn't cancel the rest
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp selectolax python-dotenv requests
+
+      - name: "Run host crawl (shard ${{ matrix.shard }}/16)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python host_crawl.py \
+            --shard ${{ matrix.shard }} \
+            --total-shards 16 \
+            ${{ github.event.inputs.max_runtime_minutes && format('--max-runtime-seconds {0}', github.event.inputs.max_runtime_minutes) || '' }}
+        # max_runtime_minutes input, when set via workflow_dispatch, is
+        # passed straight through as SECONDS above — a deliberate quick
+        # way to run a short test shard without editing code. Leave the
+        # input blank for a real run (host_crawl.py's own 5.5h default
+        # already leaves flush headroom under this job's 350min timeout).
+
+  # Seeding is a SEPARATE, manual-only job — it doesn't run on the
+  # schedule above. The host queue only needs re-seeding when you want to
+  # pull in a newer Common Crawl monthly release (roughly monthly), not
+  # every crawl run; host_crawl.py's whole design point is draining an
+  # already-seeded queue across many runs, not re-seeding it each time.
+  seed:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.seed_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install duckdb python-dotenv requests
+
+      - name: Seed host queue from Common Crawl's Host Index (via Hugging Face)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Optional — not required, this dataset is fully public. Only
+          # helps get a higher rate-limit tier for anonymous requests
+          # from a shared-IP CI runner. Leave the secret unset and this
+          # env var is simply empty, which host_crawl_seed.py handles.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python host_crawl_seed.py
+        # Run this job manually (workflow_dispatch) the first time, and
+        # again whenever you want to pull in a newer Common Crawl release
+        # — NOT part of the scheduled `crawl` job above. To trigger just
+        # this job without waiting for the schedule, dispatch the
+        # workflow manually from the Actions tab. Add "--months N" to
+        # host_crawl_seed.py's invocation above (edit this step) if you
+        # want to scan more than the single latest crawl for broader
+        # coverage — free either way, just longer runtime.
