@@ -35,6 +35,15 @@ on:
         required: false
         type: boolean
         default: false
+      batch_mode:
+        description: "Run host_crawl_batch.py instead: seed ONE Common Crawl file, crawl it fully, clear host_crawl_queue/host_crawl_visited, repeat for batch_count files — only host_crawl_results is kept between batches. Runs on GitHub Actions, no local machine needed. Overrides seed_only/crawl shards if checked."
+        required: false
+        type: boolean
+        default: false
+      batch_count:
+        description: "How many files to process in this batch_mode run (default 30 = a full crawl partition). A single job is capped at 6h by GitHub, so this may not finish all of them in one dispatch — re-run the same way to continue from the next unprocessed file."
+        required: false
+        default: "30"
 
 concurrency:
   group: host-crawl-${{ github.ref }}
@@ -55,9 +64,10 @@ concurrency:
 # 6-hour window actually spent crawling in parallel, not idle.
 jobs:
   crawl:
-    # Skipped when this run is dispatched with seed_only=true — a manual
-    # "just re-seed" trigger shouldn't also burn 16 crawl-shard jobs.
-    if: github.event.inputs.seed_only != 'true'
+    # Skipped when this run is dispatched with seed_only=true (a manual
+    # "just re-seed" trigger shouldn't also burn 16 crawl-shard jobs) OR
+    # batch_mode=true (that's the separate `batch` job below instead).
+    if: github.event.inputs.seed_only != 'true' && github.event.inputs.batch_mode != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350   # 5h50m — under the 6h hard cap, leaves ~10min
                             # for setup (checkout, pip install) before the
@@ -100,7 +110,7 @@ jobs:
   # every crawl run; host_crawl.py's whole design point is draining an
   # already-seeded queue across many runs, not re-seeding it each time.
   seed:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.seed_only == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.seed_only == 'true' && github.event.inputs.batch_mode != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -120,10 +130,18 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # Optional — not required, this dataset is fully public. Only
-          # helps get a higher rate-limit tier for anonymous requests
-          # from a shared-IP CI runner. Leave the secret unset and this
-          # env var is simply empty, which host_crawl_seed.py handles.
+          # STRONGLY RECOMMENDED, not just optional — this dataset is
+          # fully public so a token isn't required for access, but running
+          # fully anonymous from GitHub Actions' shared IP pool is the
+          # prime suspect behind observed "Error: The operation was
+          # canceled." runs (a silent connection stall, not a Python
+          # exception — see host_crawl_seed.py's _get_duckdb_connection
+          # docstring/comments for the full diagnosis). Get a free token
+          # at huggingface.co/settings/tokens (read scope is enough), add
+          # it as a repo secret named HF_TOKEN. Leave unset and this env
+          # var is simply empty, which host_crawl_seed.py still handles
+          # (now with its own timeouts so a stall fails loud instead of
+          # hanging), but setting the token is the real fix.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python host_crawl_seed.py
         # Run this job manually (workflow_dispatch) the first time, and
@@ -134,3 +152,53 @@ jobs:
         # host_crawl_seed.py's invocation above (edit this step) if you
         # want to scan more than the single latest crawl for broader
         # coverage — free either way, just longer runtime.
+
+  # BATCH MODE — runs entirely on GitHub Actions, no local machine
+  # involved. Seeds ONE Common Crawl file, crawls it fully, clears
+  # host_crawl_queue/host_crawl_visited, then repeats for batch_count
+  # files — only host_crawl_results (the actual ats/slug hits) survives
+  # between batches, keeping Supabase storage bounded to roughly "one
+  # file's worth" at any moment regardless of how many batches run in
+  # total, across however many separate dispatches it takes.
+  #
+  # GitHub Actions caps any single job at 6 hours — if batch_count files
+  # can't all be processed in that window, this job stops partway and
+  # whatever it already completed stays done (host_crawl_seed_progress
+  # tracks completed files; a batch that was seeded+crawled+cleared is
+  # fully committed even if the job is later cut off mid-NEXT-batch).
+  # Simply dispatch this workflow again with batch_mode checked to
+  # continue — it automatically skips files already marked done and
+  # picks up where it left off, same as everything else in this pipeline.
+  batch:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.batch_mode == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 5h50m — under GitHub's 6h hard cap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install duckdb aiohttp selectolax python-dotenv requests
+        # needs BOTH host_crawl_seed.py's deps (duckdb) AND
+        # host_crawl.py's deps (aiohttp, selectolax) since batch mode
+        # calls both directly as Python functions, not subprocesses.
+
+      - name: "Run batch mode (seed one file -> crawl -> clear, repeat)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python host_crawl_batch.py \
+            --batches ${{ github.event.inputs.batch_count || '30' }} \
+            --max-runtime-per-batch ${{ github.event.inputs.max_runtime_minutes && format('{0}', github.event.inputs.max_runtime_minutes) || '19800' }}
+        # max_runtime_minutes is reused here (same input as the crawl
+        # job above) but passed straight through as SECONDS per batch —
+        # 19800 = 5.5h default, matching host_crawl.py's own default so
+        # a single batch's crawl step still leaves flush headroom.
