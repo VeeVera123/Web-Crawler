@@ -55,11 +55,11 @@ on:
         type: boolean
         default: false
       batch_count:
-        description: "Number of file-batches to run as a chained pipeline (seed one file -> crawl -> finalize -> re-trigger for the next file). Set to e.g. 3 to run exactly 3 files across 3 auto-chained workflow runs, then stop. Set to 0 to disable batch mode and use the legacy behavior above."
+        description: "Number of WHOLE FILES to fully complete (not 100K-chunks — a single file can need many chunks, this auto-chains as many workflow runs as that takes). Set to e.g. 3 to fully drain exactly 3 files, however many chunks each needs, then stop. Set to 0 to disable batch mode and use the legacy behavior above."
         required: false
         default: "1"
       seed_limit_per_batch:
-        description: "Max hosts seeded per file/batch (default 100000 — a single Common Crawl file can hold 1M+ matches, this keeps each batch's Supabase footprint small; the untrimmed remainder is picked up by a later batch automatically)"
+        description: "Max NEW hosts seeded per chunk/run (default 100000 — a single Common Crawl file can hold 1M+ matches, this keeps each chunk's Supabase footprint small; already-seeded hosts from this file are tracked and skipped, so repeated chunks pick genuinely new hosts each time until the file is confirmed fully drained)"
         required: false
         default: "100000"
 
@@ -153,6 +153,15 @@ jobs:
 
     outputs:
       seeded: ${{ steps.run_seed.outputs.seeded }}
+      file_done: ${{ steps.run_seed.outputs.file_done }}
+      # file_done=true means the file this batch just processed has NO
+      # new hosts left (fully drained) — finalize should decrement
+      # batch_count and move to the next file. file_done=false means
+      # this batch hit seed_limit_per_batch with more still left in the
+      # SAME file — finalize should re-trigger with batch_count
+      # UNCHANGED so the next run continues draining this same file. See
+      # host_crawl_seed.py's per-batch draining docstring for why one
+      # file can take many batches (a single file can hold 1M+ matches).
 
     steps:
       - name: Checkout
@@ -173,14 +182,42 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set +e
           python host_crawl_seed.py \
             --one-file \
-            --limit ${{ github.event.inputs.seed_limit_per_batch || '100000' }}
-          echo "seeded=true" >> "$GITHUB_OUTPUT"
-        # --one-file: exactly one unprocessed Parquet file this cycle,
-        # capped by --limit so a single oversized file (a live run showed
-        # 1.66M+ matches in ONE file) can't fill Supabase in one shot —
-        # see host_crawl_seed.py's --one-file docstring for the full story.
+            --limit ${{ github.event.inputs.seed_limit_per_batch || '100000' }} \
+            | tee seed_output.log
+          exit_code=${PIPESTATUS[0]}
+          set -e
+
+          # ONE_FILE_RESULT: file_done=true|false — printed by
+          # host_crawl_seed.py's main() specifically for this workflow to
+          # read (see its docstring). Grep it out of the captured log
+          # rather than relying on exit code, since a batch that found 0
+          # NEW hosts (file just got confirmed fully drained) is a
+          # SUCCESS, not a failure, even though nothing new was written.
+          if grep -q "ONE_FILE_RESULT: file_done=true" seed_output.log; then
+            echo "file_done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "file_done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # "seeded" (did this batch write anything NEW this pass) is
+          # separate from file_done (is the file fully drained) — a
+          # batch can write 0 new hosts (file_done=true, nothing left)
+          # without that being a seed failure, so crawl_batch below only
+          # needs to run if something new was actually queued.
+          if grep -qE "Seed complete: [1-9][0-9]* hosts written" seed_output.log; then
+            echo "seeded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "seeded=false" >> "$GITHUB_OUTPUT"
+          fi
+        # --one-file: exactly one unprocessed (or not-yet-fully-drained)
+        # Parquet file this cycle, capped by --limit so a single oversized
+        # file (a live run showed 1.66M+ matches in ONE file) can't fill
+        # Supabase in one shot — see host_crawl_seed.py's --one-file
+        # docstring for the full story, and its per-batch-draining
+        # docstring for why one file can need many batches.
 
   # Crawls whatever the seed job above just queued (one capped batch, not
   # the full unsharded dataset) — still 16 shards so the Actions tab shows
@@ -222,11 +259,27 @@ jobs:
   # crawl shard have finished (`needs:` + `if: always()` so it still runs
   # even if a shard failed/timed out, same reasoning as daily_scan.yml's
   # finalize comment). Clears the two scratch tables (only
-  # host_crawl_results/host_crawl_seed_progress survive), then re-triggers
-  # this SAME workflow for the next file if batch_count > 1 — this is what
-  # makes "seed ends -> shards run -> finalize clears DB -> seeding starts
+  # host_crawl_results/host_crawl_seed_progress/host_crawl_seeded_hosts
+  # survive), then re-triggers this SAME workflow — this is what makes
+  # "seed ends -> shards run -> finalize clears DB -> seeding starts
   # again" happen automatically across multiple workflow runs instead of
   # needing you to manually re-dispatch each time.
+  #
+  # batch_count MEANS "whole files to fully complete," not "number of
+  # 100K-chunks" — a single Common Crawl file can hold 1M+ matches, so
+  # ONE file can take many chunks/batches to fully drain (see
+  # host_crawl_seed.py's per-batch-draining docstring). finalize reads
+  # needs.seed.outputs.file_done (see the seed job's ONE_FILE_RESULT
+  # line) to tell the two cases apart:
+  #   - file_done=false: this batch hit seed_limit_per_batch with hosts
+  #     still left in the SAME file. Re-trigger with batch_count
+  #     UNCHANGED — the next run continues draining this same file.
+  #   - file_done=true: the file this batch just processed is fully
+  #     exhausted (nothing new left). Only NOW does it count as one
+  #     completed file — decrement batch_count and re-trigger to start
+  #     the NEXT file.
+  # So `batch_count: 3` genuinely means "3 whole files," however many
+  # 100K-chunks each one actually needs — matching what was asked for.
   finalize:
     needs: [seed, crawl_batch]
     if: always() && github.event.inputs.batch_count != '0' && github.event.inputs.seed_only != 'true'
@@ -243,22 +296,32 @@ jobs:
             -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY"
           curl -sS -X DELETE "$SUPABASE_URL/rest/v1/host_crawl_visited?host=neq.__never_matches__" \
             -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY"
-          echo "Cleared host_crawl_queue and host_crawl_visited. host_crawl_results and host_crawl_seed_progress were left untouched."
+          echo "Cleared host_crawl_queue and host_crawl_visited. host_crawl_results, host_crawl_seed_progress, and host_crawl_seeded_hosts were left untouched."
 
-      - name: Re-trigger for the next file, if batches remain
+      - name: Re-trigger — same file if not drained, next file if it is
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          remaining=$(( ${{ github.event.inputs.batch_count || '1' }} - 1 ))
+          file_done="${{ needs.seed.outputs.file_done }}"
+          current_batch_count="${{ github.event.inputs.batch_count || '1' }}"
+
+          if [ "$file_done" = "true" ]; then
+            remaining=$(( current_batch_count - 1 ))
+            echo "File confirmed fully drained — that's 1 completed file. $remaining file(s) left to do."
+          else
+            remaining="$current_batch_count"
+            echo "File NOT yet fully drained — still working on the current file, batch_count stays at $remaining."
+          fi
+
           if [ "$remaining" -gt 0 ]; then
-            echo "Re-dispatching for the next file — $remaining batch(es) left after this one."
+            echo "Re-dispatching..."
             gh workflow run "host_crawl.yml" \
               --ref "${{ github.ref_name }}" \
               -f batch_count="$remaining" \
               -f seed_limit_per_batch="${{ github.event.inputs.seed_limit_per_batch || '100000' }}" \
               -f max_runtime_minutes="${{ github.event.inputs.max_runtime_minutes || '' }}"
           else
-            echo "batch_count reached 0 — this was the last requested batch, not re-triggering."
+            echo "All requested files are complete — not re-triggering."
           fi
         # Requires no extra secret — GITHUB_TOKEN is auto-provided per run
         # and the `permissions: actions: write` block above grants it
