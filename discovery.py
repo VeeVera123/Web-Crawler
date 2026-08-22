@@ -10,7 +10,7 @@ Sources:
   2. kalil0321/ats-scrapers (CSV inventories for 15 platforms —
      incl. successfactors, smartrecruiters, workable)
   3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
-  4. Common Crawl index (ongoing discovery for 27 platforms — including
+  4. Common Crawl index (ongoing discovery for 26 platforms — including
      6 also covered by Feashliaa's bulk dump, added as a supplemental
      top-up since dedup is free via the on_conflict upsert. Run as 2
      platform-sharded matrix jobs in discovery.yml — see
@@ -228,11 +228,15 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     # this source can't help with them regardless of query design.
 }
 
-# ATS platforms we have working scrapers for (21 active)
+# ATS platforms we have working scrapers for (20 active)
 SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
-    "teamtailor", "breezyhr", "applytojob", "personio", "joincom",
+    "teamtailor", "breezyhr", "personio", "joincom",
+    # REMOVED 2026-08: applytojob — see ats_scrapers.py's ApplyToJob
+    # section header for why (JD enrichment wasn't reliably catching
+    # disqualifying US-eligibility language; small long-tail ATS, not
+    # worth debugging further; replaced by widening Jobicy instead).
     # Newly enabled (confirmed working via test_blacklisted_ats.py):
     "taleo", "oracle_cloud_hcm", "paylocity", "hrmdirect", "zoho",
     # Fixed (2026-08) — was blacklisted with wrong URL/API assumptions,
@@ -273,8 +277,9 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "breezyhr": "breezyhr",
     "breezy": "breezyhr",
     "breezy hr": "breezyhr",
-    "applytojob": "applytojob",
-    "apply to job": "applytojob",
+    # "applytojob"/"apply to job" removed 2026-08 (ATS retired, see
+    # SUPPORTED_ATS comment above) — no longer mapped, so any OpenPostings
+    # row tagged ApplyToJob is naturally filtered out downstream.
     "personio": "personio",
     "joincom": "joincom",
     "join": "joincom",
@@ -541,6 +546,10 @@ def _url_to_slug_breezyhr(url: str) -> str | None:
     return None
 
 
+# REMOVED 2026-08: ApplyToJob retired (see SUPPORTED_ATS comment) — no
+# longer registered in URL_TO_SLUG/CC_PLATFORM_PATTERNS/CC_EXTRACTORS
+# below. Function kept, unused, only in case it's ever needed for
+# reference.
 def _url_to_slug_applytojob(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -853,7 +862,7 @@ URL_TO_SLUG = {
     "teamtailor": _url_to_slug_teamtailor,
     "successfactors": _url_to_slug_successfactors,
     "breezyhr": _url_to_slug_breezyhr,
-    "applytojob": _url_to_slug_applytojob,
+    # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
     "hrmdirect": _url_to_slug_hrmdirect,
     "softgarden": _url_to_slug_softgarden,
     "zoho": _url_to_slug_zoho,
@@ -1105,7 +1114,7 @@ CC_PLATFORM_PATTERNS = {
     "rippling": ["*.rippling.com/careers*", "*.rippling.com/jobs*"],
     "teamtailor": ["*.teamtailor.com/jobs*"],
     "breezyhr": ["*.breezy.hr/*"],
-    "applytojob": ["*.applytojob.com/*"],
+    # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
     "personio": ["*.jobs.personio.de/*", "*.jobs.personio.com/*"],
     "joincom": ["join.com/companies/*/jobs*", "join.com/companies/*"],
     # Newly enabled platforms:
@@ -1171,7 +1180,10 @@ CC_EXTRACTORS = {
     "rippling": _url_to_slug_rippling,
     "teamtailor": _url_to_slug_teamtailor,
     "breezyhr": _url_to_slug_breezyhr,
-    "applytojob": _url_to_slug_applytojob,
+    # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above. Kept
+    # in sync with CC_PLATFORM_PATTERNS above (these two dicts must always
+    # match keys — see the CC_EXTRACTORS KeyError incident earlier this
+    # project for why a mismatch here crashes the whole Common Crawl run).
     "personio": _url_to_slug_personio,
     "joincom": _url_to_slug_joincom,
     # Newly enabled platforms:
@@ -1252,7 +1264,7 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
     (37 slugs for ~4 minutes of live fetching against a 3000-page sample)
     and its GitHub Actions matrix slot was handed to a second Common Crawl
     shard instead, since Common Crawl was already the slowest-running
-    source in the matrix (27 platforms x up to 6 crawls x however many
+    source in the matrix (26 platforms x up to 6 crawls x however many
     patterns each, all sequential within one job) and splitting it in two
     actually cuts wall-clock, unlike WDC which was just spending runtime
     for near-nothing. Pass cc_shard=None (default) to run all platforms
@@ -2199,7 +2211,7 @@ def main():
         else:
             grand_total += op_total
 
-    # Source 4: Common Crawl (ongoing discovery for 27 platforms — run as
+    # Source 4: Common Crawl (ongoing discovery for 26 platforms — run as
     # 2 shards in discovery.yml, see fetch_commoncrawl_slugs docstring)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
