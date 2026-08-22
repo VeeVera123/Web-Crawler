@@ -14,6 +14,13 @@ Supported boards:
   - Working Nomads   https://www.workingnomads.co/api/exposed_jobs/
   - FreeHire         https://www.freehire.me/api/v1/jobs
 
+REMOVED 2026-08 — Jooble: only ever returned a short `snippet`, no way to
+get the full JD, so real disqualifying language (e.g. a US-work-
+authorization requirement) could slip past the classifier undetected.
+Jobicy (already above) was widened to cover the same ground instead — see
+scrape_jobicy docstring — since its API already returns the full,
+untruncated job description at no extra cost.
+
 All APIs are free, no auth required. Output is normalized to the same dict
 format that ats_scrapers.py produces, so it feeds directly into the existing
 classification pipeline (role filter → location filter → Supabase).
@@ -51,7 +58,8 @@ _ATS_URL_PATTERNS = [
     (re.compile(r"jobs\.smartrecruiters\.com/([^/?\s]+)", re.I), "smartrecruiters"),
     (re.compile(r"([^/.\s]+)\.teamtailor\.com", re.I), "teamtailor"),
     (re.compile(r"([^/.\s]+)\.breezy\.hr", re.I), "breezyhr"),
-    (re.compile(r"([^/.\s]+)\.applytojob\.com", re.I), "applytojob"),
+    # ApplyToJob pattern removed 2026-08 — ATS retired (see ats_scrapers.py),
+    # discovering its slugs would be pointless since nothing scrapes them.
     (re.compile(r"([^/.\s]+)\.jobs\.personio\.com", re.I), "personio"),
     (re.compile(r"join\.com/companies/([^/?\s]+)", re.I), "joincom"),
     (re.compile(r"([^/.\s]+)\.taleo\.net", re.I), "taleo"),
@@ -307,7 +315,20 @@ def scrape_arbeitnow() -> list[dict]:
 # ═══════════════════════════════════════════════════════
 
 def _jobicy_fetch_one(params: dict) -> list[dict]:
-    """Fetch a single Jobicy query and normalize its jobs. Shared by scrape_jobicy()."""
+    """Fetch a single Jobicy query and normalize its jobs. Shared by scrape_jobicy().
+
+    WIDENED 2026-08 (replacing Jooble + ApplyToJob, both removed — Jooble's
+    `snippet` field is a short excerpt with no full-JD option, and
+    ApplyToJob (JazzHR) generic-fetched descriptions weren't reliably
+    catching real US-eligibility language, e.g. a live posting that said
+    "Legal work authorization in the US" got through the classifier
+    anyway; ApplyToJob is also a small long-tail ATS, not a major board,
+    so it wasn't worth debugging further). Jobicy was already integrated
+    here but under-used: its own API docs confirm `jobDescription` is the
+    FULL untruncated HTML description (not a snippet), yet the old code
+    truncated it to 2000 chars anyway for no reason — that cap is gone
+    now, so the real JD reaches the classifier same as an ATS-scraped one.
+    """
     url = "https://jobicy.com/api/v2/remote-jobs"
     try:
         resp = requests.get(url, params=params, headers=_HEADERS, timeout=_TIMEOUT)
@@ -329,7 +350,8 @@ def _jobicy_fetch_one(params: dict) -> list[dict]:
             "url": job_url,
             "source_ats": "jobicy",
             "source_type": "job_board",
-            "description_snippet": (item.get("jobDescription", "") or "")[:2000],
+            # Full HTML description, no truncation — see docstring above.
+            "description_snippet": item.get("jobDescription", "") or "",
             "salary": _format_salary(
                 item.get("annualSalaryMin"), item.get("annualSalaryMax")
             ),
@@ -338,31 +360,54 @@ def _jobicy_fetch_one(params: dict) -> list[dict]:
     return jobs
 
 
-# Jobicy's `count` param is hard-capped at 50 (verified — no pagination
-# beyond that exists). To surface more than one 50-job snapshot, fan out
-# across `industry` filters relevant to CSM/AM roles and dedupe by URL.
-_JOBICY_INDUSTRIES = ["customer-service", "business", "marketing", "sales"]
+# Jobicy's `count` param actually goes up to 100 per call (confirmed live
+# via its own docs 2026-08 — the old 50 here was an unverified guess).
+# There's still no true pagination beyond that per query, so to surface
+# more than one 100-job snapshot we fan out across `industry` filters
+# relevant to CSM/AM roles (widened from 4 to 10 — Jobicy's docs list
+# many more industry slugs than were being used) AND `geo` filters for
+# our target hiring regions, then dedupe by URL. This, combined with the
+# full-description fix above, is meant to cover what Jooble/ApplyToJob
+# were doing (CSM/AM roles, full JD, location, salary) from one already-
+# free, no-signup, no-rate-limit-key source instead of two weaker ones.
+_JOBICY_COUNT = 100
+_JOBICY_INDUSTRIES = [
+    "customer-service", "business", "marketing", "sales",
+    "management", "hr", "supporting", "admin",
+    "project management", "business development",
+]
+_JOBICY_GEOS = ["usa", "canada", "uk", "europe", "emea", "apac", "australia"]
 
 
 def scrape_jobicy() -> list[dict]:
-    """Fetch remote jobs from Jobicy: an unfiltered call plus several
-    industry-filtered calls (each capped at 50 by the API), deduplicated by URL."""
+    """Fetch remote jobs from Jobicy: an unfiltered call, several
+    industry-filtered calls, and several geo-filtered calls (each capped
+    at 100 by the API), deduplicated by URL. See _jobicy_fetch_one
+    docstring for why this replaced Jooble/ApplyToJob 2026-08."""
     seen_urls = set()
     jobs = []
 
-    for job in _jobicy_fetch_one({"count": 50}):
+    for job in _jobicy_fetch_one({"count": _JOBICY_COUNT}):
         if job["url"] not in seen_urls:
             seen_urls.add(job["url"])
             jobs.append(job)
 
     for industry in _JOBICY_INDUSTRIES:
-        for job in _jobicy_fetch_one({"count": 50, "industry": industry}):
+        for job in _jobicy_fetch_one({"count": _JOBICY_COUNT, "industry": industry}):
             if job["url"] not in seen_urls:
                 seen_urls.add(job["url"])
                 jobs.append(job)
         time.sleep(0.3)
 
-    log.info(f"  Jobicy: {len(jobs)} jobs fetched (unfiltered + {len(_JOBICY_INDUSTRIES)} industry feeds)")
+    for geo in _JOBICY_GEOS:
+        for job in _jobicy_fetch_one({"count": _JOBICY_COUNT, "geo": geo}):
+            if job["url"] not in seen_urls:
+                seen_urls.add(job["url"])
+                jobs.append(job)
+        time.sleep(0.3)
+
+    log.info(f"  Jobicy: {len(jobs)} jobs fetched (unfiltered + "
+             f"{len(_JOBICY_INDUSTRIES)} industry feeds + {len(_JOBICY_GEOS)} geo feeds)")
     return jobs
 
 
@@ -500,8 +545,12 @@ def scrape_workingnomads() -> list[dict]:
 _FREEHIRE_EXCLUDE_SOURCES = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters", "teamtailor",
-    "breezyhr", "applytojob", "personio", "joincom", "taleo",
+    "breezyhr", "personio", "joincom", "taleo",
     "oracle_cloud_hcm", "paylocity", "hrmdirect", "zoho",
+    # "applytojob" removed from this exclude set 2026-08 — we no longer
+    # scrape ApplyToJob directly (see ats_scrapers.py), so its postings
+    # are no longer duplicates; FreeHire can now surface them instead of
+    # silently dropping them.
 }
 
 
@@ -568,129 +617,6 @@ def scrape_freehire() -> list[dict]:
         time.sleep(0.5)
 
     log.info(f"  FreeHire: {len(jobs)} jobs fetched (filtered to non-overlapping sources)")
-    return jobs
-
-
-# ═══════════════════════════════════════════════════════
-# JOOBLE
-# ═══════════════════════════════════════════════════════
-
-# Targeted queries: CSM/AM roles in key hiring regions.
-# We search specific countries rather than all 60+ to stay under the 500 req limit.
-# Each (keyword, location) pair = 1 page of results (~1 request). Budget:
-#   4 keywords × 8 locations × ~2 pages avg = ~64 requests, well under 500.
-_JOOBLE_KEYWORDS = [
-    "customer success manager",
-    "account manager",
-    "client success manager",
-    "customer experience manager",
-]
-
-_JOOBLE_LOCATIONS = [
-    "Remote",
-    "United States",
-    "United Kingdom",
-    "Canada",
-    "Germany",
-    "Netherlands",
-    "Ireland",
-    "Australia",
-]
-
-_JOOBLE_QUERIES = [
-    {"keywords": kw, "location": loc}
-    for kw in _JOOBLE_KEYWORDS
-    for loc in _JOOBLE_LOCATIONS
-]
-
-
-def scrape_jooble() -> list[dict]:
-    """Fetch remote CSM/AM jobs from Jooble in targeted countries.
-
-    Requires JOOBLE_API_KEY env var. Skipped silently if not set.
-    Uses targeted keyword + location searches (32 combos × ~2 pages = ~64 requests,
-    well under the 500 request API limit).
-    """
-    api_key = os.environ.get("JOOBLE_API_KEY", "")
-    if not api_key:
-        log.info("  Jooble: skipped (JOOBLE_API_KEY not set)")
-        return []
-
-    endpoint = f"https://jooble.org/api/{api_key}"
-    jobs = []
-    seen_ids = set()
-
-    total_requests = 0
-    max_total_requests = 400  # hard cap to stay under 500 API limit
-
-    for query in _JOOBLE_QUERIES:
-        if total_requests >= max_total_requests:
-            log.warning(f"  Jooble: hit {max_total_requests} request cap, stopping early")
-            break
-
-        page = 1
-        max_pages = 3  # 3 pages per query × 32 queries = 96 max requests
-
-        for _ in range(max_pages):
-            if total_requests >= max_total_requests:
-                break
-            payload = {**query, "page": str(page)}
-            try:
-                resp = requests.post(
-                    endpoint,
-                    json=payload,
-                    headers={**_HEADERS, "Content-Type": "application/json"},
-                    timeout=_TIMEOUT,
-                )
-                total_requests += 1
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                log.error(f"Jooble API error (query={query.get('keywords', '')}, page={page}): {e}")
-                break
-
-            page_jobs = data.get("jobs", [])
-            if not page_jobs:
-                break
-
-            for item in page_jobs:
-                job_id = item.get("id")
-                if job_id and job_id in seen_ids:
-                    continue
-                if job_id:
-                    seen_ids.add(job_id)
-
-                job_url = item.get("link", "")
-                if not job_url:
-                    continue
-
-                # Slug discovery from job URLs
-                slug_pair = _try_extract_slug(job_url)
-                if slug_pair:
-                    _discovered_slugs.append(slug_pair)
-
-                jobs.append({
-                    "title": item.get("title", ""),
-                    "company": item.get("company", ""),
-                    "location": item.get("location", "Remote"),
-                    "url": job_url,
-                    "source_ats": "jooble",
-                    "source_type": "job_board",
-                    "description_snippet": (item.get("snippet", "") or "")[:2000],
-                    "salary": item.get("salary", ""),
-                    "employment_type": item.get("type", ""),
-                    "jooble_source": item.get("source", ""),
-                })
-
-            total_count = data.get("totalCount", 0)
-            if not total_count or page * len(page_jobs) >= total_count or len(page_jobs) < 20:
-                break
-            page += 1
-            time.sleep(1)  # be polite between pages
-
-        time.sleep(1)  # pause between different queries
-
-    log.info(f"  Jooble: {len(jobs)} jobs fetched across {len(_JOOBLE_QUERIES)} queries")
     return jobs
 
 
@@ -820,13 +746,12 @@ BOARD_SCRAPERS = {
     "weworkremotely": scrape_weworkremotely,
     "workingnomads": scrape_workingnomads,
     "freehire": scrape_freehire,
-    "jooble": scrape_jooble,
     "ycombinator": scrape_ycombinator,
 }
 
 
 def scrape_all_job_boards() -> list[dict]:
-    """Pull from all 9 job boards. Returns normalized job dicts."""
+    """Pull from all 8 job boards. Returns normalized job dicts."""
     all_jobs = []
     for name, scraper in BOARD_SCRAPERS.items():
         try:
