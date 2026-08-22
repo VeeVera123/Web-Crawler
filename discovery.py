@@ -1,5 +1,5 @@
 """
-Slug Enrichment — Supabase as Single Source of Truth
+Discovery — Supabase as Single Source of Truth
 =====================================================
 Pulls company slugs from multiple sources and upserts them
 into the Supabase slug_registry table.
@@ -41,15 +41,16 @@ Sources:
      ones — genuinely broader domain universe than source 8's HTTP
      Archive, since it isn't popularity-gated. Pulls the JobPosting-class
      subset specifically: ~3.6M job-posting page URLs across ~63k hosts
-     as of the 2024-12 release. No signup, no API key, no cost. Each
-     page URL is run straight through the SAME URL_TO_SLUG extractors
-     already built for Common Crawl/YC/HTTP Archive — zero live fetches
-     needed, since we only need the URL itself, not page content. See
-     fetch_wdc_slugs docstring for format details and the one caveat:
-     this source's host (uni-mannheim.de) 403'd this project's own dev
-     sandbox outright — untested from GitHub Actions as of first ship,
-     so it fails cleanly (skip + one-line notice) rather than crash if
-     that host blocks CI runner IPs too.)
+     as of the 2024-12 release. No signup, no API key, no cost. Confirmed
+     reachable from GitHub Actions 2026-08 (this project's own dev sandbox
+     got a 403 from this host, but that turned out to be a sandbox-only
+     IP block, not a real reachability issue). FIXED 2026-08: most of
+     WDC's URLs are a company's OWN careers page, not an ATS-hosted URL —
+     direct URL_TO_SLUG matching alone found 0/97,001 on the first live
+     run. Now tries direct matching first (free), then falls back to the
+     same bounded live-fetch resolver used for sources 6/8
+     (resolve_company_to_ats_slug) for whatever's left. See fetch_wdc_slugs
+     docstring for the full explanation.)
 
 Runs weekly (Sunday) via GitHub Actions, as a 9-way matrix — one job per
 source, all in parallel (see .github/workflows/discovery.yml) — rather
@@ -1899,36 +1900,38 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 6,
 # of us guessing URL patterns, it hands back every page ANYONE marked up
 # with schema.org JobPosting data — including companies on platforms we
 # have no pattern for yet, or self-hosted career pages that happen to
-# link out to an ATS elsewhere on the same page. In practice most of
-# what comes back here will still resolve to platforms already covered
-# (large ATS platforms are exactly the sites most likely to have JobPosting
-# markup, since the ATS vendor itself usually injects it) — so treat this
-# as a high-precision, low-maintenance top-up on top of source 4, not a
-# replacement for it.
+# link out to an ATS elsewhere on the same page.
+#
+# CORRECTED 2026-08 (see fetch_wdc_slugs for the full story): the first
+# ship assumed most WDC URLs would already BE the ATS-hosted URL itself
+# (e.g. boards.greenhouse.io/acme), needing zero live fetches — a live run
+# proved that wrong (0/97,001 direct matches). In practice the graph URL
+# is usually the COMPANY'S OWN careers page (the ATS vendor doesn't need
+# to be the one serving the page for schema.org markup to exist on it),
+# so this source now works the same way sources 6/8 do: try a free direct
+# match first, then a bounded live fetch of what's left via
+# resolve_company_to_ats_slug(). It's still worth running rather than
+# retiring, because the direct-match tier is free and the live-fetch tier
+# is genuinely net-new candidate companies (self-hosted pages linking to
+# an ATS) that sources 4/6/8 wouldn't otherwise surface — just no longer
+# the "zero live fetches" free lunch it was originally pitched as.
 #
 # Format note: N-Quads, one line per RDF triple/quad:
 #   <subject> <predicate> <object-or-literal> <graph-url> .
 # The 4th element (graph) is the URL of the page the data was extracted
 # from — this is ALL we need. We don't need the nested Organization/Place
-# data WDC also extracts (hiringOrganization, jobLocation, etc.) since
-# URL_TO_SLUG only needs the URL itself to extract a slug, exactly like
-# every Common Crawl candidate URL above. So parsing is deliberately
+# data WDC also extracts (hiringOrganization, jobLocation, etc.), since
+# either URL_TO_SLUG (direct match) or resolve_company_to_ats_slug (live
+# fetch) only needs the URL itself as a starting point. So parsing stays
 # minimal: pull out just the graph URL from lines whose predicate is
-# rdf-syntax-ns#type and object is schema.org/JobPosting, dedupe, and run
-# each straight through URL_TO_SLUG — zero live HTTP fetches needed here,
-# unlike the YC/HTTP Archive sources, since we're not resolving a
-# COMPANY'S homepage to find its ATS link; the URL WDC gives us often
-# already IS the ATS-hosted URL itself (e.g. boards.greenhouse.io/acme).
+# rdf-syntax-ns#type and object is schema.org/JobPosting, and dedupe.
 #
-# KNOWN RISK, flagged honestly: data.dws.informatik.uni-mannheim.de
-# returned HTTP 403 to this project's own dev sandbox on every attempt
-# (both a plain HTTP client and a real Chrome browser), while a separate
-# research fetch reached it fine minutes earlier — inconsistent enough
-# that this may be an IP/ASN-range block rather than a hard ban, and
-# GitHub Actions runner IPs may or may not fare better. This source fails
-# CLOSED per-file (skip + warning) rather than crash if a file 403s/times
-# out, same defensive pattern as every source above — so a first real run
-# on GitHub Actions is the actual test of reachability, not this dev box.
+# Host reachability: confirmed reachable from GitHub Actions 2026-08 (all
+# 14 part files downloaded successfully on the first live run) — the 403
+# this project's own dev sandbox got turned out to be a sandbox-specific
+# IP/proxy block, not a real barrier. Still fails CLOSED per-file (skip +
+# warning) rather than crash if a file 403s/times out on some future run,
+# same defensive pattern as every source above.
 
 WDC_JOBPOSTING_BASE_URL = (
     "https://data.dws.informatik.uni-mannheim.de/structureddata/"
@@ -1970,15 +1973,49 @@ def _extract_wdc_job_urls(part_url: str, timeout: int = 300) -> set[str]:
     return urls
 
 
-def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES) -> dict[str, set[str]]:
+def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES,
+                     max_live_resolves: int = 3000,
+                     max_workers: int = 30) -> dict[str, set[str]]:
     """Download WDC's JobPosting N-Quads part files, extract distinct
-    page URLs, and run each straight through URL_TO_SLUG (no live fetches
-    needed — see module-level Source 9 docstring above for why).
+    page URLs, and resolve each to an ATS slug.
+
+    FIXED 2026-08: the first version of this only ran each graph URL
+    straight through URL_TO_SLUG (direct ATS-hostname matching) — and a
+    live run came back with 97,001 URLs and ZERO matches. Root cause,
+    confirmed by re-reading WDC's own format: the graph element of a
+    JobPosting quad is the URL of the page the schema.org markup was
+    found ON, which for the large majority of the dataset is the
+    COMPANY'S OWN careers page (e.g. acme.com/careers/eng-lead), not an
+    ATS-vendor-hosted URL — direct matching can only ever succeed for the
+    minority of postings hosted directly on an ATS's own domain.
+
+    Fix: same two-tier approach already used for HTTP Archive (source 8)
+    and Y Combinator (source 6) — try the free direct match first (still
+    catches genuinely ATS-hosted URLs at zero extra cost), then for
+    whatever's left, reuse resolve_company_to_ats_slug() (fetch the page
+    once, scan its links, follow one hop to a careers page if needed —
+    same robots.txt-respecting logic as sources 6/8) to find the actual
+    ATS link a company's own page points to. This reintroduces a bounded
+    live-fetch step — the exact cost this source's docstring originally
+    said it avoided — but with zero net matches otherwise, an unbounded
+    "free" source that finds nothing isn't actually free of cost, it's
+    just wasting the weekly bandwidth/runtime downloading 14 large files
+    for nothing.
+
+    max_live_resolves caps how many of the NON-direct-match URLs get a
+    live fetch per run (default 3000, similar order of magnitude to YC's
+    default cap) — the pool is typically far larger than this, so a
+    random-ish subset (Python set iteration order, not truly random, but
+    not meaningfully biased either) is attempted each run; upserts are
+    idempotent, so coverage still broadens across successive weekly runs
+    rather than resolving the same slice forever.
 
     max_parts caps how many of the 14 part files to download per run
     (default: all 14) — pass a smaller number for a quicker/cheaper test
     run while confirming this host is reachable from GitHub Actions.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     all_job_urls: set[str] = set()
     parts_ok = 0
 
@@ -1999,16 +2036,59 @@ def fetch_wdc_slugs(max_parts: int = WDC_NUM_PART_FILES) -> dict[str, set[str]]:
         return {}
 
     log.info(f"WDC: {len(all_job_urls)} distinct job-posting URLs from "
-             f"{parts_ok}/{max_parts} part files — resolving against "
-             f"{len(URL_TO_SLUG)} known ATS URL patterns...")
+             f"{parts_ok}/{max_parts} part files — checking direct ATS-hostname "
+             f"matches against {len(URL_TO_SLUG)} known patterns first...")
 
     slugs_by_ats: dict[str, set[str]] = {}
+    unmatched: list[str] = []
     for url in all_job_urls:
+        matched = False
         for ats, extractor in URL_TO_SLUG.items():
             slug = extractor(url)
             if slug:
                 slugs_by_ats.setdefault(ats, set()).add(slug)
+                matched = True
                 break   # one URL matches at most one platform
+        if not matched:
+            unmatched.append(url)
+
+    direct_total = sum(len(s) for s in slugs_by_ats.values())
+    log.info(f"WDC: {direct_total} companies from direct ATS-hostname matches "
+             f"({len(unmatched)} URLs are company-owned pages needing a live "
+             f"fetch to find their ATS link)")
+
+    to_resolve = unmatched[:max_live_resolves] if max_live_resolves else unmatched
+    if to_resolve:
+        log.info(f"WDC: resolving {len(to_resolve)}/{len(unmatched)} company "
+                 f"pages via live fetch (capped by max_live_resolves)...")
+
+        _robots_check_stats["unreachable"] = 0
+        _robots_check_stats["disallowed_by_rule"] = 0
+        resolved = 0
+
+        def _resolve_one(url):
+            result = resolve_company_to_ats_slug(url)
+            time.sleep(0.1)
+            return result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_resolve_one, url) for url in to_resolve]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception:
+                    continue
+                if result:
+                    ats, slug = result
+                    slugs_by_ats.setdefault(ats, set()).add(slug)
+                    resolved += 1
+
+        skipped = len(to_resolve) - resolved
+        log.info(f"  WDC live-resolve summary: {resolved} resolved, {skipped} "
+                 f"skipped ({_robots_check_stats['unreachable']} unreachable, "
+                 f"{_robots_check_stats['disallowed_by_rule']} disallowed by "
+                 f"robots.txt, rest had no detectable ATS link) — run with "
+                 f"-v/--verbose for per-site detail.")
 
     for ats, slugs in slugs_by_ats.items():
         if slugs:
@@ -2200,7 +2280,7 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enrich Supabase slug_registry from 8 sources"
+        description="Discovery: populate Supabase slug_registry from 9 sources"
     )
     parser.add_argument(
         "--source",
@@ -2243,9 +2323,15 @@ def main():
         "--wdc-parts", type=int, default=WDC_NUM_PART_FILES,
         help=f"Number of Web Data Commons JobPosting part_N.gz files to "
              f"download per run (default: all {WDC_NUM_PART_FILES}) — pass "
-             f"a smaller number (e.g. 1) for a quick test run while "
-             f"confirming this host is reachable from GitHub Actions, see "
-             f"Source 9's KNOWN RISK docstring note",
+             f"a smaller number (e.g. 1) for a quicker/cheaper test run.",
+    )
+    parser.add_argument(
+        "--wdc-live-resolves", type=int, default=3000,
+        help="Cap on how many WDC company-owned pages (not directly "
+             "ATS-hosted) get a live fetch per run to find their ATS link "
+             "— see fetch_wdc_slugs docstring for why this live-fetch step "
+             "exists. Pass 0 to disable it (direct-match only, the "
+             "original zero-live-fetch behavior).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -2395,12 +2481,13 @@ def main():
             grand_total += ha_total
 
     # Source 9: Web Data Commons (free bulk schema.org JobPosting extract —
-    # broader domain universe than HTTP Archive, no live fetches needed,
-    # see fetch_wdc_slugs docstring for the KNOWN RISK note on host
-    # reachability from GitHub Actions)
+    # broader domain universe than HTTP Archive; direct-match first, then
+    # a bounded live-fetch fallback for company-owned URLs — see
+    # fetch_wdc_slugs docstring for why the fallback was added 2026-08)
     if args.source in ("wdc", "all"):
         log.info("\n--- WEB DATA COMMONS (bulk schema.org JobPosting extract) ---")
-        wdc_slugs = fetch_wdc_slugs(max_parts=args.wdc_parts)
+        wdc_slugs = fetch_wdc_slugs(max_parts=args.wdc_parts,
+                                     max_live_resolves=args.wdc_live_resolves)
         wdc_total = sum(len(s) for s in wdc_slugs.values())
         if wdc_total:
             log.info(f"Web Data Commons total: {wdc_total} slugs across "
