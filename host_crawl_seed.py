@@ -1,11 +1,19 @@
 """
 Host Crawl — Seed Step
 =======================
-Populates host_seed with candidate hostnames from Common Crawl's
+Populates h_seeding with candidate hostnames from Common Crawl's
 HOST INDEX, re-hosted by Common Crawl's own official org on Hugging Face
 (huggingface.co/datasets/commoncrawl/host-index-testing-v2), queried
 directly via DuckDB's native `hf://` support — no AWS account, no
 billing, no robots.txt wall, genuinely free.
+
+NOTE (2026-08 merge): h_seeding used to be two separate tables (one for
+the not-yet-visited queue, one for crawl outcomes) — since by the end of
+any batch every row is in exactly one of those two states, keeping them
+apart was pure duplication of the same hosts. They're now one table: a
+row starts with outcome IS NULL (queued, written by THIS script) and
+host_crawl.py's _flush_results() later fills in outcome/ats/slug/
+checked_at in place on the same row once it's actually been visited.
 
 FULL HISTORY (why this is v5 — see BULK_DOMAIN_DISCOVERY_NOTES.md for the
 complete write-up of every path tried, with live error messages):
@@ -52,21 +60,24 @@ per-HOST (one row per known host, aggregated), not per-URL — slightly
 less granular, but genuinely sufficient for seeding a "visit this host
 and look for an ATS link" crawl queue, which is exactly what this is for.
 
-PER-BATCH DRAINING (2026-08 update, host_file + host_file_seeded — renamed
-from host_crawl_seed_progress / host_crawl_seeded_hosts): a single Common
+PER-BATCH DRAINING (2026-08 update, h_file_count + h_total_seeded —
+renamed from host_crawl_seed_progress / host_crawl_seeded_hosts, via an
+intermediate file_count / total_seeded naming, to their final h_-
+prefixed names so all four of this pipeline's tables group together
+alphabetically in the table viewer): a single Common
 Crawl Parquet file can hold 1.6M+ matching hosts — the batch pipeline
 (host_crawl_batch.py / host_crawl.yml's seed/crawl_batch/finalize jobs)
 caps each --one-file seed at a small --limit (default 100K) so a batch's
 Supabase footprint stays bounded. Since that means one file often needs
-SEVERAL batches to fully seed, host_file_seeded tracks every host already
-seeded from each file (separately from host_file's file-level
+SEVERAL batches to fully seed, h_total_seeded tracks every host already
+seeded from each file (separately from h_file_count's file-level
 done/not-done), so a re-run of a not-yet-drained file skips hosts already
 written and picks genuinely NEW ones each time — converging on full
 coverage of the file after enough batches, rather than repeatedly
 re-picking the same random slice. A file is only marked fully done in
-host_file once a batch finds strictly fewer new hosts left than the cap
+h_file_count once a batch finds strictly fewer new hosts left than the cap
 (proof nothing remains), not merely "this batch wrote something." The
-moment a file IS marked fully done, its rows in host_file_seeded are
+moment a file IS marked fully done, its rows in h_total_seeded are
 deleted (see _clear_seeded_hosts_for_file) — that table only ever needs
 to hold rows for files still IN PROGRESS, so clearing a finished file's
 rows keeps it from growing forever.
@@ -117,8 +128,9 @@ _FALLBACK_CRAWL = "CC-MAIN-2025-18"
 # A live run showed ~1.66M live hosts matched from JUST ONE of 30 files in
 # a single crawl partition — the full partition could plausibly yield
 # tens of millions, which would blow well past Supabase's 500MB free tier
-# (measured: host_seed ≈167 bytes/row, host_visited ≈175
-# bytes/row — see BULK_DOMAIN_DISCOVERY_NOTES.md's 2026-08-22 update for
+# (measured: ≈167 bytes/row queued, ≈175 bytes/row once an outcome is
+# recorded, both now on the same h_seeding row — see
+# BULK_DOMAIN_DISCOVERY_NOTES.md's 2026-08-22 update for
 # the full math). ~900K total hosts keeps steady-state usage comfortably
 # under budget. This is a DEFAULT, not a hard ceiling — pass
 # --limit 0 (or any explicit --limit) to override it.
@@ -275,14 +287,14 @@ def _get_processed_files() -> set[str]:
     """Which Parquet files have already been fully processed (queried AND
     successfully written to Supabase) in a prior run — lets a re-run skip
     straight past them instead of re-downloading/re-querying files that
-    already made it into host_seed. Stored in Supabase (not a local
+    already made it into h_seeding. Stored in Supabase (not a local
     file) because GitHub Actions runners are ephemeral — nothing written
     to local disk survives between separate workflow runs."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return set()
     try:
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/host_file",
+            f"{SUPABASE_URL}/rest/v1/h_file_count",
             headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
             params={"select": "file"},
             timeout=30,
@@ -303,7 +315,7 @@ def _mark_file_processed(fpath: str, crawl_name: str, rows_matched: int):
         return
     try:
         r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/host_file",
+            f"{SUPABASE_URL}/rest/v1/h_file_count",
             headers={
                 "apikey": SUPABASE_KEY,
                 "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -327,7 +339,7 @@ def _get_seeded_hosts_for_file(fpath: str) -> set[str]:
     re-matching and potentially re-picking the same 100K again — this is
     what makes the per-batch cap converge on full coverage of a file
     instead of gambling on the same random slice every time. Stored
-    separately from host_file (file-level done/not-done) and cleared for
+    separately from h_file_count (file-level done/not-done) and cleared for
     a given file the moment that file is marked done (see
     _clear_seeded_hosts_for_file) — it only needs to hold rows for files
     still in progress."""
@@ -335,7 +347,7 @@ def _get_seeded_hosts_for_file(fpath: str) -> set[str]:
         return set()
     try:
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/host_file_seeded",
+            f"{SUPABASE_URL}/rest/v1/h_total_seeded",
             headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
             params={"select": "host", "file": f"eq.{fpath}"},
             timeout=30,
@@ -345,7 +357,7 @@ def _get_seeded_hosts_for_file(fpath: str) -> set[str]:
     except Exception as e:
         log.warning(f"Could not fetch already-seeded hosts for {fpath} (a "
                     f"re-run of this file may re-pick some hosts already "
-                    f"seeded — not harmful, since host_seed's upsert "
+                    f"seeded — not harmful, since h_seeding's upsert "
                     f"on_conflict=host just no-ops on a duplicate, but wastes "
                     f"some of this batch's cap on hosts already written): {e}")
         return set()
@@ -353,7 +365,7 @@ def _get_seeded_hosts_for_file(fpath: str) -> set[str]:
 
 def _record_seeded_hosts(fpath: str, hosts: list[str]):
     """Record hosts as seeded from this file, right after they're
-    successfully written to host_seed — so the NEXT batch (if this
+    successfully written to h_seeding — so the NEXT batch (if this
     file isn't fully drained yet) knows to skip them and pick genuinely
     new ones instead."""
     if not SUPABASE_URL or not SUPABASE_KEY or not hosts:
@@ -369,7 +381,7 @@ def _record_seeded_hosts(fpath: str, hosts: list[str]):
         batch = [{"host": h, "file": fpath} for h in hosts[i:i + batch_size]]
         try:
             r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/host_file_seeded",
+                f"{SUPABASE_URL}/rest/v1/h_total_seeded",
                 headers=headers, json=batch, timeout=60,
                 params={"on_conflict": "host"},
             )
@@ -382,27 +394,27 @@ def _record_seeded_hosts(fpath: str, hosts: list[str]):
 
 
 def _clear_seeded_hosts_for_file(fpath: str):
-    """Delete this file's rows from host_file_seeded now that it's been
-    marked fully done in host_file. host_file_seeded's whole purpose is
+    """Delete this file's rows from h_total_seeded now that it's been
+    marked fully done in h_file_count. h_total_seeded's whole purpose is
     tracking per-host progress WITHIN an in-progress file — once a file is
-    done, host_file's own record of that (file -> done) is sufficient and
+    done, h_file_count's own record of that (file -> done) is sufficient and
     permanent; keeping the (potentially 1M+ row) per-host detail around
-    forever would make host_file_seeded grow without bound across many
-    files. host_file itself (the small, permanent completion tracker) is
+    forever would make h_total_seeded grow without bound across many
+    files. h_file_count itself (the small, permanent completion tracker) is
     NEVER cleared — only this per-file detail table."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     try:
         r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/host_file_seeded",
+            f"{SUPABASE_URL}/rest/v1/h_total_seeded",
             headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
             params={"file": f"eq.{fpath}"},
             timeout=60,
         )
         r.raise_for_status()
-        log.info(f"Cleared host_file_seeded rows for completed file {fpath}.")
+        log.info(f"Cleared h_total_seeded rows for completed file {fpath}.")
     except Exception as e:
-        log.warning(f"Could not clear host_file_seeded rows for completed "
+        log.warning(f"Could not clear h_total_seeded rows for completed "
                     f"file {fpath} (not harmful — just leaves some now-unneeded "
                     f"rows behind until a future cleanup): {e}")
 
@@ -522,7 +534,7 @@ def seed(limit: int | None = None, dry_run: bool = False,
         files_by_crawl[c] = files
 
     # Skip files a PRIOR run already fully processed (queried AND written
-    # to Supabase) — recorded in host_file. This is what
+    # to Supabase) — recorded in h_file_count. This is what
     # makes a re-run resume instead of re-doing the whole partition from
     # scratch: Common Crawl's Parquet files aren't row-numbered in any way
     # that supports a "resume from row N" checkpoint (rows within a file
@@ -694,7 +706,7 @@ def seed(limit: int | None = None, dry_run: bool = False,
                     batch = file_rows[i:i + batch_size]
                     try:
                         r = requests.post(
-                            f"{SUPABASE_URL}/rest/v1/host_seed",
+                            f"{SUPABASE_URL}/rest/v1/h_seeding",
                             headers=headers, json=batch, timeout=60,
                             params={"on_conflict": "host"},
                         )
@@ -717,8 +729,8 @@ def seed(limit: int | None = None, dry_run: bool = False,
 
                 if not write_failed and file_fully_drained_this_pass:
                     _mark_file_processed(fpath, c, len(file_rows))
-                    # File is now permanently recorded as done in host_file
-                    # — host_file_seeded's per-host detail for this file has
+                    # File is now permanently recorded as done in h_file_count
+                    # — h_total_seeded's per-host detail for this file has
                     # served its purpose (letting THIS file's batches
                     # converge without duplicates) and would otherwise sit
                     # around forever. Clear it now so the table only ever
@@ -754,13 +766,13 @@ def seed(limit: int | None = None, dry_run: bool = False,
         return len(dry_run_rows)
 
     log.info(f"Seed complete: {total_written} hosts written to "
-             f"host_seed{dead_summary}.")
+             f"h_seeding{dead_summary}.")
     return total_written
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Seed host_seed from Common Crawl's Host Index "
+        description="Seed h_seeding from Common Crawl's Host Index "
                     "(via Hugging Face + DuckDB, free)"
     )
     parser.add_argument("--limit", type=int, default=None,
