@@ -5,14 +5,13 @@ anthropic>=0.34
 groq>=0.4
 beautifulsoup4>=4.12
 
-# host_crawl.py / host_crawl_seed.py (bulk async discovery — see
-# .github/workflows/host_crawl.yml) — not needed by main.py/discovery.py
+# tranco_seed.py / tranco_crawl.py (bulk async discovery, seeded from the
+# Tranco top-sites list — see tranco_seed.py's module docstring) — not
+# needed by main.py/discovery.py. aiohttp/selectolax carried over from the
+# retired host-crawl pipeline (see ./host crawl/) for the async crawl step.
 aiohttp>=3.9
 selectolax>=0.3
-# host_crawl_seed.py queries Common Crawl's Host Index (re-hosted on
-# Hugging Face by Common Crawl's own org) via DuckDB's native hf://
-# support — free, no AWS account needed. (boto3 removed 2026-08 — was
-# only needed for the AWS Athena approach, abandoned when a free
-# Hugging-Face-hosted mirror was found instead; see host_crawl_seed.py's
-# module docstring and BULK_DOMAIN_DISCOVERY_NOTES.md for the full history.)
-duckdb>=0.10.3
+
+# duckdb removed 2026-08 — was only needed by the retired host-crawl
+# pipeline's Common Crawl Host Index Parquet queries (see ./host crawl/).
+# Tranco seeding uses only stdlib zipfile/csv/io + requests, no DuckDB.
