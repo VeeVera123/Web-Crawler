@@ -10,11 +10,46 @@ This is a direct port of the (retired) host_crawl.py — see ./host crawl/
 — onto the new Tranco-sourced tables (t_seeding / t_slugs /
 tranco_claim_batch) instead of the old Common Crawl Host Index ones
 (h_seeding / h_slugs / host_crawl_claim_batch). The crawl mechanics
-(async fetch, robots.txt handling, ATS link scan, one-hop career-page
-follow, checkpointing) are unchanged — what changed is only the source
-of hosts, so the working code for actually crawling them didn't need to
-be rewritten, just re-pointed. See tranco_seed.py's module docstring for
-why Tranco replaced the Common Crawl Host Index as the seed source.
+(async fetch, robots.txt handling, ATS link scan, checkpointing) are
+carried over unchanged — what changed is only the source of hosts. See
+tranco_seed.py's module docstring for why Tranco replaced the Common
+Crawl Host Index as the seed source.
+
+REACH STRATEGY (2026-08 update — see _crawl_one's docstring for the full
+per-host decision tree): the original one-hop "find a careers-looking
+link on the homepage" heuristic missed a large share of real ATS-using
+companies, because most sites don't put a raw careers link on the
+homepage itself, and a growing number inject their nav/footer (including
+the careers link) via client-side JavaScript that a plain HTTP GET never
+sees — aiohttp+selectolax fetch and parse raw HTML only, no JS execution,
+so a link that only exists after the page's own JS runs is invisible to
+this crawler. Rather than reach for a full headless browser (Playwright/
+Puppeteer/Selenium) — researched and deliberately rejected as the
+default path here: every credible real-world project that does this at
+scale (Apify's Crawlee AdaptivePlaywrightCrawler, scrapy-playwright)
+treats a real browser as an expensive escalation tier, not a default,
+specifically because of the CPU/memory cost and context-leak fragility
+of running thousands of browser contexts unattended in CI — this crawler
+instead adds three cheap, no-JS-required techniques that catch most of
+what the one-hop heuristic was missing:
+  1. Direct URL guessing (_CAREER_PATH_GUESSES) — probe a fixed list of
+     high-probability career-page paths (/careers, /jobs, /about/careers,
+     etc.) directly, instead of only relying on finding a link. Catches
+     sites where the careers page exists at a normal, static, guessable
+     URL even though its nav link is JS-injected.
+  2. sitemap.xml, discovered via robots.txt's `Sitemap:` directive (or
+     the conventional /sitemap.xml fallback) — sitemaps are frequently
+     generated server-side independent of the client-rendered nav chrome,
+     so a careers URL often shows up there even when it's nowhere in the
+     rendered homepage HTML at all.
+  3. Two hops instead of one — the homepage, PLUS every candidate career
+     URL found via (1)/(2)/the original link-heuristic, not just a single
+     followed link.
+A genuine headless-browser fallback tier (for the residual hosts that
+still come back no_match after all of the above) is a reasonable future
+addition but deliberately NOT implemented here — see the research notes
+in this project's conversation history for the cost/complexity tradeoff
+that motivated deferring it.
 
 WHY ASYNC, NOT THREADS: every other live-fetch source in this project
 (YC, HTTP Archive, WDC's live-resolve fallback) uses requests +
@@ -95,6 +130,21 @@ FLUSH_BUFFER_SECONDS = 5 * 60
 # How many hosts to claim from the queue per batch. Each is one
 # concurrent connection slot; batch size also bounds how much can be lost
 # if the process dies mid-batch before the next checkpoint flush.
+#
+# REQUEST-COUNT TRADEOFF (2026-08, from adding the reach techniques —
+# see module docstring): a host that has NO ATS match anywhere now costs
+# up to ~14 requests (robots.txt + homepage + sitemap.xml + 11 guessed
+# paths) instead of the original ~2-3 (robots.txt + homepage + maybe one
+# link-hop). A host WITH a match usually short-circuits much earlier
+# (first hit wins, see _crawl_one), so this worst case only applies to
+# genuine no_match hosts — but since most Tranco-ranked domains ARE
+# no_match (see the ROI discussion in this project's history — most
+# top-ranked domains are infra/CDN/ad-tech with no careers page at all),
+# expect overall request volume and wall-clock per batch to land roughly
+# 5-7x higher than before this change. If a run's throughput becomes a
+# real constraint, the first things to reconsider are trimming
+# _CAREER_PATH_GUESSES to the highest-yield paths, or dropping the
+# sitemap fetch — both are cheap, isolated changes.
 BATCH_SIZE = 2000
 MAX_CONCURRENCY = 500  # concurrent in-flight requests within a batch
 
@@ -109,6 +159,35 @@ _CAREER_LINK_RE = re.compile(
     r"\b(careers?|jobs?|join[\s\-]?us|we[\s\-]?re[\s\-]?hiring|work[\s\-]?with[\s\-]?us)\b",
     re.I,
 )
+
+# Direct path-guessing (reach technique #1 — see module docstring). Tried
+# concurrently against every host regardless of whether a link was found
+# on the homepage, since a JS-injected nav can hide an otherwise perfectly
+# normal, static, server-rendered careers page. Ordered roughly by
+# observed real-world frequency (plain /careers and /jobs cover the large
+# majority of sites that have one at all) so _crawl_one's short-circuit
+# (stop at the first 2xx hit) tends to spend the fewest extra requests.
+_CAREER_PATH_GUESSES = [
+    "/careers", "/jobs", "/careers/", "/jobs/",
+    "/about/careers", "/company/careers", "/about-us/careers",
+    "/join-us", "/work-with-us", "/en/careers", "/company/jobs",
+]
+
+# Sitemap discovery (reach technique #2). robots.txt's Sitemap: directive
+# is the authoritative pointer when present; /sitemap.xml is the
+# conventional fallback location most sites use even without declaring it
+# in robots.txt. Only the FIRST sitemap is fetched per host (a sitemap
+# index can point to many child sitemaps — chasing all of them would blow
+# the per-host request budget for a technique that's already a secondary
+# signal, not the primary detection path).
+_SITEMAP_DIRECTIVE_RE = re.compile(r"^\s*sitemap:\s*(\S+)", re.I | re.M)
+_CAREER_URL_IN_TEXT_RE = re.compile(
+    r"https?://[^\s<>\"']*(?:careers?|jobs?)[^\s<>\"']*", re.I
+)
+_SITEMAP_FETCH_TIMEOUT = 8  # keep this tighter than FETCH_TIMEOUT — a
+                             # slow/huge sitemap.xml is a secondary signal
+                             # and shouldn't be allowed to dominate a
+                             # host's total time budget
 
 # ── Per-run stats (detailed but summarized once, not per-host noise) ──
 class Stats:
@@ -142,29 +221,34 @@ stats = Stats()
 # at this scale, re-fetching robots.txt once per host on the SAME domain
 # (rare, but happens with subdomains) would double request volume for no
 # benefit. Bounded by BATCH_SIZE turnover; not persisted across runs
-# since robots.txt can legitimately change.
-_robots_cache: dict[str, bool] = {}
+# since robots.txt can legitimately change. Cache now stores the raw text
+# too (was just (allowed, reason) before) so callers can pull the
+# Sitemap: directive out of it without a second fetch.
+_robots_cache: dict[str, tuple[bool, str, str]] = {}
 
 
-async def _robots_allows(session: aiohttp.ClientSession, base_url: str) -> tuple[bool, str]:
+async def _robots_allows(session: aiohttp.ClientSession, base_url: str) -> tuple[bool, str, str]:
     """Live robots.txt check, cached per-domain within this process.
-    Returns (allowed, reason) — reason is "ok", "unreachable" (DNS/timeout/
-    connection/SSL failure — NOT a real robots.txt rule), or "disallowed"
-    (an actual robots.txt rule blocked us). Only a real "disallowed" rule
-    should ever be recorded as outcome='disallowed' in t_seeding
-    — collapsing "the site was unreachable" into the same bucket as "the
-    site explicitly disallows crawling" made the retired host-crawl
-    pipeline's results table useless for telling those two very different
-    situations apart (see host_crawl.py's original version of this
-    docstring for the full history). Matches discovery.py's
-    _robots_allows behavior: no robots.txt (4xx/5xx) means allowed, not
-    disallowed; only an explicit Disallow rule blocks."""
+    Returns (allowed, reason, raw_text) — reason is "ok", "unreachable"
+    (DNS/timeout/connection/SSL failure — NOT a real robots.txt rule), or
+    "disallowed" (an actual robots.txt rule blocked us). raw_text is the
+    robots.txt body if one was fetched (empty string otherwise) — used by
+    _extract_sitemap_url for reach technique #2, see module docstring.
+    Only a real "disallowed" rule should ever be recorded as
+    outcome='disallowed' in t_seeding — collapsing "the site was
+    unreachable" into the same bucket as "the site explicitly disallows
+    crawling" made the retired host-crawl pipeline's results table
+    useless for telling those two very different situations apart (see
+    host_crawl.py's original version of this docstring for the full
+    history). Matches discovery.py's _robots_allows behavior: no
+    robots.txt (4xx/5xx) means allowed, not disallowed; only an explicit
+    Disallow rule blocks."""
     if base_url in _robots_cache:
         stats.robots_cache_hits += 1
         return _robots_cache[base_url]
 
     stats.robots_fetches += 1
-    result = (False, "unreachable")
+    result = (False, "unreachable", "")
     try:
         async with session.get(f"{base_url}/robots.txt",
                                 timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT)) as r:
@@ -172,24 +256,73 @@ async def _robots_allows(session: aiohttp.ClientSession, base_url: str) -> tuple
                 # No robots.txt at all is conventionally "allow everything"
                 # — matches discovery.py's _robots_allows, and the actual
                 # robots.txt spec. This is NOT a failure of any kind.
-                result = (True, "ok")
+                result = (True, "ok", "")
             else:
                 text = await r.text(errors="replace")
                 import urllib.robotparser
                 rp = urllib.robotparser.RobotFileParser()
                 rp.parse(text.splitlines())
                 if rp.can_fetch(USER_AGENT, "/"):
-                    result = (True, "ok")
+                    result = (True, "ok", text)
                 else:
-                    result = (False, "disallowed")
+                    result = (False, "disallowed", text)
     except Exception:
         # DNS failure, timeout, connection reset, SSL error, etc. — the
         # site itself is unreachable, this has nothing to do with
         # robots.txt rules and must not be recorded as "disallowed".
-        result = (False, "unreachable")
+        result = (False, "unreachable", "")
 
     _robots_cache[base_url] = result
     return result
+
+
+def _extract_sitemap_url(robots_text: str, base_url: str) -> str:
+    """Pull the first Sitemap: directive out of a robots.txt body, or
+    fall back to the conventional /sitemap.xml location most sites use
+    even without declaring it (see module docstring, reach technique
+    #2)."""
+    if robots_text:
+        m = _SITEMAP_DIRECTIVE_RE.search(robots_text)
+        if m:
+            try:
+                return urljoin(base_url, m.group(1).strip())
+            except Exception:
+                pass
+    return f"{base_url}/sitemap.xml"
+
+
+async def _fetch_sitemap_career_urls(session: aiohttp.ClientSession,
+                                      sitemap_url: str) -> list[str]:
+    """Fetch one sitemap (XML or plain text — some sites serve a bare
+    URL list) and pull out any entries that look like a careers/jobs
+    page. Deliberately shallow: does NOT recurse into a sitemap INDEX's
+    child sitemaps (a sitemap index can point to dozens of large child
+    files — chasing all of them would blow the per-host request budget
+    for what's already a secondary signal, not the primary detection
+    path). Returns [] on any failure — this is a best-effort bonus
+    signal, never a reason to fail the whole host."""
+    try:
+        async with session.get(
+            sitemap_url, timeout=aiohttp.ClientTimeout(total=_SITEMAP_FETCH_TIMEOUT),
+            headers={"User-Agent": USER_AGENT},
+        ) as r:
+            if r.status >= 400:
+                return []
+            text = await r.text(errors="replace")
+    except Exception:
+        return []
+
+    urls = set(_CAREER_URL_IN_TEXT_RE.findall(text))
+    return list(urls)[:5]  # cap — a sitemap matching many "jobs"-looking
+                            # URLs (e.g. a job board's OWN sitemap) could
+                            # otherwise blow up this host's request count
+
+
+def _guess_career_urls(base_url: str) -> list[str]:
+    """Reach technique #1 (see module docstring) — fixed list of
+    high-probability career-page paths, tried directly rather than
+    depending on finding a link on the homepage."""
+    return [urljoin(base_url, p) for p in _CAREER_PATH_GUESSES]
 
 
 def _scan_html_for_ats_slug(html: str, base_url: str) -> tuple[str, str] | None:
@@ -227,13 +360,62 @@ def _find_career_page_link(html: str, base_url: str) -> str | None:
     return None
 
 
+async def _try_career_url(session: aiohttp.ClientSession, url: str,
+                           home_base: str) -> tuple[str, str] | None:
+    """Fetch one candidate career-page URL and scan it for an ATS link.
+    Returns (ats, slug) on a hit, None otherwise (covers robots-disallow,
+    unreachable, non-2xx, and no-match alike — this is a best-effort
+    probe among several candidates, not the primary per-host outcome, so
+    it never raises and never distinguishes failure reasons the way
+    _crawl_one's own top-level fetch does)."""
+    url_host = urlparse(url).hostname or ""
+    url_base = f"https://{url_host}"
+    if url_base != home_base:
+        # Different host than the one we're crawling (e.g. a sitemap
+        # entry or guessed path resolved to an external domain) — still
+        # respect ITS robots.txt before fetching.
+        allowed, _, _ = await _robots_allows(session, url_base)
+        if not allowed:
+            return None
+    try:
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT),
+            headers={"User-Agent": USER_AGENT},
+        ) as r:
+            if r.status >= 400:
+                return None
+            html = await r.text(errors="replace")
+    except Exception:
+        return None
+    return _scan_html_for_ats_slug(html, url)
+
+
 async def _crawl_one(session: aiohttp.ClientSession, host: str) -> dict:
     """Visit one host, return a result dict to be written back onto
     t_seeding (+ t_slugs if a slug was found). Never raises — every
-    failure mode is captured as an outcome, not an exception."""
+    failure mode is captured as an outcome, not an exception.
+
+    Per-host decision tree (see module docstring for why — the short
+    version: most real ATS-using companies don't have a homepage link
+    the original one-hop heuristic could find, either because it's
+    genuinely deeper in the site or because it's injected by JS this
+    crawler can't execute):
+      1. robots.txt check on the homepage — unchanged from before.
+      2. Fetch the homepage itself, scan its raw HTML for a direct ATS
+         link (the original, still-cheapest path — most matches will
+         still be found right here).
+      3. If no hit, gather EVERY candidate career-page URL from three
+         sources at once: (a) the original href-text heuristic, (b) a
+         fixed list of guessed common paths, (c) sitemap.xml (via
+         robots.txt's Sitemap: directive or the /sitemap.xml fallback).
+         All candidates are then fetched CONCURRENTLY and scanned —
+         first hit wins, remaining in-flight fetches are simply not
+         awaited further (their tasks are still let to finish so the
+         event loop doesn't warn about unawaited coroutines, but their
+         results are ignored once a hit is found)."""
     base = f"https://{host}"
 
-    allowed, reason = await _robots_allows(session, base)
+    allowed, reason, robots_text = await _robots_allows(session, base)
     if not allowed:
         # reason is either "disallowed" (a real robots.txt rule) or
         # "unreachable" (DNS/timeout/connection/SSL failure) — record
@@ -257,28 +439,49 @@ async def _crawl_one(session: aiohttp.ClientSession, host: str) -> dict:
         ats, slug = hit
         return {"host": host, "outcome": "found", "ats": ats, "slug": slug}
 
-    # One hop to a careers page, same as discovery.py's YC resolver.
-    career_url = _find_career_page_link(html, base)
-    if career_url:
-        career_host = urlparse(career_url).hostname or ""
-        career_base = f"https://{career_host}"
-        if career_base != base:
-            career_allowed, _ = await _robots_allows(session, career_base)
-            if not career_allowed:
-                return {"host": host, "outcome": "no_match"}
-        try:
-            async with session.get(
-                career_url, timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT),
-                headers={"User-Agent": USER_AGENT},
-            ) as r2:
-                if r2.status < 400:
-                    html2 = await r2.text(errors="replace")
-                    hit2 = _scan_html_for_ats_slug(html2, career_url)
-                    if hit2:
-                        ats, slug = hit2
-                        return {"host": host, "outcome": "found", "ats": ats, "slug": slug}
-        except Exception:
-            pass
+    # No direct hit on the homepage — gather every candidate career URL
+    # from all three reach techniques and check them concurrently.
+    candidates: list[str] = []
+
+    link_hit = _find_career_page_link(html, base)
+    if link_hit:
+        candidates.append(link_hit)
+
+    candidates.extend(_guess_career_urls(base))
+
+    sitemap_url = _extract_sitemap_url(robots_text, base)
+    sitemap_urls = await _fetch_sitemap_career_urls(session, sitemap_url)
+    candidates.extend(sitemap_urls)
+
+    # De-dupe while preserving order (link heuristic first, since it's
+    # the highest-confidence signal — an explicit "careers" link beats a
+    # guessed path).
+    seen = set()
+    ordered_candidates = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            ordered_candidates.append(c)
+
+    if not ordered_candidates:
+        return {"host": host, "outcome": "no_match"}
+
+    tasks = [asyncio.ensure_future(_try_career_url(session, c, base))
+             for c in ordered_candidates]
+    try:
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            if result:
+                ats, slug = result
+                # First hit wins — cancel whatever else is still
+                # in-flight (the finally block below) so a host with
+                # many candidates doesn't hold open extra connections
+                # once we already have an answer for it.
+                return {"host": host, "outcome": "found", "ats": ats, "slug": slug}
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
 
     return {"host": host, "outcome": "no_match"}
 
