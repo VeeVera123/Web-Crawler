@@ -41,6 +41,19 @@ Usage:
                                               # no-header shape as the ZIP's
                                               # contents, so a manually
                                               # downloaded list drops in as-is)
+    python tranco_seed.py --from-csv tranco_4m.csv --top-n 2000000
+                                              # seed only the FIRST 2M ranks
+                                              # (ranks 1-2,000,000) from a
+                                              # larger file
+    python tranco_seed.py --from-csv tranco_4m.csv --rank-from 2000001
+                                              # seed only the LAST ~2.3M
+                                              # ranks (everything ranked
+                                              # 2,000,001 or worse) from a
+                                              # 4.3M-row file — combine with
+                                              # --top-n to seed an arbitrary
+                                              # middle slice, e.g.
+                                              # --rank-from 2000001 --top-n 3000000
+                                              # seeds ranks 2,000,001-3,000,000
 """
 
 import argparse
@@ -205,10 +218,15 @@ def _load_from_csv(path: str) -> list[tuple[int, str]] | None:
 
 
 def seed(top_n: int | None = None, dry_run: bool = False,
-          list_date: str | None = None, from_csv: str | None = None) -> int:
+          list_date: str | None = None, from_csv: str | None = None,
+          rank_from: int | None = None) -> int:
     rows = _load_from_csv(from_csv) if from_csv else _download_tranco_csv(list_date)
     if rows is None:
         return 0
+
+    if rank_from:
+        rows = [r for r in rows if r[0] >= rank_from]
+        log.info(f"Trimmed to rank >= {rank_from:,} — {len(rows)} domains.")
 
     if top_n:
         rows = [r for r in rows if r[0] <= top_n]
@@ -262,7 +280,16 @@ def main():
                          help=f"Only seed domains ranked <= this (default: "
                               f"{_DEFAULT_TOP_N:,} — Tranco's daily list is "
                               f"~1M rows total). Pass 0 to seed the entire "
-                              f"list with no rank cutoff.")
+                              f"list with no upper cutoff — needed if you "
+                              f"want more than the top 1M from a larger "
+                              f"file, e.g. combined with --rank-from.")
+    parser.add_argument("--rank-from", type=int, default=None,
+                         help="Only seed domains ranked >= this (no lower "
+                              "cutoff by default — starts from rank 1). "
+                              "Combine with --top-n to seed an arbitrary "
+                              "slice of a larger file, e.g. the LAST 2M "
+                              "ranks of a 4.3M-row file: "
+                              "--rank-from 2300000 --top-n 0")
     parser.add_argument("--dry-run", action="store_true",
                          help="Count without writing to Supabase")
     parser.add_argument("--list-date", type=str, default=None,
@@ -279,7 +306,8 @@ def main():
     top_n = args.top_n if args.top_n and args.top_n > 0 else None
 
     written = seed(top_n=top_n, dry_run=args.dry_run,
-                    list_date=args.list_date, from_csv=args.from_csv)
+                    list_date=args.list_date, from_csv=args.from_csv,
+                    rank_from=args.rank_from)
 
     if written == 0:
         sys.exit(1)
