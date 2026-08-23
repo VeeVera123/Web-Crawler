@@ -508,6 +508,36 @@ def _today_str() -> str:
     return datetime.date.today().isoformat()
 
 
+# How many times to retry a FAILED claim call (network error, transient
+# 500, statement timeout under concurrent load, etc.) before treating it
+# as a real stop condition. This distinction matters a lot: _claim_batch
+# returning [] used to mean ONLY ONE thing to run()'s loop — "queue
+# exhausted, stop this shard for good" — but a transient failure (a
+# dropped connection, a brief Supabase blip, one-off lock contention from
+# 16 shards claiming at once) ALSO used to come back as [] after being
+# swallowed here, and run() couldn't tell the two apart. A live run
+# confirmed this really happened: scattered single 500s throughout an
+# otherwise-healthy run (nowhere near the "all 16 shards at once"
+# pileup the earlier statement-timeout bug caused) were each enough to
+# permanently end whichever shard hit one — most shards showed as
+# "completed" within ~4 minutes in the Actions UI while their real
+# t_seeding slice was still 95%+ untouched. Retrying a genuine failure a
+# few times with backoff, and raising instead of silently returning [],
+# means run()'s loop only ever sees an empty result when the RPC itself
+# says there's nothing left to claim — a real, meaningful signal again.
+_CLAIM_RETRIES = 5
+_CLAIM_BACKOFF_SECONDS = 5  # doubles each retry: 5s, 10s, 20s, 40s, 80s
+
+
+class _ClaimBatchError(Exception):
+    """Raised by _claim_batch after exhausting retries on a genuine
+    failure — distinct from a normal empty result, which means the queue
+    really is exhausted for this shard. run() catches this separately so
+    a shard logs and stops on a REAL persistent failure, rather than
+    silently mislabeling it as "queue exhausted" the way a bare []
+    return used to."""
+
+
 def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
     """Pull the next batch of not-yet-visited hosts (outcome IS NULL)
     assigned to this shard, from t_seeding — the single queue+outcome
@@ -515,7 +545,14 @@ def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
     h_seeding). Sharding is done in SQL by hashing the host, so this
     needs no coordination between concurrently-running shards — each
     shard only ever sees its own slice, so two shards claiming batches at
-    the same moment can't double-claim the same host."""
+    the same moment can't double-claim the same host.
+
+    Retries a failed call up to _CLAIM_RETRIES times with backoff before
+    raising _ClaimBatchError — see that class's docstring and
+    _CLAIM_RETRIES' comment for why this distinction matters. An empty
+    list returned normally (no exception) means the RPC call itself
+    SUCCEEDED and genuinely found nothing left to claim for this shard —
+    the only case that should ever stop run()'s loop early."""
     # Using a Postgres function (tranco_claim_batch) keeps the "next
     # unvisited hosts for this shard" logic atomic and server-side rather
     # than racy client-side pagination — two shards claiming batches at
@@ -525,19 +562,29 @@ def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
     # host_crawl_claim_batch, this orders by rank ASC (Tranco rank 1 =
     # most popular) instead of a Common-Crawl-derived score DESC.
     import requests
-    try:
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/tranco_claim_batch",
-            headers=_sb_headers(),
-            json={"p_shard": shard, "p_total_shards": total_shards,
-                  "p_batch_size": batch_size},
-            timeout=60,
-        )
-        r.raise_for_status()
-        return r.json() or []
-    except Exception as e:
-        log.error(f"Failed to claim batch: {e}")
-        return []
+    last_err = None
+    for attempt in range(1, _CLAIM_RETRIES + 1):
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/tranco_claim_batch",
+                headers=_sb_headers(),
+                json={"p_shard": shard, "p_total_shards": total_shards,
+                      "p_batch_size": batch_size},
+                timeout=60,
+            )
+            r.raise_for_status()
+            return r.json() or []
+        except Exception as e:
+            last_err = e
+            if attempt < _CLAIM_RETRIES:
+                wait = _CLAIM_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                log.warning(f"Claim batch attempt {attempt}/{_CLAIM_RETRIES} "
+                            f"failed: {e} — retrying in {wait}s.")
+                time.sleep(wait)
+            else:
+                log.error(f"Claim batch failed after {_CLAIM_RETRIES} "
+                          f"attempts: {e}")
+    raise _ClaimBatchError(str(last_err))
 
 
 def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
@@ -597,8 +644,45 @@ def run(shard: int, total_shards: int, max_runtime: float, dry_run: bool):
              f"max_concurrency={MAX_CONCURRENCY}")
 
     batch_num = 0
+    consecutive_claim_failures = 0
+    # Cap on CONSECUTIVE genuine claim failures (each already having
+    # survived _CLAIM_RETRIES internal retries) before this shard truly
+    # gives up. Distinct from _CLAIM_RETRIES: that's short-backoff retry
+    # WITHIN one claim attempt (network blip, one-off lock contention);
+    # this is a much rarer outer safety net for "the failures keep
+    # happening even across multiple fully-retried attempts," which
+    # would suggest something more persistent (e.g. Supabase itself
+    # down) rather than ordinary transient noise. A successful claim
+    # anywhere resets this counter back to 0.
+    _MAX_CONSECUTIVE_CLAIM_FAILURES = 5
+
     while time.monotonic() < deadline:
-        hosts = _claim_batch(shard, total_shards, BATCH_SIZE)
+        try:
+            hosts = _claim_batch(shard, total_shards, BATCH_SIZE)
+        except _ClaimBatchError as e:
+            consecutive_claim_failures += 1
+            log.error(f"Claim batch persistently failing "
+                      f"({consecutive_claim_failures}/"
+                      f"{_MAX_CONSECUTIVE_CLAIM_FAILURES} consecutive "
+                      f"failures, each already retried "
+                      f"{_CLAIM_RETRIES}x internally): {e}")
+            if consecutive_claim_failures >= _MAX_CONSECUTIVE_CLAIM_FAILURES:
+                log.error("Giving up after too many consecutive claim "
+                          "failures — this is NOT the same as the queue "
+                          "being exhausted; whatever's left in this "
+                          "shard's slice will be picked up by the next "
+                          "run.")
+                break
+            time.sleep(30)  # extra pause beyond _claim_batch's own
+                             # internal backoff before trying the whole
+                             # claim again
+            continue
+
+        consecutive_claim_failures = 0  # a successful call (even one
+                                         # that legitimately found 0
+                                         # hosts) resets this — only
+                                         # actual exceptions count
+
         if not hosts:
             log.info("Queue exhausted for this shard — nothing left to claim.")
             break
