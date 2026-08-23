@@ -33,6 +33,14 @@ Usage:
     python tranco_seed.py --dry-run          # count without writing
     python tranco_seed.py --top-n 500000     # override how many ranks to seed
     python tranco_seed.py --list-date 2026-08-20   # pin a specific daily list
+    python tranco_seed.py --from-csv tranco_1m.csv  # seed from an already-
+                                              # downloaded Tranco CSV instead
+                                              # of hitting tranco-list.eu at
+                                              # all (see _load_from_csv's
+                                              # docstring — same "rank,domain"
+                                              # no-header shape as the ZIP's
+                                              # contents, so a manually
+                                              # downloaded list drops in as-is)
 """
 
 import argparse
@@ -41,6 +49,7 @@ import io
 import logging
 import os
 import sys
+import time
 import zipfile
 
 import requests
@@ -68,6 +77,33 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 TRANCO_DAILY_ID_URL = "https://tranco-list.eu/daily_list_id"
 TRANCO_DOWNLOAD_URL = "https://tranco-list.eu/download_daily/{list_id}"
 
+# Tranco's OWN daily-list generation has a documented history of
+# intermittent failures — see github.com/DistriNet/tranco-list issues
+# #34/#36/#39/#40 (outages, generation failures, and one severely
+# truncated list). A single 503/timeout here isn't evidence our request
+# is malformed; it's their service being transiently unavailable. Retry
+# with a short backoff before giving up, instead of failing the whole
+# seed step (and the CI workflow) on one blip.
+_NETWORK_RETRIES = 3
+_NETWORK_BACKOFF_SECONDS = 10  # doubles each retry: 10s, 20s, 40s
+
+
+def _get_with_retry(url, **kwargs):
+    last_err = None
+    for attempt in range(1, _NETWORK_RETRIES + 1):
+        try:
+            r = requests.get(url, **kwargs)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_err = e
+            if attempt < _NETWORK_RETRIES:
+                wait = _NETWORK_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                log.warning(f"Attempt {attempt}/{_NETWORK_RETRIES} failed for "
+                            f"{url}: {e} — retrying in {wait}s.")
+                time.sleep(wait)
+    raise last_err
+
 # How many top-ranked domains to seed by default. Tranco's daily list is
 # ~1M rows; capping well under Supabase's free tier (500MB) — at a rough
 # ~40 bytes/row for t_seeding, 1M rows is only ~40MB, so this is a
@@ -85,29 +121,29 @@ def _download_tranco_csv(list_date: str | None) -> list[tuple[int, str]] | None:
     date_str = list_date or datetime.date.today().isoformat()
 
     try:
-        r = requests.get(
+        r = _get_with_retry(
             TRANCO_DAILY_ID_URL,
             params={"date": date_str, "subdomains": "false"},
             timeout=30,
         )
-        r.raise_for_status()
         list_id = r.text.strip()
         if not list_id:
             log.error(f"Tranco returned an empty list ID for date={date_str}.")
             return None
         log.info(f"Tranco list ID for {date_str}: {list_id}")
     except Exception as e:
-        log.error(f"Failed to fetch Tranco's daily list ID for {date_str}: {e}")
+        log.error(f"Failed to fetch Tranco's daily list ID for {date_str} "
+                   f"after {_NETWORK_RETRIES} attempts: {e}")
         return None
 
     try:
-        r = requests.get(
+        r = _get_with_retry(
             TRANCO_DOWNLOAD_URL.format(list_id=list_id),
             timeout=120,
         )
-        r.raise_for_status()
     except Exception as e:
-        log.error(f"Failed to download Tranco list {list_id}: {e}")
+        log.error(f"Failed to download Tranco list {list_id} after "
+                   f"{_NETWORK_RETRIES} attempts: {e}")
         return None
 
     try:
@@ -137,9 +173,40 @@ def _download_tranco_csv(list_date: str | None) -> list[tuple[int, str]] | None:
         return None
 
 
+def _load_from_csv(path: str) -> list[tuple[int, str]] | None:
+    """Load [(rank, domain), ...] from an already-downloaded Tranco CSV
+    instead of hitting tranco-list.eu at all — useful when their daily-
+    list-generation service is down (a documented recurring issue, see
+    _NETWORK_RETRIES's comment) or when you already have a list saved
+    locally. Expects the SAME shape as the CSV inside Tranco's own daily-
+    list ZIP: no header row, "rank,domain" per line — exactly what
+    tranco-list.eu/download_daily and /download both produce, so a
+    manually downloaded list (e.g. the top-1M CSV from Tranco's site)
+    drops in unmodified, no reformatting needed."""
+    rows = []
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.reader(f):
+                if len(row) < 2:
+                    continue
+                try:
+                    rank = int(row[0])
+                except ValueError:
+                    continue  # skip a stray header row if present
+                domain = row[1].strip().lower()
+                if domain:
+                    rows.append((rank, domain))
+    except Exception as e:
+        log.error(f"Failed to read/parse {path}: {e}")
+        return None
+
+    log.info(f"Loaded {len(rows)} domains from {path}.")
+    return rows
+
+
 def seed(top_n: int | None = None, dry_run: bool = False,
-          list_date: str | None = None) -> int:
-    rows = _download_tranco_csv(list_date)
+          list_date: str | None = None, from_csv: str | None = None) -> int:
+    rows = _load_from_csv(from_csv) if from_csv else _download_tranco_csv(list_date)
     if rows is None:
         return 0
 
@@ -201,11 +268,18 @@ def main():
     parser.add_argument("--list-date", type=str, default=None,
                          help="Pin a specific daily list by date "
                               "(YYYY-MM-DD). Default: today's daily list.")
+    parser.add_argument("--from-csv", type=str, default=None,
+                         help="Seed from an already-downloaded Tranco CSV "
+                              "(no header, 'rank,domain' per line) instead "
+                              "of fetching from tranco-list.eu. Bypasses "
+                              "the network entirely — useful if Tranco's "
+                              "daily-list service is down.")
     args = parser.parse_args()
 
     top_n = args.top_n if args.top_n and args.top_n > 0 else None
 
-    written = seed(top_n=top_n, dry_run=args.dry_run, list_date=args.list_date)
+    written = seed(top_n=top_n, dry_run=args.dry_run,
+                    list_date=args.list_date, from_csv=args.from_csv)
 
     if written == 0:
         sys.exit(1)
