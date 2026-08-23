@@ -89,7 +89,6 @@ Usage:
 
 import argparse
 import asyncio
-import datetime
 import logging
 import os
 import sys
@@ -501,13 +500,6 @@ def _sb_headers(prefer: str | None = None) -> dict:
     return h
 
 
-def _today_str() -> str:
-    # ISO date string for t_seeding.checked_at (a `date` column) — set the
-    # moment a host's crawl outcome is recorded, distinct from added_at
-    # (set when the host was first seeded by tranco_seed.py).
-    return datetime.date.today().isoformat()
-
-
 # How many times to retry a FAILED claim call (network error, transient
 # 500, statement timeout under concurrent load, etc.) before treating it
 # as a real stop condition. This distinction matters a lot: _claim_batch
@@ -589,14 +581,19 @@ def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
 
 def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
     """Write this batch's outcomes. visited_rows are UPSERTED into
-    t_seeding — this fills in outcome/ats/slug/checked_at on the SAME
-    row that was already there from seeding, rather than inserting into
-    a separate "visited" table (matches the retired host-crawl pipeline's
+    t_seeding — this fills in outcome/ats/slug on the SAME row that was
+    already there from seeding, rather than inserting into a separate
+    "visited" table (matches the retired host-crawl pipeline's
     merged-table design). found_rows go to t_slugs (only actual ATS
     matches, a genuinely different, permanent dataset). on_conflict must
     be passed as a query param alongside the merge-duplicates Prefer
     header — PostgREST silently no-ops the upsert semantics without it
-    (see discovery.py's upsert_to_supabase for the same pattern)."""
+    (see discovery.py's upsert_to_supabase for the same pattern).
+
+    NOTE (2026-08): t_seeding used to also have added_at/checked_at date
+    columns — pure informational timestamps nothing in the pipeline read
+    back. Dropped to reduce dead weight; claimed_at stays, since
+    tranco_claim_batch's queue logic genuinely depends on it."""
     import requests
     if visited_rows:
         try:
@@ -712,8 +709,7 @@ def run(shard: int, total_shards: int, max_runtime: float, dry_run: bool):
             elif outcome == "http_error":
                 stats.http_error += 1
             visited_rows.append({"host": res["host"], "outcome": outcome,
-                                  "ats": res.get("ats"), "slug": res.get("slug"),
-                                  "checked_at": _today_str()})
+                                  "ats": res.get("ats"), "slug": res.get("slug")})
 
         if not dry_run:
             _flush_results(visited_rows, found_rows)
