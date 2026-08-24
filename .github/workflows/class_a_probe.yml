@@ -2,18 +2,21 @@ name: Class A — Seed-and-Probe Extraction
 
 # A DIFFERENT technique from ctlog_extract.yml (Phase 1 of the CT-logs
 # pipeline) — built for the platforms CT logs structurally can't touch:
-# Greenhouse, Lever, Ashby, Workable. All four put the company identifier
-# in a URL PATH (e.g. boards.greenhouse.io/{slug}), and a certificate can
-# never carry a path, so a CT-log sweep of these domains returns zero
-# tenant signal no matter how large the platform is. See
-# CTLOGS_CLASS_A_HELP_REQUEST.md / CLASS_A_SUGGESTIONS_REVIEW.md for the
-# full background.
+# Greenhouse, Lever, Ashby, Workable, SmartRecruiters. All five put the
+# company identifier in a URL PATH (e.g. boards.greenhouse.io/{slug}),
+# and a certificate can never carry a path, so a CT-log sweep of these
+# domains returns zero tenant signal no matter how large the platform
+# is. See CTLOGS_CLASS_A_HELP_REQUEST.md / CLASS_A_SUGGESTIONS_REVIEW.md
+# for the full background. NOTE: Class A has more members than these
+# five (join.com, Jobvite, JobAdder, BrassRing, ADP, Paylocity, Folks
+# HR) — only these five have a CONFIRMED probeable public endpoint (see
+# class_a_probe.py's module docstring), the rest aren't wired in yet.
 #
-# INSTEAD: all four expose a real, documented, unauthenticated public
+# INSTEAD: all five expose a real, confirmed, unauthenticated public
 # per-slug job-board API that 200s for a real company and 404s for a
 # fake one (see class_a_probe.py's module docstring for the exact URLs
 # and where each was confirmed). class_a_probe.py combines THREE free
-# bulk seed sources (People Data Labs' 22M-company dataset, SEC EDGAR's
+# bulk seed sources (People Data Labs' ~7M-company dataset, SEC EDGAR's
 # CIK list, and the original YC company list — see
 # CLASS_A_SEED_LIST_HELP_REQUEST.md for why the YC list alone came back
 # too small/narrow on the first run) and probes plausible slug variants
@@ -24,32 +27,44 @@ name: Class A — Seed-and-Probe Extraction
 # company's real one — so treat this as supplemental signal, not a full
 # replacement.
 #
-# PDL SEED FILE: the People Data Labs dataset is Kaggle-hosted and needs
-# a one-time authenticated download (Kaggle's API requires an account +
-# token — no way around that for a Kaggle-hosted file), so it's NOT
-# fetched fresh by this workflow. Commit the downloaded CSV into the repo
-# (or adjust PDL_DATASET_PATH below to pull it from wherever it's
-# stored) for this seed source to be used — the script runs fine without
-# it, just with fewer candidates (SEC EDGAR + YC only), logging a warning
-# rather than failing.
+# PDL SEED FILE: too large to commit into the repo (~1GB uncompressed,
+# ~290MB zipped — GitHub blocks anything over 100MB without Git LFS) and
+# Kaggle-hosted (needs an authenticated one-time download, not fetchable
+# fresh per run). Instead it's uploaded ONCE as an asset on a GitHub
+# Release in this repo (see PDL_RELEASE_TAG below), and every job
+# downloads + unzips that release asset before running — `gh release
+# download` works against a private repo automatically via the
+# workflow's own built-in GITHUB_TOKEN, no extra secret needed. If the
+# release/asset doesn't exist yet, this step logs a warning and
+# continues — class_a_probe.py runs fine without the PDL file present,
+# just with fewer candidates (SEC EDGAR + YC only).
 #
 # Workable ALSO gets its own documented master XML feed
-# (workable.com/boards/workable.xml) fetched directly in the same run —
-# one request, no per-slug guessing, pure bonus signal on top of the
-# probe sweep.
+# (workable.com/boards/workable.xml) fetched directly, but only on
+# shard 0 of that platform's matrix row — one request covers ALL
+# accounts, so every other shard fetching it too would just be redundant
+# multi-minute downloads for zero extra signal (see class_a_probe.py's
+# run_platform).
 #
 # Writes into the SAME ctlog_probe_results staging table the CT-logs
 # pipeline uses — Phase 2 verification (still on hold, see
 # ctlog_verify.yml) already covers everything in that table regardless
 # of which extraction technique populated it.
 #
-# ONE JOB PER PLATFORM, no sharding — the seed sources are fetched/read
-# once per run rather than paginated like crt.sh's sweep; splitting
-# across shards wouldn't meaningfully speed anything up and would just
-# multiply redundant seed-source fetches (including re-downloading SEC
-# EDGAR's 13MB file per shard).
+# SHARDED (2026-08): 5 platforms x 4 shards = 20 jobs, exactly at the
+# 20-job account-wide concurrent cap (same budget this project's other
+# workflows track — see ctlog_extract.yml's comment on the same cap).
+# Sharding is MODULO over the combined seed list (companies[i::N]), not
+# a contiguous slice — see class_a_probe.py's run_platform docstring for
+# why (PDL's rows are sorted largest-company-first, so a contiguous
+# chunk would badly skew which shard gets the "good" candidates).
 on:
   workflow_dispatch:
+    inputs:
+      pdl_release_tag:
+        description: "Tag of the GitHub Release holding the PDL dataset zip asset"
+        required: false
+        default: "pdl-seed-data"
 
 concurrency:
   group: class-a-probe-${{ github.ref }}
@@ -58,11 +73,12 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
-      fail-fast: false   # one platform's API hiccup shouldn't cancel the other 3
+      fail-fast: false   # one shard's API hiccup shouldn't cancel the other 19
       matrix:
-        platform: [greenhouse, lever, ashby, workable]
+        platform: [greenhouse, lever, ashby, workable, smartrecruiters]
+        shard: [0, 1, 2, 3]
 
     steps:
       - name: Checkout
@@ -76,13 +92,31 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp requests python-dotenv
 
-      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe)"
+      - name: Download PDL seed dataset from GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.pdl_release_tag || 'pdl-seed-data' }}"
+          if gh release download "$TAG" --repo "${{ github.repository }}" -p "*.zip" -D . ; then
+            unzip -o ./*.zip
+            # The PDL Kaggle zip extracts to companies_sorted.csv — rename
+            # to what class_a_probe.py expects by default (see its
+            # PDL_DATASET_PATH). If you uploaded it under a different
+            # internal filename, adjust this rename accordingly.
+            if [ -f companies_sorted.csv ] && [ ! -f people_data_labs_companies.csv ]; then
+              mv companies_sorted.csv people_data_labs_companies.csv
+            fi
+            echo "PDL dataset ready: $(ls -la people_data_labs_companies.csv 2>/dev/null || echo 'NOT FOUND after unzip — check the zip contents/filename')"
+          else
+            echo "No PDL release asset found (tag: $TAG) — continuing without it. class_a_probe.py will fall back to SEC EDGAR + YC only."
+          fi
+
+      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe, shard ${{ matrix.shard }}/4)"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # Optional — only needed if the PDL CSV isn't committed at the
-          # default path (people_data_labs_companies.csv in the repo
-          # root). See class_a_probe.py's PDL_DATASET_PATH comment.
-          PDL_DATASET_PATH: ${{ vars.PDL_DATASET_PATH }}
         run: |
-          python class_a_probe.py --platform ${{ matrix.platform }}
+          python class_a_probe.py \
+            --platform ${{ matrix.platform }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 4
