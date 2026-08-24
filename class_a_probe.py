@@ -89,11 +89,39 @@ real hostname, since there's no CT-log host involved) — Phase 2
 verification already covers everything in that table regardless of which
 extraction technique populated it, no changes needed there.
 
+RATE-LIMIT-AWARE (2026-08 rewrite): a prior run flatlined on Greenhouse
+(129 hits stuck across 65k-95k consecutive probes) with no way to tell
+genuine seed-list exhaustion from silent rate-limiting, because every
+non-200 response was logged identically as an undifferentiated "miss".
+Fixed by (1) researching each platform's actual documented rate-limit
+policy directly and setting a conservative per-platform concurrency (see
+PLATFORM_CONCURRENCY below), (2) adding a shared per-platform backoff gate
+that a 429 pushes forward for every in-flight probe, not just the one
+that got rate-limited (see RateLimiter), and (3) tracking a full
+status-code breakdown (hit / bad-shape-200 / 404 / 429 / other-error /
+exception) logged every batch and summarized at the end of each run, so
+future logs make the taper-vs-throttle question directly answerable
+instead of a guess.
+
+LIVE VERIFICATION: a "hit" here already means the platform's own API
+returned a 200 with a body that looks like a real job-board payload (see
+_looks_like_real_board) — not just any 200. That IS a live check; there's
+no separate unverified-write path in this script. Everything written to
+ctlog_probe_results from here has already been confirmed live against
+the platform at probe time.
+
+THIS ROUND'S ACTIVE PLATFORM SET: greenhouse, lever, ashby, smartrecruiters
+(workable's per-slug probing code path is still here and still works —
+see PROBE_URL — it's just excluded from this round's GitHub Actions
+matrix; its master XML feed fetch, a separate/free bulk source, is
+independent of that decision).
+
 Usage:
     pip install aiohttp requests python-dotenv
     python class_a_probe.py --platform greenhouse
     python class_a_probe.py --platform lever
     python class_a_probe.py --platform ashby
+    python class_a_probe.py --platform smartrecruiters
     python class_a_probe.py --platform workable
 """
 import argparse
@@ -102,6 +130,7 @@ import logging
 import os
 import re
 import sys
+import time
 
 import aiohttp
 import requests
@@ -121,14 +150,86 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=12)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-PROBE_CONCURRENCY = 80  # these are cheap 200/404 HEAD-ish checks against
-                          # well-provisioned vendor APIs, not crt.sh — safe
-                          # to run much more concurrent than the CT/live-
-                          # resolve steps elsewhere in this project. Raised
-                          # from 40 — with the full PDL dataset in play
-                          # (millions of candidates vs. the original ~6k
-                          # YC-only run), throughput matters a lot more
-                          # than it did for a quick small-list pass.
+
+# ── per-platform concurrency + backoff (2026-08 rewrite) ──────────────
+# Replaced the old flat PROBE_CONCURRENCY=80 for every platform after a
+# run flatlined on Greenhouse (129 hits stuck across 65k-95k consecutive
+# probes) with zero way to tell "genuine taper" from "silently
+# rate-limited" apart, because every non-200 was logged identically as a
+# miss. Researched each platform's ACTUAL documented rate-limit policy
+# directly (not assumed) before picking these numbers:
+#   - SmartRecruiters: documented, confirmed at
+#     developers.smartrecruiters.com/docs/rate-limiting — "up to 10
+#     requests per second" for the Posting API, 429 on excess, official
+#     recommendation is exponential backoff. Concurrency alone isn't a
+#     per-second limiter, so this is kept well under 10 as a margin.
+#   - Greenhouse: NO published rate-limit doc found anywhere on
+#     developers.greenhouse.io. The 129-stuck-for-95k-probes flatline is
+#     a real, previously-unexplained symptom consistent with an
+#     undocumented WAF/CDN soft-throttle under sustained high-concurrency
+#     traffic — kept deliberately conservative until this run's new
+#     diagnostic counters (see PROBE_STATS below) can show whether 429s
+#     (or silent non-200/timeouts) actually spike at higher concurrency.
+#   - Lever: only a documented limit for POST application submissions (2
+#     req/sec) at github.com/lever/postings-api — no documented GET/read
+#     limit, so given more headroom than Greenhouse, but still well below
+#     the old flat 80 since "undocumented" isn't the same as "unlimited."
+#   - Ashby: per apis.io/rate-limits/ashby, applies a per-key sliding-
+#     window limit with 429 + Retry-After on excess, but no exact numeric
+#     limit confirmed for the specific public job-board endpoint used
+#     here — conservative pending real data from this run's 429 counter.
+#   - Workable: kept for completeness (the per-slug probing path can
+#     still run for it even though this round's workflow matrix excludes
+#     it) — no documented per-slug limit found, moderate default.
+PLATFORM_CONCURRENCY = {
+    "greenhouse": 15,
+    "lever": 30,
+    "ashby": 15,
+    "smartrecruiters": 8,
+    "workable": 40,
+}
+DEFAULT_CONCURRENCY = 15
+
+# Default backoff duration (seconds) applied on a 429 that carries no
+# Retry-After header — used only as a fallback; a real Retry-After value
+# from the response always wins (see RateLimiter.register_429).
+DEFAULT_RETRY_AFTER = {
+    "greenhouse": 10.0,
+    "lever": 5.0,
+    "ashby": 5.0,
+    "smartrecruiters": 2.0,
+    "workable": 5.0,
+}
+
+
+class RateLimiter:
+    """Tiny shared per-platform backoff gate. Every probe coroutine checks
+    in before making a request; a 429 anywhere pushes a shared
+    'backoff_until' timestamp forward, and every subsequent probe (not
+    just the one that got 429'd) waits it out before firing its next
+    request. This is what turns "we got rate-limited" into an actual
+    pause instead of hammering straight through it 80-wide."""
+
+    def __init__(self, ats: str):
+        self.ats = ats
+        self.backoff_until = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait_if_needed(self):
+        now = time.monotonic()
+        if now < self.backoff_until:
+            await asyncio.sleep(self.backoff_until - now)
+
+    async def register_429(self, retry_after_header: str | None):
+        async with self._lock:
+            now = time.monotonic()
+            delay = DEFAULT_RETRY_AFTER.get(self.ats, 5.0)
+            if retry_after_header:
+                try:
+                    delay = max(delay, float(retry_after_header))
+                except ValueError:
+                    pass
+            self.backoff_until = max(self.backoff_until, now + delay)
 
 # ── platform probe URLs — each must return something CLEARLY different
 # for a real vs. fake slug (200 w/ real JSON body vs. 404), confirmed
@@ -352,7 +453,8 @@ def _slug_variants(name: str, domain: str | None = None) -> list[str]:
 
 async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                       ats: str, company_name: str, variants: list[str],
-                      domain_variant_count: int) -> tuple[str, str, str] | None:
+                      domain_variant_count: int, stats: dict,
+                      limiter: "RateLimiter") -> tuple[str, str, str] | None:
     """Try each slug variant for one company in order, stop at the first
     real hit (200 + body that actually looks like a job-board payload,
     not just any 200 — some of these APIs 200 a malformed/empty request
@@ -361,23 +463,45 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
     variants are always tried first (see _slug_variants), so a hit within
     the first domain_variant_count variants tried came from the domain,
     everything after came from the name — this is the benchmark data
-    needed to answer "which strategy actually yields more hits"."""
+    needed to answer "which strategy actually yields more hits".
+
+    Every non-200 outcome is now attributed to a specific bucket in
+    `stats` (hit / bad_shape_200 / 404 / 429 / other_error / exception)
+    instead of being collapsed into an undifferentiated "miss" — this is
+    what lets a future run's logs distinguish genuine 404 taper from
+    silent 429 rate-limiting, which the old flat logging couldn't do (see
+    the module-level PLATFORM_CONCURRENCY comment for why this mattered).
+    A 429 also pushes this platform's shared RateLimiter backoff forward
+    so every other in-flight probe backs off too, not just this one."""
     url_template = PROBE_URL[ats]
     async with sem:
         for idx, slug in enumerate(variants):
             url = url_template.format(slug=slug)
+            await limiter.wait_if_needed()
             try:
                 async with session.get(url, timeout=REQUEST_TIMEOUT,
                                         headers={"User-Agent": USER_AGENT}) as r:
+                    if r.status == 429:
+                        stats["429"] += 1
+                        await limiter.register_429(r.headers.get("Retry-After"))
+                        continue
+                    if r.status == 404:
+                        stats["404"] += 1
+                        continue
                     if r.status != 200:
+                        stats["other_error"] += 1
                         continue
                     body = await r.text()
             except Exception:
+                stats["exception"] += 1
                 continue
 
             if _looks_like_real_board(ats, body):
+                stats["hit"] += 1
                 strategy = "domain" if idx < domain_variant_count else "name"
                 return slug, company_name, strategy
+            else:
+                stats["bad_shape_200"] += 1
     return None
 
 
@@ -433,9 +557,14 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
         companies = companies[shard_index::shard_count]
         log.info(f"  {len(companies)} companies in this shard's slice")
 
-    sem = asyncio.Semaphore(PROBE_CONCURRENCY)
+    concurrency = PLATFORM_CONCURRENCY.get(ats, DEFAULT_CONCURRENCY)
+    log.info(f"  concurrency={concurrency}, default backoff on 429={DEFAULT_RETRY_AFTER.get(ats, 5.0)}s "
+             f"(see PLATFORM_CONCURRENCY comment for why these numbers)")
+    sem = asyncio.Semaphore(concurrency)
+    limiter = RateLimiter(ats)
     found: dict[str, str] = {}   # slug -> company_name
     strategy_hits = {"domain": 0, "name": 0}
+    stats = {"hit": 0, "bad_shape_200": 0, "404": 0, "429": 0, "other_error": 0, "exception": 0}
 
     async with aiohttp.ClientSession() as session:
         existing = await fetch_existing_slug_registry_slugs(session, ats)
@@ -452,7 +581,8 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
                 continue
             domain_variant_count = 1 if domain else 0  # _slug_variants puts
                 # at most one domain-derived variant first — see its docstring
-            tasks.append(_probe_one(session, sem, ats, name, variants, domain_variant_count))
+            tasks.append(_probe_one(session, sem, ats, name, variants,
+                                     domain_variant_count, stats, limiter))
 
         BATCH = 5000  # write incrementally, same "don't lose progress on
                       # an interrupted run" principle as ctlog_extract.py.
@@ -464,9 +594,10 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
                       # is triggered — since the real hit rate is well
                       # under 1%, a SMALL batch mostly means frequent,
                       # tiny, mostly-empty write calls (pure overhead), not
-                      # faster delivery of real hits. 5000 probes complete
-                      # in well under a minute at PROBE_CONCURRENCY=80, so
-                      # this still writes many times over a long run (an
+                      # faster delivery of real hits. 5000 probes still
+                      # complete reasonably fast even at the now-lower
+                      # per-platform concurrency (see PLATFORM_CONCURRENCY),
+                      # so this still writes many times over a long run (an
                       # interrupted run loses at most one batch's worth),
                       # while cutting total request overhead a lot
                       # compared to a smaller batch.
@@ -489,6 +620,12 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
             log.info(f"  probed {min(i + BATCH, len(tasks))}/{len(tasks)} — "
                      f"{len(found)} real slugs found so far "
                      f"(domain-derived: {strategy_hits['domain']}, name-derived: {strategy_hits['name']})")
+            log.info(f"    status breakdown (cumulative): hit={stats['hit']} "
+                     f"bad_shape_200={stats['bad_shape_200']} 404={stats['404']} "
+                     f"429={stats['429']} other_error={stats['other_error']} "
+                     f"exception={stats['exception']}"
+                     + (f"  ⚠ currently backing off {(limiter.backoff_until - time.monotonic()):.0f}s "
+                        f"after a 429" if time.monotonic() < limiter.backoff_until else ""))
 
         # Only fetch the Workable feed on ONE shard (shard 0, or the
         # unsharded case) — it's a single request covering ALL accounts,
@@ -510,6 +647,21 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
 
     net_new = len(set(found) - existing)
     log.info(f"  TOTAL: {len(found)} real slugs found ({net_new} net-new vs slug_registry)")
+    total_probed = sum(stats.values())
+    log.info(f"  FINAL status breakdown — {total_probed} total slug-variant requests made: "
+             f"hit={stats['hit']} ({stats['hit'] / total_probed * 100:.2f}%)  "
+             f"bad_shape_200={stats['bad_shape_200']}  404={stats['404']} "
+             f"({stats['404'] / total_probed * 100:.1f}%)  "
+             f"429={stats['429']} ({stats['429'] / total_probed * 100:.2f}%)  "
+             f"other_error={stats['other_error']}  exception={stats['exception']}")
+    if stats["429"] > total_probed * 0.01:
+        log.warning(f"  ⚠ {stats['429']} requests (>{1:.0f}% of total) hit HTTP 429 — this run WAS "
+                    f"meaningfully rate-limited, not just tapering off. If hit-rate looked flat, "
+                    f"429s (not genuine exhaustion) are the likely reason — consider lowering "
+                    f"PLATFORM_CONCURRENCY['{ats}'] further next time.")
+    elif stats["429"] == 0 and stats["other_error"] < total_probed * 0.01:
+        log.info(f"  No meaningful 429s or other errors this run — a flat/tapering hit rate here "
+                 f"reflects genuine seed-list exhaustion, not rate-limiting.")
 
 
 _WORKABLE_FEED_SLUG_RE = re.compile(r"apply\.workable\.com/([a-z0-9\-]+)/", re.I)
@@ -597,12 +749,28 @@ async def fetch_existing_slug_registry_slugs(session: aiohttp.ClientSession, ats
 
 async def write_to_staging_table(session: aiohttp.ClientSession, ats: str,
                                   slugs: dict[str, str], source_marker: str) -> int:
+    """`slugs` maps slug -> the actual matched company display name.
+    FIXED (2026-08): source_hostname used to be set to the same flat
+    constant as root_domain (e.g. both "seed_probe:multi_source"), which
+    is why a real hit like slug="agroprosperis" showed up with no
+    indication of which company it actually matched — confusing and not
+    useful for spot-checking results. Now source_hostname carries the
+    real company name (falling back to the technique marker only when no
+    name is available, e.g. Workable-feed-derived slugs, which don't come
+    with a company name attached), and root_domain keeps the short
+    technique marker so it's still easy to filter/group rows by which
+    extraction method found them."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         log.warning("  SUPABASE_URL/SUPABASE_KEY not set — cannot write to staging table.")
         return 0
     rows = [
-        {"ats": ats, "slug": slug, "source_hostname": source_marker, "root_domain": source_marker}
-        for slug in slugs
+        {
+            "ats": ats,
+            "slug": slug,
+            "source_hostname": (name.strip() if name and name.strip() else source_marker)[:250],
+            "root_domain": source_marker,
+        }
+        for slug, name in slugs.items()
     ]
     headers = {
         "apikey": SUPABASE_KEY,
