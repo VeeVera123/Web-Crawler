@@ -51,13 +51,24 @@ name: Class A — Seed-and-Probe Extraction
 # ctlog_verify.yml) already covers everything in that table regardless
 # of which extraction technique populated it.
 #
-# SHARDED (2026-08): 5 platforms x 4 shards = 20 jobs, exactly at the
-# 20-job account-wide concurrent cap (same budget this project's other
-# workflows track — see ctlog_extract.yml's comment on the same cap).
+# SHARDED (2026-08, updated): 4 platforms x 5 shards = 20 jobs, still
+# exactly at the 20-job account-wide concurrent cap (same budget this
+# project's other workflows track — see ctlog_extract.yml's comment on
+# the same cap). Workable is EXCLUDED from this round's matrix (dropped
+# per explicit instruction — its per-slug probing code path still exists
+# in class_a_probe.py and still works, it's just not run here this
+# round); the active set is greenhouse, lever, ashby, smartrecruiters.
 # Sharding is MODULO over the combined seed list (companies[i::N]), not
 # a contiguous slice — see class_a_probe.py's run_platform docstring for
 # why (PDL's rows are sorted largest-company-first, so a contiguous
 # chunk would badly skew which shard gets the "good" candidates).
+#
+# RATE-LIMIT-AWARE (2026-08): class_a_probe.py now sets its own
+# per-platform concurrency and backoff internally (see
+# PLATFORM_CONCURRENCY / RateLimiter in class_a_probe.py) based on each
+# platform's actual documented rate-limit policy — nothing to configure
+# here in the workflow, just noting it since a prior run's Greenhouse
+# flatline turned out to need this.
 on:
   workflow_dispatch:
     inputs:
@@ -77,8 +88,8 @@ jobs:
     strategy:
       fail-fast: false   # one shard's API hiccup shouldn't cancel the other 19
       matrix:
-        platform: [greenhouse, lever, ashby, workable, smartrecruiters]
-        shard: [0, 1, 2, 3]
+        platform: [greenhouse, lever, ashby, smartrecruiters]
+        shard: [0, 1, 2, 3, 4]
 
     steps:
       - name: Checkout
@@ -111,7 +122,7 @@ jobs:
             echo "No PDL release asset found (tag: $TAG) — continuing without it. class_a_probe.py will fall back to SEC EDGAR + YC only."
           fi
 
-      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe, shard ${{ matrix.shard }}/4)"
+      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe, shard ${{ matrix.shard }}/5)"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -119,4 +130,4 @@ jobs:
           python class_a_probe.py \
             --platform ${{ matrix.platform }} \
             --shard-index ${{ matrix.shard }} \
-            --shard-count 4
+            --shard-count 5
