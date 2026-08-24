@@ -12,14 +12,26 @@ name: Class A — Seed-and-Probe Extraction
 # INSTEAD: all four expose a real, documented, unauthenticated public
 # per-slug job-board API that 200s for a real company and 404s for a
 # fake one (see class_a_probe.py's module docstring for the exact URLs
-# and where each was confirmed). class_a_probe.py takes the free YC
-# company-name seed list (yc-oss/api — already used elsewhere in this
-# project, see discovery.py's fetch_yc_companies) and probes plausible
-# slug variants of each company name against each platform's API.
-# Genuinely probabilistic, not exhaustive like CT logs — only finds a
-# company if it's in the seed list AND one of the guessed slug variants
-# happens to be the company's real one — so treat this as supplemental
-# signal, not a full replacement.
+# and where each was confirmed). class_a_probe.py combines THREE free
+# bulk seed sources (People Data Labs' 22M-company dataset, SEC EDGAR's
+# CIK list, and the original YC company list — see
+# CLASS_A_SEED_LIST_HELP_REQUEST.md for why the YC list alone came back
+# too small/narrow on the first run) and probes plausible slug variants
+# of each company name — and, where PDL supplies a domain, DOMAIN-derived
+# variants too — against each platform's API. Genuinely probabilistic,
+# not exhaustive like CT logs — only finds a company if it's in a seed
+# source AND one of the guessed slug variants happens to be the
+# company's real one — so treat this as supplemental signal, not a full
+# replacement.
+#
+# PDL SEED FILE: the People Data Labs dataset is Kaggle-hosted and needs
+# a one-time authenticated download (Kaggle's API requires an account +
+# token — no way around that for a Kaggle-hosted file), so it's NOT
+# fetched fresh by this workflow. Commit the downloaded CSV into the repo
+# (or adjust PDL_DATASET_PATH below to pull it from wherever it's
+# stored) for this seed source to be used — the script runs fine without
+# it, just with fewer candidates (SEC EDGAR + YC only), logging a warning
+# rather than failing.
 #
 # Workable ALSO gets its own documented master XML feed
 # (workable.com/boards/workable.xml) fetched directly in the same run —
@@ -31,10 +43,11 @@ name: Class A — Seed-and-Probe Extraction
 # ctlog_verify.yml) already covers everything in that table regardless
 # of which extraction technique populated it.
 #
-# ONE JOB PER PLATFORM, no sharding — unlike crt.sh's paginated sweep,
-# the seed list here is a single ~6k-row static JSON file fetched once
-# per run; splitting it across shards wouldn't meaningfully speed
-# anything up and would just multiply redundant seed-list fetches.
+# ONE JOB PER PLATFORM, no sharding — the seed sources are fetched/read
+# once per run rather than paginated like crt.sh's sweep; splitting
+# across shards wouldn't meaningfully speed anything up and would just
+# multiply redundant seed-source fetches (including re-downloading SEC
+# EDGAR's 13MB file per shard).
 on:
   workflow_dispatch:
 
@@ -67,5 +80,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Optional — only needed if the PDL CSV isn't committed at the
+          # default path (people_data_labs_companies.csv in the repo
+          # root). See class_a_probe.py's PDL_DATASET_PATH comment.
+          PDL_DATASET_PATH: ${{ vars.PDL_DATASET_PATH }}
         run: |
           python class_a_probe.py --platform ${{ matrix.platform }}
