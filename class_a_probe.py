@@ -249,31 +249,52 @@ async def run_platform(ats: str) -> None:
     log.info(f"  TOTAL: {len(found)} real slugs found ({net_new} net-new vs slug_registry)")
 
 
+_WORKABLE_FEED_SLUG_RE = re.compile(r"apply\.workable\.com/([a-z0-9\-]+)/", re.I)
+
+
 async def fetch_workable_feed_slugs(session: aiohttp.ClientSession) -> set[str]:
     """Workable's own documented aggregated jobs feed — one request,
     covers many customer accounts at once, no per-slug guessing. See
-    module docstring / help.workable.com/hc/en-us/articles/4420464031767."""
+    module docstring / help.workable.com/hc/en-us/articles/4420464031767.
+
+    STREAMED rather than buffered with r.text(): this feed is large
+    enough that a full-body read can hit a transfer-length mismatch
+    partway through (confirmed live — aiohttp raises
+    ClientPayloadError/TransferEncodingError when the connection is cut
+    or the server's Content-Length doesn't match what actually arrives),
+    and r.text() discards everything collected so far when that happens.
+    Reading in chunks and regex-scanning as data arrives means a
+    truncated transfer still yields every slug seen before the cutoff,
+    instead of losing the whole feed to one late error."""
+    slugs: set[str] = set()
+    tail = ""  # carries a possibly-split match pattern across chunk boundaries
+    bytes_read = 0
     try:
         async with session.get(WORKABLE_FEED_URL,
-                                timeout=aiohttp.ClientTimeout(total=180),
+                                timeout=aiohttp.ClientTimeout(total=300),
                                 headers={"User-Agent": USER_AGENT}) as r:
             if r.status != 200:
                 log.warning(f"  Workable feed returned HTTP {r.status} — skipping.")
                 return set()
-            body = await r.text()
+            try:
+                async for chunk in r.content.iter_chunked(1 << 20):  # 1MB chunks
+                    bytes_read += len(chunk)
+                    text = tail + chunk.decode("utf-8", errors="ignore")
+                    slugs.update(_WORKABLE_FEED_SLUG_RE.findall(text))
+                    tail = text[-200:]  # keep enough overlap that a URL split
+                                        # across the chunk boundary still matches
+                                        # on the next iteration
+            except (aiohttp.ClientPayloadError, aiohttp.ClientConnectionError) as e:
+                log.warning(f"  Workable feed cut off after {bytes_read:,} bytes "
+                            f"({type(e).__name__}) — using the {len(slugs)} slugs "
+                            f"seen before the cutoff rather than discarding them.")
     except Exception as e:
         log.warning(f"  Workable feed fetch failed: {type(e).__name__}: {e or '(no message)'} — skipping.")
         return set()
 
-    # Feed URLs look like https://apply.workable.com/{slug}/j/{job_id}/
-    # or https://www.workable.com/j/{job_id} with a separate <company>
-    # or <partner-name> tag depending on feed version — match the
-    # apply.workable.com/{slug} shape directly out of the raw XML rather
-    # than fully parsing it (feed is large; a regex pass is far cheaper
-    # and robust to either tag layout).
-    slugs = set(re.findall(r"apply\.workable\.com/([a-z0-9\-]+)/", body, re.I))
     slugs = {s.lower() for s in slugs if s.lower() not in SKIP_SLUGS}
-    log.info(f"  Workable feed: {len(slugs)} distinct account slugs found in the raw feed")
+    log.info(f"  Workable feed: {len(slugs)} distinct account slugs found "
+             f"({bytes_read:,} bytes read)")
     return slugs
 
 
