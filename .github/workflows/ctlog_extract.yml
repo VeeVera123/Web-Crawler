@@ -1,29 +1,38 @@
 name: CT Logs — Extract Slugs (Phase 1)
 
 # Phase 1 of the CT-logs discovery pipeline: sweep crt.sh's Certificate
-# Transparency data for 5 subdomain-based ATS platforms and write net-new
+# Transparency data for 4 subdomain-based ATS platforms and write net-new
 # candidate slugs into ctlog_probe_results. Deliberately its own workflow,
 # SEPARATE from ctlog_verify.yml (Phase 2) — a slow/flaky live-verification
 # pass should never block or force a rerun of extraction, and vice versa.
 #
-# 5-WAY MATRIX, one shard per PLATFORM (not a hash-sharded slice of one
-# combined queue) — each platform's crt.sh sweep is already an
-# independent, self-contained unit of work with no shared state between
-# platforms, so this is the natural split (same reasoning documented in
-# discovery.py's module docstring for why Common Crawl shards differently
-# from the single-source jobs). All 5 run as fully parallel GitHub
-# Actions jobs — this is what actually makes "5 platforms at once" fast,
-# not asyncio within a single job (crt.sh's guest Postgres role is a
-# single connection at a time regardless of language — see
-# ctlog_extract.py's module docstring). Within each shard, aiohttp DOES
-# give real concurrency for slug resolution, Workday's live site_id
-# lookup, and the Supabase writes themselves.
+# TWO-AXIS MATRIX: platform × hostname-shard, 4 platforms x 5 shards each
+# = 20 jobs, using the full GitHub Actions free-tier concurrent-job
+# ceiling (confirmed against GitHub's own docs, same budget note as this
+# project's other workflows — see host_crawl.yml's comment on the same
+# 20-job account-wide cap). Each platform's crt.sh hostname range is
+# genuinely splittable because the underlying query is already
+# ORDER BY NAME_VALUE (alphabetical) — shard 0 covers "0"-"9", shard 1
+# covers roughly "a"-"h", etc, each keyset-paginating its own slice
+# independently with no coordination needed between shards (see
+# ctlog_extract.py's query_certwatch_pages/_shard_bounds docstrings for
+# the full mechanics). This is a REAL speedup, unlike naive over-sharding
+# would be — crt.sh's guest Postgres role is one connection at a time,
+# but that's PER SHARD; 5 shards means 5 independent connections/
+# pagination sequences running at once for the same platform.
 #
-# PLATFORMS: bamboohr, workday, icims, rippling, teamtailor — all
-# genuinely subdomain-per-tenant (the one shape CT logs can extract
-# directly). greenhouse/lever/ashby deliberately excluded — path-based,
-# structurally close to zero yield via a CT-log domain sweep (see
-# ctlog_extract.py's module docstring for the full reasoning).
+# PLATFORMS: bamboohr, icims, rippling, teamtailor — all genuinely
+# subdomain-per-tenant (the one shape CT logs can extract directly).
+# greenhouse/lever/ashby deliberately excluded — path-based, structurally
+# close to zero yield via a CT-log domain sweep (see ctlog_extract.py's
+# module docstring for the full reasoning; a custom-domain-CNAME angle
+# for those is a real but separate follow-up needing a company-to-domain
+# mapping this project doesn't have yet). workday TRIED AND REMOVED
+# (2026-08) — two live runs confirmed crt.sh only surfaces ~115-123 hosts
+# total for myworkdayjobs.com, over 90% of which is Workday's own
+# internal infrastructure, not customer tenants; not worth a pipeline
+# slot for single-digit real yield (see ctlog_extract.py's module
+# docstring for the full history).
 on:
   workflow_dispatch:       # manual trigger — this pipeline is still new/
                             # being proven out, no schedule yet (add a
@@ -39,9 +48,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
-      fail-fast: false   # one platform's crt.sh hiccup shouldn't cancel the other 4
+      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 19
       matrix:
-        platform: [bamboohr, workday, icims, rippling, teamtailor]
+        platform: [bamboohr, icims, rippling, teamtailor]
+        shard: [0, 1, 2, 3, 4]
 
     steps:
       - name: Checkout
@@ -55,8 +65,12 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp psycopg2-binary python-dotenv requests
 
-      - name: "Extract ${{ matrix.platform }} slugs from CT logs"
+      - name: "Extract ${{ matrix.platform }} slugs (shard ${{ matrix.shard }}/5)"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python ctlog_extract.py --platform ${{ matrix.platform }}
+        run: |
+          python ctlog_extract.py \
+            --platform ${{ matrix.platform }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 5
