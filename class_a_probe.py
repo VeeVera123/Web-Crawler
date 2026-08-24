@@ -131,6 +131,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 
 import aiohttp
 import requests
@@ -190,6 +191,23 @@ PLATFORM_CONCURRENCY = {
 }
 DEFAULT_CONCURRENCY = 15
 
+# Status codes treated as an IMPLICIT rate-limit/block signal even though
+# they aren't 429 — added after a live run showed exactly this pattern on
+# Greenhouse: 404s froze completely after the first ~5000-company batch
+# while non-200/404/429 responses climbed unboundedly for the rest of the
+# run, with 429 staying at zero the whole time. That shape (real misses
+# stop, something-else-entirely takes over, no formal rate-limit signal)
+# is the classic fingerprint of a CDN/WAF (Cloudflare, Akamai, etc.)
+# soft-blocking an IP after too much sustained traffic, typically via 403
+# or a 5xx rather than 429. Backing off on these too, not just literal
+# 429s, is the fix — see _probe_one.
+_SOFT_BLOCK_STATUSES = {403, 500, 502, 503, 520, 521, 522, 523, 524, 525, 526, 530}
+
+# Soft-block statuses get a LONGER default cool-down than a plain 429 —
+# an IP-level WAF ban is typically minutes, not seconds, unlike a
+# well-behaved API's documented per-second rate limit.
+SOFT_BLOCK_DEFAULT_DELAY = 60.0
+
 # Default backoff duration (seconds) applied on a 429 that carries no
 # Retry-After header — used only as a fallback; a real Retry-After value
 # from the response always wins (see RateLimiter.register_429).
@@ -220,10 +238,15 @@ class RateLimiter:
         if now < self.backoff_until:
             await asyncio.sleep(self.backoff_until - now)
 
-    async def register_429(self, retry_after_header: str | None):
+    async def register_429(self, retry_after_header: str | None, default_delay: float | None = None):
+        """default_delay overrides the platform's normal 429 default —
+        used for soft-block statuses (403/5xx with no Retry-After), which
+        in practice tend to be IP-level WAF bans that outlast a typical
+        rate-limit window, so they get a longer default cool-down (see
+        SOFT_BLOCK_DEFAULT_DELAY / _probe_one)."""
         async with self._lock:
             now = time.monotonic()
-            delay = DEFAULT_RETRY_AFTER.get(self.ats, 5.0)
+            delay = default_delay if default_delay is not None else DEFAULT_RETRY_AFTER.get(self.ats, 5.0)
             if retry_after_header:
                 try:
                     delay = max(delay, float(retry_after_header))
@@ -469,10 +492,18 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
     `stats` (hit / bad_shape_200 / 404 / 429 / other_error / exception)
     instead of being collapsed into an undifferentiated "miss" — this is
     what lets a future run's logs distinguish genuine 404 taper from
-    silent 429 rate-limiting, which the old flat logging couldn't do (see
+    silent rate-limiting, which the old flat logging couldn't do (see
     the module-level PLATFORM_CONCURRENCY comment for why this mattered).
-    A 429 also pushes this platform's shared RateLimiter backoff forward
-    so every other in-flight probe backs off too, not just this one."""
+    The EXACT status code of every "other_error" is also tallied in
+    `stats["status_codes"]` (a Counter), because a 429 isn't the only way
+    a platform can soft-throttle — a first live run under this rewrite
+    showed 404s freezing completely after batch 1 while other_error
+    climbed unboundedly, which is the signature of an IP-level WAF block
+    (commonly a 403 or a 5xx from Cloudflare/Akamai) rather than organic
+    seed-list taper. So any status in _SOFT_BLOCK_STATUSES now triggers
+    the SAME shared backoff a 429 would, on the theory that "every
+    request from this IP is being rejected" is functionally a rate-limit
+    signal even when the platform doesn't say so via 429."""
     url_template = PROBE_URL[ats]
     async with sem:
         for idx, slug in enumerate(variants):
@@ -483,6 +514,7 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                                         headers={"User-Agent": USER_AGENT}) as r:
                     if r.status == 429:
                         stats["429"] += 1
+                        stats["status_codes"][r.status] += 1
                         await limiter.register_429(r.headers.get("Retry-After"))
                         continue
                     if r.status == 404:
@@ -490,6 +522,12 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                         continue
                     if r.status != 200:
                         stats["other_error"] += 1
+                        stats["status_codes"][r.status] += 1
+                        if r.status in _SOFT_BLOCK_STATUSES:
+                            # Treat as an implicit rate-limit/block signal
+                            # even without a 429 — see docstring above.
+                            await limiter.register_429(r.headers.get("Retry-After"),
+                                                        default_delay=SOFT_BLOCK_DEFAULT_DELAY)
                         continue
                     body = await r.text()
             except Exception:
@@ -564,7 +602,8 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
     limiter = RateLimiter(ats)
     found: dict[str, str] = {}   # slug -> company_name
     strategy_hits = {"domain": 0, "name": 0}
-    stats = {"hit": 0, "bad_shape_200": 0, "404": 0, "429": 0, "other_error": 0, "exception": 0}
+    stats = {"hit": 0, "bad_shape_200": 0, "404": 0, "429": 0, "other_error": 0, "exception": 0,
+              "status_codes": Counter()}  # exact non-200/404 codes seen — see _SOFT_BLOCK_STATUSES
 
     async with aiohttp.ClientSession() as session:
         existing = await fetch_existing_slug_registry_slugs(session, ats)
@@ -620,12 +659,14 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
             log.info(f"  probed {min(i + BATCH, len(tasks))}/{len(tasks)} — "
                      f"{len(found)} real slugs found so far "
                      f"(domain-derived: {strategy_hits['domain']}, name-derived: {strategy_hits['name']})")
+            top_codes = ", ".join(f"{code}={n}" for code, n in stats["status_codes"].most_common(5))
             log.info(f"    status breakdown (cumulative): hit={stats['hit']} "
                      f"bad_shape_200={stats['bad_shape_200']} 404={stats['404']} "
                      f"429={stats['429']} other_error={stats['other_error']} "
                      f"exception={stats['exception']}"
+                     + (f"  [codes: {top_codes}]" if top_codes else "")
                      + (f"  ⚠ currently backing off {(limiter.backoff_until - time.monotonic()):.0f}s "
-                        f"after a 429" if time.monotonic() < limiter.backoff_until else ""))
+                        f"after a 429/soft-block status" if time.monotonic() < limiter.backoff_until else ""))
 
         # Only fetch the Workable feed on ONE shard (shard 0, or the
         # unsharded case) — it's a single request covering ALL accounts,
@@ -647,21 +688,32 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
 
     net_new = len(set(found) - existing)
     log.info(f"  TOTAL: {len(found)} real slugs found ({net_new} net-new vs slug_registry)")
-    total_probed = sum(stats.values())
+    total_probed = stats["hit"] + stats["bad_shape_200"] + stats["404"] + stats["429"] + \
+        stats["other_error"] + stats["exception"]
+    codes_str = ", ".join(f"{code}={n}" for code, n in stats["status_codes"].most_common(10))
     log.info(f"  FINAL status breakdown — {total_probed} total slug-variant requests made: "
-             f"hit={stats['hit']} ({stats['hit'] / total_probed * 100:.2f}%)  "
+             f"hit={stats['hit']} ({stats['hit'] / max(total_probed, 1) * 100:.2f}%)  "
              f"bad_shape_200={stats['bad_shape_200']}  404={stats['404']} "
-             f"({stats['404'] / total_probed * 100:.1f}%)  "
-             f"429={stats['429']} ({stats['429'] / total_probed * 100:.2f}%)  "
+             f"({stats['404'] / max(total_probed, 1) * 100:.1f}%)  "
+             f"429={stats['429']} ({stats['429'] / max(total_probed, 1) * 100:.2f}%)  "
              f"other_error={stats['other_error']}  exception={stats['exception']}")
-    if stats["429"] > total_probed * 0.01:
+    if codes_str:
+        log.info(f"  Exact non-200/404 status codes seen: {codes_str}")
+    soft_block_hits = sum(n for code, n in stats["status_codes"].items() if code in _SOFT_BLOCK_STATUSES)
+    if soft_block_hits > total_probed * 0.01:
+        log.warning(f"  ⚠ {soft_block_hits} requests (>{1:.0f}% of total) returned a soft-block-shaped "
+                    f"status ({', '.join(str(c) for c in _SOFT_BLOCK_STATUSES)}) — this run was almost "
+                    f"certainly being throttled/blocked by a WAF/CDN, NOT organically running out of "
+                    f"real matches. See the exact codes above; consider lowering "
+                    f"PLATFORM_CONCURRENCY['{ats}'] further, adding real delay between requests, or "
+                    f"reducing GitHub Actions shard count (fewer simultaneous source IPs) next time.")
+    elif stats["429"] > total_probed * 0.01:
         log.warning(f"  ⚠ {stats['429']} requests (>{1:.0f}% of total) hit HTTP 429 — this run WAS "
-                    f"meaningfully rate-limited, not just tapering off. If hit-rate looked flat, "
-                    f"429s (not genuine exhaustion) are the likely reason — consider lowering "
+                    f"meaningfully rate-limited, not just tapering off. Consider lowering "
                     f"PLATFORM_CONCURRENCY['{ats}'] further next time.")
-    elif stats["429"] == 0 and stats["other_error"] < total_probed * 0.01:
-        log.info(f"  No meaningful 429s or other errors this run — a flat/tapering hit rate here "
-                 f"reflects genuine seed-list exhaustion, not rate-limiting.")
+    elif stats["429"] == 0 and soft_block_hits == 0 and stats["other_error"] < total_probed * 0.01:
+        log.info(f"  No meaningful 429s, soft-block statuses, or other errors this run — a flat/"
+                 f"tapering hit rate here reflects genuine seed-list exhaustion, not rate-limiting.")
 
 
 _WORKABLE_FEED_SLUG_RE = re.compile(r"apply\.workable\.com/([a-z0-9\-]+)/", re.I)
