@@ -1,0 +1,71 @@
+name: Class A — Seed-and-Probe Extraction
+
+# A DIFFERENT technique from ctlog_extract.yml (Phase 1 of the CT-logs
+# pipeline) — built for the platforms CT logs structurally can't touch:
+# Greenhouse, Lever, Ashby, Workable. All four put the company identifier
+# in a URL PATH (e.g. boards.greenhouse.io/{slug}), and a certificate can
+# never carry a path, so a CT-log sweep of these domains returns zero
+# tenant signal no matter how large the platform is. See
+# CTLOGS_CLASS_A_HELP_REQUEST.md / CLASS_A_SUGGESTIONS_REVIEW.md for the
+# full background.
+#
+# INSTEAD: all four expose a real, documented, unauthenticated public
+# per-slug job-board API that 200s for a real company and 404s for a
+# fake one (see class_a_probe.py's module docstring for the exact URLs
+# and where each was confirmed). class_a_probe.py takes the free YC
+# company-name seed list (yc-oss/api — already used elsewhere in this
+# project, see discovery.py's fetch_yc_companies) and probes plausible
+# slug variants of each company name against each platform's API.
+# Genuinely probabilistic, not exhaustive like CT logs — only finds a
+# company if it's in the seed list AND one of the guessed slug variants
+# happens to be the company's real one — so treat this as supplemental
+# signal, not a full replacement.
+#
+# Workable ALSO gets its own documented master XML feed
+# (workable.com/boards/workable.xml) fetched directly in the same run —
+# one request, no per-slug guessing, pure bonus signal on top of the
+# probe sweep.
+#
+# Writes into the SAME ctlog_probe_results staging table the CT-logs
+# pipeline uses — Phase 2 verification (still on hold, see
+# ctlog_verify.yml) already covers everything in that table regardless
+# of which extraction technique populated it.
+#
+# ONE JOB PER PLATFORM, no sharding — unlike crt.sh's paginated sweep,
+# the seed list here is a single ~6k-row static JSON file fetched once
+# per run; splitting it across shards wouldn't meaningfully speed
+# anything up and would just multiply redundant seed-list fetches.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: class-a-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false   # one platform's API hiccup shouldn't cancel the other 3
+      matrix:
+        platform: [greenhouse, lever, ashby, workable]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp requests python-dotenv
+
+      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python class_a_probe.py --platform ${{ matrix.platform }}
