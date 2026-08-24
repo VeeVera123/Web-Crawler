@@ -101,10 +101,19 @@ _MAX_PAGES = 500  # backstop, not the normal stopping condition — see
                     # query_certwatch's docstring, same reasoning as
                     # ctlogs_probe_direct.py's identical constant
 
-_CONNECT_RETRIES = 6
-_CONNECT_BACKOFF_SECONDS = 15
-_QUERY_TIMEOUT_RETRIES = 4
-_QUERY_TIMEOUT_BACKOFF_SECONDS = 20
+# Shortened from 6/15s (worst case ~8min single sleep, ~15min total) —
+# per explicit direction that a stuck/cancelled run needs to actually
+# resolve quickly, not just "eventually". A long exponential backoff
+# made sense when this was a one-shot local script you'd just wait out;
+# in a GitHub Actions matrix job you want to CANCEL, a multi-minute
+# blocking time.sleep() means Cancel workflow can look hung even though
+# it's technically going to stop once the sleep finishes — same actual
+# stopping behavior, just capped so the wait is never more than ~40s on
+# a single retry and ~2min total worst case.
+_CONNECT_RETRIES = 4
+_CONNECT_BACKOFF_SECONDS = 5     # 5s, 10s, 20s, 40s ≈ 75s total worst case
+_QUERY_TIMEOUT_RETRIES = 3
+_QUERY_TIMEOUT_BACKOFF_SECONDS = 8   # 8s, 16s, 24s ≈ 48s total worst case
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
