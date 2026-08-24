@@ -1,38 +1,45 @@
 name: CT Logs — Extract Slugs (Phase 1)
 
 # Phase 1 of the CT-logs discovery pipeline: sweep crt.sh's Certificate
-# Transparency data for 4 subdomain-based ATS platforms and write net-new
+# Transparency data for subdomain-based ATS platforms and write net-new
 # candidate slugs into ctlog_probe_results. Deliberately its own workflow,
 # SEPARATE from ctlog_verify.yml (Phase 2) — a slow/flaky live-verification
 # pass should never block or force a rerun of extraction, and vice versa.
 #
-# TWO-AXIS MATRIX: platform × hostname-shard, 4 platforms x 5 shards each
-# = 20 jobs, using the full GitHub Actions free-tier concurrent-job
-# ceiling (confirmed against GitHub's own docs, same budget note as this
+# TWO SEPARATE MATRICES to fit the 20-job account-wide concurrent cap
+# (confirmed against GitHub's own docs, same budget note as this
 # project's other workflows — see host_crawl.yml's comment on the same
-# 20-job account-wide cap). Each platform's crt.sh hostname range is
-# genuinely splittable because the underlying query is already
-# ORDER BY NAME_VALUE (alphabetical) — shard 0 covers "0"-"9", shard 1
-# covers roughly "a"-"h", etc, each keyset-paginating its own slice
-# independently with no coordination needed between shards (see
-# ctlog_extract.py's query_certwatch_pages/_shard_bounds docstrings for
-# the full mechanics). This is a REAL speedup, unlike naive over-sharding
-# would be — crt.sh's guest Postgres role is one connection at a time,
-# but that's PER SHARD; 5 shards means 5 independent connections/
-# pagination sequences running at once for the same platform.
+# cap) while giving bamboohr — the one confirmed BambooHR-scale platform
+# — more shards than the 5 smaller ones:
+#   extract_bamboohr: 5 shards (5 jobs)
+#   extract_others:   5 platforms x 3 shards (15 jobs)
+#   5 + 15 = 20 jobs total, using the full budget.
+# Each platform's crt.sh hostname range is genuinely splittable because
+# the underlying query is already ORDER BY NAME_VALUE (alphabetical) —
+# each shard keyset-paginates its own slice of that range independently,
+# no coordination needed between shards (see ctlog_extract.py's
+# query_certwatch_pages/_shard_bounds docstrings for the full mechanics).
+# This is a REAL speedup, unlike naive over-sharding would be — crt.sh's
+# guest Postgres role is one connection at a time, but that's PER SHARD.
 #
-# PLATFORMS: bamboohr, icims, rippling, teamtailor — all genuinely
-# subdomain-per-tenant (the one shape CT logs can extract directly).
-# greenhouse/lever/ashby deliberately excluded — path-based, structurally
-# close to zero yield via a CT-log domain sweep (see ctlog_extract.py's
-# module docstring for the full reasoning; a custom-domain-CNAME angle
-# for those is a real but separate follow-up needing a company-to-domain
-# mapping this project doesn't have yet). workday TRIED AND REMOVED
-# (2026-08) — two live runs confirmed crt.sh only surfaces ~115-123 hosts
-# total for myworkdayjobs.com, over 90% of which is Workday's own
-# internal infrastructure, not customer tenants; not worth a pipeline
-# slot for single-digit real yield (see ctlog_extract.py's module
-# docstring for the full history).
+# PLATFORMS (2026-08 — replaced the prior bamboohr/icims/rippling/
+# teamtailor lineup): bamboohr (the one confirmed BambooHR-scale winner —
+# 24,991 net-new) + personio, recruitee, softgarden, zoho, hrmdirect (the
+# next 5 largest genuinely subdomain-based platforms by existing
+# slug_registry size — none are BambooHR-scale, but all are cheap to try
+# and structurally viable). icims/rippling/teamtailor were RETIRED after
+# a real run confirmed they cap out at 64/86/37 net-new respectively —
+# confirmed real, but per explicit direction the bar for an ONGOING
+# pipeline slot is "thousands, BambooHR-scale," not merely nonzero, so
+# they're no longer re-extracted (their already-collected rows still go
+# through Phase 2 verification once). ashby considered and REJECTED —
+# path-based (jobs.ashbyhq.com/{slug}), same structural wall as
+# greenhouse/lever: a certificate can't carry a URL path, so a domain
+# sweep returns ~0 tenant signal regardless of platform size. workday
+# TRIED AND REMOVED earlier (2026-08) — two live runs confirmed crt.sh
+# only surfaces ~115-123 hosts total for myworkdayjobs.com, over 90% of
+# which is Workday's own internal infrastructure, not customer tenants
+# (see ctlog_extract.py's module docstring for the full history on both).
 on:
   workflow_dispatch:       # manual trigger — this pipeline is still new/
                             # being proven out, no schedule yet (add a
@@ -44,13 +51,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  extract:
+  extract_bamboohr:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
-      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 19
+      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 4
       matrix:
-        platform: [bamboohr, icims, rippling, teamtailor]
         shard: [0, 1, 2, 3, 4]
 
     steps:
@@ -65,7 +71,38 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp psycopg2-binary python-dotenv requests
 
-      - name: "Extract ${{ matrix.platform }} slugs (shard ${{ matrix.shard }}/5)"
+      - name: "Extract bamboohr slugs (shard ${{ matrix.shard }}/5)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python ctlog_extract.py \
+            --platform bamboohr \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 5
+
+  extract_others:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 14
+      matrix:
+        platform: [personio, recruitee, softgarden, zoho, hrmdirect]
+        shard: [0, 1, 2]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp psycopg2-binary python-dotenv requests
+
+      - name: "Extract ${{ matrix.platform }} slugs (shard ${{ matrix.shard }}/3)"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -73,4 +110,4 @@ jobs:
           python ctlog_extract.py \
             --platform ${{ matrix.platform }} \
             --shard-index ${{ matrix.shard }} \
-            --shard-count 5
+            --shard-count 3
