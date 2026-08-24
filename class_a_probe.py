@@ -155,11 +155,13 @@ WORKABLE_FEED_URL = "https://www.workable.com/boards/workable.xml"
 # gracefully skipped otherwise, same "don't hard-fail if a seed source
 # isn't wired up yet" idea as everywhere else in this project.
 PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companies.csv")
-PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "500000"))  # cap per run —
-    # 22M rows is far more than any single run needs; a rolling cap keeps
-    # wall-clock reasonable while still covering the dataset over several
-    # runs (idempotent upsert makes re-running safe/cheap, same as every
-    # other source in this project).
+PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap —
+    # was capped by default while this was a single-machine, single-pass
+    # run; now that GitHub Actions shards the FULL combined seed list
+    # across parallel jobs (see --shard-index/--shard-count below and
+    # class_a_probe.yml), there's no more reason to hold back — each
+    # shard only processes its own slice regardless of the total size.
+    # Still overridable via PDL_ROW_LIMIT for a quick local test run.
 
 # SEC EDGAR CIK LOOKUP — confirmed free, official (sec.gov), no signup,
 # plain-text, ~13MB. Format per line: "COMPANY NAME:CIK:" — historically
@@ -379,13 +381,27 @@ def _looks_like_real_board(ats: str, body: str) -> bool:
     return True
 
 
-async def run_platform(ats: str) -> None:
-    log.info(f"── {ats} (seed-and-probe, multi-source) ──")
+async def run_platform(ats: str, shard_index: int | None = None, shard_count: int | None = None) -> None:
+    label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
+    log.info(f"── {ats} (seed-and-probe, multi-source){label} ──")
     companies = fetch_all_seed_companies()
     if not companies:
         log.error("  No seed companies fetched — aborting.")
         return
-    log.info(f"  {len(companies)} total distinct seed companies to probe")
+    log.info(f"  {len(companies)} total distinct seed companies before sharding")
+
+    if shard_index is not None and shard_count is not None:
+        # MODULO sharding, not a contiguous slice — PDL's rows are sorted
+        # largest-company-first (see fetch_pdl_companies), so a contiguous
+        # chunk would give shard 0 all the biggest companies and the last
+        # shard all the smallest/least-likely-to-hit ones. Interleaving by
+        # index instead gives every shard a representative, similarly-
+        # sized-company mix, same reasoning ctlog_extract.py's alphabetical
+        # sharding uses to keep shards comparably "useful," just a
+        # different mechanism since there's no natural alphabetical key
+        # here the way there is for crt.sh hostnames.
+        companies = companies[shard_index::shard_count]
+        log.info(f"  {len(companies)} companies in this shard's slice")
 
     sem = asyncio.Semaphore(PROBE_CONCURRENCY)
     found: dict[str, str] = {}   # slug -> company_name
@@ -430,7 +446,13 @@ async def run_platform(ats: str) -> None:
                      f"{len(found)} real slugs found so far "
                      f"(domain-derived: {strategy_hits['domain']}, name-derived: {strategy_hits['name']})")
 
-        if ats == "workable":
+        # Only fetch the Workable feed on ONE shard (shard 0, or the
+        # unsharded case) — it's a single request covering ALL accounts,
+        # not per-company-name work, so every other shard fetching it too
+        # would just be N redundant multi-minute downloads of the same
+        # feed for zero extra signal (the write is idempotent so it
+        # wouldn't be WRONG to repeat it, just wasteful).
+        if ats == "workable" and (shard_index is None or shard_index == 0):
             feed_slugs = await fetch_workable_feed_slugs(session)
             new_from_feed = {s: "" for s in feed_slugs if s not in found and s not in existing}
             if new_from_feed:
@@ -570,8 +592,15 @@ async def write_to_staging_table(session: aiohttp.ClientSession, ats: str,
 def main():
     parser = argparse.ArgumentParser(description="Class A seed-and-probe extraction (async)")
     parser.add_argument("--platform", choices=list(PROBE_URL.keys()), required=True)
+    parser.add_argument("--shard-index", type=int, default=None,
+                         help="This job's shard index (0-based) when splitting the combined "
+                              "seed list across multiple parallel jobs — see run_platform's "
+                              "modulo-sharding docstring for why it's not a contiguous slice")
+    parser.add_argument("--shard-count", type=int, default=None,
+                         help="Total number of shards splitting the seed list (must be passed "
+                              "together with --shard-index)")
     args = parser.parse_args()
-    asyncio.run(run_platform(args.platform))
+    asyncio.run(run_platform(args.platform, args.shard_index, args.shard_count))
 
 
 if __name__ == "__main__":
