@@ -123,28 +123,17 @@ async def _verify_teamtailor(session: aiohttp.ClientSession, slug: str) -> bool:
         return r.status == 200
 
 
-async def _verify_workday(session: aiohttp.ClientSession, slug: str) -> bool:
-    """slug is 'company|wd|site_id' — reconstruct the actual board URL."""
-    parts = slug.split("|")
-    if len(parts) != 3:
-        return False
-    company, wd, site_id = parts
-    url = f"https://{company}.{wd}.myworkdayjobs.com/{site_id}"
-    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
-                            headers={"User-Agent": USER_AGENT}) as r:
-        # Workday's own "no such site" page still serves from the same
-        # host, so a host check alone isn't enough here — look for a 200
-        # and the site_id surviving in the final path (a dead site_id
-        # gets redirected back to a generic tenant landing page instead).
-        return r.status == 200 and site_id.lower() in str(r.url).lower()
-
-
+# workday's verifier was removed 2026-08 along with the platform itself —
+# two live extraction runs confirmed crt.sh only surfaces ~115-123 hosts
+# total for myworkdayjobs.com, over 90% of which is Workday's own
+# internal infrastructure, not customer tenants (see ctlog_extract.py's
+# module docstring for the full history). Nothing to verify for a
+# platform that isn't extracted anymore.
 PLATFORM_VERIFIERS = {
     "bamboohr": _verify_bamboohr,
     "icims": _verify_icims,
     "rippling": _verify_rippling,
     "teamtailor": _verify_teamtailor,
-    "workday": _verify_workday,
 }
 
 
