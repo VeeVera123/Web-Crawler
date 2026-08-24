@@ -1,6 +1,6 @@
 name: CT Logs — Verify Slugs (Phase 2)
 
-# Phase 2 of the CT-logs discovery pipeline: for each of the 5 platforms
+# Phase 2 of the CT-logs discovery pipeline: for each of the 4 platforms
 # extracted by ctlog_extract.yml, hit every candidate slug's real board
 # URL live and drop the ones that redirect to the ATS vendor's own
 # marketing/root domain (confirmed pattern: acty.bamboohr.com ->
@@ -13,12 +13,14 @@ name: CT Logs — Verify Slugs (Phase 2)
 # force a rerun of the other. Run this AFTER extract has populated
 # ctlog_probe_results for the platforms you want verified.
 #
-# Same 5-way, one-shard-per-platform matrix as Phase 1. Fully async
-# (aiohttp + a bounded semaphore) within each shard — this IS where async
-# genuinely buys speed, since verification is nothing but independent
-# I/O-bound HTTPS fetches against five different vendors' servers (unlike
-# crt.sh, which is a single connection regardless of language — see
-# ctlog_extract.yml's comment on that same distinction).
+# One shard per platform (4 total) — verification doesn't have the same
+# page-cursor bottleneck extraction does (see ctlog_extract.yml's
+# hostname-sharding comment); it's already a flat, fully async, bounded-
+# concurrency sweep over that platform's rows within a single job, so
+# there's no equivalent win to splitting a single platform's row range
+# across multiple jobs the way extraction's alphabetical hostname shards
+# help. workday removed along with the platform itself (see
+# ctlog_extract.yml's comment on why).
 on:
   workflow_dispatch:
     inputs:
@@ -41,9 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
-      fail-fast: false   # one platform's flakiness shouldn't cancel the other 4
+      fail-fast: false   # one platform's flakiness shouldn't cancel the other 3
       matrix:
-        platform: [bamboohr, workday, icims, rippling, teamtailor]
+        platform: [bamboohr, icims, rippling, teamtailor]
 
     steps:
       - name: Checkout
