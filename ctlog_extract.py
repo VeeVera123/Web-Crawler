@@ -13,33 +13,32 @@ extraction, and vice versa.
 
 PLATFORMS THIS RUN (chosen deliberately — see track_list.md and the
 in-chat platform classification worked out before this script existed):
-  bamboohr, workday, icims, rippling, teamtailor
-All five are genuinely SUBDOMAIN-per-tenant, which is the one shape CT
+  bamboohr, icims, rippling, teamtailor
+All four are genuinely SUBDOMAIN-per-tenant, which is the one shape CT
 logs can extract directly (a certificate covers a hostname, never a URL
-path or query string — see WORKDAY_CAVEAT below for the one platform in
-this set that still needs an extra step). Greenhouse/Lever/Ashby were
-deliberately EXCLUDED from this batch: they're path-based
-(boards.greenhouse.io/{slug}), so a %.root_domain CT sweep only ever
-returns the platform's own shared hostnames, zero tenant signal — see the
-module-level discussion in this project's own history for why a
-custom-domain-CNAME angle for those platforms is a fundamentally
-different (live-fetch-first, not CT-log-first) technique, better served
-by piggybacking on the existing Common Crawl/HTTP Archive sources than by
-this pipeline.
+path or query string). Greenhouse/Lever/Ashby were deliberately EXCLUDED
+from this batch: they're path-based (boards.greenhouse.io/{slug}), so a
+%.root_domain CT sweep only ever returns the platform's own shared
+hostnames, zero tenant signal — a custom-domain-CNAME angle for those
+platforms is a real possibility but a fundamentally different
+(live-fetch-first, needs a company-name-to-domain mapping this project
+doesn't have yet) technique — separate follow-up, not part of this
+pipeline.
 
-WORKDAY_CAVEAT — SOLVED IN THIS VERSION: this project's Workday slug
-format is "{company}|{wd_number}|{site_id}" (see discovery.py's
-_url_to_slug_workday). A cert only ever proves "{company}.{wd_number}
-.myworkdayjobs.com" exists — site_id lives in the URL PATH, which no
-certificate carries. Earlier probes (ctlogs_probe.py, ctlogs_probe_direct.py)
-reported "119 Workday hosts, 0 usable slugs" and stopped there. THIS
-script closes that gap: for every CT-log-confirmed Workday host, it does
-one live async HTTP fetch of the bare root
-(https://{company}.{wd_number}.myworkdayjobs.com/) and extracts site_id
-from the redirect target or the page's own careers-site links (Workday
-always redirects a bare tenant root to its default/first career site) —
-see resolve_workday_site_id(). Run INLINE in the same async pass, per
-explicit direction, not deferred to a later step.
+WORKDAY — TRIED, ABANDONED (2026-08): this project's Workday slug format
+is "{company}|{wd_number}|{site_id}" (see discovery.py's
+_url_to_slug_workday), and a cert only ever proves
+"{company}.{wd_number}.myworkdayjobs.com" exists — site_id lives in the
+URL path, which no certificate carries. A live-resolve step (fetching
+each confirmed host to recover site_id) was built and tried, but two live
+runs confirmed Workday just isn't a viable CT-logs source at all: crt.sh
+only ever surfaced ~115-123 hosts total for myworkdayjobs.com, and over
+90% of THOSE were Workday's own internal infrastructure (staging/DR/
+implementation-ops subdomains — wd117, dr-cp2-wd12, stgprod-wd500, etc,
+confirmed non-public via DNS failure), not customer tenants. What was
+left after filtering infra and resolving site_id was single-digit slug
+counts, all already known. Removed from this pipeline entirely rather
+than kept as permanent near-zero-yield dead weight.
 
 WHY ASYNC/AIOHTTP: crt.sh's own guest Postgres connection is NOT
 parallelized here — it's a single psycopg2 connection, one page at a
@@ -48,20 +47,17 @@ That part is a hard constraint of the data source (crt.sh's guest role
 has shown real pool-exhaustion/session-limit behavior under concurrent
 connections in this project's own history), not a design choice, and
 matrix-sharding by PLATFORM (see ctlog_extract.yml) is what actually
-makes 5 platforms fast — they run as 5 fully independent GitHub Actions
-jobs at once, not serialized. What genuinely benefits from asyncio
-WITHIN one platform's shard is everything after the SQL page comes back:
-resolving thousands of hostnames to slugs is pure CPU (cheap either way),
-but Workday's live site_id fetch is exactly the I/O-bound fan-out
-aiohttp is built for — hundreds of concurrent HTTPS requests instead of
-one at a time. So: sync psycopg2 for the crt.sh sweep, async aiohttp for
-resolution/live-fetch and for the Supabase writes themselves (upserting
-thousands of rows over HTTP is also I/O-bound).
+makes multiple platforms fast — they run as fully independent GitHub
+Actions jobs at once, not serialized. What genuinely benefits from
+asyncio WITHIN one platform's shard is everything after the SQL page
+comes back — resolving hostnames to slugs and writing to Supabase are
+both handled per-page (see run_platform), so a platform's results land
+in ctlog_probe_results incrementally as crt.sh pages complete, not only
+once the entire sweep finishes.
 
 Usage:
     pip install aiohttp psycopg2-binary python-dotenv
     python ctlog_extract.py --platform bamboohr
-    python ctlog_extract.py --platform workday
     python ctlog_extract.py --platform icims
     python ctlog_extract.py --platform rippling
     python ctlog_extract.py --platform teamtailor
@@ -94,7 +90,6 @@ CRT_SH_DSN = "postgresql://guest@crt.sh:5432/certwatch"
 
 PLATFORMS = {
     "bamboohr": "bamboohr.com",
-    "workday": "myworkdayjobs.com",
     "icims": "icims.com",
     "rippling": "rippling.com",
     "teamtailor": "teamtailor.com",
@@ -113,10 +108,6 @@ _QUERY_TIMEOUT_BACKOFF_SECONDS = 20
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-WORKDAY_CONCURRENCY = 40  # concurrent live site_id fetches — polite but fast;
-                            # confirmed-Workday-host counts are in the low
-                            # hundreds at most (per earlier probes), so this
-                            # finishes in seconds, not minutes
 
 
 # ── infra-noise filter — carried over verbatim from ctlogs_probe_direct.py ──
@@ -128,7 +119,6 @@ _INFRA_KEYWORDS = {
     "prometheus", "sandbox", "demo", "beta", "alpha", "preview",
     "onboarding", "integration", "perform",
 }
-
 
 def _looks_like_infra(slug: str) -> bool:
     if "." in slug:
@@ -159,35 +149,71 @@ def connect_with_retry():
     return None
 
 
-def query_certwatch(root_domain: str) -> set[str]:
+def query_certwatch_pages(root_domain: str, shard_start: str = "", shard_end: str | None = None):
     """Fresh connection per page + keyset pagination + retry-on-timeout —
     same proven approach as ctlogs_probe_direct.py's query_certwatch_direct.
-    Kept synchronous deliberately (see module docstring)."""
-    hosts = set()
+    Kept synchronous deliberately (see module docstring).
+
+    A GENERATOR yielding each page's host set as soon as it's fetched,
+    rather than returning one combined set at the very end — this is what
+    lets run_platform() resolve+write each page to Supabase as it comes
+    in, instead of waiting for the whole platform's crt.sh sweep (which
+    can be many pages) to finish first. Per explicit direction: a run
+    that gets interrupted partway through a big platform should still
+    have written everything found so far, not lost it all waiting on a
+    final write that never happens.
+
+    shard_start/shard_end bound the keyset scan to a slice of the
+    alphabetically-sorted NAME_VALUE range — e.g. shard_start="",
+    shard_end="f" covers everything before "f", letting SEVERAL GitHub
+    Actions jobs page through ONE platform's crt.sh results in parallel
+    instead of one sequential job per platform (see ctlog_extract.yml's
+    HOSTNAME_SHARDS and the --shard-start/--shard-end CLI flags below).
+    This is genuinely parallelizable because the query is already
+    ORDER BY NAME_VALUE — each shard just keyset-paginates its own slice
+    of that same sorted order, with no coordination needed between
+    shards (unlike, say, OFFSET-based paging, which can't be sliced this
+    way without re-scanning). shard_end=None means "no upper bound",
+    i.e. this shard runs to the real end of the platform's data."""
     suffix = "." + root_domain
-    last_seen = ""
+    last_seen = shard_start
     page = 1
     timeout_retries_left = _QUERY_TIMEOUT_RETRIES
 
     while page <= _MAX_PAGES:
         conn = connect_with_retry()
         if conn is None:
-            log.error(f"  Could not get a connection for page {page} — stopping with {len(hosts)} hosts so far.")
+            log.error(f"  Could not get a connection for page {page} — stopping this shard.")
             break
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT DISTINCT NAME_VALUE
-                    FROM certificate_and_identities cai
-                    WHERE plainto_tsquery('certwatch', %s) @@ identities(cai.CERTIFICATE)
-                      AND cai.NAME_VALUE ILIKE %s
-                      AND cai.NAME_VALUE > %s
-                    ORDER BY NAME_VALUE
-                    LIMIT %s
-                    """,
-                    (root_domain, f"%{suffix}", last_seen, PAGE_SIZE),
-                )
+                if shard_end is not None:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT NAME_VALUE
+                        FROM certificate_and_identities cai
+                        WHERE plainto_tsquery('certwatch', %s) @@ identities(cai.CERTIFICATE)
+                          AND cai.NAME_VALUE ILIKE %s
+                          AND cai.NAME_VALUE > %s
+                          AND cai.NAME_VALUE < %s
+                        ORDER BY NAME_VALUE
+                        LIMIT %s
+                        """,
+                        (root_domain, f"%{suffix}", last_seen, shard_end, PAGE_SIZE),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT NAME_VALUE
+                        FROM certificate_and_identities cai
+                        WHERE plainto_tsquery('certwatch', %s) @@ identities(cai.CERTIFICATE)
+                          AND cai.NAME_VALUE ILIKE %s
+                          AND cai.NAME_VALUE > %s
+                        ORDER BY NAME_VALUE
+                        LIMIT %s
+                        """,
+                        (root_domain, f"%{suffix}", last_seen, PAGE_SIZE),
+                    )
                 rows = cur.fetchall()
         except psycopg2.errors.QueryCanceled:
             conn.rollback()
@@ -198,7 +224,7 @@ def query_certwatch(root_domain: str) -> set[str]:
                 conn.close()
                 time.sleep(wait)
                 continue
-            log.error(f"  Page {page} timed out after {_QUERY_TIMEOUT_RETRIES} retries — stopping with {len(hosts)} hosts.")
+            log.error(f"  Page {page} timed out after {_QUERY_TIMEOUT_RETRIES} retries — stopping this shard.")
             conn.close()
             break
         except psycopg2.OperationalError as e:
@@ -210,7 +236,7 @@ def query_certwatch(root_domain: str) -> set[str]:
         timeout_retries_left = _QUERY_TIMEOUT_RETRIES
 
         if not rows:
-            log.info(f"  Page {page}: 0 rows — reached the end.")
+            log.info(f"  Page {page}: 0 rows — reached the end of this shard's range.")
             break
 
         page_hosts = set()
@@ -225,17 +251,15 @@ def query_certwatch(root_domain: str) -> set[str]:
             if not _HOSTNAME_RE.match(name):
                 continue
             page_hosts.add(name)
-        hosts |= page_hosts
 
-        log.info(f"  Page {page}: {len(rows)} rows -> {len(page_hosts)} hosts ({len(hosts)} total so far)")
+        log.info(f"  Page {page}: {len(rows)} rows -> {len(page_hosts)} hosts this page")
+        yield page_hosts
 
         last_seen = rows[-1][0]
         if len(rows) < PAGE_SIZE:
             break
         page += 1
         time.sleep(1)
-
-    return hosts
 
 
 # ── slug resolution ──────────────────────────────────────────
@@ -251,11 +275,7 @@ def resolve_slugs(hosts: set[str], ats: str) -> dict[str, str]:
         slug = resolver(f"https://{host}/")
         if not slug:
             continue
-        if ats != "workday" and _looks_like_infra(slug):
-            # Workday's slug is "company|wd|site_id" (pipe-delimited, not a
-            # bare hostname fragment) — the infra-keyword filter doesn't
-            # apply to it the same way and would misfire on legitimate
-            # site_ids that happen to contain a filtered token.
+        if _looks_like_infra(slug):
             rejected_infra += 1
             continue
         if slug not in out:
@@ -264,73 +284,6 @@ def resolve_slugs(hosts: set[str], ats: str) -> dict[str, str]:
         log.info(f"  filtered out {rejected_infra} likely-infra non-tenant hostnames")
     return out
 
-
-# ── Workday site_id live-resolve (async — see module docstring) ──────
-
-_WORKDAY_SITE_RE = re.compile(r"/(?:wday/cxs/[^/]+/)?([A-Za-z0-9_\-]+)(?:/job|/?$)")
-
-
-async def resolve_workday_site_id(session: aiohttp.ClientSession, host: str, sem: asyncio.Semaphore) -> str | None:
-    """One host is 'company.wdN.myworkdayjobs.com' — CT logs can prove
-    that much exists, but not which career SITE (site_id) it serves.
-    Workday redirects a bare tenant root to its default career site
-    (e.g. https://acme.wd12.myworkdayjobs.com/ -> .../CentreF), so a
-    single GET with redirects followed recovers site_id from the final
-    URL's path in the overwhelming majority of cases. Falls back to
-    scanning the landing page's own links for a /{site_id}/ pattern if
-    the redirect alone doesn't resolve it (some tenants serve content
-    directly at the root without redirecting)."""
-    url = f"https://{host}/"
-    async with sem:
-        try:
-            async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
-                                    headers={"User-Agent": USER_AGENT}) as resp:
-                final_path = resp.url.path.strip("/")
-                if final_path:
-                    site_id = final_path.split("/")[0]
-                    if site_id:
-                        return site_id
-                # Fallback: scan the page body for a career-site path.
-                try:
-                    text = await resp.text(errors="ignore")
-                except Exception:
-                    return None
-                m = _WORKDAY_SITE_RE.search(text)
-                if m:
-                    return m.group(1)
-        except Exception as e:
-            log.debug(f"    workday site_id fetch failed for {host}: {e}")
-    return None
-
-
-async def resolve_workday_slugs(hosts: set[str]) -> dict[str, str]:
-    """Combines the CT-confirmed host with a live-fetched site_id into
-    this project's real 'company|wd|site_id' slug format — the actual
-    gap-closing step described in WORKDAY_CAVEAT above."""
-    sem = asyncio.Semaphore(WORKDAY_CONCURRENCY)
-    out: dict[str, str] = {}
-
-    async with aiohttp.ClientSession() as session:
-        tasks = {host: asyncio.create_task(resolve_workday_site_id(session, host, sem)) for host in hosts}
-        done = 0
-        for host, task in tasks.items():
-            site_id = await task
-            done += 1
-            if done % 50 == 0 or done == len(tasks):
-                log.info(f"    workday site_id resolution: {done}/{len(tasks)}")
-            if not site_id:
-                continue
-            parts = host.split(".")
-            if len(parts) < 2:
-                continue
-            company, wd = parts[0], parts[1]
-            if not company or not wd:
-                continue
-            slug = f"{company}|{wd}|{site_id}"
-            if slug not in out:
-                out[slug] = host
-
-    return out
 
 
 # ── Supabase I/O (async) ──────────────────────────────────────
@@ -409,48 +362,116 @@ async def write_to_staging_table(session: aiohttp.ClientSession, ats: str, root_
 
 # ── orchestration ──────────────────────────────────────────
 
-async def run_platform(ats: str, root_domain: str) -> None:
-    log.info(f"── {ats} ({root_domain}) ──")
+async def run_platform(ats: str, root_domain: str, shard_start: str = "", shard_end: str | None = None,
+                        shard_label: str = "") -> None:
+    """Resolves + writes EACH crt.sh page to Supabase as soon as that
+    page comes back, instead of collecting every page for the whole
+    platform first and writing once at the very end — a run that gets
+    interrupted partway through (or just takes a long time on a big
+    platform) still has everything found so far safely written, per
+    explicit direction. query_certwatch_pages is a sync generator (see
+    its docstring for why crt.sh querying itself stays sync); this
+    function drives it from the async side, awaiting a write after each
+    page before pulling the next one.
 
-    # crt.sh sweep — sync (see module docstring)
-    hosts = query_certwatch(root_domain)
-    if not hosts:
-        log.warning(f"  0 hosts for {ats} — either genuinely nothing found, or every page failed.")
-        return
-    log.info(f"  {len(hosts)} distinct hostnames extracted")
+    shard_start/shard_end/shard_label: this platform's slice of the
+    alphabetically-sorted hostname range, when run as one of several
+    parallel GitHub Actions jobs covering the SAME platform (see
+    ctlog_extract.yml's hostname-sharding and query_certwatch_pages'
+    docstring for why this is safe to parallelize). Defaults cover the
+    platform's FULL range (no sharding) for local/manual runs."""
+    label = f" [shard {shard_label}]" if shard_label else ""
+    log.info(f"── {ats} ({root_domain}){label} ──")
 
-    if ats == "workday":
-        # Inline resolution — per explicit direction, not deferred to a
-        # separate step. See WORKDAY_CAVEAT above.
-        slugs = await resolve_workday_slugs(hosts)
-        log.info(f"  {len(slugs)} slugs resolved with live site_id lookup "
-                 f"({len(hosts) - len(slugs)} hosts had no resolvable site_id)")
-    else:
-        slugs = resolve_slugs(hosts, ats)
-        skip_hits = sum(1 for s in slugs if s in SKIP_SLUGS)
-        log.info(f"  {len(slugs)} distinct slugs resolved ({skip_hits} would've hit SKIP_SLUGS)")
-
-    if not slugs:
-        return
+    total_hosts = 0
+    total_slugs = 0
+    total_net_new = 0
+    saw_any_page = False
 
     async with aiohttp.ClientSession() as session:
         existing = await fetch_existing_slug_registry_slugs(session, ats)
-        net_new = set(slugs) - existing
-        log.info(f"  slug_registry already has {len(existing)} {ats} slugs — {len(net_new)} of this probe's {len(slugs)} are NET-NEW")
+        log.info(f"  slug_registry already has {len(existing)} {ats} slugs")
 
-        await write_to_staging_table(session, ats, root_domain, slugs)
+        for page_hosts in query_certwatch_pages(root_domain, shard_start, shard_end):
+            saw_any_page = True
+            if not page_hosts:
+                continue
+            total_hosts += len(page_hosts)
+
+            slugs = resolve_slugs(page_hosts, ats)
+            if not slugs:
+                continue
+            total_slugs += len(slugs)
+
+            net_new = set(slugs) - existing
+            total_net_new += len(net_new)
+            existing |= set(slugs)  # so a slug seen on page 2 that also
+                                     # appeared on page 1 isn't double-
+                                     # counted as net-new twice
+
+            await write_to_staging_table(session, ats, root_domain, slugs)
+
+    if not saw_any_page:
+        log.warning(f"  0 hosts for {ats}{label} — either genuinely nothing found in this range, or every page failed.")
+        return
+
+    log.info(f"  TOTAL{label}: {total_hosts} hostnames -> {total_slugs} slugs "
+             f"({total_net_new} net-new vs slug_registry) written across all pages")
 
 
-async def main_async(platform: str) -> None:
+# Default alphabet split for --shard-count N (over the platform's raw
+# hostname range, which always starts with a lowercase letter or digit —
+# see _HOSTNAME_RE). Evenly divides a-z0-9 into N contiguous ranges so
+# each shard's slice is roughly comparable in size (crt.sh hostnames
+# aren't perfectly uniform across the alphabet, but this is a reasonable
+# default absent real per-letter distribution data).
+_SHARD_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _shard_bounds(shard_index: int, shard_count: int) -> tuple[str, str | None]:
+    """Returns (start, end) NAME_VALUE bounds for shard_index of
+    shard_count total shards, splitting _SHARD_ALPHABET's first-character
+    range evenly. The last shard's end is None (no upper bound — covers
+    everything through the real end of data), so shard_count doesn't need
+    to evenly divide len(_SHARD_ALPHABET)."""
+    n = len(_SHARD_ALPHABET)
+    chunk = max(1, n // shard_count)
+    start_idx = shard_index * chunk
+    end_idx = start_idx + chunk
+    start = _SHARD_ALPHABET[start_idx] if start_idx < n else _SHARD_ALPHABET[-1]
+    if shard_index == shard_count - 1 or end_idx >= n:
+        end = None
+    else:
+        end = _SHARD_ALPHABET[end_idx]
+    # shard 0 starts at "" (covers everything before/including the first
+    # letter), not at _SHARD_ALPHABET[0] — NAME_VALUE > "" matches
+    # anything, same as the unsharded default.
+    return ("" if shard_index == 0 else start), end
+
+
+async def main_async(platform: str, shard_index: int | None, shard_count: int | None) -> None:
     root_domain = PLATFORMS[platform]
-    await run_platform(platform, root_domain)
+    if shard_index is not None and shard_count is not None:
+        start, end = _shard_bounds(shard_index, shard_count)
+        label = f"{shard_index}/{shard_count} ({start or '(start)'}–{end or '(end)'})"
+        await run_platform(platform, root_domain, shard_start=start, shard_end=end, shard_label=label)
+    else:
+        await run_platform(platform, root_domain)
 
 
 def main():
     parser = argparse.ArgumentParser(description="CT-logs extraction (async) — one ATS platform per run")
     parser.add_argument("--platform", choices=list(PLATFORMS.keys()), required=True)
+    parser.add_argument("--shard-index", type=int, default=None,
+                         help="This job's shard index (0-based) when splitting one platform's "
+                              "hostname range across multiple parallel GitHub Actions jobs")
+    parser.add_argument("--shard-count", type=int, default=None,
+                         help="Total number of shards splitting this platform's hostname range "
+                              "(must be passed together with --shard-index)")
     args = parser.parse_args()
-    asyncio.run(main_async(args.platform))
+    if (args.shard_index is None) != (args.shard_count is None):
+        parser.error("--shard-index and --shard-count must be passed together")
+    asyncio.run(main_async(args.platform, args.shard_index, args.shard_count))
 
 
 if __name__ == "__main__":
