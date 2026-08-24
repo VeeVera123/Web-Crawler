@@ -98,17 +98,26 @@ CRT_SH_DSN = "postgresql://guest@crt.sh:5432/certwatch"
 # net-new, BambooHR-scale," not merely nonzero. None of the three came
 # close, so they're not run again.
 #
-# NEW (2026-08): the next 5 largest genuinely SUBDOMAIN-based platforms
-# by existing slug_registry size (a rough proxy for real-world platform
-# scale) — personio (4,858 existing), recruitee (3,998), softgarden
-# (2,664), zoho (2,029), hrmdirect (1,544). None are BambooHR-scale
-# either, but all are cheap to try and confirmed structurally viable
-# (unlike ashby, which was considered and rejected — path-based,
-# jobs.ashbyhq.com/{slug}, same structural wall as greenhouse/lever: a
-# certificate can't carry a URL path, so a domain sweep returns ~0
-# tenant signal no matter how large the platform is).
+# bamboohr RETIRED 2026-08 — extraction complete (24,991 net-new,
+# confirmed the standout large-scale win). No longer run; its slot in
+# the active lineup below is filled by the next-largest viable
+# candidate, breezyhr.
+#
+# ACTIVE (2026-08): the largest genuinely SUBDOMAIN-based platforms by
+# existing slug_registry size (a rough proxy for real-world platform
+# scale) not yet extracted — breezyhr (5,578 existing — largest viable
+# remaining candidate; paylocity/joincom/workable/adp/smartrecruiters are
+# all larger but path- or query-param-based, structurally dead for CT
+# logs, same wall as greenhouse/lever/ashby), personio (4,858),
+# recruitee (3,998), softgarden (2,664), zoho (2,029), hrmdirect (1,544).
+# None are BambooHR-scale, but all are cheap to try and confirmed
+# structurally viable. taleo considered and rejected — needs BOTH a
+# subdomain AND a URL-path section (company|section), same shape as
+# workday's site_id problem, and workday already proved that live-resolve
+# pattern isn't worth it even at a larger scale (taleo has only 1,717
+# existing slugs, smaller than workday's 19,552).
 PLATFORMS = {
-    "bamboohr": "bamboohr.com",
+    "breezyhr": "breezy.hr",
     "personio": "jobs.personio.de",   # supplemental .com sweep handled separately — see PERSONIO_EXTRA_ROOT
     "recruitee": "recruitee.com",
     "softgarden": "softgarden.io",
