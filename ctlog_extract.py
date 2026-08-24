@@ -11,19 +11,28 @@ workflow (ctlog_verify.yml / ctlog_verify_async.py) per explicit
 direction, so a slow or flaky verification pass never blocks or reruns
 extraction, and vice versa.
 
-PLATFORMS THIS RUN (chosen deliberately — see track_list.md and the
-in-chat platform classification worked out before this script existed):
-  bamboohr, icims, rippling, teamtailor
-All four are genuinely SUBDOMAIN-per-tenant, which is the one shape CT
-logs can extract directly (a certificate covers a hostname, never a URL
-path or query string). Greenhouse/Lever/Ashby were deliberately EXCLUDED
-from this batch: they're path-based (boards.greenhouse.io/{slug}), so a
-%.root_domain CT sweep only ever returns the platform's own shared
-hostnames, zero tenant signal — a custom-domain-CNAME angle for those
-platforms is a real possibility but a fundamentally different
-(live-fetch-first, needs a company-name-to-domain mapping this project
-doesn't have yet) technique — separate follow-up, not part of this
-pipeline.
+CLASS C RETIRED (2026-08): every genuinely subdomain-per-tenant ATS has
+now been tried — bamboohr (24,991 net-new, the one big win, DONE),
+icims/rippling/teamtailor (64/86/37, retired as too-small), breezyhr/
+personio/recruitee/softgarden/zoho/hrmdirect/avature/eploy (all run,
+none BambooHR-scale). Class C is exhausted — nothing left to add there.
+This pipeline has now moved to CLASS B: platforms where CT logs confirm
+a subdomain/tenant exists, but the full slug ALSO needs a path or query
+segment a certificate can't carry. Unlike Class A (greenhouse/lever/
+workable/etc — one shared host, a cert gives ~0 tenant signal
+regardless), Class B gets a real, if partial, win from CT logs alone:
+the tenant subdomain itself is genuine signal, and a LIVE-RESOLVE step
+(fetching the confirmed host to recover the missing path/query piece)
+can complete the slug from there. See resolve_slugs_live() below.
+
+PLATFORMS THIS RUN — Class B, live-resolve:
+  taleo, oracle_cloud_hcm, successfactors
+workday was ALSO Class B and tried first (see below) — abandoned, not
+part of this run. jobadder/brassring were considered but are actually
+CLASS A, not B (both live entirely on ONE shared host —
+clientapps.jobadder.com/{client}/{board} and brassring.com?partnerId=
+&siteId= — no subdomain-per-tenant shape at all, so a CT sweep of their
+root domain returns zero tenant signal, same wall as greenhouse/lever).
 
 WORKDAY — TRIED, ABANDONED (2026-08): this project's Workday slug format
 is "{company}|{wd_number}|{site_id}" (see discovery.py's
@@ -38,7 +47,10 @@ implementation-ops subdomains — wd117, dr-cp2-wd12, stgprod-wd500, etc,
 confirmed non-public via DNS failure), not customer tenants. What was
 left after filtering infra and resolving site_id was single-digit slug
 counts, all already known. Removed from this pipeline entirely rather
-than kept as permanent near-zero-yield dead weight.
+than kept as permanent near-zero-yield dead weight. Taleo/Oracle Cloud
+HCM/SuccessFactors get a fresh try since none of them share Workday's
+"mostly internal infra" problem (nothing in their existing slug_registry
+counts suggests that), but the same abandon-if-mostly-noise bar applies.
 
 WHY ASYNC/AIOHTTP: crt.sh's own guest Postgres connection is NOT
 parallelized here — it's a single psycopg2 connection, one page at a
@@ -50,17 +62,17 @@ matrix-sharding by PLATFORM (see ctlog_extract.yml) is what actually
 makes multiple platforms fast — they run as fully independent GitHub
 Actions jobs at once, not serialized. What genuinely benefits from
 asyncio WITHIN one platform's shard is everything after the SQL page
-comes back — resolving hostnames to slugs and writing to Supabase are
-both handled per-page (see run_platform), so a platform's results land
-in ctlog_probe_results incrementally as crt.sh pages complete, not only
-once the entire sweep finishes.
+comes back — resolving hostnames to slugs (now including the live-fetch
+step for Class B) and writing to Supabase are both handled per-page (see
+run_platform), so a platform's results land in ctlog_probe_results
+incrementally as crt.sh pages complete, not only once the entire sweep
+finishes.
 
 Usage:
     pip install aiohttp psycopg2-binary python-dotenv
-    python ctlog_extract.py --platform breezyhr
-    python ctlog_extract.py --platform personio
-    python ctlog_extract.py --platform avature
-    python ctlog_extract.py --platform eploy
+    python ctlog_extract.py --platform taleo
+    python ctlog_extract.py --platform oracle_cloud_hcm
+    python ctlog_extract.py --platform successfactors
 """
 import argparse
 import asyncio
@@ -88,48 +100,34 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 CRT_SH_DSN = "postgresql://guest@crt.sh:5432/certwatch"
 
-# Retired 2026-08: rippling (86 net-new), icims (64 — wildcard-cert
-# coverage, confirmed separately via ctlogs_icims_diagnostic.py before
-# that script was deleted), teamtailor (37, one shard's worth — full run
-# would be somewhat more but nowhere near thousands). All three are
-# genuinely real, confirmed-viable sources — their already-extracted rows
-# still go through Phase 2 verification — but per explicit direction the
-# bar for an ONGOING platform slot in this pipeline is "thousands of
-# net-new, BambooHR-scale," not merely nonzero. None of the three came
-# close, so they're not run again.
-#
-# bamboohr RETIRED 2026-08 — extraction complete (24,991 net-new,
-# confirmed the standout large-scale win). No longer run; its slot in
-# the active lineup below is filled by the next-largest viable
-# candidate, breezyhr.
-#
-# ACTIVE (2026-08): the largest genuinely SUBDOMAIN-based platforms by
-# existing slug_registry size (a rough proxy for real-world platform
-# scale) not yet extracted — breezyhr (5,578 existing — largest viable
-# remaining candidate; paylocity/joincom/workable/adp/smartrecruiters are
-# all larger but path- or query-param-based, structurally dead for CT
-# logs, same wall as greenhouse/lever/ashby), personio (4,858),
-# recruitee (3,998), softgarden (2,664), zoho (2,029), hrmdirect (1,544),
-# avature (3,217), eploy (209). None are BambooHR-scale, but all are
-# cheap to try and confirmed structurally viable — both avature and
-# eploy resolve off nothing but the subdomain (see discovery.py's
-# _url_to_slug_avature / _url_to_slug_eploy), same clean shape as the
-# rest of this lineup. taleo considered and rejected — needs BOTH a
-# subdomain AND a URL-path section (company|section), same shape as
-# workday's site_id problem, and workday already proved that live-resolve
-# pattern isn't worth it even at a larger scale (taleo has only 1,717
-# existing slugs, smaller than workday's 19,552).
+# CLASS C RETIRED (2026-08) — every genuinely subdomain-per-tenant ATS
+# has been tried: bamboohr (24,991 net-new, DONE), icims/rippling/
+# teamtailor (64/86/37, retired too-small), breezyhr/personio/recruitee/
+# softgarden/zoho/hrmdirect/avature/eploy (all run, none BambooHR-scale).
+# Nothing left in Class C — see track_list.md / the Class C task for the
+# full history. This pipeline now runs CLASS B instead: subdomain
+# confirmable via CT logs, but the full slug needs a live-resolve fetch
+# to recover a path/query segment no certificate can carry (see module
+# docstring and resolve_slugs_live() below).
 PLATFORMS = {
-    "breezyhr": "breezy.hr",
-    "personio": "jobs.personio.de",   # supplemental .com sweep handled separately — see PERSONIO_EXTRA_ROOT
-    "recruitee": "recruitee.com",
-    "softgarden": "softgarden.io",
-    "zoho": "zohorecruit.com",
-    "hrmdirect": "hrmdirect.com",
-    "avature": "avature.net",         # 3,217 existing slugs — largest remaining Class C candidate
-    "eploy": "eploy.net",             # 209 existing slugs — small but cheap/clean subdomain shape
+    "taleo": "taleo.net",
+    "oracle_cloud_hcm": "oraclecloud.com",
+    "successfactors": "successfactors.com",   # sapsf.com/.eu and successfactors.eu tenants exist too — see SUCCESSFACTORS_EXTRA_ROOTS
 }
-PERSONIO_EXTRA_ROOT = "jobs.personio.com"
+SUCCESSFACTORS_EXTRA_ROOTS = ["successfactors.eu", "sapsf.com", "sapsf.eu"]
+
+# LIVE-RESOLVE: platforms whose resolver in discovery.py can't produce a
+# full slug from the hostname alone and needs the actual page fetched to
+# recover a path/query segment. taleo STRICTLY needs this (its resolver
+# returns None with no /careersection/{section}/ match). oracle_cloud_hcm
+# and successfactors both have a graceful hostname-only FALLBACK slug
+# already built into their discovery.py resolvers (host_prefix alone /
+# instance alone) — live-resolve still gets tried first since a fuller
+# slug is strictly better, but a failed/timed-out fetch doesn't lose the
+# candidate entirely for these two, just leaves it as the partial form.
+LIVE_RESOLVE_ATS = {"taleo", "oracle_cloud_hcm", "successfactors"}
+LIVE_RESOLVE_CONCURRENCY = 25
+LIVE_RESOLVE_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 _HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$")
 PAGE_SIZE = 5000
@@ -330,6 +328,82 @@ def resolve_slugs(hosts: set[str], ats: str) -> dict[str, str]:
     return out
 
 
+# Landing path guessed per-platform so the live fetch has a real shot at
+# reaching a URL the resolver can find a path/query segment on, rather
+# than just hitting "/" (which for all three of these platforms redirects
+# to a generic tenant landing page with no careersection/site/company
+# param visible yet). Best-effort — if the guess 404s or the real page
+# needs JS to reach that segment, resolve_slugs_live() still falls back
+# to whatever URL_TO_SLUG produces off the bare hostname (None for taleo,
+# the host-prefix/instance-only partial slug for oracle/successfactors).
+_LIVE_RESOLVE_PATH = {
+    "taleo": "/careersection/2/jobsearch.ftl",
+    "oracle_cloud_hcm": "/hcmUI/CandidateExperience/en/sites/CX_1",
+    "successfactors": "/career",
+}
+
+
+async def resolve_slugs_live(session: aiohttp.ClientSession, hosts: set[str], ats: str) -> dict[str, str]:
+    """Class B version of resolve_slugs(): CT logs only confirm the
+    HOSTNAME exists, but taleo/oracle_cloud_hcm/successfactors also need
+    a path or query segment (careersection id, site number, company key)
+    that no certificate carries — see module docstring. Live-fetches each
+    candidate host (bounded concurrency, short timeout — this hits real
+    third-party servers, same caution as Phase 2 verification) and feeds
+    the RESOLVED final URL (after redirects) through the same
+    URL_TO_SLUG resolver used everywhere else, so a live-resolve success
+    produces the exact same slug shape discovery.py already expects.
+    Falls back to the bare-hostname resolver result (None for taleo,
+    a partial host-only slug for oracle/successfactors) on any fetch
+    failure, so a flaky third-party server never loses a candidate
+    entirely for the two platforms with a graceful fallback."""
+    resolver = URL_TO_SLUG.get(ats)
+    if not resolver:
+        log.error(f"No URL_TO_SLUG resolver registered for '{ats}'")
+        return {}
+    guess_path = _LIVE_RESOLVE_PATH.get(ats, "/")
+    sem = asyncio.Semaphore(LIVE_RESOLVE_CONCURRENCY)
+    out: dict[str, str] = {}
+    lock = asyncio.Lock()
+    live_hits = 0
+    fallback_hits = 0
+    dead = 0
+
+    async def _resolve_one(host: str):
+        nonlocal live_hits, fallback_hits, dead
+        fallback_slug = resolver(f"https://{host}/")
+        async with sem:
+            try:
+                async with session.get(
+                    f"https://{host}{guess_path}",
+                    timeout=LIVE_RESOLVE_TIMEOUT,
+                    headers={"User-Agent": USER_AGENT},
+                    allow_redirects=True,
+                ) as r:
+                    final_url = str(r.url)
+                    live_slug = resolver(final_url)
+            except Exception:
+                live_slug = None
+
+        slug = live_slug or fallback_slug
+        if not slug:
+            dead += 1
+            return
+        if _looks_like_infra(slug):
+            return
+        async with lock:
+            if slug not in out:
+                out[slug] = host
+                if live_slug:
+                    live_hits += 1
+                else:
+                    fallback_hits += 1
+
+    await asyncio.gather(*(_resolve_one(h) for h in hosts))
+    log.info(f"  live-resolve: {live_hits} full slugs, {fallback_hits} hostname-only "
+             f"fallback slugs, {dead} produced nothing (no fallback + fetch failed)")
+    return out
+
 
 # ── Supabase I/O (async) ──────────────────────────────────────
 
@@ -443,7 +517,10 @@ async def run_platform(ats: str, root_domain: str, shard_start: str = "", shard_
                 continue
             total_hosts += len(page_hosts)
 
-            slugs = resolve_slugs(page_hosts, ats)
+            if ats in LIVE_RESOLVE_ATS:
+                slugs = await resolve_slugs_live(session, page_hosts, ats)
+            else:
+                slugs = resolve_slugs(page_hosts, ats)
             if not slugs:
                 continue
             total_slugs += len(slugs)
@@ -504,6 +581,13 @@ async def main_async(platform: str, shard_index: int | None, shard_count: int | 
         # slice of BOTH domains rather than needing its own separate
         # matrix entry.
         root_domains.append(PERSONIO_EXTRA_ROOT)
+    if platform == "successfactors":
+        # SAP SuccessFactors tenants are split across FOUR root domains
+        # (.com/.eu variants of both successfactors.* and sapsf.* —
+        # both are real, live SAP-owned domains for this product, not a
+        # typo) — same "same shard bounds, independent sweeps" pattern
+        # as Personio above.
+        root_domains.extend(SUCCESSFACTORS_EXTRA_ROOTS)
 
     if shard_index is not None and shard_count is not None:
         start, end = _shard_bounds(shard_index, shard_count)
