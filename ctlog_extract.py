@@ -57,10 +57,10 @@ once the entire sweep finishes.
 
 Usage:
     pip install aiohttp psycopg2-binary python-dotenv
-    python ctlog_extract.py --platform bamboohr
-    python ctlog_extract.py --platform icims
-    python ctlog_extract.py --platform rippling
-    python ctlog_extract.py --platform teamtailor
+    python ctlog_extract.py --platform breezyhr
+    python ctlog_extract.py --platform personio
+    python ctlog_extract.py --platform avature
+    python ctlog_extract.py --platform eploy
 """
 import argparse
 import asyncio
@@ -109,9 +109,12 @@ CRT_SH_DSN = "postgresql://guest@crt.sh:5432/certwatch"
 # remaining candidate; paylocity/joincom/workable/adp/smartrecruiters are
 # all larger but path- or query-param-based, structurally dead for CT
 # logs, same wall as greenhouse/lever/ashby), personio (4,858),
-# recruitee (3,998), softgarden (2,664), zoho (2,029), hrmdirect (1,544).
-# None are BambooHR-scale, but all are cheap to try and confirmed
-# structurally viable. taleo considered and rejected — needs BOTH a
+# recruitee (3,998), softgarden (2,664), zoho (2,029), hrmdirect (1,544),
+# avature (3,217), eploy (209). None are BambooHR-scale, but all are
+# cheap to try and confirmed structurally viable — both avature and
+# eploy resolve off nothing but the subdomain (see discovery.py's
+# _url_to_slug_avature / _url_to_slug_eploy), same clean shape as the
+# rest of this lineup. taleo considered and rejected — needs BOTH a
 # subdomain AND a URL-path section (company|section), same shape as
 # workday's site_id problem, and workday already proved that live-resolve
 # pattern isn't worth it even at a larger scale (taleo has only 1,717
@@ -123,6 +126,8 @@ PLATFORMS = {
     "softgarden": "softgarden.io",
     "zoho": "zohorecruit.com",
     "hrmdirect": "hrmdirect.com",
+    "avature": "avature.net",         # 3,217 existing slugs — largest remaining Class C candidate
+    "eploy": "eploy.net",             # 209 existing slugs — small but cheap/clean subdomain shape
 }
 PERSONIO_EXTRA_ROOT = "jobs.personio.com"
 
