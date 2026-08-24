@@ -2,21 +2,32 @@
 CLASS A SEED-AND-PROBE EXTRACTION (2026-08) — a genuinely different
 technique from the CT-logs pipeline (ctlog_extract.py), built specifically
 for the platforms CT logs structurally can't touch: Greenhouse, Lever,
-Ashby, Workable. See CTLOGS_CLASS_A_HELP_REQUEST.md and
+Ashby, Workable, SmartRecruiters. See CTLOGS_CLASS_A_HELP_REQUEST.md and
 CLASS_A_SUGGESTIONS_REVIEW.md for the full background — short version:
 these platforms put the company identifier in a URL PATH, not a hostname
 (e.g. boards.greenhouse.io/{slug}), and a TLS certificate can never carry
 a path. CT logs return zero tenant signal for them no matter how large
 the platform is.
 
-WHY THIS WORKS INSTEAD: all four platforms expose a real, documented,
-UNAUTHENTICATED public job-board API keyed by the company's slug:
-  Greenhouse: boards-api.greenhouse.io/v1/boards/{slug}/jobs
-  Lever:      api.lever.co/v0/postings/{slug}?mode=json
-  Ashby:      api.ashbyhq.com/posting-api/job-board/{slug}
-  Workable:   www.workable.com/api/accounts/{slug}?details=true
+NOT ALL OF CLASS A IS COVERED — only these five have a CONFIRMED public,
+unauthenticated, per-slug probeable endpoint (checked directly, not
+assumed — see CLASS_A_SUGGESTIONS_REVIEW.md for what was checked and
+ruled out). join.com, Jobvite, JobAdder, BrassRing, ADP, Paylocity, and
+Folks HR are also Class A but do NOT have a confirmed probeable endpoint
+wired in here yet — adding one without confirming it first risks
+repeating the SmartRecruiters-directory mistake (a suggested endpoint
+that turned out not to exist on inspection).
+
+WHY THIS WORKS INSTEAD: all five platforms expose a real, documented (or
+directly confirmed) UNAUTHENTICATED public job-board API keyed by the
+company's slug:
+  Greenhouse:      boards-api.greenhouse.io/v1/boards/{slug}/jobs
+  Lever:           api.lever.co/v0/postings/{slug}?mode=json
+  Ashby:           api.ashbyhq.com/posting-api/job-board/{slug}
+  Workable:        www.workable.com/api/accounts/{slug}?details=true
+  SmartRecruiters: api.smartrecruiters.com/v1/companies/{slug}/postings
 Each returns 200 for a real slug and 404 for a wrong guess. That turns
-"discover Greenhouse/Lever/Ashby/Workable companies" into "cheaply check
+"discover Greenhouse/Lever/Ashby/Workable/SmartRecruiters companies" into "cheaply check
 whether a GUESSED slug is real" — i.e. a seed-and-probe problem, not a
 crawl.
 
@@ -110,10 +121,14 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=12)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-PROBE_CONCURRENCY = 40  # these are cheap 200/404 HEAD-ish checks against
+PROBE_CONCURRENCY = 80  # these are cheap 200/404 HEAD-ish checks against
                           # well-provisioned vendor APIs, not crt.sh — safe
                           # to run much more concurrent than the CT/live-
-                          # resolve steps elsewhere in this project.
+                          # resolve steps elsewhere in this project. Raised
+                          # from 40 — with the full PDL dataset in play
+                          # (millions of candidates vs. the original ~6k
+                          # YC-only run), throughput matters a lot more
+                          # than it did for a quick small-list pass.
 
 # ── platform probe URLs — each must return something CLEARLY different
 # for a real vs. fake slug (200 w/ real JSON body vs. 404), confirmed
@@ -123,6 +138,12 @@ PROBE_URL = {
     "lever": "https://api.lever.co/v0/postings/{slug}?mode=json",
     "ashby": "https://api.ashbyhq.com/posting-api/job-board/{slug}",
     "workable": "https://www.workable.com/api/accounts/{slug}?details=true",
+    # SmartRecruiters has NO public company-directory (checked and
+    # confirmed absent — see CLASS_A_SUGGESTIONS_REVIEW.md), but DOES
+    # have a real per-company postings endpoint that 200s for a real
+    # company id and 404s for a wrong guess — same probeable shape as
+    # the other four, just without a bulk listing endpoint of its own.
+    "smartrecruiters": "https://api.smartrecruiters.com/v1/companies/{slug}/postings",
 }
 
 WORKABLE_FEED_URL = "https://www.workable.com/boards/workable.xml"
@@ -378,6 +399,15 @@ def _looks_like_real_board(ats: str, body: str) -> bool:
         return '"jobs"' in lowered or '"joblist"' in lowered or '"organizationname"' in lowered
     if ats == "workable":
         return '"name"' in lowered or '"jobs"' in lowered
+    if ats == "smartrecruiters":
+        # SmartRecruiters' postings endpoint returns a JSON object with a
+        # "content" array (possibly empty for a real company with zero
+        # current postings — still a valid hit, same "empty board still
+        # counts" reasoning as Lever above) and a "totalFound" count field
+        # on a real company id; a bad id 404s outright rather than 200ing
+        # an empty shell, so body-shape checking here is a secondary
+        # safety net, not the primary signal.
+        return '"content"' in lowered or '"totalfound"' in lowered
     return True
 
 
@@ -424,8 +454,22 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
                 # at most one domain-derived variant first — see its docstring
             tasks.append(_probe_one(session, sem, ats, name, variants, domain_variant_count))
 
-        BATCH = 500  # write incrementally, same "don't lose progress on
-                      # an interrupted run" principle as ctlog_extract.py
+        BATCH = 5000  # write incrementally, same "don't lose progress on
+                      # an interrupted run" principle as ctlog_extract.py.
+                      # This does NOT control how big each Supabase HTTP
+                      # write is — write_to_staging_table already caps
+                      # every actual write at 1000 rows/request regardless
+                      # of BATCH (see chunk_size there). BATCH only
+                      # controls how many probes complete before a flush
+                      # is triggered — since the real hit rate is well
+                      # under 1%, a SMALL batch mostly means frequent,
+                      # tiny, mostly-empty write calls (pure overhead), not
+                      # faster delivery of real hits. 5000 probes complete
+                      # in well under a minute at PROBE_CONCURRENCY=80, so
+                      # this still writes many times over a long run (an
+                      # interrupted run loses at most one batch's worth),
+                      # while cutting total request overhead a lot
+                      # compared to a smaller batch.
         for i in range(0, len(tasks), BATCH):
             batch = tasks[i:i + BATCH]
             results = await asyncio.gather(*batch)
