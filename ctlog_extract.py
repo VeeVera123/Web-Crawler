@@ -88,12 +88,34 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 CRT_SH_DSN = "postgresql://guest@crt.sh:5432/certwatch"
 
+# Retired 2026-08: rippling (86 net-new), icims (64 — wildcard-cert
+# coverage, confirmed separately via ctlogs_icims_diagnostic.py before
+# that script was deleted), teamtailor (37, one shard's worth — full run
+# would be somewhat more but nowhere near thousands). All three are
+# genuinely real, confirmed-viable sources — their already-extracted rows
+# still go through Phase 2 verification — but per explicit direction the
+# bar for an ONGOING platform slot in this pipeline is "thousands of
+# net-new, BambooHR-scale," not merely nonzero. None of the three came
+# close, so they're not run again.
+#
+# NEW (2026-08): the next 5 largest genuinely SUBDOMAIN-based platforms
+# by existing slug_registry size (a rough proxy for real-world platform
+# scale) — personio (4,858 existing), recruitee (3,998), softgarden
+# (2,664), zoho (2,029), hrmdirect (1,544). None are BambooHR-scale
+# either, but all are cheap to try and confirmed structurally viable
+# (unlike ashby, which was considered and rejected — path-based,
+# jobs.ashbyhq.com/{slug}, same structural wall as greenhouse/lever: a
+# certificate can't carry a URL path, so a domain sweep returns ~0
+# tenant signal no matter how large the platform is).
 PLATFORMS = {
     "bamboohr": "bamboohr.com",
-    "icims": "icims.com",
-    "rippling": "rippling.com",
-    "teamtailor": "teamtailor.com",
+    "personio": "jobs.personio.de",   # supplemental .com sweep handled separately — see PERSONIO_EXTRA_ROOT
+    "recruitee": "recruitee.com",
+    "softgarden": "softgarden.io",
+    "zoho": "zohorecruit.com",
+    "hrmdirect": "hrmdirect.com",
 }
+PERSONIO_EXTRA_ROOT = "jobs.personio.com"
 
 _HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$")
 PAGE_SIZE = 5000
@@ -460,12 +482,23 @@ def _shard_bounds(shard_index: int, shard_count: int) -> tuple[str, str | None]:
 
 async def main_async(platform: str, shard_index: int | None, shard_count: int | None) -> None:
     root_domain = PLATFORMS[platform]
+    root_domains = [root_domain]
+    if platform == "personio":
+        # Personio splits tenants across TWO root domains (.de and .com)
+        # — both get the SAME shard bounds (they're independent sweeps,
+        # not one combined range), so a shard covers its alphabetical
+        # slice of BOTH domains rather than needing its own separate
+        # matrix entry.
+        root_domains.append(PERSONIO_EXTRA_ROOT)
+
     if shard_index is not None and shard_count is not None:
         start, end = _shard_bounds(shard_index, shard_count)
         label = f"{shard_index}/{shard_count} ({start or '(start)'}–{end or '(end)'})"
-        await run_platform(platform, root_domain, shard_start=start, shard_end=end, shard_label=label)
+        for rd in root_domains:
+            await run_platform(platform, rd, shard_start=start, shard_end=end, shard_label=label)
     else:
-        await run_platform(platform, root_domain)
+        for rd in root_domains:
+            await run_platform(platform, rd)
 
 
 def main():
