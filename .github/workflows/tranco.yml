@@ -1,0 +1,144 @@
+name: Tranco Crawl (Bulk Discovery)
+
+# Replaces the retired host_crawl.yml (see ./host crawl/ in the repo —
+# kept intact for reference/possible future reactivation, not deleted).
+# Seeded from the Tranco top-sites list (tranco-list.eu) instead of
+# Common Crawl's Host Index — see tranco_seed.py's module docstring for
+# why. This workflow is intentionally much simpler than host_crawl.yml:
+# Tranco is a single fixed-size (~1M row) list, not ~30 huge Parquet
+# files per crawl partition needing per-file draining/dedup-tracking, so
+# there's no seed->crawl->finalize->re-dispatch chain here — just seed
+# once (or on demand), then crawl whatever's queued in t_seeding on a
+# schedule. Re-running crawl repeatedly keeps expanding coverage since
+# outcome IS NULL rows are what gets claimed each time (see
+# tranco_crawl.py's checkpointing docstring).
+on:
+  schedule:
+    - cron: "0 4 * * 1,4"   # Monday + Thursday, 4:00 UTC — same slot the
+                             # retired host_crawl.yml used, so it doesn't
+                             # collide with discovery.yml (Sunday) or
+                             # daily_scan.yml (daily).
+  workflow_dispatch:
+    inputs:
+      max_runtime_minutes:
+        description: "Cap runtime per shard, in minutes (default: full 5.5h budget)"
+        required: false
+        default: ""
+      reseed:
+        description: "Re-run the Tranco seed step before crawling (fetches the current daily list and upserts — existing hosts are left alone via on_conflict=host, so this is safe to run repeatedly and just adds any newly-ranked domains)"
+        required: false
+        type: boolean
+        default: false
+      seed_only:
+        description: "Only run the seed step — skip the crawl shards this run"
+        required: false
+        type: boolean
+        default: false
+      top_n:
+        description: "Only used when seeding: cap seeding to top N ranks (default 1000000 = Tranco's full daily list). Pass 0 for no cutoff."
+        required: false
+        default: "1000000"
+
+concurrency:
+  group: tranco-crawl-${{ github.ref }}
+  # cancel-in-progress: true (2026-08 fix) — this was false, copied over
+  # from the retired host_crawl.yml where it made sense: that workflow
+  # re-dispatches ITSELF via the GitHub API when a batch finishes, so
+  # cancel-in-progress: false stopped that auto-triggered re-dispatch from
+  # cancelling a run still in progress. tranco.yml has NO such
+  # self-re-dispatch — it only ever runs from a manual trigger or the
+  # twice-weekly schedule — so there was never a run this setting needed
+  # to protect, and it was instead just sitting there blocking YOUR manual
+  # "Cancel workflow" clicks from actually stopping anything (confirmed:
+  # user reported a workflow "refuses to cancel" — this is the setting
+  # responsible). true is the correct value for a workflow with no
+  # self-chaining: clicking Cancel now actually cancels every queued/
+  # running job in this concurrency group, including all 16 crawl shards.
+  cancel-in-progress: true
+
+# ── Concurrency budget ──
+# GitHub Actions free tier's real hard ceiling is 20 concurrent jobs
+# ACCOUNT-WIDE. This repo already runs daily_scan.yml (9 concurrent: 8 ATS
+# shards + 1 job-boards job) and discovery.yml (9 concurrent). This
+# workflow uses 16 shards — not 20 — deliberately leaving headroom, same
+# reasoning as the retired host_crawl.yml.
+jobs:
+  seed:
+    if: github.event.inputs.reseed == 'true' || github.event.inputs.seed_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install python-dotenv requests
+
+      - name: Seed t_seeding from the Tranco top-sites list
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python tranco_seed.py --top-n "${{ github.event.inputs.top_n || '1000000' }}"
+
+  crawl:
+    needs: seed
+    # Runs whenever seed_only isn't set, AND seed didn't outright fail.
+    # MUST be wrapped in always() — GitHub Actions' default behavior is
+    # to skip a job automatically the moment ANY of its `needs` jobs was
+    # itself skipped, BEFORE this if: condition is even evaluated. seed
+    # is skipped on every normal run (its own if: only fires when reseed
+    # or seed_only is checked) — so without always() here, crawl was
+    # silently skipped on every single unchecked-boxes run, no matter
+    # what this condition said (confirmed live: leaving both boxes
+    # unchecked produced a run where NEITHER job executed). always()
+    # forces this job to actually be considered regardless of seed's
+    # outcome, so the if: below is the only thing that decides.
+    if: |
+      always() &&
+      github.event.inputs.seed_only != 'true' &&
+      needs.seed.result != 'failure' && needs.seed.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 5h50m — under the 6h hard cap, leaves ~10min
+                            # for setup (checkout, pip install) before the
+                            # job itself would be force-killed
+    strategy:
+      fail-fast: false     # one bad/slow shard shouldn't cancel the rest
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp selectolax python-dotenv requests
+
+      - name: "Run Tranco crawl (shard ${{ matrix.shard }}/16)"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python tranco_crawl.py \
+            --shard ${{ matrix.shard }} \
+            --total-shards 16 \
+            ${{ github.event.inputs.max_runtime_minutes && format('--max-runtime-seconds {0}', github.event.inputs.max_runtime_minutes) || '' }}
+
+# NOTE: no finalize/re-dispatch job here, unlike the retired host_crawl.yml.
+# t_seeding is never cleared between runs — outcome IS NULL is what marks
+# a host as still-queued, and tranco_claim_batch() already skips anything
+# already resolved, so repeated scheduled runs just keep expanding
+# coverage over the same fixed ~1M-row queue instead of needing to be
+# refilled and drained in per-file chunks the way Common Crawl's Host
+# Index required.
