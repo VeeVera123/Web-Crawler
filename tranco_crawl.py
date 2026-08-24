@@ -200,6 +200,13 @@ class Stats:
         self.by_ats: dict[str, int] = {}
         self.robots_cache_hits = 0
         self.robots_fetches = 0
+        self.flush_failures = 0  # batches whose flush failed even after
+                                  # _FLUSH_RETRIES retries — those hosts'
+                                  # results were NOT recorded this run;
+                                  # they'll auto-release (30min staleness)
+                                  # and get re-claimed later, but this
+                                  # counter makes the loss visible in the
+                                  # run summary instead of silent.
 
     def summary(self) -> str:
         top_ats = sorted(self.by_ats.items(), key=lambda kv: -kv[1])[:10]
@@ -211,6 +218,7 @@ class Stats:
             f"top ATS hits: {ats_line} | "
             f"robots.txt cache hit rate: "
             f"{self.robots_cache_hits}/{self.robots_cache_hits + self.robots_fetches}"
+            f"{' | flush_failures=' + str(self.flush_failures) if self.flush_failures else ''}"
         )
 
 
@@ -579,6 +587,30 @@ def _claim_batch(shard: int, total_shards: int, batch_size: int) -> list[dict]:
     raise _ClaimBatchError(str(last_err))
 
 
+class _FlushError(Exception):
+    """Raised by _flush_results after exhausting retries on a genuine
+    flush failure. This used to be silently swallowed (log.error and move
+    on) — the actual root cause of "not all of them were checked": a
+    failed flush POST left that whole batch's hosts stuck at
+    claimed_at=<today>/outcome=NULL with NO retry and NO record that
+    anything went wrong beyond a log line, while the crawler just claimed
+    the next batch and kept going. Confirmed live via t_seeding: every one
+    of the 16 shards showed almost exactly half its claimed rows resolved
+    and half stuck, in batch-sized (2000-row) chunks, throughout the
+    entire run — not a runtime-limit tail cutoff, but a roughly-constant
+    flush failure rate compounding batch after batch. Paired with the
+    2026-08 DB fix (claimed_at is now a real timestamp and
+    tranco_claim_batch releases anything >30min stale regardless of
+    calendar day), a batch that fails to flush even after retries here
+    will still get automatically released and re-claimed later in the
+    SAME run, instead of being an invisible, same-day-unrecoverable
+    permanent loss."""
+
+
+_FLUSH_RETRIES = 5
+_FLUSH_BACKOFF_SECONDS = 5  # doubles each retry: 5s, 10s, 20s, 40s, 80s
+
+
 def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
     """Write this batch's outcomes. visited_rows are UPSERTED into
     t_seeding — this fills in outcome/ats/slug on the SAME row that was
@@ -593,31 +625,71 @@ def _flush_results(visited_rows: list[dict], found_rows: list[dict]):
     NOTE (2026-08): t_seeding used to also have added_at/checked_at date
     columns — pure informational timestamps nothing in the pipeline read
     back. Dropped to reduce dead weight; claimed_at stays, since
-    tranco_claim_batch's queue logic genuinely depends on it."""
+    tranco_claim_batch's queue logic genuinely depends on it.
+
+    Retries each POST up to _FLUSH_RETRIES times with backoff (same
+    pattern as _claim_batch) before raising _FlushError — see that
+    class's docstring for why a bare log-and-continue was actually the
+    root cause of incomplete runs. Raises on either visited_rows or
+    found_rows failing after exhausting retries; caller (run()) decides
+    what to do about it."""
     import requests
+    errors = []
+
     if visited_rows:
-        try:
-            r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/t_seeding",
-                headers=_sb_headers("resolution=merge-duplicates"),
-                json=visited_rows, timeout=60,
-                params={"on_conflict": "host"},
-            )
-            r.raise_for_status()
-        except Exception as e:
-            log.error(f"Failed to flush {len(visited_rows)} visited rows: {e}")
+        last_err = None
+        for attempt in range(1, _FLUSH_RETRIES + 1):
+            try:
+                r = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/t_seeding",
+                    headers=_sb_headers("resolution=merge-duplicates"),
+                    json=visited_rows, timeout=60,
+                    params={"on_conflict": "host"},
+                )
+                r.raise_for_status()
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < _FLUSH_RETRIES:
+                    wait = _FLUSH_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    log.warning(f"Flush of {len(visited_rows)} visited rows "
+                                f"attempt {attempt}/{_FLUSH_RETRIES} failed: "
+                                f"{e} — retrying in {wait}s.")
+                    time.sleep(wait)
+        if last_err is not None:
+            log.error(f"Failed to flush {len(visited_rows)} visited rows "
+                      f"after {_FLUSH_RETRIES} attempts: {last_err}")
+            errors.append(f"visited_rows: {last_err}")
 
     if found_rows:
-        try:
-            r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/t_slugs",
-                headers=_sb_headers("resolution=merge-duplicates"),
-                json=found_rows, timeout=60,
-                params={"on_conflict": "ats,slug"},
-            )
-            r.raise_for_status()
-        except Exception as e:
-            log.error(f"Failed to flush {len(found_rows)} found rows: {e}")
+        last_err = None
+        for attempt in range(1, _FLUSH_RETRIES + 1):
+            try:
+                r = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/t_slugs",
+                    headers=_sb_headers("resolution=merge-duplicates"),
+                    json=found_rows, timeout=60,
+                    params={"on_conflict": "ats,slug"},
+                )
+                r.raise_for_status()
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < _FLUSH_RETRIES:
+                    wait = _FLUSH_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    log.warning(f"Flush of {len(found_rows)} found rows "
+                                f"attempt {attempt}/{_FLUSH_RETRIES} failed: "
+                                f"{e} — retrying in {wait}s.")
+                    time.sleep(wait)
+        if last_err is not None:
+            log.error(f"Failed to flush {len(found_rows)} found rows "
+                      f"after {_FLUSH_RETRIES} attempts: {last_err}")
+            errors.append(f"found_rows: {last_err}")
+
+    if errors:
+        raise _FlushError("; ".join(errors))
 
 
 async def _run_batch(hosts: list[str]) -> list[dict]:
@@ -652,6 +724,19 @@ def run(shard: int, total_shards: int, max_runtime: float, dry_run: bool):
     # down) rather than ordinary transient noise. A successful claim
     # anywhere resets this counter back to 0.
     _MAX_CONSECUTIVE_CLAIM_FAILURES = 5
+
+    consecutive_flush_failures = 0
+    # Same idea as _MAX_CONSECUTIVE_CLAIM_FAILURES but for flushes: each
+    # failure here has already survived _FLUSH_RETRIES internal retries,
+    # so several of THOSE in a row means something persistent (Supabase
+    # down/degraded), not ordinary transient noise. Unlike a claim
+    # failure, a flush failure doesn't lose data permanently on its own —
+    # the DB-side 30-minute staleness release means that batch's hosts
+    # get automatically un-stuck and re-claimed later (this run or the
+    # next) — but there's no point letting a shard burn through its whole
+    # runtime crawling batches it can't ever record, so this still caps
+    # out and stops the shard early, same as the claim-failure cap.
+    _MAX_CONSECUTIVE_FLUSH_FAILURES = 5
 
     while time.monotonic() < deadline:
         try:
@@ -712,7 +797,30 @@ def run(shard: int, total_shards: int, max_runtime: float, dry_run: bool):
                                   "ats": res.get("ats"), "slug": res.get("slug")})
 
         if not dry_run:
-            _flush_results(visited_rows, found_rows)
+            try:
+                _flush_results(visited_rows, found_rows)
+                consecutive_flush_failures = 0
+            except _FlushError as e:
+                consecutive_flush_failures += 1
+                stats.flush_failures += 1
+                log.error(f"Flush persistently failing "
+                          f"({consecutive_flush_failures}/"
+                          f"{_MAX_CONSECUTIVE_FLUSH_FAILURES} consecutive "
+                          f"failures, each already retried "
+                          f"{_FLUSH_RETRIES}x internally): {e} — this "
+                          f"batch's {len(visited_rows)} results were NOT "
+                          f"recorded; those hosts will auto-release after "
+                          f"30min staleness and get re-claimed later.")
+                if consecutive_flush_failures >= _MAX_CONSECUTIVE_FLUSH_FAILURES:
+                    log.error("Giving up after too many consecutive flush "
+                              "failures — Supabase looks persistently "
+                              "unreachable/degraded rather than "
+                              "transiently blipping. Whatever's left in "
+                              "this shard's slice (including the batches "
+                              "that just failed to flush, once they "
+                              "auto-release) will be picked up by a "
+                              "future run.")
+                    break
 
         elapsed_total = time.monotonic() - start
         log.info(f"Batch {batch_num}: {len(hosts)} hosts in {batch_elapsed:.1f}s "
