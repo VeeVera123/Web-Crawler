@@ -1,0 +1,62 @@
+name: CT Logs — Extract Slugs (Phase 1)
+
+# Phase 1 of the CT-logs discovery pipeline: sweep crt.sh's Certificate
+# Transparency data for 5 subdomain-based ATS platforms and write net-new
+# candidate slugs into ctlog_probe_results. Deliberately its own workflow,
+# SEPARATE from ctlog_verify.yml (Phase 2) — a slow/flaky live-verification
+# pass should never block or force a rerun of extraction, and vice versa.
+#
+# 5-WAY MATRIX, one shard per PLATFORM (not a hash-sharded slice of one
+# combined queue) — each platform's crt.sh sweep is already an
+# independent, self-contained unit of work with no shared state between
+# platforms, so this is the natural split (same reasoning documented in
+# discovery.py's module docstring for why Common Crawl shards differently
+# from the single-source jobs). All 5 run as fully parallel GitHub
+# Actions jobs — this is what actually makes "5 platforms at once" fast,
+# not asyncio within a single job (crt.sh's guest Postgres role is a
+# single connection at a time regardless of language — see
+# ctlog_extract.py's module docstring). Within each shard, aiohttp DOES
+# give real concurrency for slug resolution, Workday's live site_id
+# lookup, and the Supabase writes themselves.
+#
+# PLATFORMS: bamboohr, workday, icims, rippling, teamtailor — all
+# genuinely subdomain-per-tenant (the one shape CT logs can extract
+# directly). greenhouse/lever/ashby deliberately excluded — path-based,
+# structurally close to zero yield via a CT-log domain sweep (see
+# ctlog_extract.py's module docstring for the full reasoning).
+on:
+  workflow_dispatch:       # manual trigger — this pipeline is still new/
+                            # being proven out, no schedule yet (add a
+                            # cron: once Phase 1 + Phase 2 have both run
+                            # clean a few times)
+
+concurrency:
+  group: ctlog-extract-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one platform's crt.sh hiccup shouldn't cancel the other 4
+      matrix:
+        platform: [bamboohr, workday, icims, rippling, teamtailor]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp psycopg2-binary python-dotenv requests
+
+      - name: "Extract ${{ matrix.platform }} slugs from CT logs"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python ctlog_extract.py --platform ${{ matrix.platform }}

@@ -1,0 +1,68 @@
+name: CT Logs — Verify Slugs (Phase 2)
+
+# Phase 2 of the CT-logs discovery pipeline: for each of the 5 platforms
+# extracted by ctlog_extract.yml, hit every candidate slug's real board
+# URL live and drop the ones that redirect to the ATS vendor's own
+# marketing/root domain (confirmed pattern: acty.bamboohr.com ->
+# https://www.bamboohr.com/) — a CT-log cert proves a hostname was once
+# ISSUED, not that the tenant is still active today. A genuine job-board
+# response (even zero current openings) is kept. Deliberately its OWN
+# workflow, separate from ctlog_extract.yml (Phase 1), per explicit
+# direction — this hits live third-party servers and can be slower/
+# flakier than the crt.sh sweep itself, and neither phase should block or
+# force a rerun of the other. Run this AFTER extract has populated
+# ctlog_probe_results for the platforms you want verified.
+#
+# Same 5-way, one-shard-per-platform matrix as Phase 1. Fully async
+# (aiohttp + a bounded semaphore) within each shard — this IS where async
+# genuinely buys speed, since verification is nothing but independent
+# I/O-bound HTTPS fetches against five different vendors' servers (unlike
+# crt.sh, which is a single connection regardless of language — see
+# ctlog_extract.yml's comment on that same distinction).
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report live/dead counts without deleting anything"
+        required: false
+        type: boolean
+        default: false
+      limit:
+        description: "Only check the first N rows per platform (0 = no limit)"
+        required: false
+        default: "0"
+
+concurrency:
+  group: ctlog-verify-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one platform's flakiness shouldn't cancel the other 4
+      matrix:
+        platform: [bamboohr, workday, icims, rippling, teamtailor]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp python-dotenv
+
+      - name: "Verify ${{ matrix.platform }} slugs against live boards"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python ctlog_verify_async.py \
+            --platform ${{ matrix.platform }} \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }} \
+            ${{ github.event.inputs.limit != '0' && format('--limit {0}', github.event.inputs.limit) || '' }}
