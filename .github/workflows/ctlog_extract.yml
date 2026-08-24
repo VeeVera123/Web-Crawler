@@ -10,10 +10,13 @@ name: CT Logs — Extract Slugs (Phase 1)
 # in ctlog_probe_results at once, rather than growing per-platform as we
 # go (per explicit direction).
 #
-# SINGLE MATRIX: platform × hostname-shard, 6 platforms x 3 shards each
-# = 18 jobs, under the 20-job account-wide concurrent cap (confirmed
+# SINGLE MATRIX: platform × hostname-shard, 8 platforms x 2 shards each
+# = 16 jobs, under the 20-job account-wide concurrent cap (confirmed
 # against GitHub's own docs, same budget note as this project's other
-# workflows — see host_crawl.yml's comment on the same cap). Each
+# workflows — see host_crawl.yml's comment on the same cap). Dropped
+# from 3 shards to 2 per platform when avature/eploy were added (6x3=18
+# would have been fine, but 8x3=24 exceeds the cap) — each platform still
+# gets genuine parallelism, just a coarser alphabetical split. Each
 # platform's crt.sh hostname range is genuinely splittable because the
 # underlying query is already ORDER BY NAME_VALUE (alphabetical) — each
 # shard keyset-paginates its own slice of that range independently, no
@@ -29,8 +32,12 @@ name: CT Logs — Extract Slugs (Phase 1)
 # smartrecruiters are all larger but path- or query-param-based,
 # structurally dead for CT logs). Active lineup: breezyhr, personio
 # (4,858), recruitee (3,998), softgarden (2,664), zoho (2,029), hrmdirect
-# (1,544) — none are BambooHR-scale, but all are cheap to try and
-# structurally viable. icims/rippling/teamtailor RETIRED earlier after a
+# (1,544), avature (3,217), eploy (209) — none are BambooHR-scale, but
+# all are cheap to try and structurally viable. recruitee/softgarden/
+# hrmdirect already ran with small real yields (0-1 / 3 / 1 net-new so
+# far) — kept in the matrix since re-running is cheap and shards may
+# still be catching up, not because more is expected.
+# icims/rippling/teamtailor RETIRED earlier after a
 # real run confirmed they cap out at 64/86/37 net-new — confirmed real,
 # but below the "thousands, BambooHR-scale" bar for an ongoing slot.
 # ashby/taleo considered and REJECTED — ashby is path-based
@@ -61,8 +68,8 @@ jobs:
     strategy:
       fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 17
       matrix:
-        platform: [breezyhr, personio, recruitee, softgarden, zoho, hrmdirect]
-        shard: [0, 1, 2]
+        platform: [breezyhr, personio, recruitee, softgarden, zoho, hrmdirect, avature, eploy]
+        shard: [0, 1]
 
     steps:
       - name: Checkout
@@ -76,7 +83,7 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp psycopg2-binary python-dotenv requests
 
-      - name: "Extract ${{ matrix.platform }} slugs (shard ${{ matrix.shard }}/3)"
+      - name: "Extract ${{ matrix.platform }} slugs (shard ${{ matrix.shard }}/2)"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -84,4 +91,4 @@ jobs:
           python ctlog_extract.py \
             --platform ${{ matrix.platform }} \
             --shard-index ${{ matrix.shard }} \
-            --shard-count 3
+            --shard-count 2
