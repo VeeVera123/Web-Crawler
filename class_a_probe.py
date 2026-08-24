@@ -255,14 +255,14 @@ async def fetch_workable_feed_slugs(session: aiohttp.ClientSession) -> set[str]:
     module docstring / help.workable.com/hc/en-us/articles/4420464031767."""
     try:
         async with session.get(WORKABLE_FEED_URL,
-                                timeout=aiohttp.ClientTimeout(total=60),
+                                timeout=aiohttp.ClientTimeout(total=180),
                                 headers={"User-Agent": USER_AGENT}) as r:
             if r.status != 200:
                 log.warning(f"  Workable feed returned HTTP {r.status} — skipping.")
                 return set()
             body = await r.text()
     except Exception as e:
-        log.warning(f"  Workable feed fetch failed: {e} — skipping.")
+        log.warning(f"  Workable feed fetch failed: {type(e).__name__}: {e or '(no message)'} — skipping.")
         return set()
 
     # Feed URLs look like https://apply.workable.com/{slug}/j/{job_id}/
