@@ -5,41 +5,45 @@ name: CT Logs — Extract Slugs (Phase 1)
 # candidate slugs into ctlog_probe_results. Deliberately its own workflow,
 # SEPARATE from ctlog_verify.yml (Phase 2) — a slow/flaky live-verification
 # pass should never block or force a rerun of extraction, and vice versa.
+# Verification itself is on hold until every ATS in the active lineup has
+# been extracted — a single unified verification pass covers everything
+# in ctlog_probe_results at once, rather than growing per-platform as we
+# go (per explicit direction).
 #
-# TWO SEPARATE MATRICES to fit the 20-job account-wide concurrent cap
-# (confirmed against GitHub's own docs, same budget note as this
-# project's other workflows — see host_crawl.yml's comment on the same
-# cap) while giving bamboohr — the one confirmed BambooHR-scale platform
-# — more shards than the 5 smaller ones:
-#   extract_bamboohr: 5 shards (5 jobs)
-#   extract_others:   5 platforms x 3 shards (15 jobs)
-#   5 + 15 = 20 jobs total, using the full budget.
-# Each platform's crt.sh hostname range is genuinely splittable because
-# the underlying query is already ORDER BY NAME_VALUE (alphabetical) —
-# each shard keyset-paginates its own slice of that range independently,
-# no coordination needed between shards (see ctlog_extract.py's
+# SINGLE MATRIX: platform × hostname-shard, 6 platforms x 3 shards each
+# = 18 jobs, under the 20-job account-wide concurrent cap (confirmed
+# against GitHub's own docs, same budget note as this project's other
+# workflows — see host_crawl.yml's comment on the same cap). Each
+# platform's crt.sh hostname range is genuinely splittable because the
+# underlying query is already ORDER BY NAME_VALUE (alphabetical) — each
+# shard keyset-paginates its own slice of that range independently, no
+# coordination needed between shards (see ctlog_extract.py's
 # query_certwatch_pages/_shard_bounds docstrings for the full mechanics).
 # This is a REAL speedup, unlike naive over-sharding would be — crt.sh's
 # guest Postgres role is one connection at a time, but that's PER SHARD.
 #
-# PLATFORMS (2026-08 — replaced the prior bamboohr/icims/rippling/
-# teamtailor lineup): bamboohr (the one confirmed BambooHR-scale winner —
-# 24,991 net-new) + personio, recruitee, softgarden, zoho, hrmdirect (the
-# next 5 largest genuinely subdomain-based platforms by existing
-# slug_registry size — none are BambooHR-scale, but all are cheap to try
-# and structurally viable). icims/rippling/teamtailor were RETIRED after
-# a real run confirmed they cap out at 64/86/37 net-new respectively —
-# confirmed real, but per explicit direction the bar for an ONGOING
-# pipeline slot is "thousands, BambooHR-scale," not merely nonzero, so
-# they're no longer re-extracted (their already-collected rows still go
-# through Phase 2 verification once). ashby considered and REJECTED —
-# path-based (jobs.ashbyhq.com/{slug}), same structural wall as
-# greenhouse/lever: a certificate can't carry a URL path, so a domain
-# sweep returns ~0 tenant signal regardless of platform size. workday
-# TRIED AND REMOVED earlier (2026-08) — two live runs confirmed crt.sh
-# only surfaces ~115-123 hosts total for myworkdayjobs.com, over 90% of
-# which is Workday's own internal infrastructure, not customer tenants
-# (see ctlog_extract.py's module docstring for the full history on both).
+# PLATFORMS (2026-08): bamboohr RETIRED — extraction complete, confirmed
+# the standout large-scale win (24,991 net-new), no longer run. Its slot
+# is filled by breezyhr (5,578 existing slugs — the largest remaining
+# genuinely subdomain-based platform; paylocity/joincom/workable/adp/
+# smartrecruiters are all larger but path- or query-param-based,
+# structurally dead for CT logs). Active lineup: breezyhr, personio
+# (4,858), recruitee (3,998), softgarden (2,664), zoho (2,029), hrmdirect
+# (1,544) — none are BambooHR-scale, but all are cheap to try and
+# structurally viable. icims/rippling/teamtailor RETIRED earlier after a
+# real run confirmed they cap out at 64/86/37 net-new — confirmed real,
+# but below the "thousands, BambooHR-scale" bar for an ongoing slot.
+# ashby/taleo considered and REJECTED — ashby is path-based
+# (jobs.ashbyhq.com/{slug}), a certificate can't carry a URL path so a
+# domain sweep returns ~0 tenant signal; taleo needs BOTH a subdomain AND
+# a path section, same shape as workday's site_id problem, and workday
+# already proved that live-resolve pattern isn't worth it even at larger
+# scale than taleo's 1,717 existing slugs. workday itself TRIED AND
+# REMOVED (2026-08) — two live runs confirmed crt.sh only surfaces
+# ~115-123 hosts total for myworkdayjobs.com, over 90% of which is
+# Workday's own internal infrastructure, not customer tenants (see
+# ctlog_extract.py's module docstring for the full history on all of the
+# above).
 on:
   workflow_dispatch:       # manual trigger — this pipeline is still new/
                             # being proven out, no schedule yet (add a
@@ -51,43 +55,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  extract_bamboohr:
+  extract:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
-      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 4
+      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 17
       matrix:
-        shard: [0, 1, 2, 3, 4]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install aiohttp psycopg2-binary python-dotenv requests
-
-      - name: "Extract bamboohr slugs (shard ${{ matrix.shard }}/5)"
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          python ctlog_extract.py \
-            --platform bamboohr \
-            --shard-index ${{ matrix.shard }} \
-            --shard-count 5
-
-  extract_others:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false   # one shard's crt.sh hiccup shouldn't cancel the other 14
-      matrix:
-        platform: [personio, recruitee, softgarden, zoho, hrmdirect]
+        platform: [breezyhr, personio, recruitee, softgarden, zoho, hrmdirect]
         shard: [0, 1, 2]
 
     steps:
