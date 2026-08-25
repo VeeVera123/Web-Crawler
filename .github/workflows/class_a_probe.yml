@@ -50,13 +50,13 @@ on:
       shard_count:
         description: "Number of parallel shards to split the company list across"
         required: false
-        default: "20"
+        default: "10"
       concurrency:
         description: "Companies crawled in parallel PER shard (no rate limiting — see class_a_probe.py)"
         required: false
         default: "400"
       countries:
-        description: "'default' = US/UK/Canada/Australia + EU-27 (31 countries — see class_a_probe.py's DEFAULT_COUNTRIES). 'all' = no filter, every country. Or a comma-separated custom list of PDL country values, e.g. 'united states,canada,japan'."
+        description: "'default' = a hand-picked 13-country set (US/UK/Canada/Australia/Ireland/New Zealand/Singapore/Malta/Bahamas/Guyana/Barbados/France/Germany — see class_a_probe.py's DEFAULT_COUNTRIES). 'all' = no filter, every country. Or a comma-separated custom list of PDL country values, e.g. 'united states,canada,japan'."
         required: false
         default: "default"
 
