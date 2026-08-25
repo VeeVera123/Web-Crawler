@@ -291,13 +291,80 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
 _URL_RE = re.compile(r'https?://[^\s"\'<>\\]{4,300}', re.I)
 _MAX_CANDIDATE_URLS_PER_PAGE = 4000  # pathological-page safety cap
 
+# Junk cleanup (2026-08): _URL_RE's terminator set ([^\s"'<>\\]) stops at a
+# literal '"' but NOT at an HTML-ENCODED quote like '&quot;'/'&#34;', and
+# not at a curly/smart quote character either — both are common right
+# after a URL sitting inside inline JS/JSON blobs that the page's own HTML
+# source already entity-encoded before this regex ever sees it. Confirmed
+# live in ctlog_probe_results (2026-08 audit): real, correctly-matched
+# rows for recruitee/smartrecruiters/teamtailor/bamboohr/icims/
+# oracle_cloud_hcm had usable, correct hosts with garbage stuck on — NOT a
+# false-positive domain match (that's the separate, already-fixed
+# _host_matches_domain bug), just an extraction-boundary bug on top of an
+# otherwise-real hit. In the worst observed case (a whole inline JSON blob
+# — {"atsHost":"recruitee.com","captcha":{"apiHost":"https://...
+# — that the page had already HTML-entity-escaped, so EVERY quote in it
+# became a bare, unexcluded '&quot;') the true URL ended right after
+# 'recruitee.com', but the entity junk continued for another 150+ chars
+# with no literal quote/whitespace/bracket anywhere in between to stop
+# _URL_RE — trimming only from the very end of the eventual match can
+# never recover that; the first entity occurrence has to be found and cut
+# to, not just the last.
+_HTML_ENTITY_RE = re.compile(
+    r'&(?:quot|apos|amp|gt|lt|nbsp|#[0-9]+|#x[0-9a-fA-F]+);', re.I)
+_CURLY_QUOTE_RE = re.compile(r'[“”‘’]')
+_TRAILING_STATUS_CODE_RE = re.compile(r'(?:;[0-9]{2,4})+;?$')  # e.g. ';307;' — an
+# HTTP status/redirect code that ended up concatenated onto the URL text
+# somewhere upstream of this function; never part of a real ATS URL.
+
+
+def _clean_extracted_url(url: str) -> str:
+    """Recover the real URL out of a raw _URL_RE match that may have
+    over-consumed into surrounding entity-encoded JSON/JS junk.
+
+    Step 1 — cut, don't trim: find the FIRST occurrence anywhere in the
+    string of a real HTML entity ('&quot;'/'&#34;'/etc. — the pattern only
+    matches a complete, semicolon-terminated entity name, so a legitimate
+    query-string '&' like '?a=1&b=2' can never match it) or a curly/smart
+    quote character, and truncate there. This has to be a cut at the
+    FIRST occurrence, not a trim of trailing junk, because a fully
+    entity-encoded JSON blob can run on for hundreds of characters past
+    the real end of the URL with nothing in between that _URL_RE's own
+    terminator set would stop at.
+    Step 2 — trim: with the entity/curly-quote junk already cut away,
+    iteratively strip whatever ordinary trailing junk is left (JS/JSON
+    statement punctuation, a stray ';307;'-style status-code fragment, an
+    unbalanced trailing closing bracket/paren) — looped because it can
+    arrive in mixed order (e.g. ',' before a status-code fragment or
+    after it, depending on the page)."""
+    m = _HTML_ENTITY_RE.search(url)
+    if m:
+        url = url[:m.start()]
+    m = _CURLY_QUOTE_RE.search(url)
+    if m:
+        url = url[:m.start()]
+
+    prev = None
+    while prev != url:
+        prev = url
+        url = url.strip()
+        url = url.rstrip(",;")
+        url = _TRAILING_STATUS_CODE_RE.sub("", url)
+        for open_c, close_c in (("(", ")"), ("[", "]"), ("{", "}")):
+            while url.endswith(close_c) and url.count(open_c) < url.count(close_c):
+                url = url[:-1]
+    return url
+
 
 def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
     """Method A + B combined: parsed <a href> links (resolved against the
     page's own URL, catching relative/protocol-relative links) PLUS a raw
     full-text scan for absolute URLs anywhere in the source (catching
     links embedded in <script> blocks, JS strings, iframe src, or
-    anywhere else that isn't a plain <a> tag)."""
+    anywhere else that isn't a plain <a> tag). Every URL, from either
+    method, is run through _clean_extracted_url() before being added —
+    see that function's docstring for why (trailing HTML-entity / smart-
+    quote / JS-punctuation junk that _URL_RE's own terminator set misses)."""
     urls: set[str] = set()
 
     try:
@@ -307,7 +374,7 @@ def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
             if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
                 continue
             try:
-                urls.add(urljoin(base_url, href))
+                urls.add(_clean_extracted_url(urljoin(base_url, href)))
             except ValueError:
                 continue
             if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
@@ -316,7 +383,7 @@ def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
         pass  # a malformed page shouldn't kill the whole crawl of this company
 
     for m in _URL_RE.finditer(html):
-        urls.add(m.group(0))
+        urls.add(_clean_extracted_url(m.group(0)))
         if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
             break
 
