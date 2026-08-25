@@ -202,6 +202,34 @@ PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companie
 PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap
 
 
+# US/UK/Canada/Australia + all 27 EU member states, as literal 'country'
+# column values — CONFIRMED real strings for the first several (verified
+# directly against the user's own PDL file: 'united states' 2,278,866
+# rows, 'united kingdom' 511,969, 'canada' 186,621, 'australia' 117,133,
+# 'spain'/'netherlands'/'germany'/'france'/'italy'/'belgium'/'sweden'/
+# 'denmark'/'poland'/'portugal'/'ireland'/'finland'/'romania'/'czechia'/
+# 'austria'/'hungary'/'bulgaria'/'croatia'/'lithuania'/'slovakia' — all
+# seen directly in the user's real country-count output). The remaining
+# 6 EU members (Cyprus, Estonia, Latvia, Luxembourg, Malta, Slovenia)
+# weren't visible in that output (it was capped at the top 60 countries
+# by row count — these are small-population EU states, plausibly just
+# below that cutoff, not confirmed absent). Included anyway, by their
+# standard English name, on the same reasoning the whole filter design
+# follows: a country string that doesn't actually appear in the file
+# just matches 0 rows — harmless — whereas leaving a real EU member out
+# would silently under-cover, which is exactly the failure mode this
+# project chose to avoid (over-inclusion over under-inclusion).
+DEFAULT_COUNTRIES = {
+    "united states", "united kingdom", "canada", "australia",
+    # EU-27
+    "austria", "belgium", "bulgaria", "croatia", "cyprus", "czechia",
+    "denmark", "estonia", "finland", "france", "germany", "greece",
+    "hungary", "ireland", "italy", "latvia", "lithuania", "luxembourg",
+    "malta", "netherlands", "poland", "portugal", "romania", "slovakia",
+    "slovenia", "spain", "sweden",
+}
+
+
 def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
                                      countries: set[str] | None = None) -> list[dict]:
     """Reads the People Data Labs Free Company Dataset from a LOCAL file
@@ -213,19 +241,15 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
     optional source, so this script still runs (finding nothing) rather
     than crashing for anyone who hasn't done the one-time download yet.
 
-    countries (2026-08): PDL's own documented schema carries a per-company
-    HQ 'country' field (confirmed via docs.peopledatalabs.com — this is
-    NOT inferred from the domain string, which is exactly the unreliable
-    ".com is used everywhere" problem a ccTLD-based filter would have).
-    When given, only rows whose country value matches (case-insensitive)
-    one of the given strings are kept. The exact CSV column name/casing
-    for this Kaggle export hasn't been directly confirmed against the
-    real file from this sandbox (the file only lives on the user's PC),
-    so this checks a few likely header variants rather than assuming one
-    — and if a country filter was requested but NONE of them are present
-    in the file's actual header row, this logs the real header names and
-    returns nothing rather than silently ignoring the filter and crawling
-    every country anyway."""
+    countries: PDL's real 'country' column (confirmed — the exact literal
+    column name, verified directly against the user's own file, no more
+    guessing across candidate header names). Case-insensitive exact-string
+    match — pass None (default) for NO filter at all, matching every
+    country including PDL's ~2.35M blank-country rows (blank is the
+    single largest bucket, bigger than any one country, so 'no filter' is
+    NOT the same as 'only known countries' — a filter, even a wide one,
+    always drops every unclassified row too). See DEFAULT_COUNTRIES for
+    the ready-made US/UK/Canada/Australia + EU-27 set."""
     import csv
 
     if not os.path.exists(PDL_DATASET_PATH):
@@ -234,35 +258,22 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
         return []
 
     countries_lower = {c.strip().lower() for c in countries} if countries else None
+    if countries_lower:
+        log.info(f"  filtering PDL rows to {len(countries_lower)} countries "
+                 f"(column: 'country', case-insensitive)")
 
     out = []
     total_rows = 0
     skipped_wrong_country = 0
-    country_col = None
     try:
         with open(PDL_DATASET_PATH, newline="", encoding="utf-8", errors="ignore") as f:
             reader = csv.DictReader(f)
-            if countries_lower:
-                candidates = ["country", "hq country", "current company hq country", "hq_country"]
-                fieldnames_lower = {(fn or "").strip().lower(): fn for fn in (reader.fieldnames or [])}
-                for cand in candidates:
-                    if cand in fieldnames_lower:
-                        country_col = fieldnames_lower[cand]
-                        break
-                if not country_col:
-                    log.error(f"  --country was given but no country-like column was found in "
-                              f"'{PDL_DATASET_PATH}'. Actual columns: {reader.fieldnames}. "
-                              f"Tell me the real column name so I can fix this instead of guessing "
-                              f"wrong and silently crawling every country.")
-                    return []
-                log.info(f"  filtering PDL rows to countries {sorted(countries_lower)} "
-                         f"(column: '{country_col}')")
             for i, row in enumerate(reader):
                 if limit and i >= limit:
                     break
                 total_rows += 1
                 if countries_lower:
-                    row_country = (row.get(country_col) or "").strip().lower()
+                    row_country = (row.get("country") or "").strip().lower()
                     if row_country not in countries_lower:
                         skipped_wrong_country += 1
                         continue
@@ -834,13 +845,18 @@ def main():
                               f"timeout-minutes (default {TIME_BUDGET_MINUTES}, env "
                               f"CRAWL_TIME_BUDGET_MINUTES — see TIME_BUDGET_MINUTES comment)")
     parser.add_argument("--country", action="append", default=None,
-                         help="Only crawl companies whose PDL HQ country matches this (case-"
-                              "insensitive, exact string match against the CSV's country column — "
-                              "e.g. 'united states'). Repeatable for multiple countries, e.g. "
-                              "--country 'united states' --country canada. Omit to crawl every "
-                              "country (previous behavior, unchanged).")
+                         help="Only crawl companies whose PDL 'country' column matches this "
+                              "(case-insensitive exact string, e.g. 'united states'). Repeatable — "
+                              "--country 'united states' --country canada. Omit for no filter "
+                              "(default — crawls every country, including PDL's ~2.35M "
+                              "blank-country rows). See --use-default-countries for a ready-made "
+                              "US/UK/Canada/Australia + EU-27 set instead of typing all of them.")
+    parser.add_argument("--use-default-countries", action="store_true",
+                         help=f"Shortcut for filtering to DEFAULT_COUNTRIES "
+                              f"({len(DEFAULT_COUNTRIES)} countries: US/UK/Canada/Australia + "
+                              f"EU-27). Ignored if --country is also given.")
     args = parser.parse_args()
-    countries = set(args.country) if args.country else None
+    countries = set(args.country) if args.country else (DEFAULT_COUNTRIES if args.use_default_countries else None)
     asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency,
                            args.time_budget_minutes, countries))
 
