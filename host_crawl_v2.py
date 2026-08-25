@@ -1,10 +1,10 @@
 """
-Host Crawl v2 — single-pass, single-partition, country-aware
+Host Crawl v2 — single-pass, multi-partition, country-aware
 ==============================================================
 Replaces the old two-stage host_crawl.py/host_crawl_seed.py design
 (seed into a Supabase queue table, then a SEPARATE crawl job drains that
-queue) with ONE pass: seed hostnames from exactly ONE Common Crawl Host
-Index partition, then immediately crawl each one the exact same way
+queue) with ONE pass: seed hostnames from one or more Common Crawl Host
+Index partitions, then immediately crawl each one the exact same way
 class_a_probe.py crawls a PDL company (visit the real site, follow links,
 look for a real ATS URL — NOT guessing slugs against any platform's API),
 using class_a_probe.py's already-proven fetch/parse/detect core directly
@@ -12,21 +12,26 @@ using class_a_probe.py's already-proven fetch/parse/detect core directly
 
 WHY NOT THE OLD QUEUE DESIGN: that design existed to let seeding and
 crawling happen as separate, independently-resumable GitHub Actions jobs,
-converging on FULL coverage of a partition across many runs (h_seeding /
-h_file_count / h_total_seeded checkpointing). This build is deliberately
-scoped to exactly 1 partition, one run, and doesn't need that convergence
-machinery — it trades "eventually see everything" for "simple, single
-job, done." If broader multi-partition coverage is wanted later, that
-checkpointing infrastructure in host_crawl_seed.py is still there and can
-be adapted; nothing here depends on it existing or not.
+converging on FULL coverage across many runs (h_seeding / h_file_count /
+h_total_seeded checkpointing). This build doesn't need that convergence
+machinery because it doesn't hold whole-partition state between runs —
+it trades "eventually see everything via checkpointed resumption" for
+"crawl N partitions per run, done." If that old resumption model is
+wanted later, host_crawl_seed.py's checkpointing infrastructure is still
+there and can be adapted; nothing here depends on it existing or not.
 
-WHY EXACTLY 1 PARTITION: a live check of Common Crawl's own crawl
-schedule confirmed one partition (e.g. CC-MAIN-2025-18) spans roughly
-1-1.5 months, not a year — Common Crawl publishes ~6-12 of these a year.
-The ~26 partitions Hugging Face lists span roughly 2-4 years of real
-crawl history, not 26 years. Given that, and that host TURNOVER within a
-couple months is low, one partition is a reasonable, deliberately modest
-first pass — this is what was explicitly asked for, not a compromise.
+HOW MANY PARTITIONS: originally scoped to exactly 1 (a live check of
+Common Crawl's own schedule found one partition, e.g. CC-MAIN-2025-18,
+spans roughly 1-1.5 months, not a year — they publish ~6-12 a year, so
+~26 available on Hugging Face spans 2-4 years of history). Widened
+2026-08 to accept --partitions N: the per-file streaming fix below (see
+STREAMING SEED+CRAWL) already bounds memory to one file at a time
+regardless of partition count, so walking N partitions sequentially in
+one run carries the same memory profile as walking N files within one
+partition — no new risk. The --time-budget-minutes budget is shared
+across however many partitions are requested, not multiplied per
+partition, so this trades depth (more historical coverage) for breadth
+per partition within the same wall-clock run, not "more total runtime."
 
 COUNTRY FILTER — WHY NOT COMMON CRAWL'S OWN DATA: live research into the
 Host Index's actual schema (fields: surt_host_name, url_host_tld, crawl,
@@ -99,16 +104,35 @@ matching rows over the wire — cheaper AND safer, instead of pulling
 everything and discarding 9/10 of it in Python afterward. (2) seeding and
 crawling are now interleaved per Parquet file — each file's shard-
 filtered hosts are crawled (and written) immediately, then that file's
-host list is dropped, before the next file is even queried. Memory now
-scales with ONE file's shard-filtered slice, not the whole partition.
-TIME_BUDGET_MINUTES is the sole thing governing how long a run lasts —
-there's no longer a host-count cap needed for memory safety, so there
-isn't one exposed as a flag.
+host list is dropped, before the next file is even queried, and this
+holds true walking across multiple partitions too (see HOW MANY
+PARTITIONS above) — memory never scales with anything bigger than one
+file's shard-filtered slice. TIME_BUDGET_MINUTES is the sole thing
+governing how long a run lasts — there's no host-count cap.
+
+ACCURACY / COVERAGE (2026-08): three changes to _crawl_one_v2's fallback
+chain, all zero-risk of introducing false positives since every one just
+changes what gets FETCHED or MERGED, never how a fetched page's own URLs
+get validated (still discovery.py's anchored URL_TO_SLUG — see that
+file's _host_matches_domain history for why that anchoring itself
+matters). (1) Tiers no longer stop at the first page with a hit — every
+page fetched at a tier (all CAREER_PATHS, all sitemap-matched URLs) is
+checked and merged (see class_a_probe.py's _collapse_hits), so a company
+running two ATS platforms at once (old + new mid-migration) now gets
+both instead of whichever happened to be checked first. (2) The sitemap
+fallback's "does this URL look like a careers page" filter used to only
+recognize career/jobs/join/work-with-us — now built directly from
+CAREER_PATHS (CAREER_LIKE_RE) so it can't silently drift out of sync
+with the direct-path list again. (3) SITEMAP_MAX_FOLLOW raised 3 -> 8,
+and a site publishing its sitemap at /sitemap_index.xml instead of
+/sitemap.xml (a common WordPress-family convention) is now reached too
+(SITEMAP_INDEX_PATHS) — previously never tried at all.
 
 Usage:
-    python host_crawl_v2.py                              # 1 partition, unsharded (small/dev runs only — see SHARDING note)
-    python host_crawl_v2.py --crawl CC-MAIN-2025-18       # pin a specific partition
-    python host_crawl_v2.py --shard-index 0 --shard-count 10   # production shape — each shard queries only its own slice
+    python host_crawl_v2.py                                       # 1 partition, unsharded (small/dev runs only — see SHARDING note)
+    python host_crawl_v2.py --crawl CC-MAIN-2025-18                # pin the starting partition
+    python host_crawl_v2.py --partitions 3                        # 3 most recent partitions, one run, shared time budget
+    python host_crawl_v2.py --shard-index 0 --shard-count 10 --partitions 3   # production shape
 """
 
 import argparse
@@ -130,6 +154,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Reusing class_a_probe.py's already-proven fetch/parse/detect/write core
 # directly, rather than re-implementing any of it — see module docstring.
 from class_a_probe import (  # noqa: E402
+    CAREER_LIKE_RE,
     CAREER_PATHS,
     CONNECTOR_LIMIT,
     CRAWL_CONCURRENCY,
@@ -138,7 +163,9 @@ from class_a_probe import (  # noqa: E402
     SUPABASE_URL,
     SUPABASE_KEY,
     TIME_BUDGET_MINUTES,
+    _collapse_hits,
     _fetch_page,
+    _fetch_sitemap,
     _parse_detect_ats_and_country,
     write_rows_to_staging_table,
 )
@@ -233,9 +260,10 @@ def _get_duckdb_connection():
     return con
 
 
-def _resolve_crawl_name(con, pinned: str | None) -> str:
-    if pinned:
-        return pinned
+def _list_all_crawl_names(con) -> list[str]:
+    """Live-lists every partition Hugging Face has, most recent first.
+    Empty list if the listing itself fails (network hiccup, HF down,
+    etc) — callers fall back to a single hardcoded partition in that case."""
     try:
         rows = _run_with_timeout(
             lambda: con.execute(
@@ -244,16 +272,35 @@ def _resolve_crawl_name(con, pinned: str | None) -> str:
             ).fetchall(),
             timeout=60,
         )
-        names = [r[0] for r in rows if r[0]]
-        if names:
-            log.info(f"Available crawl partitions (most recent 5): {names[:5]}")
-            return names[0]
+        return [r[0] for r in rows if r[0]]
     except concurrent.futures.TimeoutError:
         log.warning("Listing crawl partitions timed out after 60s.")
     except Exception as e:
         log.warning(f"Could not list crawl partitions live: {e}")
-    log.warning(f"Falling back to hardcoded {_FALLBACK_CRAWL!r} (may be stale).")
-    return _FALLBACK_CRAWL
+    return []
+
+
+def _resolve_crawl_names(con, pinned: str | None, count: int) -> list[str]:
+    """Resolves `count` partitions to crawl this run, in most-recent-first
+    order, starting from `pinned` if given (or the true latest otherwise)
+    and walking backward through older partitions to fill out the count.
+    Falls back to a single partition — `pinned` or the hardcoded default —
+    if the live listing fails, since without it there's no way to know
+    which partitions are older than a given one."""
+    names = _list_all_crawl_names(con)
+    if names:
+        log.info(f"Available crawl partitions (most recent 5 of {len(names)}): {names[:5]}")
+        start = names.index(pinned) if pinned in names else 0
+        selected = names[start:start + count]
+        if len(selected) < count:
+            log.warning(f"Only {len(selected)}/{count} partition(s) available at/older than "
+                        f"the start point — crawling all {len(selected)} of them.")
+        return selected
+    single = pinned or _FALLBACK_CRAWL
+    log.warning(f"Falling back to a single hardcoded partition {single!r} (may be stale) — "
+                f"live listing failed, so {count} partition(s) were requested but only this "
+                f"one can be resolved without it.")
+    return [single]
 
 
 def _list_partition_files(con, crawl_name: str) -> list[str]:
@@ -276,14 +323,17 @@ def _list_partition_files(con, crawl_name: str) -> list[str]:
     return files
 
 
-def iter_seed_hosts_by_file(crawl: str | None, shard_index: int | None, shard_count: int | None):
-    """Streams candidate hostnames from exactly ONE Common Crawl Host
-    Index partition, ONE PARQUET FILE AT A TIME — yields
-    (file_num, total_files, hosts_for_this_file) and never holds more
-    than one file's worth of hosts in memory at once (see module
-    docstring's STREAMING SEED+CRAWL note for why: the previous
-    whole-partition-at-once version OOM-killed a real run at 126M
-    accumulated hosts).
+def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shard_count: int | None):
+    """Streams candidate hostnames across one or more Common Crawl Host
+    Index partitions, ONE PARQUET FILE AT A TIME — yields (partition_name,
+    partition_num, total_partitions, file_num, total_files_in_partition,
+    hosts_for_this_file) and never holds more than one file's worth of
+    hosts in memory at once, no matter how many partitions are requested
+    (see module docstring's STREAMING SEED+CRAWL note for why: the
+    previous whole-partition-at-once version OOM-killed a real run at
+    126M accumulated hosts — walking additional partitions is safe here
+    for the same reason a single partition's files are: each one is still
+    processed and dropped before the next is even queried).
 
     SHARDING HAPPENS IN SQL, not in Python (2026-08 — see module
     docstring): when shard_index/shard_count are given, the query itself
@@ -300,73 +350,71 @@ def iter_seed_hosts_by_file(crawl: str | None, shard_index: int | None, shard_co
     if con is None:
         return
 
-    crawl_name = _resolve_crawl_name(con, crawl)
-    log.info(f"Seeding from crawl partition: {crawl_name} (exactly 1 partition, as instructed)")
-
-    files = _list_partition_files(con, crawl_name)
     sharded = shard_index is not None and shard_count is not None
-    if sharded:
-        log.info(f"crawl={crawl_name}: {len(files)} Parquet file(s) to scan — shard "
-                 f"{shard_index}/{shard_count} (SQL-level hash filter, not Python slicing)")
-    else:
-        log.warning(f"crawl={crawl_name}: {len(files)} Parquet file(s) to scan — UNSHARDED. "
-                    f"Each file's full TLD-matched candidate set (can be 10M+ rows per file) "
-                    f"will be pulled into memory at once. Fine for a small/dev run; use "
-                    f"--shard-index/--shard-count for a production-scale run.")
+    if not sharded:
+        log.warning("Running UNSHARDED — each file's full TLD-matched candidate set (can be "
+                    "10M+ rows) will be pulled into memory at once. Fine for a small/dev run; "
+                    "use --shard-index/--shard-count for a production-scale run.")
 
     tld_filter = _build_tld_filter()
     shard_clause = f"AND (hash(surt_host_name) % {shard_count}) = {shard_index}" if sharded else ""
     query_timeout = 300
-    total_dead_skipped = 0
-    total_hosts = 0
 
-    for file_num, fpath in enumerate(files, start=1):
-        query = f"""
-            SELECT surt_host_name, fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
-            FROM read_parquet('{fpath}')
-            WHERE url_host_tld IN ({tld_filter})
-            {shard_clause}
-        """
-        try:
-            rows = _run_with_timeout(lambda q=query: con.execute(q).fetchall(), timeout=query_timeout)
-        except concurrent.futures.TimeoutError:
-            log.warning(f"  [{file_num}/{len(files)}] query timed out after {query_timeout}s — skipping.")
-            continue
-        except Exception as e:
-            log.warning(f"  [{file_num}/{len(files)}] query failed — skipping: {e}")
-            continue
+    for partition_num, crawl_name in enumerate(partitions, start=1):
+        log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} ──")
+        files = _list_partition_files(con, crawl_name)
+        log.info(f"  {len(files)} file(s) to scan"
+                 + (f" — shard {shard_index}/{shard_count}" if sharded else ""))
 
-        # Dedup is PER-FILE only, not across the whole run (2026-08 — a
-        # deliberate trade after the OOM incident): a persistent
-        # cross-file `seen` set would itself grow to the same size as the
-        # old whole-partition host list and reintroduce the same memory
-        # risk. If the same host happens to appear in more than one file
-        # (the Host Index's own partitioning by hash range makes this
-        # unlikely in practice, though not something this script verifies)
-        # it just gets crawled again — a handful of duplicate HTTP
-        # requests, not a correctness problem: the (ats,slug) dedup in
-        # run_host_crawl's write path already prevents any duplicate row
-        # from reaching Supabase either way.
-        file_hosts: list[str] = []
-        seen_this_file: set[str] = set()
-        dead_skipped = 0
-        for surt_host, f200, f4xx, f5xx, fgone, ngone in rows:
-            if not surt_host:
+        total_dead_skipped = 0
+        total_hosts = 0
+        for file_num, fpath in enumerate(files, start=1):
+            query = f"""
+                SELECT surt_host_name, fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
+                FROM read_parquet('{fpath}')
+                WHERE url_host_tld IN ({tld_filter})
+                {shard_clause}
+            """
+            try:
+                rows = _run_with_timeout(lambda q=query: con.execute(q).fetchall(), timeout=query_timeout)
+            except concurrent.futures.TimeoutError:
+                log.warning(f"  file {file_num}/{len(files)}: query timed out after "
+                            f"{query_timeout}s — skipping this file.")
                 continue
-            if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
-                dead_skipped += 1
+            except Exception as e:
+                log.warning(f"  file {file_num}/{len(files)}: query failed — skipping: {e}")
                 continue
-            domain = ".".join(reversed(surt_host.split(",")))
-            if domain in seen_this_file:
-                continue
-            seen_this_file.add(domain)
-            file_hosts.append(domain)
-        total_dead_skipped += dead_skipped
-        total_hosts += len(file_hosts)
-        log.info(f"  [{file_num}/{len(files)}] {len(rows)} candidate rows, {len(file_hosts)} hosts "
-                 f"this file ({total_hosts} total seeded so far this run, "
-                 f"{total_dead_skipped} dead-skipped)")
-        yield file_num, len(files), file_hosts
+
+            # Dedup is PER-FILE only, not across the whole run (2026-08 — a
+            # deliberate trade after the OOM incident): a persistent
+            # cross-file `seen` set would itself grow to the same size as
+            # the old whole-partition host list and reintroduce the same
+            # memory risk. If the same host happens to appear in more than
+            # one file (unlikely — the Host Index partitions by hash
+            # range) it just gets crawled again — a handful of duplicate
+            # HTTP requests, not a correctness problem: the (ats,slug)
+            # dedup in the write path already prevents any duplicate row
+            # from reaching Supabase either way.
+            file_hosts: list[str] = []
+            seen_this_file: set[str] = set()
+            dead_skipped = 0
+            for surt_host, f200, f4xx, f5xx, fgone, ngone in rows:
+                if not surt_host:
+                    continue
+                if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
+                    dead_skipped += 1
+                    continue
+                domain = ".".join(reversed(surt_host.split(",")))
+                if domain in seen_this_file:
+                    continue
+                seen_this_file.add(domain)
+                file_hosts.append(domain)
+            total_dead_skipped += dead_skipped
+            total_hosts += len(file_hosts)
+            log.info(f"  file {file_num}/{len(files)}: {len(file_hosts)} live hosts to crawl "
+                     f"(of {len(rows)} candidates, {dead_skipped} dead-skipped) — "
+                     f"{total_hosts} seeded so far this partition")
+            yield crawl_name, partition_num, len(partitions), file_num, len(files), file_hosts
 
 
 # ── crawl (reuses class_a_probe.py's fetch/parse core) ─────────────────
@@ -377,17 +425,16 @@ async def _crawl_one_v2(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                          target_geo_countries: set[str]
                          ) -> list[tuple[str, str, str, str, str, str, str]]:
     """Same homepage -> career-path -> sitemap fallback chain as
-    class_a_probe.py's _crawl_one, but ALSO resolves country per page via
-    _parse_detect_ats_and_country. COUNTRY IS NOT A GATE (2026-08 — see
-    module docstring): a row is returned as soon as a real ATS hit is
-    found, at whichever tier finds it first, exactly like
-    class_a_probe.py's _crawl_one. Country is opportunistic metadata —
-    whatever's confidently resolved from the pages already fetched by the
-    point the ATS hit is found (most often just the homepage) is attached;
-    if nothing confidently resolved yet, the row is still returned, just
-    with country=None, same as every other discovery method already
-    writes when it doesn't know. Returns (ats, slug, matched_url, domain,
-    tier, country, country_method) tuples."""
+    class_a_probe.py's _crawl_one (including the 2026-08 all-pages-in-a-
+    tier merge — see _collapse_hits there), but ALSO resolves country per
+    page via _parse_detect_ats_and_country. COUNTRY IS NOT A GATE (2026-08
+    — see module docstring): rows are returned as soon as a tier produces
+    ANY hits. Country is opportunistic metadata — whatever's confidently
+    resolved from the pages already fetched in that tier is attached to
+    every hit found there; if nothing confidently resolved, rows are still
+    returned, just with country=None, same as every other discovery method
+    already writes when it doesn't know. Returns (ats, slug, matched_url,
+    domain, tier, country, country_method) tuples."""
     loop = asyncio.get_running_loop()
     async with sem:
         stats["companies_attempted"] += 1
@@ -426,42 +473,49 @@ async def _crawl_one_v2(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
             return [(ats, slug, url, domain, "homepage", best_country, best_method)
                     for ats, slug, url in hits]
 
+        # Fallback tier 1: common career-page paths, fetched concurrently,
+        # every hit-bearing page merged (see class_a_probe.py's _collapse_hits).
         origin_parts = urlparse(final_url)
         origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
         career_pages = await asyncio.gather(
             *[_fetch_page(session, urljoin(origin, p), stats) for p in CAREER_PATHS]
         )
+        career_hit_lists = []
         for cp in career_pages:
             if not cp:
                 continue
             cp_url, cp_html = cp
-            hits = await _detect(cp_html, cp_url)
-            if hits:
-                stats["hits_from_career_path"] += 1
-                if not best_country:
-                    stats["written_without_country"] += 1
-                return [(ats, slug, url, domain, "career_path", best_country, best_method)
-                        for ats, slug, url in hits]
+            career_hit_lists.append(await _detect(cp_html, cp_url))
+        merged = _collapse_hits(career_hit_lists)
+        if merged:
+            stats["hits_from_career_path"] += 1
+            if not best_country:
+                stats["written_without_country"] += 1
+            return [(ats, slug, url, domain, "career_path", best_country, best_method)
+                    for ats, slug, url in merged]
 
-        sitemap = await _fetch_page(session, urljoin(origin, "/sitemap.xml"), stats)
+        # Fallback tier 2: sitemap, only reached if everything above found nothing.
+        sitemap = await _fetch_sitemap(session, origin, stats)
         if sitemap:
             sm_url, sm_xml = sitemap
             loc_urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", sm_xml, re.I)
-            career_like = [u for u in loc_urls if re.search(r"career|jobs?|join|work-with-us", u, re.I)]
+            career_like = [u for u in loc_urls if CAREER_LIKE_RE.search(u)]
             sm_pages = await asyncio.gather(
                 *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]]
             )
+            sitemap_hit_lists = []
             for sp in sm_pages:
                 if not sp:
                     continue
                 sp_url, sp_html = sp
-                hits = await _detect(sp_html, sp_url)
-                if hits:
-                    stats["hits_from_sitemap"] += 1
-                    if not best_country:
-                        stats["written_without_country"] += 1
-                    return [(ats, slug, url, domain, "sitemap", best_country, best_method)
-                            for ats, slug, url in hits]
+                sitemap_hit_lists.append(await _detect(sp_html, sp_url))
+            merged = _collapse_hits(sitemap_hit_lists)
+            if merged:
+                stats["hits_from_sitemap"] += 1
+                if not best_country:
+                    stats["written_without_country"] += 1
+                return [(ats, slug, url, domain, "sitemap", best_country, best_method)
+                        for ats, slug, url in merged]
 
         stats["dropped_no_ats"] += 1
         return []
@@ -512,8 +566,6 @@ async def _crawl_and_write_hosts(hosts: list[str], session, sem, stats, parse_po
                     "country": country,
                     "discovery_method": "host_crawl_v2",
                 })
-        if duplicates_collapsed:
-            log.info(f"    ({duplicates_collapsed} duplicate (ats,slug) hits collapsed before writing)")
         written = 0
         if batch_rows:
             written = await write_rows_to_staging_table(session, batch_rows)
@@ -522,26 +574,34 @@ async def _crawl_and_write_hosts(hosts: list[str], session, sem, stats, parse_po
         done = min(i + BATCH, len(tasks))
         elapsed = time.monotonic() - crawl_start
         rate = stats["companies_attempted"] / elapsed if elapsed > 0 else 0
-
         hosts_n = max(stats["companies_attempted"], 1)
         hit_n = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
 
-        log.info(f"  {done}/{len(tasks)} hosts this file — {rate:.1f} hosts/sec overall — "
-                 f"{elapsed:.0f}s elapsed")
-        log.info(f"    → supabase: {written}/{len(batch_rows)} rows written this batch "
-                 f"({len(found_rows)} hits total so far)")
-        log.info(f"    hosts so far: hit(ats)={hit_n / hosts_n * 100:.1f}% "
-                 f"(of which no_country={stats['written_without_country'] / max(hit_n, 1) * 100:.1f}%) "
-                 f"dropped_no_ats={stats['dropped_no_ats'] / hosts_n * 100:.1f}% "
-                 f"unreachable={stats['homepage_unreachable'] / hosts_n * 100:.1f}%")
+        log.info(f"  {done}/{len(tasks)} hosts — {rate:.1f}/sec — {elapsed:.0f}s elapsed")
+        dup_note = f", {duplicates_collapsed} dup collapsed" if duplicates_collapsed else ""
+        log.info(f"    → {written} written{dup_note} — {len(found_rows)} hits total "
+                 f"({hit_n / hosts_n * 100:.2f}% hit rate)")
     return len(tasks), elapsed, rate, time_budget_hit
 
 
-async def run_host_crawl(crawl: str | None, shard_index: int | None, shard_count: int | None,
-                          concurrency: int, time_budget_minutes: int) -> None:
+async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: int | None,
+                          shard_count: int | None, concurrency: int,
+                          time_budget_minutes: int) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-    log.info(f"── Host Crawl v2{label} — 1 partition, follow-links ATS discovery, "
-             f"country recorded when found (not a filter), seed+crawl streamed per file ──")
+    log.info(f"── Host Crawl v2{label} ──")
+    log.info(f"  concurrency={concurrency} (network fetches in parallel — no rate limiting)")
+    log.info(f"  parse_workers={PARSE_WORKERS} (separate process pool for HTML/JSON-LD parsing)")
+    log.info(f"  time_budget={time_budget_minutes}min (graceful cutoff, shared across all "
+             f"requested partitions)")
+
+    con = _get_duckdb_connection()
+    if con is None:
+        return
+    partitions = _resolve_crawl_names(con, crawl, partitions_count)
+    if not partitions:
+        log.error("No partition(s) resolved — nothing to crawl.")
+        return
+    log.info(f"  partitions ({len(partitions)}): {partitions}")
 
     # No target-country restriction at all (2026-08 — see module
     # docstring): country is never a gate here, so there's no "target
@@ -570,67 +630,98 @@ async def run_host_crawl(crawl: str | None, shard_index: int | None, shard_count
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
     total_hosts_seen = 0
-    files_completed = 0
-    total_files = 0
+    partitions_completed = 0
+    last_partition_name = partitions[0]
 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
-            for file_num, total_files, file_hosts in iter_seed_hosts_by_file(crawl, shard_index, shard_count):
+            for partition_name, partition_num, total_partitions, file_num, total_files, file_hosts \
+                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count):
+                last_partition_name = partition_name
                 if time.monotonic() - crawl_start >= time_budget_seconds:
                     time_budget_hit = True
-                    log.warning(f"  time budget ({time_budget_minutes}min) reached before file "
-                                f"{file_num}/{total_files} — stopping here, everything found "
-                                f"so far is written. Seeding for remaining files was skipped "
-                                f"entirely (not just the crawl), so no wasted DuckDB queries.")
+                    log.warning(f"  time budget ({time_budget_minutes}min) reached before "
+                                f"{partition_name} file {file_num}/{total_files} — stopping "
+                                f"here, everything found so far is written. Remaining seeding "
+                                f"was skipped entirely (not just the crawl).")
                     break
+                partitions_completed = partition_num - 1
                 if not file_hosts:
-                    files_completed += 1
                     continue
                 total_hosts_seen += len(file_hosts)
                 _, elapsed, rate, file_time_hit = await _crawl_and_write_hosts(
                     file_hosts, session, sem, stats, parse_pool, accept_any_country,
                     found_rows, crawl_start, time_budget_seconds, time_budget_minutes)
-                files_completed += 1
                 if file_time_hit:
                     time_budget_hit = True
                     break
+                if file_num == total_files:
+                    partitions_completed = partition_num
     finally:
         parse_pool.shutdown(wait=True)
 
     total_hits = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
     hosts_n = max(stats["companies_attempted"], 1)
+
+    log.info("")
+    log.info(f"── Host Crawl v2{label} summary ──")
     if time_budget_hit:
-        log.info(f"── host_crawl_v2{label} STOPPED EARLY (time budget): "
-                 f"{files_completed}/{total_files} file(s) reached, "
-                 f"{stats['companies_attempted']}/{total_hosts_seen} hosts in those files attempted, "
-                 f"{elapsed:.0f}s, {rate:.1f} hosts/sec avg ──")
+        log.info(f"  status:      STOPPED EARLY — time budget reached mid-{last_partition_name}")
     else:
-        log.info(f"── host_crawl_v2{label} complete: {total_files} file(s), {total_hosts_seen} hosts, "
-                 f"{elapsed:.0f}s, {rate:.1f} hosts/sec avg ──")
-    log.info(f"  hits(ats)={total_hits / hosts_n * 100:.1f}% ({total_hits}) | "
-             f"of which no_country={stats['written_without_country'] / max(total_hits, 1) * 100:.1f}% "
-             f"({stats['written_without_country']}) | "
-             f"dropped_no_ats={stats['dropped_no_ats'] / hosts_n * 100:.1f}% ({stats['dropped_no_ats']}) | "
-             f"unreachable={stats['homepage_unreachable'] / hosts_n * 100:.1f}% ({stats['homepage_unreachable']})")
+        log.info("  status:      complete — all requested partitions covered")
+    log.info(f"  partitions:  {partitions_completed}/{len(partitions)} fully covered "
+             f"({partitions})")
+    log.info(f"  hosts:       {stats['companies_attempted']} attempted, {total_hosts_seen} seeded")
+    log.info(f"  time:        {elapsed:.0f}s of {time_budget_seconds:.0f}s budget, "
+             f"{rate:.1f} hosts/sec avg")
+    log.info("")
+    log.info("  accuracy:")
+    log.info(f"    ATS hits found:     {total_hits} ({total_hits / hosts_n * 100:.2f}% of hosts attempted)")
+    log.info(f"    with country:       {total_hits - stats['written_without_country']} "
+             f"({(1 - stats['written_without_country'] / max(total_hits, 1)) * 100:.1f}% of hits)")
+    log.info(f"    no ATS found:       {stats['dropped_no_ats']} "
+             f"({stats['dropped_no_ats'] / hosts_n * 100:.1f}% of hosts attempted)")
+    log.info(f"    unreachable:        {stats['homepage_unreachable']} "
+             f"({stats['homepage_unreachable'] / hosts_n * 100:.1f}% of hosts attempted)")
     if total_hits:
-        log.info(f"  hit source: homepage={stats['hits_from_homepage'] / total_hits * 100:.1f}% "
-                 f"career_path={stats['hits_from_career_path'] / total_hits * 100:.1f}% "
-                 f"sitemap={stats['hits_from_sitemap'] / total_hits * 100:.1f}%")
+        log.info("")
+        log.info("  hits by tier:")
+        log.info(f"    homepage:     {stats['hits_from_homepage']} "
+                 f"({stats['hits_from_homepage'] / total_hits * 100:.1f}%)")
+        log.info(f"    career_path:  {stats['hits_from_career_path']} "
+                 f"({stats['hits_from_career_path'] / total_hits * 100:.1f}%)")
+        log.info(f"    sitemap:      {stats['hits_from_sitemap']} "
+                 f"({stats['hits_from_sitemap'] / total_hits * 100:.1f}%)")
     ats_breakdown = Counter(r["ats"] for r in found_rows)
     if ats_breakdown:
-        log.info(f"  by platform: {dict(ats_breakdown.most_common())}")
+        log.info("")
+        log.info("  hits by platform:")
+        for ats, n in ats_breakdown.most_common():
+            log.info(f"    {ats}: {n}")
     country_breakdown = Counter(r["country"] or "unknown" for r in found_rows)
     if country_breakdown:
-        log.info(f"  by country (incl. unknown): {dict(country_breakdown.most_common())}")
+        log.info("")
+        log.info("  hits by country:")
+        for country, n in country_breakdown.most_common():
+            log.info(f"    {country}: {n}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Host Crawl v2 — 1-partition, follow-links ATS discovery. Country is "
-                     "detected and recorded when found, but is NOT a filter — see module docstring.")
+        description="Host Crawl v2 — follow-links ATS discovery across one or more Common "
+                     "Crawl partitions. Country is detected and recorded when found, but is "
+                     "NOT a filter — see module docstring.")
     parser.add_argument("--crawl", type=str, default=None,
-                         help="Pin a specific Common Crawl partition (e.g. CC-MAIN-2025-18). "
+                         help="Pin the starting Common Crawl partition (e.g. CC-MAIN-2025-18). "
                               "Default: the most recent available.")
+    parser.add_argument("--partitions", type=int, default=1,
+                         help="How many partitions to crawl this run, starting at --crawl (or "
+                              "the latest) and walking backward through older ones. Safe to "
+                              "raise — memory only ever holds one file's worth of hosts "
+                              "regardless of how many partitions are requested (see module "
+                              "docstring). The --time-budget-minutes budget is shared across "
+                              "all of them, not per-partition, so more partitions means less "
+                              "time per partition, not more total runtime.")
     parser.add_argument("--shard-index", type=int, default=None,
                          help="This job's shard index (0-based) — filtering happens IN THE SQL "
                               "QUERY itself (hash(surt_host_name) %% shard_count), not by "
@@ -644,11 +735,11 @@ def main():
                          help=f"Hosts crawled in parallel (default {CRAWL_CONCURRENCY})")
     parser.add_argument("--time-budget-minutes", type=int, default=TIME_BUDGET_MINUTES,
                          help=f"Stop gracefully after this many minutes (default {TIME_BUDGET_MINUTES}) "
-                              f"— this is now the ONLY thing bounding how much of the partition a "
-                              f"run covers; there's no separate host-count cap.")
+                              f"— the ONLY thing bounding how much gets covered; there's no "
+                              f"separate host-count cap.")
     args = parser.parse_args()
 
-    asyncio.run(run_host_crawl(args.crawl, args.shard_index, args.shard_count,
+    asyncio.run(run_host_crawl(args.crawl, args.partitions, args.shard_index, args.shard_count,
                                 args.concurrency, args.time_budget_minutes))
 
 
