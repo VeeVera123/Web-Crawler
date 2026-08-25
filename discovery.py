@@ -538,11 +538,22 @@ def _url_to_slug_brassring(url: str) -> str | None:
 
 
 def _url_to_slug_teamtailor(url: str) -> str | None:
+    """Teamtailor's widget/embed loader (see support.teamtailor.com "job
+    list widget") is served from a GENERIC infra subdomain —
+    scripts.teamtailor.com/widget/... — with the actual company identified
+    by a separate data-key attribute, not the script URL itself. Same
+    false-slug shape as the Greenhouse 'embed' bug: subdomain.split(".")[0]
+    on that URL is the literal word "scripts", not a company, and would
+    otherwise be returned as if it were one. There's no data-key value in
+    the URL to fall back to (unlike Greenhouse's ?for= — Teamtailor's key
+    isn't in the script URL at all), so this platform's widget form is
+    correctly a MISS via URL-only detection rather than a wrong answer;
+    excluding "scripts" here just stops it from being a WRONG one."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "teamtailor.com" in host:
         slug = host.replace(".teamtailor.com", "").lower()
-        if slug and slug not in SKIP_SLUGS and slug not in ("www", "app"):
+        if slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "scripts", "cdn", "support"):
             return slug
     return None
 
