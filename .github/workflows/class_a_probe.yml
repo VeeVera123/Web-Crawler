@@ -1,80 +1,45 @@
-name: Class A — Seed-and-Probe Extraction
+name: Class A — Domain-Crawl Discovery
 
-# A DIFFERENT technique from ctlog_extract.yml (Phase 1 of the CT-logs
-# pipeline) — built for the platforms CT logs structurally can't touch:
-# Greenhouse, Lever, Ashby, Workable, SmartRecruiters. All five put the
-# company identifier in a URL PATH (e.g. boards.greenhouse.io/{slug}),
-# and a certificate can never carry a path, so a CT-log sweep of these
-# domains returns zero tenant signal no matter how large the platform
-# is. See CTLOGS_CLASS_A_HELP_REQUEST.md / CLASS_A_SUGGESTIONS_REVIEW.md
-# for the full background. NOTE: Class A has more members than these
-# five (join.com, Jobvite, JobAdder, BrassRing, ADP, Paylocity, Folks
-# HR) — only these five have a CONFIRMED probeable public endpoint (see
-# class_a_probe.py's module docstring), the rest aren't wired in yet.
+# REWRITTEN (2026-08): this used to be a "guess a slug, ask the platform's
+# API" prober (seed-and-probe). It's now a domain-crawl discovery tool
+# instead — visits each company's OWN website (from PDL's domain field)
+# and looks for a REAL link to any of the 25+ ATS platforms
+# discovery.py's URL_TO_SLUG recognizes, using multiple independent
+# detection methods per page (parsed links, raw-text regex scan for
+# embedded/JS links, dedicated JSON-LD structured-data parsing) with a
+# fallback chain (homepage -> common career-page paths -> sitemap.xml) if
+# the homepage alone doesn't turn anything up. See class_a_probe.py's
+# module docstring for the full rationale — short version: guessing
+# slugs against Greenhouse's shared API is what got this project soft-
+# blocked by their WAF, and separately produced a 4.5M-row false-positive
+# incident against SmartRecruiters (their API 200'd identically for real
+# and fake slugs, so body-shape checking could never have worked).
+# Neither failure mode is possible with this technique: a match here
+# means the literal URL is present on the company's OWN page, and every
+# request goes to a different company's own domain instead of hammering
+# one shared host, so there's no single target for a WAF to trip on.
 #
-# INSTEAD: all five expose a real, confirmed, unauthenticated public
-# per-slug job-board API that 200s for a real company and 404s for a
-# fake one (see class_a_probe.py's module docstring for the exact URLs
-# and where each was confirmed). class_a_probe.py combines THREE free
-# bulk seed sources (People Data Labs' ~7M-company dataset, SEC EDGAR's
-# CIK list, and the original YC company list — see
-# CLASS_A_SEED_LIST_HELP_REQUEST.md for why the YC list alone came back
-# too small/narrow on the first run) and probes plausible slug variants
-# of each company name — and, where PDL supplies a domain, DOMAIN-derived
-# variants too — against each platform's API. Genuinely probabilistic,
-# not exhaustive like CT logs — only finds a company if it's in a seed
-# source AND one of the guessed slug variants happens to be the
-# company's real one — so treat this as supplemental signal, not a full
-# replacement.
+# NO --platform ANYMORE: the old script probed one platform at a time.
+# This one detects ALL platforms simultaneously from a single visit to
+# each company's site, so there's nothing to select — sharding is purely
+# over the company list now (see shard_count input).
 #
-# PDL SEED FILE: too large to commit into the repo (~1GB uncompressed,
-# ~290MB zipped — GitHub blocks anything over 100MB without Git LFS) and
-# Kaggle-hosted (needs an authenticated one-time download, not fetchable
-# fresh per run). Instead it's uploaded ONCE as an asset on a GitHub
-# Release in this repo (see pdl_release_tag input below), and every job
-# downloads + unzips that release asset before running — `gh release
-# download` works against a private repo automatically via the
-# workflow's own built-in GITHUB_TOKEN, no extra secret needed. If the
-# release/asset doesn't exist yet, this step logs a warning and
-# continues — class_a_probe.py runs fine without the PDL file present,
-# just with fewer candidates (SEC EDGAR + YC only).
+# NO RATE LIMITING: deliberately removed (see class_a_probe.py's module
+# docstring) — it existed specifically to survive hammering one shared
+# host and would be pure overhead here, where the actual constraint is
+# this runner's own network/CPU throughput, not any single target's
+# tolerance for traffic.
 #
-# Workable ALSO gets its own documented master XML feed
-# (workable.com/boards/workable.xml) fetched directly, but only on
-# shard 0 of that platform's matrix row — one request covers ALL
-# accounts, so every other shard fetching it too would just be redundant
-# multi-minute downloads for zero extra signal (see class_a_probe.py's
-# run_platform).
+# PDL SEED FILE: same as before — too large to commit into the repo
+# (~1GB uncompressed), uploaded once as a GitHub Release asset (tag:
+# pdl_release_tag below) and downloaded fresh each run via `gh release
+# download` using the workflow's own built-in token.
 #
 # Writes into the SAME ctlog_probe_results staging table the CT-logs
-# pipeline uses — Phase 2 verification (still on hold, see
-# ctlog_verify.yml) already covers everything in that table regardless
-# of which extraction technique populated it.
-#
-# TWO-AT-A-TIME, DYNAMIC MATRIX (2026-08, updated): previously ran all 4
-# platforms x 5 shards = 20 jobs in one go (~1.4M companies/shard). Even
-# with the 350-min timeout, that's too much per shard once you account
-# for every job independently re-parsing the ~1GB PDL CSV + SEC EDGAR
-# file (real minutes of pure-Python overhead before probing even starts)
-# plus possible soft-block backoff pauses on top. Switched to running
-# TWO platforms per dispatch at DOUBLE the shard count (10 instead of 5)
-# — same 20-job account-wide cap, but each shard now only covers
-# ~710k companies instead of ~1.4M, roughly halving the per-shard
-# workload. The `platforms` input controls which two (or fewer/more, if
-# you want) run this time — e.g. run "greenhouse,smartrecruiters" now,
-# then dispatch again later with "lever,ashby" for the other two,
-# without needing to hand-edit this file each time. A `prepare-matrix`
-# job builds the actual platform x shard matrix from that input at
-# dispatch time (GitHub Actions matrices can't reference inputs
-# directly, so this indirection via `fromJson` is required).
-#
-# RATE-LIMIT-AWARE (2026-08): class_a_probe.py sets its own per-platform
-# concurrency and backoff internally (see PLATFORM_CONCURRENCY /
-# RateLimiter in class_a_probe.py) based on each platform's actual
-# documented rate-limit policy, and now also treats WAF/CDN soft-block
-# statuses (403/5xx, see _SOFT_BLOCK_STATUSES) as an implicit rate-limit
-# signal, not just literal 429s — nothing to configure here in the
-# workflow, just noting it since a prior Greenhouse run needed it.
+# pipeline uses, now with root_domain finally holding the actual company
+# domain that was crawled (previously a placeholder marker string, since
+# the old technique had no real domain to put there) and source_hostname
+# holding the exact page URL + detection tier the match was found on.
 on:
   workflow_dispatch:
     inputs:
@@ -82,14 +47,14 @@ on:
         description: "Tag of the GitHub Release holding the PDL dataset zip asset"
         required: false
         default: "pdl-seed-data"
-      platforms:
-        description: "Comma-separated platforms to run THIS pass (keep to 2 at shard_count=10 to stay at the 20-job cap). Choices: greenhouse, lever, ashby, smartrecruiters, workable"
-        required: false
-        default: "greenhouse,smartrecruiters"
       shard_count:
-        description: "Shards per platform this pass"
+        description: "Number of parallel shards to split the company list across"
         required: false
-        default: "10"
+        default: "20"
+      concurrency:
+        description: "Companies crawled in parallel PER shard (no rate limiting — see class_a_probe.py)"
+        required: false
+        default: "400"
 
 concurrency:
   group: class-a-probe-${{ github.ref }}
@@ -97,39 +62,38 @@ concurrency:
 
 jobs:
   prepare-matrix:
+    # GitHub Actions matrices can't reference workflow_dispatch inputs
+    # directly, so shard_count -> [0, 1, ..., shard_count-1] is computed
+    # here first and passed to the crawl job via fromJson (same pattern
+    # this workflow already used for its old platform x shard matrix).
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
-      - name: Build platform x shard matrix from inputs
+      - name: Build shard-index matrix from shard_count input
         id: build
         run: |
-          PLATFORMS="${{ github.event.inputs.platforms || 'greenhouse,smartrecruiters' }}"
-          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '20' }}"
           MATRIX_JSON=$(python3 -c "
           import json
-          platforms = [p.strip() for p in '$PLATFORMS'.split(',') if p.strip()]
           shard_count = int('$SHARD_COUNT')
-          include = [{'platform': p, 'shard': s, 'shard_count': shard_count}
-                     for p in platforms for s in range(shard_count)]
-          print(json.dumps({'include': include}))
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
           ")
-          echo "Platforms this pass: $PLATFORMS  |  shard_count: $SHARD_COUNT  |  total jobs: $(python3 -c "print(len('$PLATFORMS'.split(',')) * $SHARD_COUNT)")"
+          echo "shard_count: $SHARD_COUNT  |  total jobs: $SHARD_COUNT"
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
-  probe:
+  crawl:
     needs: prepare-matrix
     runs-on: ubuntu-latest
-    # See the TWO-AT-A-TIME comment above for why 350 (near GitHub-hosted
-    # runners' hard 360-minute ceiling, which timeout-minutes can't
-    # exceed regardless of what's set here) is still worth keeping even
-    # with the smaller per-shard workload — soft-block backoff can still
-    # add real waiting time on an unlucky run.
+    # 350 keeps real headroom under GitHub-hosted runners' hard 360-min
+    # ceiling. Unlike the old probe, there's no backoff/circuit-breaker
+    # that could stall a shard indefinitely here — a slow shard is just
+    # genuinely slow (network-bound crawling of however many companies
+    # landed in its slice), not stuck waiting on a block.
     timeout-minutes: 350
     strategy:
-      fail-fast: false   # one shard's API hiccup shouldn't cancel the others
+      fail-fast: false   # one shard's issue shouldn't cancel the others
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -140,7 +104,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install aiohttp requests python-dotenv
+        run: pip install aiohttp aiodns selectolax requests python-dotenv
 
       - name: Download PDL seed dataset from GitHub Release
         env:
@@ -149,24 +113,20 @@ jobs:
           TAG="${{ github.event.inputs.pdl_release_tag || 'pdl-seed-data' }}"
           if gh release download "$TAG" --repo "${{ github.repository }}" -p "*.zip" -D . ; then
             unzip -o ./*.zip
-            # The PDL Kaggle zip extracts to companies_sorted.csv — rename
-            # to what class_a_probe.py expects by default (see its
-            # PDL_DATASET_PATH). If you uploaded it under a different
-            # internal filename, adjust this rename accordingly.
             if [ -f companies_sorted.csv ] && [ ! -f people_data_labs_companies.csv ]; then
               mv companies_sorted.csv people_data_labs_companies.csv
             fi
             echo "PDL dataset ready: $(ls -la people_data_labs_companies.csv 2>/dev/null || echo 'NOT FOUND after unzip — check the zip contents/filename')"
           else
-            echo "No PDL release asset found (tag: $TAG) — continuing without it. class_a_probe.py will fall back to SEC EDGAR + YC only."
+            echo "No PDL release asset found (tag: $TAG) — nothing to crawl without it, this shard will find 0 companies."
           fi
 
-      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe, shard ${{ matrix.shard }}/${{ matrix.shard_count }})"
+      - name: "Crawl companies (shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '20' }})"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python class_a_probe.py \
-            --platform ${{ matrix.platform }} \
             --shard-index ${{ matrix.shard }} \
-            --shard-count ${{ matrix.shard_count }}
+            --shard-count ${{ github.event.inputs.shard_count || '20' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '400' }}
