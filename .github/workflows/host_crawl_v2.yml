@@ -1,52 +1,31 @@
 name: Host Crawl v2 — Common Crawl Domain Discovery
 
-# NEW (2026-08): replaces the old seed/crawl/finalize batch-pipeline
-# design (host_crawl.yml, host_crawl_seed.py's h_seeding/h_file_count/
-# h_total_seeded queue tables) with a single combined seed+crawl+detect
-# pass, scoped to exactly ONE Common Crawl Host Index partition, per
-# explicit instruction. host_crawl_v2.py does the seeding (a DuckDB
-# hf:// query against Hugging Face's mirror of Common Crawl's Host Index,
-# same proven memory-safe per-file pattern host_crawl_seed.py used) AND
-# the crawl (reusing class_a_probe.py's fetch/parse/detect core directly)
-# in one script — no queue tables, no multi-run convergence needed for a
-# single-partition pass. See host_crawl_v2.py's module docstring for the
-# full rationale, including why 1 partition (~1-2 months of crawl data,
-# NOT a year) is a reasonable, deliberate scope for this build.
-#
-# COUNTRY IS NOT A GATE (2026-08 — see host_crawl_v2.py's module
-# docstring): a row is written whenever a real ATS link is found. Country
-# is detected and attached to the row when confidently found (JSON-LD /
-# footer address text), left NULL otherwise — expect most rows to have
-# country=NULL, since only ~15-30% of sites publish machine-readable
-# address data at all. Narrowing by country, if wanted, is a query
-# against ctlog_probe_results afterward, not a crawl-time filter here.
-#
-# SHARDING (rewritten 2026-08 after a real OOM crash — see host_crawl_v2.py's
-# module docstring): the FIRST version seeded the whole partition into one
-# Python list before crawling anything, then sliced hosts[shard::shard_count]
-# — a live run with a high host_limit accumulated 126M+ hosts in memory
-# and got OOM-killed by the runner's OS mid-seed (reported as the generic
-# "Error: The operation was canceled."). Sharding now happens IN THE SQL
-# QUERY itself (hash(surt_host_name) % shard_count = shard_index), so each
-# shard's DuckDB query only ever pulls its own ~1/N slice over the wire —
-# both cheaper and memory-safe — AND seeding/crawling are interleaved per
-# Parquet file rather than seeding the whole partition up front, so memory
-# never holds more than one file's worth of hosts at a time regardless of
-# partition size. There's no host-count cap anymore — TIME_BUDGET_MINUTES
-# alone governs how much of the partition a run covers.
+# Single combined seed+crawl+detect pass over Common Crawl's Host Index —
+# no queue tables, no multi-run convergence. Country is detected and
+# attached when found, but is never a filter (most rows will have
+# country=NULL — that's normal, see host_crawl_v2.py's module docstring).
+# Sharding happens in the SQL query itself and seeding/crawling stream one
+# Parquet file at a time, so memory stays bounded regardless of partition
+# count or host_limit (there is no host_limit anymore — see module
+# docstring's STREAMING SEED+CRAWL and HOW MANY PARTITIONS sections for
+# the full history and reasoning).
 on:
   workflow_dispatch:
     inputs:
       crawl_partition:
-        description: "Common Crawl partition to use. Defaulted to CC-MAIN-2025-18 — confirmed live (2026-08) to actually be the most recent partition in this Host Index dataset, pinned explicitly so every shard uses the same one deterministically and skips the live 'list available partitions' lookup, which failed transiently on a real run (fell back to this same hardcoded value anyway, just with an unnecessary warning). Blank = fall back to the live lookup instead."
+        description: "Starting Common Crawl partition. Blank = latest."
         required: false
         default: "CC-MAIN-2025-18"
+      partitions:
+        description: "How many partitions to crawl, starting there (walks backward through older ones). Time budget is shared across all of them, not multiplied."
+        required: false
+        default: "1"
       shard_count:
-        description: "Number of parallel shards to split the seeded host list across"
+        description: "Parallel shards to split the crawl across"
         required: false
         default: "10"
       concurrency:
-        description: "Hosts crawled in parallel PER shard (no rate limiting — see class_a_probe.py/host_crawl_v2.py). Raised default 2026-08 from 300 to 700, matching class_a_probe.yml's own already-proven concurrency=700 (confirmed live: a real class_a_probe run at concurrency=700 logged parse_workers=3 auto-detected and a steady 31.2 companies/sec with no memory issues — CORRECTING an earlier wrong assumption here that this account's free-tier runner was 2 vCPUs; parse_workers=cpu_count()-1=3 only happens on a 4-vCPU runner, which GitHub's standard 'ubuntu-latest' image now is regardless of plan tier). This only bounds NETWORK fetch parallelism (asyncio.Semaphore) — cheap to raise since there's no rate limiting and DNS goes through aiodns. The real per-runner ceiling is PARSE_WORKERS, a separate CPU-bound HTML-parsing process pool that auto-sizes to cpu_count()-1 (reserves one core for the async event loop/OS/network stack — see PARSE_WORKERS comment in class_a_probe.py for why that reserved core matters) — left at its auto-detected default here rather than hardcoded, since it already correctly adapts to whatever runner size is actually available. Override this input per-run to test a different value — the run's own log lines report live 'X hosts/sec overall' every 2000 hosts, so a real run tells you directly whether a change actually helped."
+        description: "Hosts crawled in parallel PER shard. 700 matches class_a_probe's own proven value on this runner size (4 vCPUs) — see class_a_probe.py's PARSE_WORKERS comment before raising further."
         required: false
         default: "700"
 
@@ -113,5 +92,6 @@ jobs:
           python host_crawl_v2.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
-            --concurrency ${{ github.event.inputs.concurrency || '300' }} \
+            --partitions ${{ github.event.inputs.partitions || '1' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '700' }} \
             "${CRAWL_ARGS[@]}"
