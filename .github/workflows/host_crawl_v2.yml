@@ -34,9 +34,9 @@ on:
         required: false
         default: ""
       host_limit:
-        description: "Cap on candidate hosts seeded from the partition (per shard's own seed pass, before sharding is applied)"
+        description: "Cap on candidate hosts seeded from the partition, shared across all shards (not per-shard — see host_crawl_v2.py). Set deliberately high (default below) so it never triggers early — a live host_crawl_seed.py run found ~1.66M matching hosts in JUST ONE of ~30 files in a partition, so this is set well above any realistic partition total. The actual runtime cap that matters is TIME_BUDGET_MINUTES (crawl stops gracefully, writes everything found so far) — this input only bounds the seed scan, not the crawl."
         required: false
-        default: "60000"
+        default: "50000000"
       shard_count:
         description: "Number of parallel shards to split the seeded host list across"
         required: false
@@ -107,7 +107,7 @@ jobs:
           fi
 
           python host_crawl_v2.py \
-            --host-limit ${{ github.event.inputs.host_limit || '60000' }} \
+            --host-limit ${{ github.event.inputs.host_limit || '50000000' }} \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --concurrency ${{ github.event.inputs.concurrency || '300' }} \
