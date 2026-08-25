@@ -30,9 +30,9 @@ on:
   workflow_dispatch:
     inputs:
       crawl_partition:
-        description: "Pin a specific Common Crawl partition (e.g. CC-MAIN-2025-18). Blank = most recent available."
+        description: "Common Crawl partition to use. Defaulted to CC-MAIN-2025-18 — confirmed live (2026-08) to actually be the most recent partition in this Host Index dataset, pinned explicitly so every shard uses the same one deterministically and skips the live 'list available partitions' lookup, which failed transiently on a real run (fell back to this same hardcoded value anyway, just with an unnecessary warning). Blank = fall back to the live lookup instead."
         required: false
-        default: ""
+        default: "CC-MAIN-2025-18"
       host_limit:
         description: "Cap on candidate hosts seeded from the partition, shared across all shards (not per-shard — see host_crawl_v2.py). Set deliberately high (default below) so it never triggers early — a live host_crawl_seed.py run found ~1.66M matching hosts in JUST ONE of ~30 files in a partition, so this is set well above any realistic partition total. The actual runtime cap that matters is TIME_BUDGET_MINUTES (crawl stops gracefully, writes everything found so far) — this input only bounds the seed scan, not the crawl."
         required: false
