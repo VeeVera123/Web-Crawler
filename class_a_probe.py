@@ -93,6 +93,7 @@ Usage:
 """
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -145,6 +146,20 @@ CONNECTOR_LIMIT = int(os.environ.get("CRAWL_CONNECTOR_LIMIT", str(CRAWL_CONCURRE
 # time/memory. Way more than any real HTML page needs (few hundred KB is
 # typical); this is a safety ceiling, not a realistic limit.
 MAX_PAGE_BYTES = 3_000_000
+
+# PARSE WORKERS (2026-08): HTML/JSON-LD parsing + regex scanning is real
+# synchronous Python/C-extension work, and asyncio's single event-loop
+# thread can't spread that across cores no matter how many the runner
+# has — past some concurrency, parsing becomes the bottleneck, not
+# network wait (see the --concurrency discussion in project notes). This
+# offloads _parse_and_detect to a real multi-process pool via
+# loop.run_in_executor, so parsing genuinely uses every core the runner
+# has instead of queueing behind one. Network I/O (the actual aiohttp
+# fetch) stays on the main event loop as before — only the CPU-bound
+# part moves. Default leaves one core for the event loop/OS/network
+# stack itself; override with PARSE_WORKERS if that's not the right
+# split for a given runner.
+PARSE_WORKERS = int(os.environ.get("PARSE_WORKERS", str(max(1, (os.cpu_count() or 4) - 1))))
 
 # WIDENED (2026-08): real company sites use a lot of different paths for
 # their careers page — the original 4-path list was too narrow and would
@@ -312,6 +327,20 @@ def _detect_ats_hits(urls: set[str]) -> list[tuple[str, str, str]]:
     return hits
 
 
+def _parse_and_detect(html: str, base_url: str) -> list[tuple[str, str, str]]:
+    """The full CPU-bound half of processing one page — methods A+B+C
+    (link extraction, raw-text URL regex scan, JSON-LD parsing) plus
+    running every candidate through URL_TO_SLUG — bundled into ONE
+    function so it can be shipped to a worker process as a single unit
+    (see PARSE_WORKERS / run_crawl's ProcessPoolExecutor). Must stay a
+    plain module-level function taking only picklable arguments (a
+    string page body + a string URL) — that's what makes it safe to run
+    via loop.run_in_executor across process boundaries, including on
+    Windows where multiprocessing needs importable top-level functions."""
+    urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
+    return _detect_ats_hits(urls)
+
+
 # ── fetching ──────────────────────────────────────────────────────────
 
 async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> tuple[str, str] | None:
@@ -320,6 +349,13 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
     (unreachable, non-HTML, too large, error status). No retries, no
     backoff — see module docstring for why that machinery doesn't belong
     here; a single miss just means this company/path didn't pan out."""
+    # requests_attempted is a REQUEST-level counter — a single company can
+    # fire dozens of these (homepage candidates + up to 18 career paths +
+    # up to 3 sitemap follows), unlike companies_attempted which is
+    # COMPANY-level. Error-rate percentages below are computed against
+    # THIS counter, not companies_attempted — dividing request counts by
+    # company counts is what produced nonsensical >100% figures before.
+    stats["requests_attempted"] += 1
     try:
         async with session.get(url, timeout=REQUEST_TIMEOUT,
                                 headers={"User-Agent": USER_AGENT},
@@ -327,6 +363,8 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
                                 ssl=False) as r:
             if r.status >= 400:
                 stats["http_error"] += 1
+                if r.status == 404:
+                    stats["status_404"] += 1
                 return None
             content_type = r.headers.get("Content-Type", "")
             if content_type and "html" not in content_type.lower():
@@ -354,7 +392,8 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
 
 
 async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                      company_name: str, domain: str, stats: dict) -> list[tuple[str, str, str, str, str]]:
+                      company_name: str, domain: str, stats: dict,
+                      parse_pool: concurrent.futures.ProcessPoolExecutor) -> list[tuple[str, str, str, str, str]]:
     """Crawls one company's site end to end: homepage -> (if nothing
     found) common career-page paths -> (if still nothing) sitemap.xml
     fallback. Returns a list of (ats, slug, matched_url, domain, tier) —
@@ -363,6 +402,7 @@ async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
     found at whichever tier first produced a hit are kept, not just the
     first pair. `tier` is "homepage" / "career_path" / "sitemap",
     whichever fetch tier actually produced this hit."""
+    loop = asyncio.get_running_loop()
     async with sem:
         stats["companies_attempted"] += 1
         candidates = [f"https://{domain}"]
@@ -381,8 +421,7 @@ async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
 
         final_url, html = page
         stats["homepage_fetched"] += 1
-        urls = _extract_candidate_urls(html, final_url) | _extract_jsonld_urls(html)
-        hits = _detect_ats_hits(urls)
+        hits = await loop.run_in_executor(parse_pool, _parse_and_detect, html, final_url)
         if hits:
             stats["hits_from_homepage"] += 1
             return [(ats, slug, url, domain, "homepage") for ats, slug, url in hits]
@@ -397,8 +436,7 @@ async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
             if not cp:
                 continue
             cp_url, cp_html = cp
-            urls = _extract_candidate_urls(cp_html, cp_url) | _extract_jsonld_urls(cp_html)
-            hits = _detect_ats_hits(urls)
+            hits = await loop.run_in_executor(parse_pool, _parse_and_detect, cp_html, cp_url)
             if hits:
                 stats["hits_from_career_path"] += 1
                 return [(ats, slug, url, domain, "career_path") for ats, slug, url in hits]
@@ -416,8 +454,7 @@ async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                 if not sp:
                     continue
                 sp_url, sp_html = sp
-                urls = _extract_candidate_urls(sp_html, sp_url) | _extract_jsonld_urls(sp_html)
-                hits = _detect_ats_hits(urls)
+                hits = await loop.run_in_executor(parse_pool, _parse_and_detect, sp_html, sp_url)
                 if hits:
                     stats["hits_from_sitemap"] += 1
                     return [(ats, slug, url, domain, "sitemap") for ats, slug, url in hits]
@@ -466,7 +503,10 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
 
     results = await asyncio.gather(*(_write_chunk(c) for c in chunks))
     written = sum(results)
-    log.info(f"  Wrote {written}/{len(rows)} rows to ctlog_probe_results")
+    # Logged by run_crawl's per-batch summary line instead (keeps writes
+    # to a single, consistently-placed "written to supabase" line rather
+    # than an extra one interleaved mid-batch from here).
+    log.debug(f"  Wrote {written}/{len(rows)} rows to ctlog_probe_results")
     return written
 
 
@@ -509,59 +549,114 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     stats = Counter()
     found_rows: list[dict] = []
 
-    async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [_crawl_one(session, sem, c["name"], c["domain"], stats) for c in companies]
+    # Real multi-core parsing (see PARSE_WORKERS comment). NOTE: this is
+    # passed EXPLICITLY into every run_in_executor call in _crawl_one —
+    # asyncio's loop.set_default_executor() only accepts a
+    # ThreadPoolExecutor (a hard CPython restriction, confirmed by
+    # actually hitting the TypeError it raises), so a ProcessPoolExecutor
+    # can't be installed as "the" default; it has to be threaded through
+    # explicitly instead.
+    log.info(f"  parse_workers={PARSE_WORKERS} (separate process pool for HTML/JSON-LD "
+             f"parsing — see PARSE_WORKERS comment)")
+    parse_pool = concurrent.futures.ProcessPoolExecutor(max_workers=PARSE_WORKERS)
 
-        BATCH = 3000
-        total_distinct_hits = 0
-        crawl_start = time.monotonic()
-        for i in range(0, len(tasks), BATCH):
-            batch = tasks[i:i + BATCH]
-            results = await asyncio.gather(*batch)
-            batch_rows = []
-            for company_hits in results:
-                for ats, slug, matched_url, domain, tier in company_hits:
-                    batch_rows.append({
-                        "ats": ats,
-                        "slug": slug,
-                        "source_hostname": f"[{tier}] {matched_url}"[:250],
-                        "root_domain": domain,
-                    })
-            if batch_rows:
-                total_distinct_hits += len(batch_rows)
-                await write_rows_to_staging_table(session, batch_rows)
-                found_rows.extend(batch_rows)
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = [_crawl_one(session, sem, c["name"], c["domain"], stats, parse_pool) for c in companies]
 
-            done = min(i + BATCH, len(tasks))
-            elapsed = time.monotonic() - crawl_start
-            rate = done / elapsed if elapsed > 0 else 0
-            # timeout+unreachable as a share of attempts made so far — the
-            # tell for whether the current --concurrency is actually
-            # helping or has been pushed past what this runner's single
-            # CPU-bound parsing thread can keep up with (see module
-            # docstring / the "is 400 safe to raise" question this was
-            # added to answer): a rising share here at a HIGHER
-            # concurrency than a previous run, with a LOWER companies/sec
-            # rate, means back off — you're queueing, not parallelizing.
-            attempted = max(stats["companies_attempted"], 1)
-            stall_share = (stats["timeout"] + stats["unreachable"]) / attempted * 100
-            log.info(f"  crawled {done}/{len(tasks)} companies — {total_distinct_hits} ATS hits found so far "
-                     f"— {rate:.1f} companies/sec")
-            log.info(f"    fetch breakdown (cumulative): homepage_fetched={stats['fetched_ok']} "
-                     f"homepage_unreachable={stats['homepage_unreachable']} "
-                     f"http_error={stats['http_error']} timeout={stats['timeout']} "
-                     f"non_html={stats['non_html']} unreachable={stats['unreachable']} "
-                     f"(timeout+unreachable = {stall_share:.1f}% of attempts)")
-            log.info(f"    hit source (cumulative): homepage={stats['hits_from_homepage']} "
-                     f"career_path={stats['hits_from_career_path']} sitemap={stats['hits_from_sitemap']}")
+            BATCH = 3000
+            total_distinct_hits = 0
+            crawl_start = time.monotonic()
+            elapsed, rate = 0.0, 0.0  # in case tasks is empty (0 companies in this shard's slice)
+            for i in range(0, len(tasks), BATCH):
+                batch = tasks[i:i + BATCH]
+                results = await asyncio.gather(*batch)
+                batch_rows = []
+                for company_hits in results:
+                    for ats, slug, matched_url, domain, tier in company_hits:
+                        batch_rows.append({
+                            "ats": ats,
+                            "slug": slug,
+                            "source_hostname": f"[{tier}] {matched_url}"[:250],
+                            "root_domain": domain,
+                        })
+                written = 0
+                if batch_rows:
+                    total_distinct_hits += len(batch_rows)
+                    written = await write_rows_to_staging_table(session, batch_rows)
+                    found_rows.extend(batch_rows)
 
-    hit_rate = total_distinct_hits / max(len(companies), 1) * 100
-    reach_rate = stats['fetched_ok'] / max(len(companies), 1) * 100
-    log.info(f"  TOTAL: {total_distinct_hits} ATS hits found across {len(companies)} companies "
-             f"({hit_rate:.2f}% of companies yielded a hit, {reach_rate:.1f}% had a reachable homepage)")
+                done = min(i + BATCH, len(tasks))
+                elapsed = time.monotonic() - crawl_start
+                rate = done / elapsed if elapsed > 0 else 0
+
+                # TWO different denominators, deliberately kept separate:
+                #   pct_co   — % of COMPANIES attempted. One company = one
+                #              outcome (hit / no_ats_found / unreachable),
+                #              so this is what "X% hit" should mean.
+                #   pct_req  — % of individual HTTP REQUESTS attempted. A
+                #              single company can fire 20+ requests via the
+                #              career-path/sitemap fallback tiers, so
+                #              request-level counters (404, timeout,
+                #              non_html, ...) divided by company count would
+                #              (and previously did) exceed 100%.
+                companies_n = max(stats["companies_attempted"], 1)
+                requests_n = max(stats["requests_attempted"], 1)
+                pct_co = lambda n: n / companies_n * 100  # noqa: E731
+                pct_req = lambda n: n / requests_n * 100  # noqa: E731
+
+                hit_n = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
+                no_ats_n = max(stats["companies_attempted"] - hit_n - stats["homepage_unreachable"], 0)
+                other_http_error_n = stats['http_error'] - stats['status_404']
+
+                # Line 1 — throughput.
+                log.info(f"  batch {done}/{len(tasks)} companies — {rate:.1f} companies/sec "
+                         f"— {elapsed:.0f}s elapsed")
+                # Line 2 — what got written to Supabase this batch vs. cumulative.
+                log.info(f"    → supabase: {written}/{len(batch_rows)} rows written this batch "
+                         f"({total_distinct_hits} hits total so far)")
+                # Line 3 — per-company hit/miss rates + per-request error rates, so far.
+                log.info(f"    companies so far: hit={pct_co(hit_n):.1f}% "
+                         f"no_ats_found={pct_co(no_ats_n):.1f}% "
+                         f"unreachable={pct_co(stats['homepage_unreachable']):.1f}%  ||  "
+                         f"requests so far: 404={pct_req(stats['status_404']):.1f}% "
+                         f"other_error={pct_req(other_http_error_n):.1f}% "
+                         f"timeout={pct_req(stats['timeout']):.1f}% "
+                         f"conn_failed={pct_req(stats['unreachable']):.1f}% "
+                         f"non_html={pct_req(stats['non_html']):.1f}%")
+    finally:
+        parse_pool.shutdown(wait=True)
+
+    # ── end-of-shard cumulative summary — same two-denominator split as
+    # the per-batch lines above (company outcomes vs. request outcomes),
+    # so it's directly comparable across shards/runs of different sizes. ──
+    companies_n = max(len(companies), 1)
+    requests_n = max(stats["requests_attempted"], 1)
+    pct_co = lambda n: n / companies_n * 100  # noqa: E731
+    pct_req = lambda n: n / requests_n * 100  # noqa: E731
+
+    total_hits = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
+    no_ats_found = max(len(companies) - total_hits - stats["homepage_unreachable"], 0)
+    other_http_error = stats['http_error'] - stats['status_404']
+
+    log.info(f"── shard{label} complete: {len(companies)} companies, {elapsed:.0f}s, "
+             f"{rate:.1f} companies/sec avg ──")
+    log.info(f"  companies: hit={pct_co(total_hits):.1f}% ({total_hits}) | "
+             f"no_ats_found={pct_co(no_ats_found):.1f}% ({no_ats_found}) | "
+             f"unreachable={pct_co(stats['homepage_unreachable']):.1f}% ({stats['homepage_unreachable']})")
+    log.info(f"  requests ({stats['requests_attempted']} total): "
+             f"404={pct_req(stats['status_404']):.1f}% ({stats['status_404']}) | "
+             f"other_http_error={pct_req(other_http_error):.1f}% ({other_http_error}) | "
+             f"timeout={pct_req(stats['timeout']):.1f}% ({stats['timeout']}) | "
+             f"conn_failed={pct_req(stats['unreachable']):.1f}% ({stats['unreachable']}) | "
+             f"non_html={pct_req(stats['non_html']):.1f}% ({stats['non_html']})")
+    if total_hits:
+        log.info(f"  hit source: homepage={stats['hits_from_homepage'] / total_hits * 100:.1f}% "
+                 f"career_path={stats['hits_from_career_path'] / total_hits * 100:.1f}% "
+                 f"sitemap={stats['hits_from_sitemap'] / total_hits * 100:.1f}%")
     ats_breakdown = Counter(r["ats"] for r in found_rows)
     if ats_breakdown:
-        log.info(f"  By platform: {dict(ats_breakdown.most_common())}")
+        log.info(f"  by platform: {dict(ats_breakdown.most_common())}")
 
 
 def main():
