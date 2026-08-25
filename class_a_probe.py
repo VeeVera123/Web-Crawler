@@ -586,7 +586,19 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     parse_pool = concurrent.futures.ProcessPoolExecutor(max_workers=PARSE_WORKERS)
 
     try:
-        async with aiohttp.ClientSession(connector=connector) as session:
+        # DummyCookieJar (2026-08): we never send cookies back or need
+        # session state — every fetch is an independent, one-shot GET.
+        # Without this, aiohttp's default CookieJar tries to parse every
+        # Set-Cookie header from millions of unrelated sites, and a
+        # malformed one (a stray unquoted comma in the value — a bug on
+        # THEIR end, e.g. an unescaped "zip=San Jose,CA") raises
+        # http.cookies.CookieError, which aiohttp catches and logs as a
+        # WARNING ("Can not load cookies: Illegal cookie name ..."). Real,
+        # harmless, and was going to keep firing at scale across a crawl
+        # this size — DummyCookieJar skips cookie parsing/storage
+        # entirely, so it can't fail, and there's no free-lunch downside
+        # since we were throwing the cookies away anyway.
+        async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
             tasks = [_crawl_one(session, sem, c["name"], c["domain"], stats, parse_pool) for c in companies]
 
             BATCH = 3000
