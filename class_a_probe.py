@@ -1,140 +1,95 @@
 """
-CLASS A SEED-AND-PROBE EXTRACTION (2026-08) — a genuinely different
-technique from the CT-logs pipeline (ctlog_extract.py), built specifically
-for the platforms CT logs structurally can't touch: Greenhouse, Lever,
-Ashby, Workable, SmartRecruiters. See CTLOGS_CLASS_A_HELP_REQUEST.md and
-CLASS_A_SUGGESTIONS_REVIEW.md for the full background — short version:
-these platforms put the company identifier in a URL PATH, not a hostname
-(e.g. boards.greenhouse.io/{slug}), and a TLS certificate can never carry
-a path. CT logs return zero tenant signal for them no matter how large
-the platform is.
+CLASS A DOMAIN-CRAWL DISCOVERY (2026-08 rewrite) — replaces the earlier
+seed-and-probe (guess-a-slug, ask-the-platform) technique entirely with
+the method host_crawl.py used before it was deprecated: visit each
+company's OWN website and look for a REAL link to a known ATS platform
+that they themselves published, instead of guessing candidate slugs and
+asking a platform's API to confirm/deny them.
 
-NOT ALL OF CLASS A IS COVERED — only these five have a CONFIRMED public,
-unauthenticated, per-slug probeable endpoint (checked directly, not
-assumed — see CLASS_A_SUGGESTIONS_REVIEW.md for what was checked and
-ruled out). join.com, Jobvite, JobAdder, BrassRing, ADP, Paylocity, and
-Folks HR are also Class A but do NOT have a confirmed probeable endpoint
-wired in here yet — adding one without confirming it first risks
-repeating the SmartRecruiters-directory mistake (a suggested endpoint
-that turned out not to exist on inspection).
+WHY THIS REPLACES SLUG-GUESSING, NOT JUST SUPPLEMENTS IT:
+  1. PRECISION: a match here means the literal URL is present on the
+     company's own page — there is no equivalent of the SmartRecruiters
+     false-positive bug (where an API 200'd identically for real and
+     fake slugs) possible with this method, because we're not asking a
+     third party to validate a guess; we're reading what the company
+     itself published. See the 4.5M-row false-positive incident this
+     project hit with the old technique for exactly the failure mode
+     this avoids structurally, not just via a patched check.
+  2. NO SHARED CHOKE POINT: the old technique hammered ONE shared host
+     per platform (boards-api.greenhouse.io) with millions of requests,
+     which is exactly the traffic pattern that got it soft-blocked by
+     Greenhouse's WAF (see the now-removed PLATFORM_CONCURRENCY /
+     RateLimiter / circuit-breaker machinery this file used to carry).
+     This technique instead sends a handful of requests to each of
+     millions of DIFFERENT company domains — no single target ever sees
+     enough volume from us to trip an anti-abuse system. That's why all
+     of that throttling/backoff/circuit-breaker code is GONE here: it
+     solved a problem specific to the old technique's shared-host
+     traffic shape, and doesn't apply to this one.
+  3. ONE PASS, ALL PLATFORMS: the old script probed one ATS platform at a
+     time (--platform greenhouse, --platform lever, ...). This script
+     detects ALL 25+ platforms discovery.py knows how to recognize
+     (see URL_TO_SLUG there) from a SINGLE fetch of a company's page —
+     visiting acme.com once can find a Greenhouse link, a Lever link, or
+     any other platform's link, whichever is actually there. Far more
+     work extracted per request than the old one-platform-per-probe
+     design.
 
-WHY THIS WORKS INSTEAD: all five platforms expose a real, documented (or
-directly confirmed) UNAUTHENTICATED public job-board API keyed by the
-company's slug:
-  Greenhouse:      boards-api.greenhouse.io/v1/boards/{slug}/jobs
-  Lever:           api.lever.co/v0/postings/{slug}?mode=json
-  Ashby:           api.ashbyhq.com/posting-api/job-board/{slug}
-  Workable:        www.workable.com/api/accounts/{slug}?details=true
-  SmartRecruiters: api.smartrecruiters.com/v1/companies/{slug}/postings
-Four of the five return 200 for a real slug and 404 for a wrong guess.
-That turns "discover Greenhouse/Lever/Ashby/Workable companies" into
-"cheaply check whether a GUESSED slug is real" — i.e. a seed-and-probe
-problem, not a crawl. SMARTRECRUITERS IS THE EXCEPTION, confirmed by
-direct live testing (2026-08): its /postings endpoint 200s with the
-SAME {"totalFound":0,"content":[]} shell for EVERY slug, real or
-completely made up — it never validates that the company exists, and
-there is no separate company-info route on the public API to fall back
-on. The only usable signal is totalFound > 0 (see _looks_like_real_board)
-— a real number of actual current postings, present for real companies,
-reliably 0 for a fake slug. This means SmartRecruiters hits are
-UNDERCOUNTED by design now (a real company with zero currently-open
-postings can't be told apart from a fake slug and is correctly skipped)
-— the earlier version of this script used a body-shape check that
-returned true for EVERY response regardless of validity, which produced
-4.5M+ false "hits" in one run before this was caught and fixed.
+HOW DETECTION WORKS (multiple independent fallback methods per page, all
+run on every fetch — see _detect_ats_hits / _extract_candidate_urls):
+  A. Parsed <a href> links, resolved against the page's own URL (handles
+     relative/protocol-relative links a raw-text scan could miss).
+  B. A raw full-text regex scan for absolute http(s) URLs anywhere in the
+     page source — covers links embedded in <script> blocks, inline JS,
+     iframe src attributes, or anywhere else that isn't a plain <a> tag.
+  C. Dedicated JSON-LD extraction: every <script type="application/
+     ld+json"> block is parsed as real JSON and recursively walked for
+     URL-shaped string values (schema.org JobPosting/Organization
+     markup commonly carries a hiringOrganization/sameAs/url field).
+     This overlaps somewhat with method B (JSON-LD text is also inside
+     the raw page source B already scans) but parses it as structured
+     data rather than pattern-matching text, catching values method B's
+     plain-text regex could mangle (encoded characters, values split
+     across formatting) and giving a distinctly-labeled signal.
+  Every URL surfaced by A/B/C is run through discovery.py's URL_TO_SLUG —
+  the SAME per-platform converters every other source in this project
+  already trusts, so detection logic isn't duplicated or reinvented here.
 
-SEED SOURCES (2026-08, expanded after the first run came back small — see
-CLASS_A_SEED_LIST_HELP_REQUEST.md for the diagnosis): THREE free, no-auth
-bulk sources are combined and deduped by company name (see
-fetch_all_seed_companies), largest/broadest first:
-  1. People Data Labs Free Company Dataset — CC BY 4.0, 22M+ companies,
-     industry-agnostic, includes each company's own WEBSITE DOMAIN (see
-     PDL_DATASET_PATH comment below for the one-time local download this
-     needs — it's Kaggle-hosted, not fetchable fresh per-run).
-  2. SEC EDGAR CIK lookup — free, official (sec.gov), ~13MB text file,
-     hundreds of thousands of US-registered entities (skews larger/more
-     established than PDL).
-  3. Y Combinator companies (yc-oss/api) — the ORIGINAL seed source (see
-     discovery.py's fetch_yc_companies for the same list used elsewhere
-     in this project), kept as a third source rather than the only one —
-     confirmed too small (~6k) and too narrow (VC-backed tech startups
-     only) to carry this alone.
-OpenCorporates was considered and DROPPED — checked directly and it has
-no free tier at any usable bulk volume (cheapest paid plan is a few
-hundred pounds/year for 500 calls/month total).
+FALLBACK TIERS (only spent if the homepage itself yields nothing — see
+_crawl_one): if A/B/C find nothing on the homepage, a widened set of
+common career-page paths (see CAREER_PATHS — careers/jobs singular and
+plural, "join us"/"work with us" phrasing, nested under /about or
+/company, plus /hiring) are fetched CONCURRENTLY and scanned the same
+way. If THOSE also find nothing, /sitemap.xml is
+checked for any <loc> entries that look career-related and up to 3 of
+those are fetched and scanned too. This means a company genuinely gets
+several real chances before being marked as no-ATS-found, without
+unconditionally quadrupling the request volume for the (large) majority
+of companies that already resolve on the homepage alone.
 
-Every seed company is normalized into a handful of plausible slug
-variants (see _slug_variants) — DOMAIN-derived variants (from PDL's
-website field) are tried before NAME-derived ones, since an ATS slug is
-often literally the company's own domain stripped of its TLD. Each
-variant is probed against all four APIs, and which strategy (domain vs.
-name) actually produced the hit is tracked and logged per run — see
-run_platform's strategy_hits benchmark.
+SEED SOURCE — PDL ONLY, DOMAIN REQUIRED: this technique needs a real
+domain to crawl. Of the three seed sources the old script combined (PDL,
+SEC EDGAR, YC), only PDL carries a domain field — SEC EDGAR and YC only
+ever gave a company NAME, which is useless here (there's nothing to
+guess-a-domain-from without risking crawling the wrong company entirely,
+a correctness problem worse than just skipping them). So this version
+uses PDL exclusively, filtered to rows with a non-empty domain. See
+fetch_pdl_companies_with_domain.
 
-WORKABLE XML FEED: also fetches workable.com/boards/workable.xml
-directly — a documented, intentional Workable feature (see Workable's own
-help docs) that aggregates postings across many customer accounts in ONE
-request, no per-slug guessing needed. Whatever slugs that feed contains
-are pure bonus signal on top of the seed-and-probe sweep.
-
-SmartRecruiters was considered and DROPPED from this script — checked
-SmartRecruiters' own official API docs directly and confirmed there is no
-public company-directory endpoint; every endpoint needs the company
-identifier already known, which is the same seed-and-probe shape as the
-four platforms above, just without the confirmed free public seed
-overlap this project already has for them via YC. Can be added later with
-the same _probe_one() shape if a good seed list is worth spending on it.
-
-THIS IS PROBABILISTIC, UNLIKE CT LOGS: CT logs are exhaustive (every
-issued cert gets swept). Seed-and-probe only finds a candidate if (a) the
-company is in the seed list and (b) its real slug is one of the guessed
-variants. Expect a real but partial hit rate, not anywhere close to the
-seed list's total size. That's fine — this is explicitly a supplemental
-source per the same "thousands would be great, hundreds is still real"
-bar the rest of this pipeline uses, not a replacement for a proper
-crawl-based Class A solution (the deferred company-domain-CNAME idea is
-still the more exhaustive approach, see CTLOGS_CLASS_A_HELP_REQUEST.md).
-
-Writes into the SAME ctlog_probe_results staging table as the CT-logs
-pipeline (source_hostname is set to a descriptive marker instead of a
-real hostname, since there's no CT-log host involved) — Phase 2
-verification already covers everything in that table regardless of which
-extraction technique populated it, no changes needed there.
-
-RATE-LIMIT-AWARE (2026-08 rewrite): a prior run flatlined on Greenhouse
-(129 hits stuck across 65k-95k consecutive probes) with no way to tell
-genuine seed-list exhaustion from silent rate-limiting, because every
-non-200 response was logged identically as an undifferentiated "miss".
-Fixed by (1) researching each platform's actual documented rate-limit
-policy directly and setting a conservative per-platform concurrency (see
-PLATFORM_CONCURRENCY below), (2) adding a shared per-platform backoff gate
-that a 429 pushes forward for every in-flight probe, not just the one
-that got rate-limited (see RateLimiter), and (3) tracking a full
-status-code breakdown (hit / bad-shape-200 / 404 / 429 / other-error /
-exception) logged every batch and summarized at the end of each run, so
-future logs make the taper-vs-throttle question directly answerable
-instead of a guess.
-
-LIVE VERIFICATION: a "hit" here already means the platform's own API
-returned a 200 with a body that looks like a real job-board payload (see
-_looks_like_real_board) — not just any 200. That IS a live check; there's
-no separate unverified-write path in this script. Everything written to
-ctlog_probe_results from here has already been confirmed live against
-the platform at probe time.
-
-THIS ROUND'S ACTIVE PLATFORM SET: greenhouse, lever, ashby, smartrecruiters
-(workable's per-slug probing code path is still here and still works —
-see PROBE_URL — it's just excluded from this round's GitHub Actions
-matrix; its master XML feed fetch, a separate/free bulk source, is
-independent of that decision).
+DELIBERATELY NO RATE LIMITING: unlike the old script, there is no
+per-request backoff, no soft-block detection, and no circuit breaker
+here. That machinery existed specifically to survive hammering ONE
+shared host — it would be actively counterproductive against millions of
+independent domains, where the constraint is our own network/CPU
+throughput, not any single target's tolerance for our traffic. Per-
+request TIMEOUTS still exist (a dead/slow site can't be allowed to stall
+the crawl forever), but that's a liveness safeguard, not a rate limit.
 
 Usage:
-    pip install aiohttp requests python-dotenv
-    python class_a_probe.py --platform greenhouse
-    python class_a_probe.py --platform lever
-    python class_a_probe.py --platform ashby
-    python class_a_probe.py --platform smartrecruiters
-    python class_a_probe.py --platform workable
+    pip install aiohttp selectolax python-dotenv requests
+    python class_a_probe.py
+    python class_a_probe.py --shard-index 0 --shard-count 20
+    python class_a_probe.py --concurrency 600
 """
 import argparse
 import asyncio
@@ -145,15 +100,17 @@ import re
 import sys
 import time
 from collections import Counter
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import requests
 from dotenv import load_dotenv
+from selectolax.lexbor import LexborHTMLParser
 
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from discovery import SKIP_SLUGS, YC_ALL_COMPANIES_URL, YC_USER_AGENT  # noqa: E402
+from discovery import SKIP_SLUGS, URL_TO_SLUG  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
@@ -162,774 +119,328 @@ log = logging.getLogger("class_a_probe")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=12)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-# ── per-platform concurrency + backoff (2026-08 rewrite) ──────────────
-# Replaced the old flat PROBE_CONCURRENCY=80 for every platform after a
-# run flatlined on Greenhouse (129 hits stuck across 65k-95k consecutive
-# probes) with zero way to tell "genuine taper" from "silently
-# rate-limited" apart, because every non-200 was logged identically as a
-# miss. Researched each platform's ACTUAL documented rate-limit policy
-# directly (not assumed) before picking these numbers:
-#   - SmartRecruiters: documented, confirmed at
-#     developers.smartrecruiters.com/docs/rate-limiting — "up to 10
-#     requests per second" for the Posting API, 429 on excess, official
-#     recommendation is exponential backoff. Concurrency alone isn't a
-#     per-second limiter, so this is kept well under 10 as a margin.
-#   - Greenhouse: NO published rate-limit doc found anywhere on
-#     developers.greenhouse.io. The 129-stuck-for-95k-probes flatline is
-#     a real, previously-unexplained symptom consistent with an
-#     undocumented WAF/CDN soft-throttle under sustained high-concurrency
-#     traffic — kept deliberately conservative until this run's new
-#     diagnostic counters (see PROBE_STATS below) can show whether 429s
-#     (or silent non-200/timeouts) actually spike at higher concurrency.
-#   - Lever: only a documented limit for POST application submissions (2
-#     req/sec) at github.com/lever/postings-api — no documented GET/read
-#     limit, so given more headroom than Greenhouse, but still well below
-#     the old flat 80 since "undocumented" isn't the same as "unlimited."
-#   - Ashby: per apis.io/rate-limits/ashby, applies a per-key sliding-
-#     window limit with 429 + Retry-After on excess, but no exact numeric
-#     limit confirmed for the specific public job-board endpoint used
-#     here — conservative pending real data from this run's 429 counter.
-#   - Workable: kept for completeness (the per-slug probing path can
-#     still run for it even though this round's workflow matrix excludes
-#     it) — no documented per-slug limit found, moderate default.
-PLATFORM_CONCURRENCY = {
-    "greenhouse": 15,
-    "lever": 30,
-    "ashby": 15,
-    "smartrecruiters": 8,
-    "workable": 40,
-}
-DEFAULT_CONCURRENCY = 15
+# Per-request safety timeout — NOT a rate limit. A handful of dead/slow
+# sites can't be allowed to stall the whole crawl; this just caps how
+# long any single fetch is allowed to hang before being abandoned.
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=6)
 
-# Status codes treated as an IMPLICIT rate-limit/block signal even though
-# they aren't 429 — added after a live run showed exactly this pattern on
-# Greenhouse: 404s froze completely after the first ~5000-company batch
-# while non-200/404/429 responses climbed unboundedly for the rest of the
-# run, with 429 staying at zero the whole time. That shape (real misses
-# stop, something-else-entirely takes over, no formal rate-limit signal)
-# is the classic fingerprint of a CDN/WAF (Cloudflare, Akamai, etc.)
-# soft-blocking an IP after too much sustained traffic, typically via 403
-# or a 5xx rather than 429. Backing off on these too, not just literal
-# 429s, is the fix — see _probe_one.
-_SOFT_BLOCK_STATUSES = {403, 500, 502, 503, 520, 521, 522, 523, 524, 525, 526, 530}
+# CONCURRENCY: how many companies are processed in parallel. Each company
+# may issue 1 request (homepage hit found) up to ~8 (homepage miss ->
+# career-path fallback -> sitemap fallback, all attempted). Tunable via
+# env/CLI since the right number depends on the runner's own network
+# capacity, not any external constraint (see module docstring — there is
+# deliberately nothing on the other side of this that we're pacing
+# against). Default is high on purpose.
+CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_CONCURRENCY", "400"))
+# Hard ceiling on simultaneous TCP connections at the connector level —
+# set a bit above CRAWL_CONCURRENCY to give the fallback-tier burst
+# requests (a company that reaches career-path/sitemap fallback opens
+# several requests at once) room without being needlessly serialized.
+CONNECTOR_LIMIT = int(os.environ.get("CRAWL_CONNECTOR_LIMIT", str(CRAWL_CONCURRENCY + 150)))
 
-# Soft-block statuses get a LONGER default cool-down than a plain 429 —
-# an IP-level WAF ban is typically minutes, not seconds, unlike a
-# well-behaved API's documented per-second rate limit.
-SOFT_BLOCK_DEFAULT_DELAY = 60.0
+# Cap how much of any single page we read — a handful of pathological
+# multi-hundred-MB responses can't be allowed to eat all the crawl's
+# time/memory. Way more than any real HTML page needs (few hundred KB is
+# typical); this is a safety ceiling, not a realistic limit.
+MAX_PAGE_BYTES = 3_000_000
 
-# Default backoff duration (seconds) applied on a 429 that carries no
-# Retry-After header — used only as a fallback; a real Retry-After value
-# from the response always wins (see RateLimiter.register_429).
-DEFAULT_RETRY_AFTER = {
-    "greenhouse": 10.0,
-    "lever": 5.0,
-    "ashby": 5.0,
-    "smartrecruiters": 2.0,
-    "workable": 5.0,
-}
+# WIDENED (2026-08): real company sites use a lot of different paths for
+# their careers page — the original 4-path list was too narrow and would
+# have missed genuinely findable companies. Covers the common English-
+# language conventions (careers/jobs singular+plural, "join us"/"work
+# with us" phrasing, nested under /about or /company, and an explicit
+# "hiring" variant) without exploding into every possible i18n/phrasing
+# variant, which would mostly just add request volume for little extra
+# yield. All fetched CONCURRENTLY per company (see _crawl_one), so this
+# widening costs more total requests, not more time per company.
+CAREER_PATHS = [
+    "/careers", "/career",
+    "/jobs", "/job-openings", "/open-positions", "/openings",
+    "/join-us", "/join", "/work-with-us", "/work-for-us",
+    "/about/careers", "/about-us/careers", "/company/careers", "/company/jobs",
+    "/team/careers",
+    "/hiring", "/we-are-hiring",
+    "/apply",
+]
+SITEMAP_MAX_FOLLOW = 3  # cap how many sitemap-discovered URLs get fetched
 
-# CIRCUIT BREAKER (2026-08): backing off on soft-block statuses (see
-# SOFT_BLOCK_DEFAULT_DELAY above) is the right move for a TRANSIENT,
-# volume-triggered throttle — wait it out, resume. But if a platform is
-# under a SUSTAINED IP-level ban instead (the same status on every single
-# request, indefinitely), backing off just means "wait 60s, get blocked
-# again, wait 60s, get blocked again" forever — far SLOWER than the old
-# no-backoff behavior, and at that rate a multi-hundred-thousand-company
-# shard would never finish within any reasonable timeout. So: track a
-# rolling window of recent outcomes per platform, and if the block rate
-# in that window crosses GIVE_UP_BLOCK_RATIO, stop probing this shard
-# entirely rather than grinding for hours with zero real signal — see
-# RateLimiter.record_outcome / _probe_one's abort check.
-GIVE_UP_WINDOW = 200
-GIVE_UP_BLOCK_RATIO = 0.9
-
-
-class RateLimiter:
-    """Tiny shared per-platform backoff gate. Every probe coroutine checks
-    in before making a request; a 429/soft-block anywhere pushes a shared
-    'backoff_until' timestamp forward, and every subsequent probe (not
-    just the one that got blocked) waits it out before firing its next
-    request. This is what turns "we got rate-limited" into an actual
-    pause instead of hammering straight through it. It ALSO tracks a
-    rolling block-rate and sets `abort` if the platform looks sustained-
-    blocked rather than transiently throttled — see GIVE_UP_WINDOW."""
-
-    def __init__(self, ats: str):
-        self.ats = ats
-        self.backoff_until = 0.0
-        self._lock = asyncio.Lock()
-        self.window_attempts = 0
-        self.window_blocks = 0
-        self.abort = False
-
-    async def wait_if_needed(self):
-        now = time.monotonic()
-        if now < self.backoff_until:
-            await asyncio.sleep(self.backoff_until - now)
-
-    def record_outcome(self, blocked: bool):
-        """Called once per completed HTTP attempt (not per company — a
-        company can make several attempts across its slug variants).
-        `blocked` = this specific response was a 429 or a soft-block
-        status. Deliberately synchronous/no-lock: asyncio is single-
-        threaded and this never spans an `await`, so plain int increments
-        here can't race between coroutines."""
-        if self.abort:
-            return
-        self.window_attempts += 1
-        if blocked:
-            self.window_blocks += 1
-        if self.window_attempts >= GIVE_UP_WINDOW:
-            if self.window_blocks / self.window_attempts >= GIVE_UP_BLOCK_RATIO:
-                self.abort = True
-            else:
-                self.window_attempts = 0
-                self.window_blocks = 0
-
-    async def register_429(self, retry_after_header: str | None, default_delay: float | None = None):
-        """default_delay overrides the platform's normal 429 default —
-        used for soft-block statuses (403/5xx with no Retry-After), which
-        in practice tend to be IP-level WAF bans that outlast a typical
-        rate-limit window, so they get a longer default cool-down (see
-        SOFT_BLOCK_DEFAULT_DELAY / _probe_one)."""
-        async with self._lock:
-            now = time.monotonic()
-            delay = default_delay if default_delay is not None else DEFAULT_RETRY_AFTER.get(self.ats, 5.0)
-            if retry_after_header:
-                try:
-                    delay = max(delay, float(retry_after_header))
-                except ValueError:
-                    pass
-            self.backoff_until = max(self.backoff_until, now + delay)
-
-# ── platform probe URLs — each must return something CLEARLY different
-# for a real vs. fake slug (200 w/ real JSON body vs. 404), confirmed
-# against each platform's own public API docs (see module docstring). ──
-PROBE_URL = {
-    "greenhouse": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
-    "lever": "https://api.lever.co/v0/postings/{slug}?mode=json",
-    "ashby": "https://api.ashbyhq.com/posting-api/job-board/{slug}",
-    "workable": "https://www.workable.com/api/accounts/{slug}?details=true",
-    # SmartRecruiters has NO public company-directory (checked and
-    # confirmed absent — see CLASS_A_SUGGESTIONS_REVIEW.md), but DOES
-    # have a real per-company postings endpoint that 200s for a real
-    # company id and 404s for a wrong guess — same probeable shape as
-    # the other four, just without a bulk listing endpoint of its own.
-    "smartrecruiters": "https://api.smartrecruiters.com/v1/companies/{slug}/postings",
-}
-
-WORKABLE_FEED_URL = "https://www.workable.com/boards/workable.xml"
-
-# ── seed sources ──────────────────────────────────────────────────
-# Three free, no-signup bulk seed sources, largest/broadest first. Using
-# more than one matters here — see CLASS_A_SEED_LIST_HELP_REQUEST.md:
-# the YC list alone was small (~6k) and narrow (VC-backed tech startups
-# only), which is why the first probing pass came back small. PDL's
-# dataset is the real fix for that — 22M companies, industry-agnostic,
-# and (crucially) includes each company's own WEBSITE DOMAIN, not just
-# its display name, which enables a second, often more accurate slug-
-# guessing strategy (see _slug_variants' domain parameter) since ATS
-# slugs are frequently derived from a company's domain rather than its
-# full display name. OpenCorporates was considered and DROPPED — checked
-# directly and it has no free tier at any usable volume (cheapest paid
-# plan works out to hundreds of pounds/year for a few hundred calls a
-# month — fine for occasional lookups, useless for bulk seeding).
-#
-# PEOPLE DATA LABS FREE COMPANY DATASET — CC BY 4.0 (genuinely free, no
-# signup, attribution only), 22M+ companies, quarterly updated, ~9M-line
-# CSV. Confirmed columns: name, domain, year_founded, industry, country,
-# region, locality, founded year, size, id. Hosted on Kaggle; Kaggle's
-# own API needs a free account + API token to script a download (no way
-# around that for a Kaggle-hosted file), so PDL_DATASET_PATH below points
-# at a LOCAL copy — download once via `kaggle datasets download -d
-# peopledatalabssf/free-7-million-company-dataset` (or the Kaggle web UI)
-# and unzip into the project directory, since the raw file is too large
-# to fetch fresh on every GitHub Actions run. Only used if present —
-# gracefully skipped otherwise, same "don't hard-fail if a seed source
-# isn't wired up yet" idea as everywhere else in this project.
 PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companies.csv")
-PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap —
-    # was capped by default while this was a single-machine, single-pass
-    # run; now that GitHub Actions shards the FULL combined seed list
-    # across parallel jobs (see --shard-index/--shard-count below and
-    # class_a_probe.yml), there's no more reason to hold back — each
-    # shard only processes its own slice regardless of the total size.
-    # Still overridable via PDL_ROW_LIMIT for a quick local test run.
-
-# SEC EDGAR CIK LOOKUP — confirmed free, official (sec.gov), no signup,
-# plain-text, ~13MB. Format per line: "COMPANY NAME:CIK:" — historically
-# cumulative (includes renamed/inactive entities), so treat as a name
-# source only, not a signal of which companies are currently active.
-# Skews US-listed/SEC-registered (larger, more established companies)
-# rather than PDL's broader small-business-inclusive coverage — a useful
-# different slice, not a replacement for PDL.
-SEC_EDGAR_CIK_URL = "https://www.sec.gov/Archives/edgar/cik-lookup-data.txt"
-SEC_EDGAR_ROW_LIMIT = int(os.environ.get("SEC_EDGAR_ROW_LIMIT", "100000"))
-# SEC.gov requires a descriptive User-Agent identifying the requester
-# (their own published policy — generic/browser UAs get blocked) —
-# format is "AppName contact@email", not a real browser string.
-SEC_EDGAR_USER_AGENT = "ats-global-scanner research contact@example.com"
+PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap
 
 
-def fetch_yc_companies() -> list[dict]:
-    """Same free, no-auth YC company list discovery.py's own YC resolver
-    uses (see fetch_yc_companies there) — reused here as ONE of three seed
-    sources now, not the only one. ~6k companies, static JSON, GitHub
-    Pages-hosted. Kept because it's free/instant/no-file-download-needed,
-    even though it's the smallest and narrowest of the three — every extra
-    seed source is still upside as long as it's genuinely free to use."""
-    try:
-        r = requests.get(YC_ALL_COMPANIES_URL, timeout=60,
-                          headers={"User-Agent": YC_USER_AGENT})
-        r.raise_for_status()
-        return [{"name": c.get("name", ""), "domain": None} for c in r.json()]
-    except Exception as e:
-        log.error(f"Failed to fetch YC company list: {e}")
-        return []
-
-
-def fetch_pdl_companies(limit: int = PDL_ROW_LIMIT) -> list[dict]:
+def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT) -> list[dict]:
     """Reads the People Data Labs Free Company Dataset from a LOCAL file
-    (see PDL_DATASET_PATH comment above for why — Kaggle-hosted, needs a
-    one-time authenticated download, not fetchable fresh per-run). Missing
-    file is NOT an error — logs once and returns empty, same as any other
-    optional seed source, so this script still runs fine (just smaller)
-    for anyone who hasn't done the one-time Kaggle download yet."""
+    (Kaggle-hosted, one-time authenticated download — see README/prior
+    docs) and keeps ONLY rows with a real, non-empty domain — this
+    technique needs something to crawl, and PDL is the only seed source
+    this project has that carries a domain field at all. Missing file is
+    NOT an error — logs once and returns empty, same as any other
+    optional source, so this script still runs (finding nothing) rather
+    than crashing for anyone who hasn't done the one-time download yet."""
     import csv
 
     if not os.path.exists(PDL_DATASET_PATH):
-        log.warning(f"  PDL dataset not found at '{PDL_DATASET_PATH}' — skipping this seed "
-                    f"source. Download it once via the Kaggle CLI/UI (see class_a_probe.py's "
-                    f"PDL_DATASET_PATH comment) to enable it.")
+        log.warning(f"PDL dataset not found at '{PDL_DATASET_PATH}' — nothing to crawl without it. "
+                    f"Download it once (see project README) and set PDL_DATASET_PATH if needed.")
         return []
 
     out = []
+    total_rows = 0
     try:
         with open(PDL_DATASET_PATH, newline="", encoding="utf-8", errors="ignore") as f:
             reader = csv.DictReader(f)
             for i, row in enumerate(reader):
                 if limit and i >= limit:
                     break
+                total_rows += 1
                 name = (row.get("name") or "").strip()
-                # Kaggle CSV column is "domain" (bare domain, e.g.
-                # "acme.com"), NOT "website" (that name is used by a
-                # different/newer PDL product with more fields) —
-                # confirmed against a direct EDA of this exact dataset.
-                domain = (row.get("domain") or "").strip() or None
-                if name:
+                domain = (row.get("domain") or "").strip().lower()
+                # Strip any accidental scheme/path a dirty CSV value might carry
+                domain = re.sub(r"^https?://", "", domain).split("/")[0].strip()
+                if name and domain and "." in domain and domain not in SKIP_SLUGS:
                     out.append({"name": name, "domain": domain})
     except Exception as e:
-        log.error(f"  Failed to read PDL dataset: {e}")
+        log.error(f"Failed to read PDL dataset: {e}")
         return []
+    log.info(f"PDL dataset: {total_rows} total rows, {len(out)} with a usable domain "
+             f"({len(out) / max(total_rows, 1) * 100:.1f}%)")
     return out
 
 
-def fetch_sec_edgar_companies(limit: int = SEC_EDGAR_ROW_LIMIT) -> list[dict]:
-    """Free, official, no-signup SEC EDGAR CIK list — see module-level
-    comment above for format/caveats."""
+# ── detection ─────────────────────────────────────────────────────────
+
+_URL_RE = re.compile(r'https?://[^\s"\'<>\\]{4,300}', re.I)
+_MAX_CANDIDATE_URLS_PER_PAGE = 4000  # pathological-page safety cap
+
+
+def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
+    """Method A + B combined: parsed <a href> links (resolved against the
+    page's own URL, catching relative/protocol-relative links) PLUS a raw
+    full-text scan for absolute URLs anywhere in the source (catching
+    links embedded in <script> blocks, JS strings, iframe src, or
+    anywhere else that isn't a plain <a> tag)."""
+    urls: set[str] = set()
+
     try:
-        r = requests.get(SEC_EDGAR_CIK_URL, timeout=120,
-                          headers={"User-Agent": SEC_EDGAR_USER_AGENT})
-        r.raise_for_status()
-    except Exception as e:
-        log.error(f"  Failed to fetch SEC EDGAR CIK list: {e}")
-        return []
-
-    out = []
-    for line in r.text.splitlines():
-        if limit and len(out) >= limit:
-            break
-        # Format: "COMPANY NAME:CIK:" — name may contain colons in rare
-        # cases, so split on the LAST two colons rather than the first.
-        parts = line.rsplit(":", 2)
-        if len(parts) >= 2 and parts[0].strip():
-            out.append({"name": parts[0].strip(), "domain": None})
-    return out
-
-
-def fetch_all_seed_companies() -> list[dict]:
-    """Combines every available free seed source. Each dict is
-    {"name": str, "domain": str|None} — domain is used for a second,
-    often more accurate slug-guessing strategy (see _slug_variants)
-    where available (PDL only; YC/SEC EDGAR don't carry a domain field)."""
-    sources = [
-        ("PDL Free Company Dataset", fetch_pdl_companies),
-        ("SEC EDGAR CIK list", fetch_sec_edgar_companies),
-        ("Y Combinator companies", fetch_yc_companies),
-    ]
-    combined = []
-    seen_names = set()
-    for label, fetch_fn in sources:
-        companies = fetch_fn()
-        added = 0
-        for c in companies:
-            key = c["name"].lower().strip()
-            if key and key not in seen_names:
-                seen_names.add(key)
-                combined.append(c)
-                added += 1
-        log.info(f"  seed source '{label}': {len(companies)} companies, {added} new after dedup")
-    return combined
-
-
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
-_SUFFIX_WORDS = {"inc", "llc", "ltd", "co", "corp", "corporation", "company",
-                  "the", "group", "holdings", "technologies", "labs", "hq"}
-_DOMAIN_STRIP_RE = re.compile(
-    r"^(https?://)?(www\.)?|\.(com|net|org|io|co|ai|app|dev|us|biz|inc)(/.*)?$", re.I
-)
-
-
-def _slug_variants(name: str, domain: str | None = None) -> list[str]:
-    """Normalize a company name (and, where available, its website
-    domain) into a handful of plausible ATS slug guesses. Real companies
-    pick their own slug at signup, so this is inherently a guess —
-    ordered roughly most-to-least likely, callers can stop at the first
-    HIT since ATS slugs are unique per platform (getting company X's REAL
-    slug via one variant doesn't mean trying the others too — see
-    _probe_one).
-
-    DOMAIN-DERIVED variants are tried FIRST when a domain is available:
-    ATS slugs are very often literally the company's own domain name
-    stripped of its TLD (a company at acme.com is a strong bet to be
-    "acme" on Greenhouse/Lever/etc, often a better bet than a guess
-    derived from its full legal/display name, which may include suffixes,
-    punctuation, or a DBA name that doesn't match what they typed into
-    their ATS signup form)."""
-    variants = []
-
-    if domain:
-        bare = _DOMAIN_STRIP_RE.sub("", domain.lower().strip())
-        bare = _NON_ALNUM_RE.sub("", bare)
-        if bare and bare not in SKIP_SLUGS:
-            variants.append(bare)
-
-    lowered = name.lower().strip()
-    compact = _NON_ALNUM_RE.sub("", lowered)               # "acmecorp"
-    hyphenated = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")  # "acme-corp"
-
-    words = [w for w in re.split(r"[^a-z0-9]+", lowered) if w]
-    words_no_suffix = [w for w in words if w not in _SUFFIX_WORDS]
-    stripped_hyphen = "-".join(words_no_suffix) if words_no_suffix else hyphenated
-    stripped_compact = "".join(words_no_suffix) if words_no_suffix else compact
-    acronym = "".join(w[0] for w in words_no_suffix) if len(words_no_suffix) >= 2 else None
-
-    for v in (compact, hyphenated, stripped_compact, stripped_hyphen, acronym):
-        if v and v not in SKIP_SLUGS and v not in variants:
-            variants.append(v)
-    return variants
-
-
-# ── probing (async) ──────────────────────────────────────────────────
-
-async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                      ats: str, company_name: str, variants: list[str],
-                      domain_variant_count: int, stats: dict,
-                      limiter: "RateLimiter") -> tuple[str, str, str] | None:
-    """Try each slug variant for one company in order, stop at the first
-    real hit (200 + body that actually looks like a job-board payload,
-    not just any 200 — some of these APIs 200 a malformed/empty request
-    too, see the per-platform checks below). Returns (slug, company_name,
-    strategy) where strategy is "domain" or "name" — domain-derived
-    variants are always tried first (see _slug_variants), so a hit within
-    the first domain_variant_count variants tried came from the domain,
-    everything after came from the name — this is the benchmark data
-    needed to answer "which strategy actually yields more hits".
-
-    Every non-200 outcome is now attributed to a specific bucket in
-    `stats` (hit / bad_shape_200 / 404 / 429 / other_error / exception)
-    instead of being collapsed into an undifferentiated "miss" — this is
-    what lets a future run's logs distinguish genuine 404 taper from
-    silent rate-limiting, which the old flat logging couldn't do (see
-    the module-level PLATFORM_CONCURRENCY comment for why this mattered).
-    The EXACT status code of every "other_error" is also tallied in
-    `stats["status_codes"]` (a Counter), because a 429 isn't the only way
-    a platform can soft-throttle — a first live run under this rewrite
-    showed 404s freezing completely after batch 1 while other_error
-    climbed unboundedly, which is the signature of an IP-level WAF block
-    (commonly a 403 or a 5xx from Cloudflare/Akamai) rather than organic
-    seed-list taper. So any status in _SOFT_BLOCK_STATUSES now triggers
-    the SAME shared backoff a 429 would, on the theory that "every
-    request from this IP is being rejected" is functionally a rate-limit
-    signal even when the platform doesn't say so via 429."""
-    url_template = PROBE_URL[ats]
-    async with sem:
-        for idx, slug in enumerate(variants):
-            if limiter.abort:
-                # Circuit breaker already tripped (see GIVE_UP_WINDOW) —
-                # this platform/shard is being sustained-blocked, not
-                # transiently throttled. Bail out immediately rather than
-                # spending more requests (and more backoff waiting) on a
-                # dead connection.
-                return None
-            url = url_template.format(slug=slug)
-            await limiter.wait_if_needed()
+        tree = LexborHTMLParser(html)
+        for node in tree.css("a[href]"):
+            href = node.attributes.get("href")
+            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
             try:
-                async with session.get(url, timeout=REQUEST_TIMEOUT,
-                                        headers={"User-Agent": USER_AGENT}) as r:
-                    if r.status == 429:
-                        stats["429"] += 1
-                        stats["status_codes"][r.status] += 1
-                        limiter.record_outcome(blocked=True)
-                        await limiter.register_429(r.headers.get("Retry-After"))
-                        continue
-                    if r.status == 404:
-                        stats["404"] += 1
-                        limiter.record_outcome(blocked=False)
-                        continue
-                    if r.status != 200:
-                        stats["other_error"] += 1
-                        stats["status_codes"][r.status] += 1
-                        if r.status in _SOFT_BLOCK_STATUSES:
-                            # Treat as an implicit rate-limit/block signal
-                            # even without a 429 — see docstring above.
-                            limiter.record_outcome(blocked=True)
-                            await limiter.register_429(r.headers.get("Retry-After"),
-                                                        default_delay=SOFT_BLOCK_DEFAULT_DELAY)
-                        else:
-                            limiter.record_outcome(blocked=False)
-                        continue
-                    body = await r.text()
-                    limiter.record_outcome(blocked=False)
-            except Exception:
-                stats["exception"] += 1
-                # Not counted toward the block-rate window — a handful of
-                # network hiccups shouldn't trip the circuit breaker, only
-                # a sustained run of actual 429/soft-block responses should.
+                urls.add(urljoin(base_url, href))
+            except ValueError:
                 continue
-
-            if _looks_like_real_board(ats, body):
-                stats["hit"] += 1
-                strategy = "domain" if idx < domain_variant_count else "name"
-                return slug, company_name, strategy
-            else:
-                stats["bad_shape_200"] += 1
-    return None
-
-
-def _looks_like_real_board(ats: str, body: str) -> bool:
-    """A 200 status alone isn't proof — confirm the body actually looks
-    like a job-board payload for this platform, not an empty/error JSON
-    shell some of these APIs return with 200 on a bad slug."""
-    if not body or len(body) < 2:
-        return False
-    lowered = body.lower()
-    if ats == "greenhouse":
-        return '"jobs"' in lowered
-    if ats == "lever":
-        # Lever returns a bare JSON array — "[]" is a VALID real company
-        # with zero current postings, still worth keeping (see BambooHR
-        # precedent: a live-but-currently-empty board still counts).
-        return body.strip().startswith("[")
-    if ats == "ashby":
-        return '"jobs"' in lowered or '"joblist"' in lowered or '"organizationname"' in lowered
-    if ats == "workable":
-        return '"name"' in lowered or '"jobs"' in lowered
-    if ats == "smartrecruiters":
-        # CORRECTED (2026-08): the original assumption here — "a bad id
-        # 404s outright" — was WRONG, confirmed by direct live testing.
-        # The /v1/companies/{slug}/postings endpoint returns HTTP 200
-        # with the EXACT SAME {"totalFound":0,"content":[]} shell for a
-        # completely made-up slug as it does for any other unmatched
-        # string — it never validates that the company exists at all.
-        # There is also no separate company-info endpoint on the public
-        # API to fall back on (confirmed: /v1/companies/{slug} without
-        # /postings is not a real route, 404s as "Cannot GET" regardless
-        # of slug). That means simple body-shape checking (the old
-        # '"content"' / '"totalfound"' substring check) was matching on
-        # EVERY response, real or fake — this is what produced 4.5M+
-        # false "hits" in ctlog_probe_results before this fix (real
-        # SmartRecruiters penetration is nowhere near that scale).
-        #
-        # The only usable live signal confirmed by direct testing:
-        # totalFound is a real number of actual current job postings for
-        # real companies (Colliers: 99, SilfabSolar: 24) and is reliably
-        # 0 for a made-up slug. So a hit now REQUIRES totalFound > 0 —
-        # this WILL miss real SmartRecruiters companies that currently
-        # have zero open postings (a false negative), but that's the
-        # correct tradeoff: this technique cannot tell "real company,
-        # zero postings" apart from "fake slug" at all, so undercounting
-        # is the only honest option now that overcounting is confirmed
-        # broken.
-        try:
-            parsed = json.loads(body)
-        except (ValueError, TypeError):
-            return False
-        if not isinstance(parsed, dict):
-            return False
-        total_found = parsed.get("totalFound")
-        return isinstance(total_found, int) and total_found > 0
-    return True
-
-
-async def run_platform(ats: str, shard_index: int | None = None, shard_count: int | None = None) -> None:
-    label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-    log.info(f"── {ats} (seed-and-probe, multi-source){label} ──")
-    companies = fetch_all_seed_companies()
-    if not companies:
-        log.error("  No seed companies fetched — aborting.")
-        return
-    log.info(f"  {len(companies)} total distinct seed companies before sharding")
-
-    if shard_index is not None and shard_count is not None:
-        # MODULO sharding, not a contiguous slice — PDL's rows are sorted
-        # largest-company-first (see fetch_pdl_companies), so a contiguous
-        # chunk would give shard 0 all the biggest companies and the last
-        # shard all the smallest/least-likely-to-hit ones. Interleaving by
-        # index instead gives every shard a representative, similarly-
-        # sized-company mix, same reasoning ctlog_extract.py's alphabetical
-        # sharding uses to keep shards comparably "useful," just a
-        # different mechanism since there's no natural alphabetical key
-        # here the way there is for crt.sh hostnames.
-        companies = companies[shard_index::shard_count]
-        log.info(f"  {len(companies)} companies in this shard's slice")
-
-    concurrency = PLATFORM_CONCURRENCY.get(ats, DEFAULT_CONCURRENCY)
-    log.info(f"  concurrency={concurrency}, default backoff on 429={DEFAULT_RETRY_AFTER.get(ats, 5.0)}s "
-             f"(see PLATFORM_CONCURRENCY comment for why these numbers)")
-    sem = asyncio.Semaphore(concurrency)
-    limiter = RateLimiter(ats)
-    found: dict[str, str] = {}   # slug -> company_name
-    strategy_hits = {"domain": 0, "name": 0}
-    stats = {"hit": 0, "bad_shape_200": 0, "404": 0, "429": 0, "other_error": 0, "exception": 0,
-              "status_codes": Counter()}  # exact non-200/404 codes seen — see _SOFT_BLOCK_STATUSES
-
-    async with aiohttp.ClientSession() as session:
-        existing = await fetch_existing_slug_registry_slugs(session, ats)
-        log.info(f"  slug_registry already has {len(existing)} {ats} slugs")
-
-        tasks = []
-        for c in companies:
-            name = (c.get("name") or "").strip()
-            if not name:
-                continue
-            domain = c.get("domain")
-            variants = _slug_variants(name, domain)
-            if not variants:
-                continue
-            domain_variant_count = 1 if domain else 0  # _slug_variants puts
-                # at most one domain-derived variant first — see its docstring
-            tasks.append(_probe_one(session, sem, ats, name, variants,
-                                     domain_variant_count, stats, limiter))
-
-        BATCH = 5000  # write incrementally, same "don't lose progress on
-                      # an interrupted run" principle as ctlog_extract.py.
-                      # This does NOT control how big each Supabase HTTP
-                      # write is — write_to_staging_table already caps
-                      # every actual write at 1000 rows/request regardless
-                      # of BATCH (see chunk_size there). BATCH only
-                      # controls how many probes complete before a flush
-                      # is triggered — since the real hit rate is well
-                      # under 1%, a SMALL batch mostly means frequent,
-                      # tiny, mostly-empty write calls (pure overhead), not
-                      # faster delivery of real hits. 5000 probes still
-                      # complete reasonably fast even at the now-lower
-                      # per-platform concurrency (see PLATFORM_CONCURRENCY),
-                      # so this still writes many times over a long run (an
-                      # interrupted run loses at most one batch's worth),
-                      # while cutting total request overhead a lot
-                      # compared to a smaller batch.
-        gave_up = False
-        for i in range(0, len(tasks), BATCH):
-            batch = tasks[i:i + BATCH]
-            results = await asyncio.gather(*batch)
-            batch_found = {}
-            for r in results:
-                if not r:
-                    continue
-                slug, name, strategy = r
-                batch_found[slug] = name
-                if slug not in found:
-                    strategy_hits[strategy] += 1
-            new_this_batch = {s: n for s, n in batch_found.items() if s not in found}
-            found.update(new_this_batch)
-            if new_this_batch:
-                await write_to_staging_table(session, ats, new_this_batch,
-                                              source_marker="seed_probe:multi_source")
-            log.info(f"  probed {min(i + BATCH, len(tasks))}/{len(tasks)} — "
-                     f"{len(found)} real slugs found so far "
-                     f"(domain-derived: {strategy_hits['domain']}, name-derived: {strategy_hits['name']})")
-            top_codes = ", ".join(f"{code}={n}" for code, n in stats["status_codes"].most_common(5))
-            log.info(f"    status breakdown (cumulative): hit={stats['hit']} "
-                     f"bad_shape_200={stats['bad_shape_200']} 404={stats['404']} "
-                     f"429={stats['429']} other_error={stats['other_error']} "
-                     f"exception={stats['exception']}"
-                     + (f"  [codes: {top_codes}]" if top_codes else "")
-                     + (f"  ⚠ currently backing off {(limiter.backoff_until - time.monotonic()):.0f}s "
-                        f"after a 429/soft-block status" if time.monotonic() < limiter.backoff_until else ""))
-            if limiter.abort:
-                gave_up = True
-                remaining = len(tasks) - min(i + BATCH, len(tasks))
-                log.warning(f"  ⚠ CIRCUIT BREAKER TRIPPED: {limiter.window_blocks}/{limiter.window_attempts} "
-                            f"of the last {GIVE_UP_WINDOW} requests were 429/soft-block responses "
-                            f"(>={GIVE_UP_BLOCK_RATIO * 100:.0f}%) — this looks like a SUSTAINED block, "
-                            f"not a transient throttle that backing off would fix. Stopping this "
-                            f"platform/shard early ({remaining} companies not probed) rather than "
-                            f"grinding through the rest of the timeout with near-zero real signal.")
+            if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
                 break
+    except Exception:
+        pass  # a malformed page shouldn't kill the whole crawl of this company
 
-        # Only fetch the Workable feed on ONE shard (shard 0, or the
-        # unsharded case) — it's a single request covering ALL accounts,
-        # not per-company-name work, so every other shard fetching it too
-        # would just be N redundant multi-minute downloads of the same
-        # feed for zero extra signal (the write is idempotent so it
-        # wouldn't be WRONG to repeat it, just wasteful).
-        if ats == "workable" and (shard_index is None or shard_index == 0):
-            feed_slugs = await fetch_workable_feed_slugs(session)
-            new_from_feed = {s: "" for s in feed_slugs if s not in found and s not in existing}
-            if new_from_feed:
-                await write_to_staging_table(session, ats, new_from_feed,
-                                              source_marker="workable_master_xml_feed")
-                found.update(new_from_feed)
-                log.info(f"  +{len(new_from_feed)} additional slugs from the Workable master XML feed")
+    for m in _URL_RE.finditer(html):
+        urls.add(m.group(0))
+        if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
+            break
 
-    log.info(f"  Slug-generation strategy benchmark: {strategy_hits['domain']} hits from "
-             f"domain-derived variants, {strategy_hits['name']} hits from name-derived variants")
-
-    net_new = len(set(found) - existing)
-    log.info(f"  TOTAL: {len(found)} real slugs found ({net_new} net-new vs slug_registry)"
-             + ("  ⚠ INCOMPLETE — stopped early by the circuit breaker, see warning above"
-                if gave_up else ""))
-    total_probed = stats["hit"] + stats["bad_shape_200"] + stats["404"] + stats["429"] + \
-        stats["other_error"] + stats["exception"]
-    codes_str = ", ".join(f"{code}={n}" for code, n in stats["status_codes"].most_common(10))
-    log.info(f"  FINAL status breakdown — {total_probed} total slug-variant requests made: "
-             f"hit={stats['hit']} ({stats['hit'] / max(total_probed, 1) * 100:.2f}%)  "
-             f"bad_shape_200={stats['bad_shape_200']}  404={stats['404']} "
-             f"({stats['404'] / max(total_probed, 1) * 100:.1f}%)  "
-             f"429={stats['429']} ({stats['429'] / max(total_probed, 1) * 100:.2f}%)  "
-             f"other_error={stats['other_error']}  exception={stats['exception']}")
-    if codes_str:
-        log.info(f"  Exact non-200/404 status codes seen: {codes_str}")
-    soft_block_hits = sum(n for code, n in stats["status_codes"].items() if code in _SOFT_BLOCK_STATUSES)
-    if soft_block_hits > total_probed * 0.01:
-        log.warning(f"  ⚠ {soft_block_hits} requests (>{1:.0f}% of total) returned a soft-block-shaped "
-                    f"status ({', '.join(str(c) for c in _SOFT_BLOCK_STATUSES)}) — this run was almost "
-                    f"certainly being throttled/blocked by a WAF/CDN, NOT organically running out of "
-                    f"real matches. See the exact codes above; consider lowering "
-                    f"PLATFORM_CONCURRENCY['{ats}'] further, adding real delay between requests, or "
-                    f"reducing GitHub Actions shard count (fewer simultaneous source IPs) next time.")
-    elif stats["429"] > total_probed * 0.01:
-        log.warning(f"  ⚠ {stats['429']} requests (>{1:.0f}% of total) hit HTTP 429 — this run WAS "
-                    f"meaningfully rate-limited, not just tapering off. Consider lowering "
-                    f"PLATFORM_CONCURRENCY['{ats}'] further next time.")
-    elif stats["429"] == 0 and soft_block_hits == 0 and stats["other_error"] < total_probed * 0.01:
-        log.info(f"  No meaningful 429s, soft-block statuses, or other errors this run — a flat/"
-                 f"tapering hit rate here reflects genuine seed-list exhaustion, not rate-limiting.")
+    return urls
 
 
-_WORKABLE_FEED_SLUG_RE = re.compile(r"apply\.workable\.com/([a-z0-9\-]+)/", re.I)
+def _walk_json_strings(obj, depth: int = 0):
+    """Recursively yield every string value inside a parsed JSON
+    structure — used to pull URL-shaped values out of JSON-LD blocks
+    regardless of which field they're under (hiringOrganization.url,
+    sameAs, publisher.url, etc. all vary by page)."""
+    if depth > 12:  # guard against pathological/self-referential structures
+        return
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk_json_strings(v, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_json_strings(v, depth + 1)
 
 
-async def fetch_workable_feed_slugs(session: aiohttp.ClientSession) -> set[str]:
-    """Workable's own documented aggregated jobs feed — one request,
-    covers many customer accounts at once, no per-slug guessing. See
-    module docstring / help.workable.com/hc/en-us/articles/4420464031767.
-
-    STREAMED rather than buffered with r.text(): this feed is large
-    enough that a full-body read can hit a transfer-length mismatch
-    partway through (confirmed live — aiohttp raises
-    ClientPayloadError/TransferEncodingError when the connection is cut
-    or the server's Content-Length doesn't match what actually arrives),
-    and r.text() discards everything collected so far when that happens.
-    Reading in chunks and regex-scanning as data arrives means a
-    truncated transfer still yields every slug seen before the cutoff,
-    instead of losing the whole feed to one late error."""
-    slugs: set[str] = set()
-    tail = ""  # carries a possibly-split match pattern across chunk boundaries
-    bytes_read = 0
+def _extract_jsonld_urls(html: str) -> set[str]:
+    """Method C: dedicated JSON-LD structured-data extraction. Distinct
+    from the raw-text regex scan (method B) — this actually PARSES each
+    <script type="application/ld+json"> block as JSON and walks it, which
+    catches values the raw-text pattern-match could mangle (escaped
+    characters, values assembled from multiple JSON fields) and gives a
+    separately-labeled, more precise signal than pattern-matching text."""
+    urls: set[str] = set()
     try:
-        async with session.get(WORKABLE_FEED_URL,
-                                timeout=aiohttp.ClientTimeout(total=300),
-                                headers={"User-Agent": USER_AGENT}) as r:
-            if r.status != 200:
-                log.warning(f"  Workable feed returned HTTP {r.status} — skipping.")
-                return set()
+        tree = LexborHTMLParser(html)
+        for node in tree.css('script[type="application/ld+json"]'):
+            text = node.text(strip=True)
+            if not text:
+                continue
             try:
-                async for chunk in r.content.iter_chunked(1 << 20):  # 1MB chunks
-                    bytes_read += len(chunk)
-                    text = tail + chunk.decode("utf-8", errors="ignore")
-                    slugs.update(_WORKABLE_FEED_SLUG_RE.findall(text))
-                    tail = text[-200:]  # keep enough overlap that a URL split
-                                        # across the chunk boundary still matches
-                                        # on the next iteration
-            except (aiohttp.ClientPayloadError, aiohttp.ClientConnectionError) as e:
-                log.warning(f"  Workable feed cut off after {bytes_read:,} bytes "
-                            f"({type(e).__name__}) — using the {len(slugs)} slugs "
-                            f"seen before the cutoff rather than discarding them.")
-    except Exception as e:
-        log.warning(f"  Workable feed fetch failed: {type(e).__name__}: {e or '(no message)'} — skipping.")
-        return set()
-
-    slugs = {s.lower() for s in slugs if s.lower() not in SKIP_SLUGS}
-    log.info(f"  Workable feed: {len(slugs)} distinct account slugs found "
-             f"({bytes_read:,} bytes read)")
-    return slugs
+                parsed = json.loads(text)
+            except (ValueError, TypeError):
+                continue
+            for s in _walk_json_strings(parsed):
+                if s.startswith("http://") or s.startswith("https://"):
+                    urls.add(s)
+                    if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
+                        return urls
+    except Exception:
+        pass
+    return urls
 
 
-# ── Supabase I/O (async) — same shape as ctlog_extract.py's, source_hostname
-# repurposed as a free-text source marker since there's no CT-log host here ──
+def _detect_ats_hits(urls: set[str]) -> list[tuple[str, str, str]]:
+    """Runs every candidate URL through discovery.py's real per-platform
+    URL_TO_SLUG converters — the same trusted logic every other source in
+    this project uses, not reinvented here. Returns (ats, slug,
+    matched_url) for every real match found."""
+    hits = []
+    seen = set()
+    for url in urls:
+        for ats, converter in URL_TO_SLUG.items():
+            try:
+                slug = converter(url)
+            except Exception:
+                continue
+            if slug:
+                key = (ats, slug)
+                if key not in seen:
+                    seen.add(key)
+                    hits.append((ats, slug, url))
+    return hits
 
-async def fetch_existing_slug_registry_slugs(session: aiohttp.ClientSession, ats: str) -> set[str]:
+
+# ── fetching ──────────────────────────────────────────────────────────
+
+async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> tuple[str, str] | None:
+    """Fetches one page, capped at MAX_PAGE_BYTES, returns (final_url,
+    html_text) on a usable HTML response or None on anything else
+    (unreachable, non-HTML, too large, error status). No retries, no
+    backoff — see module docstring for why that machinery doesn't belong
+    here; a single miss just means this company/path didn't pan out."""
+    try:
+        async with session.get(url, timeout=REQUEST_TIMEOUT,
+                                headers={"User-Agent": USER_AGENT},
+                                allow_redirects=True, max_redirects=5,
+                                ssl=False) as r:
+            if r.status >= 400:
+                stats["http_error"] += 1
+                return None
+            content_type = r.headers.get("Content-Type", "")
+            if content_type and "html" not in content_type.lower():
+                stats["non_html"] += 1
+                return None
+            chunks = []
+            total = 0
+            async for chunk in r.content.iter_chunked(65536):
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= MAX_PAGE_BYTES:
+                    break
+            html = b"".join(chunks).decode("utf-8", errors="ignore")
+            if not html.strip():
+                stats["non_html"] += 1
+                return None
+            stats["fetched_ok"] += 1
+            return str(r.url), html
+    except asyncio.TimeoutError:
+        stats["timeout"] += 1
+        return None
+    except Exception:
+        stats["unreachable"] += 1
+        return None
+
+
+async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                      company_name: str, domain: str, stats: dict) -> list[tuple[str, str, str, str, str]]:
+    """Crawls one company's site end to end: homepage -> (if nothing
+    found) common career-page paths -> (if still nothing) sitemap.xml
+    fallback. Returns a list of (ats, slug, matched_url, domain, tier) —
+    a company CAN yield more than one hit (e.g. an old and new ATS both
+    still linked during a migration); all distinct (ats, slug) pairs
+    found at whichever tier first produced a hit are kept, not just the
+    first pair. `tier` is "homepage" / "career_path" / "sitemap",
+    whichever fetch tier actually produced this hit."""
+    async with sem:
+        stats["companies_attempted"] += 1
+        candidates = [f"https://{domain}"]
+        if not domain.startswith("www."):
+            candidates.append(f"https://www.{domain}")
+        candidates.append(f"http://{domain}")  # last resort only
+
+        page = None
+        for base_url in candidates:
+            page = await _fetch_page(session, base_url, stats)
+            if page:
+                break
+        if not page:
+            stats["homepage_unreachable"] += 1
+            return []
+
+        final_url, html = page
+        stats["homepage_fetched"] += 1
+        urls = _extract_candidate_urls(html, final_url) | _extract_jsonld_urls(html)
+        hits = _detect_ats_hits(urls)
+        if hits:
+            stats["hits_from_homepage"] += 1
+            return [(ats, slug, url, domain, "homepage") for ats, slug, url in hits]
+
+        # Fallback tier 1: common career-page paths, fetched concurrently.
+        origin_parts = urlparse(final_url)
+        origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
+        career_pages = await asyncio.gather(
+            *[_fetch_page(session, urljoin(origin, p), stats) for p in CAREER_PATHS]
+        )
+        for cp in career_pages:
+            if not cp:
+                continue
+            cp_url, cp_html = cp
+            urls = _extract_candidate_urls(cp_html, cp_url) | _extract_jsonld_urls(cp_html)
+            hits = _detect_ats_hits(urls)
+            if hits:
+                stats["hits_from_career_path"] += 1
+                return [(ats, slug, url, domain, "career_path") for ats, slug, url in hits]
+
+        # Fallback tier 2: sitemap.xml, only reached if everything above found nothing.
+        sitemap = await _fetch_page(session, urljoin(origin, "/sitemap.xml"), stats)
+        if sitemap:
+            sm_url, sm_xml = sitemap
+            loc_urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", sm_xml, re.I)
+            career_like = [u for u in loc_urls if re.search(r"career|jobs?|join|work-with-us", u, re.I)]
+            sm_pages = await asyncio.gather(
+                *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]]
+            )
+            for sp in sm_pages:
+                if not sp:
+                    continue
+                sp_url, sp_html = sp
+                urls = _extract_candidate_urls(sp_html, sp_url) | _extract_jsonld_urls(sp_html)
+                hits = _detect_ats_hits(urls)
+                if hits:
+                    stats["hits_from_sitemap"] += 1
+                    return [(ats, slug, url, domain, "sitemap") for ats, slug, url in hits]
+
+        return []
+
+
+# ── Supabase I/O ─────────────────────────────────────────────────────
+
+async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+    """rows: list of {"ats", "slug", "source_hostname", "root_domain"}.
+    root_domain is now the ACTUAL company domain that was crawled (a
+    correct, literal use of that column for the first time — the old
+    seed-and-probe technique had no real domain to put there and used a
+    flat technique-marker string instead). source_hostname carries the
+    exact page URL the match was found on, tagged with which detection
+    tier found it — the most specific, actionable piece of information
+    available, and something the old technique never had access to."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        log.warning("  SUPABASE_URL/SUPABASE_KEY not set — skipping net-new check.")
-        return set()
-    all_slugs = set()
-    page_size = 1000
-    offset = 0
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    while True:
-        headers["Range"] = f"{offset}-{offset + page_size - 1}"
-        try:
-            async with session.get(
-                f"{SUPABASE_URL}/rest/v1/slug_registry",
-                headers=headers,
-                params={"ats": f"eq.{ats}", "select": "slug"},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as r:
-                r.raise_for_status()
-                batch = await r.json()
-        except Exception as e:
-            log.warning(f"  slug_registry lookup failed at offset {offset}: {e}")
-            break
-        if not batch:
-            break
-        all_slugs.update(row["slug"] for row in batch)
-        if len(batch) < page_size:
-            break
-        offset += page_size
-    return all_slugs
-
-
-async def write_to_staging_table(session: aiohttp.ClientSession, ats: str,
-                                  slugs: dict[str, str], source_marker: str) -> int:
-    """`slugs` maps slug -> the actual matched company display name.
-    FIXED (2026-08): source_hostname used to be set to the same flat
-    constant as root_domain (e.g. both "seed_probe:multi_source"), which
-    is why a real hit like slug="agroprosperis" showed up with no
-    indication of which company it actually matched — confusing and not
-    useful for spot-checking results. Now source_hostname carries the
-    real company name (falling back to the technique marker only when no
-    name is available, e.g. Workable-feed-derived slugs, which don't come
-    with a company name attached), and root_domain keeps the short
-    technique marker so it's still easy to filter/group rows by which
-    extraction method found them."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        log.warning("  SUPABASE_URL/SUPABASE_KEY not set — cannot write to staging table.")
+        log.warning("SUPABASE_URL/SUPABASE_KEY not set — cannot write to staging table.")
         return 0
-    rows = [
-        {
-            "ats": ats,
-            "slug": slug,
-            "source_hostname": (name.strip() if name and name.strip() else source_marker)[:250],
-            "root_domain": source_marker,
-        }
-        for slug, name in slugs.items()
-    ]
+    if not rows:
+        return 0
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -950,7 +461,7 @@ async def write_to_staging_table(session: aiohttp.ClientSession, ats: str,
                 r.raise_for_status()
                 return len(chunk)
         except Exception as e:
-            log.error(f"  Failed to write a chunk to staging table: {e}")
+            log.error(f"Failed to write a chunk to staging table: {e}")
             return 0
 
     results = await asyncio.gather(*(_write_chunk(c) for c in chunks))
@@ -959,18 +470,97 @@ async def write_to_staging_table(session: aiohttp.ClientSession, ats: str,
     return written
 
 
+# ── main crawl loop ──────────────────────────────────────────────────
+
+async def run_crawl(shard_index: int | None = None, shard_count: int | None = None,
+                     concurrency: int = CRAWL_CONCURRENCY) -> None:
+    label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
+    log.info(f"── Class A domain-crawl discovery{label} ──")
+    log.info(f"  concurrency={concurrency} (see module docstring — no rate limiting, "
+             f"only a per-request timeout for liveness)")
+
+    companies = fetch_pdl_companies_with_domain()
+    if not companies:
+        log.error("  No seed companies with a usable domain — aborting.")
+        return
+
+    if shard_index is not None and shard_count is not None:
+        # MODULO sharding (not a contiguous slice) — PDL's rows are
+        # sorted largest-company-first, so a contiguous chunk would skew
+        # which shard gets the highest-signal companies.
+        companies = companies[shard_index::shard_count]
+        log.info(f"  {len(companies)} companies in this shard's slice")
+
+    # At this concurrency, resolving DNS for millions of DIFFERENT new
+    # domains (not one warm host reused over and over) can itself become
+    # the bottleneck under Python's default resolver (thread-pool based).
+    # aiodns gives aiohttp a real concurrent async resolver — use it when
+    # available, fall back cleanly (still correct, just slower under
+    # heavy load) if the package isn't installed.
+    resolver = None
+    try:
+        import aiodns  # noqa: F401
+        resolver = aiohttp.AsyncResolver()
+    except ImportError:
+        log.warning("  aiodns not installed — DNS resolution will use the slower default "
+                    "resolver. `pip install aiodns` for real throughput at this concurrency.")
+    connector = aiohttp.TCPConnector(limit=CONNECTOR_LIMIT, ttl_dns_cache=300, resolver=resolver)
+    sem = asyncio.Semaphore(concurrency)
+    stats = Counter()
+    found_rows: list[dict] = []
+
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [_crawl_one(session, sem, c["name"], c["domain"], stats) for c in companies]
+
+        BATCH = 3000
+        total_distinct_hits = 0
+        for i in range(0, len(tasks), BATCH):
+            batch = tasks[i:i + BATCH]
+            results = await asyncio.gather(*batch)
+            batch_rows = []
+            for company_hits in results:
+                for ats, slug, matched_url, domain, tier in company_hits:
+                    batch_rows.append({
+                        "ats": ats,
+                        "slug": slug,
+                        "source_hostname": f"[{tier}] {matched_url}"[:250],
+                        "root_domain": domain,
+                    })
+            if batch_rows:
+                total_distinct_hits += len(batch_rows)
+                await write_rows_to_staging_table(session, batch_rows)
+                found_rows.extend(batch_rows)
+
+            done = min(i + BATCH, len(tasks))
+            log.info(f"  crawled {done}/{len(tasks)} companies — {total_distinct_hits} ATS hits found so far")
+            log.info(f"    fetch breakdown (cumulative): homepage_fetched={stats['fetched_ok']} "
+                     f"homepage_unreachable={stats['homepage_unreachable']} "
+                     f"http_error={stats['http_error']} timeout={stats['timeout']} "
+                     f"non_html={stats['non_html']} unreachable={stats['unreachable']}")
+            log.info(f"    hit source (cumulative): homepage={stats['hits_from_homepage']} "
+                     f"career_path={stats['hits_from_career_path']} sitemap={stats['hits_from_sitemap']}")
+
+    hit_rate = total_distinct_hits / max(len(companies), 1) * 100
+    reach_rate = stats['fetched_ok'] / max(len(companies), 1) * 100
+    log.info(f"  TOTAL: {total_distinct_hits} ATS hits found across {len(companies)} companies "
+             f"({hit_rate:.2f}% of companies yielded a hit, {reach_rate:.1f}% had a reachable homepage)")
+    ats_breakdown = Counter(r["ats"] for r in found_rows)
+    if ats_breakdown:
+        log.info(f"  By platform: {dict(ats_breakdown.most_common())}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Class A seed-and-probe extraction (async)")
-    parser.add_argument("--platform", choices=list(PROBE_URL.keys()), required=True)
+    parser = argparse.ArgumentParser(description="Class A domain-crawl discovery (async)")
     parser.add_argument("--shard-index", type=int, default=None,
-                         help="This job's shard index (0-based) when splitting the combined "
-                              "seed list across multiple parallel jobs — see run_platform's "
-                              "modulo-sharding docstring for why it's not a contiguous slice")
+                         help="This job's shard index (0-based) when splitting the seed list "
+                              "across multiple parallel jobs — modulo sharding, see run_crawl")
     parser.add_argument("--shard-count", type=int, default=None,
-                         help="Total number of shards splitting the seed list (must be passed "
-                              "together with --shard-index)")
+                         help="Total number of shards (must be passed together with --shard-index)")
+    parser.add_argument("--concurrency", type=int, default=CRAWL_CONCURRENCY,
+                         help=f"Companies processed in parallel (default {CRAWL_CONCURRENCY}, "
+                              f"env CRAWL_CONCURRENCY)")
     args = parser.parse_args()
-    asyncio.run(run_platform(args.platform, args.shard_index, args.shard_count))
+    asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency))
 
 
 if __name__ == "__main__":
