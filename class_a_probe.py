@@ -880,6 +880,20 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                             "slug": slug,
                             "source_hostname": matched_url[:250],
                             "root_domain": domain,
+                            # 2026-08: this script was writing rows with
+                            # discovery_method left NULL the whole time —
+                            # confirmed via direct inspection (grep) that
+                            # this key never appeared here before. Existing
+                            # NULL rows were retroactively classified and
+                            # backfilled in Supabase (root_domain == a
+                            # known ATS platform's OWN domain, e.g.
+                            # bamboohr.com, means a ctlog_extract/
+                            # ctlogs_probe_direct.py row; everything else
+                            # with a real distinct company domain was this
+                            # script). Setting it explicitly here going
+                            # forward so that backfill never has to be
+                            # redone.
+                            "discovery_method": "pdl_domain_crawl",
                         })
                 if duplicates_collapsed:
                     log.info(f"    ({duplicates_collapsed} duplicate (ats,slug) hits within this batch "
