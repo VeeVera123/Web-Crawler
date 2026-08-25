@@ -145,14 +145,19 @@ TARGET_TLDS = {
 }
 TARGET_SUFFIXES_EXTRA = {"co.uk", "com.au"}
 
-# A live host_crawl_seed.py run found ~1.66M live hosts matching this TLD
-# filter from JUST ONE of ~30 files in a single partition — a full
-# partition, crawled at the per-host cost this script incurs (up to ~20
-# real HTTP requests per host across all fallback tiers, not a cheap
-# queue insert), would badly overrun any reasonable workflow timeout. This
-# default is deliberately modest for a first pass; override with
-# --host-limit.
-_DEFAULT_HOST_LIMIT = 60_000
+# SEEDING-ONLY CAP (2026-08 — explicit "max hosts" instruction): this
+# does NOT bound how long a run takes — TIME_BUDGET_MINUTES already does
+# that, by stopping the CRAWL gracefully and writing everything found so
+# far, no matter how large the seeded host list is. This constant only
+# stops the SEED SCAN (reading Parquet files from the partition) once
+# it's collected this many candidate hosts, so it exists purely to avoid
+# an unbounded Python list if the true partition total turns out to be
+# absurd. Set deliberately far above any realistic partition size — a
+# live host_crawl_seed.py run found ~1.66M matching hosts in JUST ONE of
+# ~30 files in a single partition, so the true full-partition total is
+# almost certainly well under this number, meaning in practice the seed
+# scan runs to completion (every file) rather than stopping early.
+_DEFAULT_HOST_LIMIT = 50_000_000
 
 _DUCKDB_CALL_TIMEOUT_SECONDS = 180
 
