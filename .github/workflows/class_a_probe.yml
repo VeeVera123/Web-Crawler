@@ -84,7 +84,19 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # RAISED from 90 (2026-08): every shard independently re-reads the full
+    # ~1GB PDL CSV + SEC EDGAR file and rebuilds the full ~7.1M-company
+    # combined seed list before slicing its own ~1.4M-company shard out of
+    # it (pure-Python CSV parsing of that scale alone eats real minutes),
+    # then still has ~1.4M companies left to probe. 90 minutes was never
+    # enough runway for that combined workload, especially with the new
+    # soft-block backoff (class_a_probe.py's SOFT_BLOCK_DEFAULT_DELAY) that
+    # can add real waiting time on top if a platform starts soft-blocking
+    # again. 350 is intentionally just under GitHub-hosted runners' hard
+    # 360-minute (6h) ceiling — timeout-minutes can't exceed that regardless
+    # of what's set here, so this is effectively "give it all the room
+    # there is."
+    timeout-minutes: 350
     strategy:
       fail-fast: false   # one shard's API hiccup shouldn't cancel the other 19
       matrix:
