@@ -4,21 +4,25 @@ openai>=1.0
 anthropic>=0.34
 groq>=0.4
 beautifulsoup4>=4.12
- 
+
 # tranco_seed.py / tranco_crawl.py (bulk async discovery, seeded from the
 # Tranco top-sites list — see tranco_seed.py's module docstring) — not
 # needed by main.py/discovery.py. aiohttp/selectolax carried over from the
 # retired host-crawl pipeline (see ./host crawl/) for the async crawl step.
 aiohttp>=3.9
 selectolax>=0.3
- 
+# aiodns — concurrent async DNS resolution, used by class_a_probe.py's
+# domain-crawl engine at high concurrency (see run_crawl). Optional —
+# the script falls back to aiohttp's default resolver if missing, just
+# slower under heavy load.
+aiodns>=3.0
+
 # duckdb removed 2026-08 — was only needed by the retired host-crawl
 # pipeline's Common Crawl Host Index Parquet queries (see ./host crawl/).
 # Tranco seeding uses only stdlib zipfile/csv/io + requests, no DuckDB.
- 
+
 # psycopg2-binary — needed by ctlog_extract.py's direct guest-Postgres
 # connection to crt.sh (certwatch). Binary wheel, not the source
 # psycopg2 package, so GitHub Actions runners don't need libpq-dev
 # installed separately.
 psycopg2-binary>=2.9
- 
