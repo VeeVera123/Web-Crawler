@@ -202,7 +202,8 @@ PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companie
 PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap
 
 
-def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT) -> list[dict]:
+def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
+                                     countries: set[str] | None = None) -> list[dict]:
     """Reads the People Data Labs Free Company Dataset from a LOCAL file
     (Kaggle-hosted, one-time authenticated download — see README/prior
     docs) and keeps ONLY rows with a real, non-empty domain — this
@@ -210,7 +211,21 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT) -> list[dict]:
     this project has that carries a domain field at all. Missing file is
     NOT an error — logs once and returns empty, same as any other
     optional source, so this script still runs (finding nothing) rather
-    than crashing for anyone who hasn't done the one-time download yet."""
+    than crashing for anyone who hasn't done the one-time download yet.
+
+    countries (2026-08): PDL's own documented schema carries a per-company
+    HQ 'country' field (confirmed via docs.peopledatalabs.com — this is
+    NOT inferred from the domain string, which is exactly the unreliable
+    ".com is used everywhere" problem a ccTLD-based filter would have).
+    When given, only rows whose country value matches (case-insensitive)
+    one of the given strings are kept. The exact CSV column name/casing
+    for this Kaggle export hasn't been directly confirmed against the
+    real file from this sandbox (the file only lives on the user's PC),
+    so this checks a few likely header variants rather than assuming one
+    — and if a country filter was requested but NONE of them are present
+    in the file's actual header row, this logs the real header names and
+    returns nothing rather than silently ignoring the filter and crawling
+    every country anyway."""
     import csv
 
     if not os.path.exists(PDL_DATASET_PATH):
@@ -218,15 +233,39 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT) -> list[dict]:
                     f"Download it once (see project README) and set PDL_DATASET_PATH if needed.")
         return []
 
+    countries_lower = {c.strip().lower() for c in countries} if countries else None
+
     out = []
     total_rows = 0
+    skipped_wrong_country = 0
+    country_col = None
     try:
         with open(PDL_DATASET_PATH, newline="", encoding="utf-8", errors="ignore") as f:
             reader = csv.DictReader(f)
+            if countries_lower:
+                candidates = ["country", "hq country", "current company hq country", "hq_country"]
+                fieldnames_lower = {(fn or "").strip().lower(): fn for fn in (reader.fieldnames or [])}
+                for cand in candidates:
+                    if cand in fieldnames_lower:
+                        country_col = fieldnames_lower[cand]
+                        break
+                if not country_col:
+                    log.error(f"  --country was given but no country-like column was found in "
+                              f"'{PDL_DATASET_PATH}'. Actual columns: {reader.fieldnames}. "
+                              f"Tell me the real column name so I can fix this instead of guessing "
+                              f"wrong and silently crawling every country.")
+                    return []
+                log.info(f"  filtering PDL rows to countries {sorted(countries_lower)} "
+                         f"(column: '{country_col}')")
             for i, row in enumerate(reader):
                 if limit and i >= limit:
                     break
                 total_rows += 1
+                if countries_lower:
+                    row_country = (row.get(country_col) or "").strip().lower()
+                    if row_country not in countries_lower:
+                        skipped_wrong_country += 1
+                        continue
                 name = (row.get("name") or "").strip()
                 domain = (row.get("domain") or "").strip().lower()
                 # Strip any accidental scheme/path a dirty CSV value might carry
@@ -236,7 +275,8 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT) -> list[dict]:
     except Exception as e:
         log.error(f"Failed to read PDL dataset: {e}")
         return []
-    log.info(f"PDL dataset: {total_rows} total rows, {len(out)} with a usable domain "
+    filter_note = f", {skipped_wrong_country} skipped by country filter" if countries_lower else ""
+    log.info(f"PDL dataset: {total_rows} total rows{filter_note}, {len(out)} with a usable domain "
              f"({len(out) / max(total_rows, 1) * 100:.1f}%)")
     return out
 
@@ -556,7 +596,8 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
 
 async def run_crawl(shard_index: int | None = None, shard_count: int | None = None,
                      concurrency: int = CRAWL_CONCURRENCY,
-                     time_budget_minutes: int = TIME_BUDGET_MINUTES) -> None:
+                     time_budget_minutes: int = TIME_BUDGET_MINUTES,
+                     countries: set[str] | None = None) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(f"── Class A domain-crawl discovery{label} ──")
     log.info(f"  concurrency={concurrency} (see module docstring — no rate limiting, "
@@ -564,7 +605,7 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     log.info(f"  time_budget={time_budget_minutes}min (graceful cutoff — see TIME_BUDGET_MINUTES comment)")
     time_budget_seconds = time_budget_minutes * 60
 
-    companies = fetch_pdl_companies_with_domain()
+    companies = fetch_pdl_companies_with_domain(countries=countries)
     if not companies:
         log.error("  No seed companies with a usable domain — aborting.")
         return
@@ -670,10 +711,19 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                             duplicates_collapsed += 1
                             continue
                         seen_keys.add(key)
+                        # source_hostname is the plain matched URL, nothing
+                        # prepended (2026-08 — was "[tier] url", changed
+                        # per explicit request: the field should just be
+                        # the website). The detection tier isn't lost —
+                        # it's still tracked in aggregate via
+                        # stats['hits_from_{homepage,career_path,sitemap}']
+                        # and reported in the per-batch/end-of-shard "hit
+                        # source" log lines; it's just not embedded in
+                        # this per-row field anymore.
                         batch_rows.append({
                             "ats": ats,
                             "slug": slug,
-                            "source_hostname": f"[{tier}] {matched_url}"[:250],
+                            "source_hostname": matched_url[:250],
                             "root_domain": domain,
                         })
                 if duplicates_collapsed:
@@ -783,8 +833,16 @@ def main():
                               f"minutes, instead of risking a hard kill at the workflow's own "
                               f"timeout-minutes (default {TIME_BUDGET_MINUTES}, env "
                               f"CRAWL_TIME_BUDGET_MINUTES — see TIME_BUDGET_MINUTES comment)")
+    parser.add_argument("--country", action="append", default=None,
+                         help="Only crawl companies whose PDL HQ country matches this (case-"
+                              "insensitive, exact string match against the CSV's country column — "
+                              "e.g. 'united states'). Repeatable for multiple countries, e.g. "
+                              "--country 'united states' --country canada. Omit to crawl every "
+                              "country (previous behavior, unchanged).")
     args = parser.parse_args()
-    asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency, args.time_budget_minutes))
+    countries = set(args.country) if args.country else None
+    asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency,
+                           args.time_budget_minutes, countries))
 
 
 if __name__ == "__main__":
