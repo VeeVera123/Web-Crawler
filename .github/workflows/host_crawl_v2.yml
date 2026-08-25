@@ -1,0 +1,114 @@
+name: Host Crawl v2 — Common Crawl Domain Discovery
+
+# NEW (2026-08): replaces the old seed/crawl/finalize batch-pipeline
+# design (host_crawl.yml, host_crawl_seed.py's h_seeding/h_file_count/
+# h_total_seeded queue tables) with a single combined seed+crawl+detect
+# pass, scoped to exactly ONE Common Crawl Host Index partition, per
+# explicit instruction. host_crawl_v2.py does the seeding (a DuckDB
+# hf:// query against Hugging Face's mirror of Common Crawl's Host Index,
+# same proven memory-safe per-file pattern host_crawl_seed.py used) AND
+# the crawl (reusing class_a_probe.py's fetch/parse/detect core directly)
+# in one script — no queue tables, no multi-run convergence needed for a
+# single-partition pass. See host_crawl_v2.py's module docstring for the
+# full rationale, including why 1 partition (~1-2 months of crawl data,
+# NOT a year) is a reasonable, deliberate scope for this build.
+#
+# COUNTRY IS NOT A GATE (2026-08 — see host_crawl_v2.py's module
+# docstring): a row is written whenever a real ATS link is found. Country
+# is detected and attached to the row when confidently found (JSON-LD /
+# footer address text), left NULL otherwise — expect most rows to have
+# country=NULL, since only ~15-30% of sites publish machine-readable
+# address data at all. Narrowing by country, if wanted, is a query
+# against ctlog_probe_results afterward, not a crawl-time filter here.
+#
+# SHARDING: each shard job independently re-runs the same (deterministic,
+# --crawl-pinned) DuckDB seed query, then takes hosts[shard::shard_count]
+# — simple, no shared queue/checkpoint table needed for a single
+# partition's worth of hosts. Costs some duplicated DuckDB query time per
+# shard; accepted for the simplicity this build was explicitly asked for.
+on:
+  workflow_dispatch:
+    inputs:
+      crawl_partition:
+        description: "Pin a specific Common Crawl partition (e.g. CC-MAIN-2025-18). Blank = most recent available."
+        required: false
+        default: ""
+      host_limit:
+        description: "Cap on candidate hosts seeded from the partition (per shard's own seed pass, before sharding is applied)"
+        required: false
+        default: "60000"
+      shard_count:
+        description: "Number of parallel shards to split the seeded host list across"
+        required: false
+        default: "10"
+      concurrency:
+        description: "Hosts crawled in parallel PER shard (no rate limiting — see class_a_probe.py/host_crawl_v2.py)"
+        required: false
+        default: "300"
+
+concurrency:
+  group: host-crawl-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT  |  total jobs: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    # Same 350-under-360 margin class_a_probe.yml uses. Each shard here
+    # ALSO pays the DuckDB seed-query cost up front (unlike class_a_probe,
+    # which reads a pre-downloaded CSV) — the internal TIME_BUDGET_MINUTES
+    # cutoff in host_crawl_v2.py still guards the crawl portion, but the
+    # seed portion itself isn't budget-capped, so a genuinely stalled
+    # Hugging Face connection (see HF_TOKEN comment) could eat into this
+    # margin. Setting the HF_TOKEN secret is the real fix for that, not a
+    # bigger number here.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests python-dotenv duckdb
+
+      - name: "Host Crawl v2 (shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '10' }})"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          CRAWL_ARGS=()
+          if [ -n "${{ github.event.inputs.crawl_partition }}" ]; then
+            CRAWL_ARGS=(--crawl "${{ github.event.inputs.crawl_partition }}")
+          fi
+
+          python host_crawl_v2.py \
+            --host-limit ${{ github.event.inputs.host_limit || '60000' }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.shard_count || '10' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '300' }} \
+            "${CRAWL_ARGS[@]}"
