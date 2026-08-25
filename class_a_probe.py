@@ -112,6 +112,7 @@ load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discovery import SKIP_SLUGS, URL_TO_SLUG  # noqa: E402
+import geo  # noqa: E402  — country-name extraction, reused by detect_country()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
@@ -202,31 +203,24 @@ PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companie
 PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap
 
 
-# US/UK/Canada/Australia + all 27 EU member states, as literal 'country'
-# column values — CONFIRMED real strings for the first several (verified
-# directly against the user's own PDL file: 'united states' 2,278,866
-# rows, 'united kingdom' 511,969, 'canada' 186,621, 'australia' 117,133,
-# 'spain'/'netherlands'/'germany'/'france'/'italy'/'belgium'/'sweden'/
-# 'denmark'/'poland'/'portugal'/'ireland'/'finland'/'romania'/'czechia'/
-# 'austria'/'hungary'/'bulgaria'/'croatia'/'lithuania'/'slovakia' — all
-# seen directly in the user's real country-count output). The remaining
-# 6 EU members (Cyprus, Estonia, Latvia, Luxembourg, Malta, Slovenia)
-# weren't visible in that output (it was capped at the top 60 countries
-# by row count — these are small-population EU states, plausibly just
-# below that cutoff, not confirmed absent). Included anyway, by their
-# standard English name, on the same reasoning the whole filter design
-# follows: a country string that doesn't actually appear in the file
-# just matches 0 rows — harmless — whereas leaving a real EU member out
-# would silently under-cover, which is exactly the failure mode this
-# project chose to avoid (over-inclusion over under-inclusion).
+# NARROWED (2026-08, explicit request — was US/UK/Canada/Australia +
+# EU-27, 31 countries). Now a deliberately small, hand-picked 13-country
+# list: 'united states'/'united kingdom'/'canada'/'australia'/'france'/
+# 'germany'/'ireland' are all CONFIRMED real PDL country-column strings
+# (seen directly in the user's real country-count output — see prior
+# comment history in git blame for the exact row counts). 'singapore',
+# 'malta', 'new zealand', 'bahamas', 'guyana', 'barbados' were NOT visible
+# in that (top-60-by-row-count) output — plausibly real but low-row-count,
+# not confirmed absent. Included anyway on the same reasoning this
+# project has used throughout: a country string that doesn't actually
+# appear in the file just matches 0 rows, harmless, so there's no
+# downside to listing a country you're not 100% sure is present, only to
+# leaving one out that is.
 DEFAULT_COUNTRIES = {
     "united states", "united kingdom", "canada", "australia",
-    # EU-27
-    "austria", "belgium", "bulgaria", "croatia", "cyprus", "czechia",
-    "denmark", "estonia", "finland", "france", "germany", "greece",
-    "hungary", "ireland", "italy", "latvia", "lithuania", "luxembourg",
-    "malta", "netherlands", "poland", "portugal", "romania", "slovakia",
-    "slovenia", "spain", "sweden",
+    "ireland", "new zealand", "singapore", "malta",
+    "bahamas", "guyana", "barbados",
+    "france", "germany",
 }
 
 
@@ -249,7 +243,7 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
     single largest bucket, bigger than any one country, so 'no filter' is
     NOT the same as 'only known countries' — a filter, even a wide one,
     always drops every unclassified row too). See DEFAULT_COUNTRIES for
-    the ready-made US/UK/Canada/Australia + EU-27 set."""
+    the ready-made 13-country default set."""
     import csv
 
     if not os.path.exists(PDL_DATASET_PATH):
@@ -407,6 +401,156 @@ def _parse_and_detect(html: str, base_url: str) -> list[tuple[str, str, str]]:
     Windows where multiprocessing needs importable top-level functions."""
     urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
     return _detect_ats_hits(urls)
+
+
+# ── country detection (2026-08, built for host_crawl_v2.py — see that
+# file's module docstring for why: Common Crawl's Host Index, unlike
+# PDL, carries NO country field at all, confirmed via Common Crawl's own
+# documentation, so a country signal has to come from the crawled page
+# content itself, not a seed-file column) ──────────────────────────────
+
+# geo.py's canonical country names don't always match PDL's own spelling
+# 1:1 — confirmed via a live check: geo.py canonically emits "Czech
+# Republic" from extract_countries(), while PDL's real CSV uses
+# "czechia" (see geo.py's Czechia-alias comment for the full story, and
+# note the alias fix there makes extract_countries() UNDERSTAND the word
+# "Czechia" in scraped text — it just still always OUTPUTS the canonical
+# "Czech Republic" spelling, which is the thing this override reconciles
+# against DEFAULT_COUNTRIES' PDL-style spelling). This is the only
+# mismatch found across all 31 DEFAULT_COUNTRIES entries — everything
+# else matches via a plain .title() call.
+_PDL_TO_GEO_COUNTRY_OVERRIDES = {"czechia": "Czech Republic"}
+
+
+def target_countries_geo_form(pdl_style_countries: set[str]) -> set[str]:
+    """Converts a DEFAULT_COUNTRIES-style set (lowercase, PDL spelling)
+    into the canonical Title-Case spellings geo.py's extract_countries()
+    actually returns, so detect_country's result can be checked against
+    it directly without either side silently missing the other over a
+    spelling difference."""
+    return {_PDL_TO_GEO_COUNTRY_OVERRIDES.get(c, c.title()) for c in pdl_style_countries}
+
+
+def _extract_address_zone_text(html: str) -> str:
+    """Pulls text from ONLY <footer> and <address> tags — narrow,
+    targeted zones where a company's real HQ/legal address is most
+    likely to appear — rather than scanning the whole page body.
+    Scanning the whole page risks false country matches from incidental
+    mentions (blog posts about other markets, other office locations,
+    case studies, "we ship to 40 countries" marketing copy) that say
+    nothing about where the company is actually headquartered."""
+    try:
+        tree = LexborHTMLParser(html)
+        parts = []
+        for tag in ("footer", "address"):
+            for node in tree.css(tag):
+                text = node.text(separator=" ", strip=True)
+                if text:
+                    parts.append(text)
+        return " | ".join(parts)
+    except Exception:
+        return ""
+
+
+def _walk_for_address_country(obj, depth: int = 0) -> str | None:
+    """Recursively look for an 'addressCountry' key anywhere in a parsed
+    JSON-LD structure (nested under Organization.address,
+    LocalBusiness.address, or other schema.org shapes), returning its
+    raw string value. Only the FIRST one found is used — a page
+    declaring multiple different addressCountry values (multiple listed
+    office locations) is exactly the ambiguous case this isn't meant to
+    resolve on its own; see detect_country's single-match requirement."""
+    if depth > 12:
+        return None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k.lower() == "addresscountry" and isinstance(v, str) and v.strip():
+                return v.strip()
+        for v in obj.values():
+            result = _walk_for_address_country(v, depth + 1)
+            if result:
+                return result
+    elif isinstance(obj, list):
+        for item in obj:
+            result = _walk_for_address_country(item, depth + 1)
+            if result:
+                return result
+    return None
+
+
+def detect_country(html: str, target_geo_countries: set[str]) -> tuple[str | None, str | None]:
+    """Precision-ordered country-detection waterfall. Returns (country,
+    method) — method is 'jsonld' or 'footer_address' — or (None, None)
+    if nothing confidently resolves to exactly one country in
+    target_geo_countries (geo.py's canonical spelling — see
+    target_countries_geo_form). DELIBERATELY does NOT use ccTLD or IP
+    geolocation as a signal at all: live research (Common Crawl's own
+    Host Index schema docs, MaxMind's own accuracy disclosures) confirmed
+    both are unreliable/systematically biased for a COMPANY'S actual HQ
+    country specifically — ccTLD because .com is used globally, IP
+    geolocation because most modern sites sit behind a CDN (Cloudflare/
+    AWS/Fastly/etc) whose edge-node location has nothing to do with the
+    company's real location. Only content the company itself actually
+    published is trusted.
+
+    Tier 1 — JSON-LD structured data (highest confidence): an explicit
+    addressCountry value the page's own markup declares. Trusted outright
+    if it resolves to exactly one country — and if that country is a
+    confident, explicit declaration of a NON-target country, this stops
+    right there rather than letting a weaker footer-text signal overrule
+    an explicit statement.
+
+    Tier 2 — footer/<address> tag text, run through geo.py's
+    extract_countries() (the same precision-hardened country-extraction
+    logic this project already trusts for job-location classification,
+    not reinvented here). Trusted ONLY if exactly one country is found —
+    zero or multiple countries mentioned in that zone is genuinely
+    ambiguous, not guessed at."""
+    jsonld_country = None
+    try:
+        tree = LexborHTMLParser(html)
+        for node in tree.css('script[type="application/ld+json"]'):
+            text = node.text(strip=True)
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+            except (ValueError, TypeError):
+                continue
+            raw = _walk_for_address_country(parsed)
+            if raw:
+                resolved = geo.extract_countries(raw)
+                if len(resolved) == 1:
+                    jsonld_country = next(iter(resolved))
+                    break
+    except Exception:
+        pass
+    if jsonld_country:
+        if jsonld_country in target_geo_countries:
+            return jsonld_country, "jsonld"
+        return None, None  # explicit, confident — just not a target country
+
+    zone_text = _extract_address_zone_text(html)
+    if zone_text:
+        resolved = geo.extract_countries(zone_text)
+        if len(resolved) == 1:
+            only = next(iter(resolved))
+            if only in target_geo_countries:
+                return only, "footer_address"
+    return None, None
+
+
+def _parse_detect_ats_and_country(html: str, base_url: str, target_geo_countries: set[str]
+                                   ) -> tuple[list[tuple[str, str, str]], str | None, str | None]:
+    """host_crawl_v2's CPU-bound per-page work, bundled into one function
+    for the same ProcessPoolExecutor-picklability reason _parse_and_detect
+    is (see that function's docstring) — ATS detection AND country
+    detection on the SAME already-fetched page, so the page never needs
+    fetching twice."""
+    urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
+    hits = _detect_ats_hits(urls)
+    country, method = detect_country(html, target_geo_countries)
+    return hits, country, method
 
 
 # ── fetching ──────────────────────────────────────────────────────────
@@ -854,8 +998,7 @@ def main():
                          help=f"Disable the country filter — crawl every country, including PDL's "
                               f"~2.35M blank-country rows. Without this flag (and without "
                               f"--country), the default is DEFAULT_COUNTRIES "
-                              f"({len(DEFAULT_COUNTRIES)} countries: US/UK/Canada/Australia + "
-                              f"EU-27).")
+                              f"({len(DEFAULT_COUNTRIES)} countries — see DEFAULT_COUNTRIES).")
     args = parser.parse_args()
     if args.country:
         countries = set(args.country)
