@@ -31,7 +31,7 @@ name: Class A — Seed-and-Probe Extraction
 # ~290MB zipped — GitHub blocks anything over 100MB without Git LFS) and
 # Kaggle-hosted (needs an authenticated one-time download, not fetchable
 # fresh per run). Instead it's uploaded ONCE as an asset on a GitHub
-# Release in this repo (see PDL_RELEASE_TAG below), and every job
+# Release in this repo (see pdl_release_tag input below), and every job
 # downloads + unzips that release asset before running — `gh release
 # download` works against a private repo automatically via the
 # workflow's own built-in GITHUB_TOKEN, no extra secret needed. If the
@@ -51,24 +51,30 @@ name: Class A — Seed-and-Probe Extraction
 # ctlog_verify.yml) already covers everything in that table regardless
 # of which extraction technique populated it.
 #
-# SHARDED (2026-08, updated): 4 platforms x 5 shards = 20 jobs, still
-# exactly at the 20-job account-wide concurrent cap (same budget this
-# project's other workflows track — see ctlog_extract.yml's comment on
-# the same cap). Workable is EXCLUDED from this round's matrix (dropped
-# per explicit instruction — its per-slug probing code path still exists
-# in class_a_probe.py and still works, it's just not run here this
-# round); the active set is greenhouse, lever, ashby, smartrecruiters.
-# Sharding is MODULO over the combined seed list (companies[i::N]), not
-# a contiguous slice — see class_a_probe.py's run_platform docstring for
-# why (PDL's rows are sorted largest-company-first, so a contiguous
-# chunk would badly skew which shard gets the "good" candidates).
+# TWO-AT-A-TIME, DYNAMIC MATRIX (2026-08, updated): previously ran all 4
+# platforms x 5 shards = 20 jobs in one go (~1.4M companies/shard). Even
+# with the 350-min timeout, that's too much per shard once you account
+# for every job independently re-parsing the ~1GB PDL CSV + SEC EDGAR
+# file (real minutes of pure-Python overhead before probing even starts)
+# plus possible soft-block backoff pauses on top. Switched to running
+# TWO platforms per dispatch at DOUBLE the shard count (10 instead of 5)
+# — same 20-job account-wide cap, but each shard now only covers
+# ~710k companies instead of ~1.4M, roughly halving the per-shard
+# workload. The `platforms` input controls which two (or fewer/more, if
+# you want) run this time — e.g. run "greenhouse,smartrecruiters" now,
+# then dispatch again later with "lever,ashby" for the other two,
+# without needing to hand-edit this file each time. A `prepare-matrix`
+# job builds the actual platform x shard matrix from that input at
+# dispatch time (GitHub Actions matrices can't reference inputs
+# directly, so this indirection via `fromJson` is required).
 #
-# RATE-LIMIT-AWARE (2026-08): class_a_probe.py now sets its own
-# per-platform concurrency and backoff internally (see
-# PLATFORM_CONCURRENCY / RateLimiter in class_a_probe.py) based on each
-# platform's actual documented rate-limit policy — nothing to configure
-# here in the workflow, just noting it since a prior run's Greenhouse
-# flatline turned out to need this.
+# RATE-LIMIT-AWARE (2026-08): class_a_probe.py sets its own per-platform
+# concurrency and backoff internally (see PLATFORM_CONCURRENCY /
+# RateLimiter in class_a_probe.py) based on each platform's actual
+# documented rate-limit policy, and now also treats WAF/CDN soft-block
+# statuses (403/5xx, see _SOFT_BLOCK_STATUSES) as an implicit rate-limit
+# signal, not just literal 429s — nothing to configure here in the
+# workflow, just noting it since a prior Greenhouse run needed it.
 on:
   workflow_dispatch:
     inputs:
@@ -76,32 +82,53 @@ on:
         description: "Tag of the GitHub Release holding the PDL dataset zip asset"
         required: false
         default: "pdl-seed-data"
+      platforms:
+        description: "Comma-separated platforms to run THIS pass (keep to 2 at shard_count=10 to stay at the 20-job cap). Choices: greenhouse, lever, ashby, smartrecruiters, workable"
+        required: false
+        default: "greenhouse,smartrecruiters"
+      shard_count:
+        description: "Shards per platform this pass"
+        required: false
+        default: "10"
 
 concurrency:
   group: class-a-probe-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  probe:
+  prepare-matrix:
     runs-on: ubuntu-latest
-    # RAISED from 90 (2026-08): every shard independently re-reads the full
-    # ~1GB PDL CSV + SEC EDGAR file and rebuilds the full ~7.1M-company
-    # combined seed list before slicing its own ~1.4M-company shard out of
-    # it (pure-Python CSV parsing of that scale alone eats real minutes),
-    # then still has ~1.4M companies left to probe. 90 minutes was never
-    # enough runway for that combined workload, especially with the new
-    # soft-block backoff (class_a_probe.py's SOFT_BLOCK_DEFAULT_DELAY) that
-    # can add real waiting time on top if a platform starts soft-blocking
-    # again. 350 is intentionally just under GitHub-hosted runners' hard
-    # 360-minute (6h) ceiling — timeout-minutes can't exceed that regardless
-    # of what's set here, so this is effectively "give it all the room
-    # there is."
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build platform x shard matrix from inputs
+        id: build
+        run: |
+          PLATFORMS="${{ github.event.inputs.platforms || 'greenhouse,smartrecruiters' }}"
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          platforms = [p.strip() for p in '$PLATFORMS'.split(',') if p.strip()]
+          shard_count = int('$SHARD_COUNT')
+          include = [{'platform': p, 'shard': s, 'shard_count': shard_count}
+                     for p in platforms for s in range(shard_count)]
+          print(json.dumps({'include': include}))
+          ")
+          echo "Platforms this pass: $PLATFORMS  |  shard_count: $SHARD_COUNT  |  total jobs: $(python3 -c "print(len('$PLATFORMS'.split(',')) * $SHARD_COUNT)")"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  probe:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    # See the TWO-AT-A-TIME comment above for why 350 (near GitHub-hosted
+    # runners' hard 360-minute ceiling, which timeout-minutes can't
+    # exceed regardless of what's set here) is still worth keeping even
+    # with the smaller per-shard workload — soft-block backoff can still
+    # add real waiting time on an unlucky run.
     timeout-minutes: 350
     strategy:
-      fail-fast: false   # one shard's API hiccup shouldn't cancel the other 19
-      matrix:
-        platform: [greenhouse, lever, ashby, smartrecruiters]
-        shard: [0, 1, 2, 3, 4]
+      fail-fast: false   # one shard's API hiccup shouldn't cancel the others
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -134,7 +161,7 @@ jobs:
             echo "No PDL release asset found (tag: $TAG) — continuing without it. class_a_probe.py will fall back to SEC EDGAR + YC only."
           fi
 
-      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe, shard ${{ matrix.shard }}/5)"
+      - name: "Probe ${{ matrix.platform }} slugs (seed-and-probe, shard ${{ matrix.shard }}/${{ matrix.shard_count }})"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -142,4 +169,4 @@ jobs:
           python class_a_probe.py \
             --platform ${{ matrix.platform }} \
             --shard-index ${{ matrix.shard }} \
-            --shard-count 5
+            --shard-count ${{ matrix.shard_count }}
