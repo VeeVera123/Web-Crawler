@@ -21,11 +21,19 @@ name: Host Crawl v2 — Common Crawl Domain Discovery
 # address data at all. Narrowing by country, if wanted, is a query
 # against ctlog_probe_results afterward, not a crawl-time filter here.
 #
-# SHARDING: each shard job independently re-runs the same (deterministic,
-# --crawl-pinned) DuckDB seed query, then takes hosts[shard::shard_count]
-# — simple, no shared queue/checkpoint table needed for a single
-# partition's worth of hosts. Costs some duplicated DuckDB query time per
-# shard; accepted for the simplicity this build was explicitly asked for.
+# SHARDING (rewritten 2026-08 after a real OOM crash — see host_crawl_v2.py's
+# module docstring): the FIRST version seeded the whole partition into one
+# Python list before crawling anything, then sliced hosts[shard::shard_count]
+# — a live run with a high host_limit accumulated 126M+ hosts in memory
+# and got OOM-killed by the runner's OS mid-seed (reported as the generic
+# "Error: The operation was canceled."). Sharding now happens IN THE SQL
+# QUERY itself (hash(surt_host_name) % shard_count = shard_index), so each
+# shard's DuckDB query only ever pulls its own ~1/N slice over the wire —
+# both cheaper and memory-safe — AND seeding/crawling are interleaved per
+# Parquet file rather than seeding the whole partition up front, so memory
+# never holds more than one file's worth of hosts at a time regardless of
+# partition size. There's no host-count cap anymore — TIME_BUDGET_MINUTES
+# alone governs how much of the partition a run covers.
 on:
   workflow_dispatch:
     inputs:
@@ -33,10 +41,6 @@ on:
         description: "Common Crawl partition to use. Defaulted to CC-MAIN-2025-18 — confirmed live (2026-08) to actually be the most recent partition in this Host Index dataset, pinned explicitly so every shard uses the same one deterministically and skips the live 'list available partitions' lookup, which failed transiently on a real run (fell back to this same hardcoded value anyway, just with an unnecessary warning). Blank = fall back to the live lookup instead."
         required: false
         default: "CC-MAIN-2025-18"
-      host_limit:
-        description: "Cap on candidate hosts seeded from the partition, shared across all shards (not per-shard — see host_crawl_v2.py). Set deliberately high (default below) so it never triggers early — a live host_crawl_seed.py run found ~1.66M matching hosts in JUST ONE of ~30 files in a partition, so this is set well above any realistic partition total. The actual runtime cap that matters is TIME_BUDGET_MINUTES (crawl stops gracefully, writes everything found so far) — this input only bounds the seed scan, not the crawl."
-        required: false
-        default: "50000000"
       shard_count:
         description: "Number of parallel shards to split the seeded host list across"
         required: false
@@ -107,7 +111,6 @@ jobs:
           fi
 
           python host_crawl_v2.py \
-            --host-limit ${{ github.event.inputs.host_limit || '50000000' }} \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --concurrency ${{ github.event.inputs.concurrency || '300' }} \
