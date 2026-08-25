@@ -597,14 +597,40 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                 batch = tasks[i:i + BATCH]
                 results = await asyncio.gather(*batch)
                 batch_rows = []
+                seen_keys = set()  # (ats, slug) — see dedup note below
+                duplicates_collapsed = 0
                 for company_hits in results:
                     for ats, slug, matched_url, domain, tier in company_hits:
+                        # DEDUP WITHIN THIS BATCH (2026-08): the table's
+                        # real unique constraint is (ats, slug) — TWO
+                        # DIFFERENT COMPANIES can legitimately resolve to
+                        # the same key (a staffing agency linking a
+                        # client's board, a misconfigured/mis-slugged
+                        # extraction, two domains for one company, etc),
+                        # and Postgres's ON CONFLICT DO UPDATE cannot
+                        # touch the same row twice in one command — it
+                        # errors the ENTIRE batch (21000 "cannot affect
+                        # row a second time"), silently losing every row
+                        # in that batch, not just the duplicate. Keeping
+                        # only the first occurrence per key before
+                        # writing avoids that; the on_conflict upsert
+                        # against EARLIER-BATCH rows still applies as
+                        # before, this only guards duplicates landing
+                        # inside the SAME outgoing request.
+                        key = (ats, slug)
+                        if key in seen_keys:
+                            duplicates_collapsed += 1
+                            continue
+                        seen_keys.add(key)
                         batch_rows.append({
                             "ats": ats,
                             "slug": slug,
                             "source_hostname": f"[{tier}] {matched_url}"[:250],
                             "root_domain": domain,
                         })
+                if duplicates_collapsed:
+                    log.info(f"    ({duplicates_collapsed} duplicate (ats,slug) hits within this batch "
+                             f"collapsed before writing — see dedup note)")
                 written = 0
                 if batch_rows:
                     total_distinct_hits += len(batch_rows)
