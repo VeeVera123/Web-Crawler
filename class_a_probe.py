@@ -514,6 +514,7 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
 
         BATCH = 3000
         total_distinct_hits = 0
+        crawl_start = time.monotonic()
         for i in range(0, len(tasks), BATCH):
             batch = tasks[i:i + BATCH]
             results = await asyncio.gather(*batch)
@@ -532,11 +533,25 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                 found_rows.extend(batch_rows)
 
             done = min(i + BATCH, len(tasks))
-            log.info(f"  crawled {done}/{len(tasks)} companies — {total_distinct_hits} ATS hits found so far")
+            elapsed = time.monotonic() - crawl_start
+            rate = done / elapsed if elapsed > 0 else 0
+            # timeout+unreachable as a share of attempts made so far — the
+            # tell for whether the current --concurrency is actually
+            # helping or has been pushed past what this runner's single
+            # CPU-bound parsing thread can keep up with (see module
+            # docstring / the "is 400 safe to raise" question this was
+            # added to answer): a rising share here at a HIGHER
+            # concurrency than a previous run, with a LOWER companies/sec
+            # rate, means back off — you're queueing, not parallelizing.
+            attempted = max(stats["companies_attempted"], 1)
+            stall_share = (stats["timeout"] + stats["unreachable"]) / attempted * 100
+            log.info(f"  crawled {done}/{len(tasks)} companies — {total_distinct_hits} ATS hits found so far "
+                     f"— {rate:.1f} companies/sec")
             log.info(f"    fetch breakdown (cumulative): homepage_fetched={stats['fetched_ok']} "
                      f"homepage_unreachable={stats['homepage_unreachable']} "
                      f"http_error={stats['http_error']} timeout={stats['timeout']} "
-                     f"non_html={stats['non_html']} unreachable={stats['unreachable']}")
+                     f"non_html={stats['non_html']} unreachable={stats['unreachable']} "
+                     f"(timeout+unreachable = {stall_share:.1f}% of attempts)")
             log.info(f"    hit source (cumulative): homepage={stats['hits_from_homepage']} "
                      f"career_path={stats['hits_from_career_path']} sitemap={stats['hits_from_sitemap']}")
 
