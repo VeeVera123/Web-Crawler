@@ -161,6 +161,23 @@ MAX_PAGE_BYTES = 3_000_000
 # split for a given runner.
 PARSE_WORKERS = int(os.environ.get("PARSE_WORKERS", str(max(1, (os.cpu_count() or 4) - 1))))
 
+# TIME BUDGET (2026-08): a graceful internal cutoff, separate from and
+# well UNDER the workflow's own timeout-minutes (350 — see
+# class_a_probe.yml). Without this, if a shard's real throughput ends up
+# slower than expected (throughput depends on which companies land in
+# that shard, network conditions on the day, etc — not something that
+# can be predicted exactly ahead of time), GitHub just hard-kills the job
+# at 350 min: whatever batch was mid-flight is lost entirely, INCLUDING
+# any hits found in it that hadn't been written to Supabase yet, and the
+# run ends with no clean summary. This checks elapsed time at each batch
+# boundary and, if the budget's spent, stops taking new batches and falls
+# through to the normal end-of-shard summary/cleanup path — so a run that
+# would've gone over just finishes early with everything found so far
+# safely written, logged, and accounted for, instead of being cut off
+# mid-write. Default leaves a 20-minute margin under the workflow's
+# 350-minute ceiling.
+TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_TIME_BUDGET_MINUTES", "330"))
+
 # WIDENED (2026-08): real company sites use a lot of different paths for
 # their careers page — the original 4-path list was too narrow and would
 # have missed genuinely findable companies. Covers the common English-
@@ -538,11 +555,14 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
 # ── main crawl loop ──────────────────────────────────────────────────
 
 async def run_crawl(shard_index: int | None = None, shard_count: int | None = None,
-                     concurrency: int = CRAWL_CONCURRENCY) -> None:
+                     concurrency: int = CRAWL_CONCURRENCY,
+                     time_budget_minutes: int = TIME_BUDGET_MINUTES) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(f"── Class A domain-crawl discovery{label} ──")
     log.info(f"  concurrency={concurrency} (see module docstring — no rate limiting, "
              f"only a per-request timeout for liveness)")
+    log.info(f"  time_budget={time_budget_minutes}min (graceful cutoff — see TIME_BUDGET_MINUTES comment)")
+    time_budget_seconds = time_budget_minutes * 60
 
     companies = fetch_pdl_companies_with_domain()
     if not companies:
@@ -605,7 +625,23 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
             total_distinct_hits = 0
             crawl_start = time.monotonic()
             elapsed, rate = 0.0, 0.0  # in case tasks is empty (0 companies in this shard's slice)
+            time_budget_hit = False
             for i in range(0, len(tasks), BATCH):
+                if time.monotonic() - crawl_start >= time_budget_seconds:
+                    # Graceful stop — see TIME_BUDGET_MINUTES comment. The
+                    # remaining tasks are plain, never-awaited coroutine
+                    # objects at this point (asyncio doesn't schedule them
+                    # until gathered) — close() them explicitly so Python
+                    # doesn't emit a "coroutine was never awaited"
+                    # RuntimeWarning per leftover task when they're GC'd.
+                    for t in tasks[i:]:
+                        t.close()
+                    time_budget_hit = True
+                    log.warning(f"  time budget ({time_budget_minutes}min) reached at "
+                                f"{i}/{len(tasks)} companies — stopping here, everything found "
+                                f"so far is written. {len(tasks) - i} companies in this shard's "
+                                f"slice were NOT attempted this run.")
+                    break
                 batch = tasks[i:i + BATCH]
                 results = await asyncio.gather(*batch)
                 batch_rows = []
@@ -692,18 +728,28 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
 
     # ── end-of-shard cumulative summary — same two-denominator split as
     # the per-batch lines above (company outcomes vs. request outcomes),
-    # so it's directly comparable across shards/runs of different sizes. ──
-    companies_n = max(len(companies), 1)
+    # so it's directly comparable across shards/runs of different sizes.
+    # Uses companies_attempted (not len(companies)) as the base — if the
+    # time budget cut this run short, len(companies) is the shard's FULL
+    # slice, not how many were actually reached, and dividing by the full
+    # slice would understate every percentage below. ──
+    companies_n = max(stats["companies_attempted"], 1)
     requests_n = max(stats["requests_attempted"], 1)
     pct_co = lambda n: n / companies_n * 100  # noqa: E731
     pct_req = lambda n: n / requests_n * 100  # noqa: E731
 
     total_hits = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
-    no_ats_found = max(len(companies) - total_hits - stats["homepage_unreachable"], 0)
+    no_ats_found = max(stats["companies_attempted"] - total_hits - stats["homepage_unreachable"], 0)
     other_http_error = stats['http_error'] - stats['status_404']
 
-    log.info(f"── shard{label} complete: {len(companies)} companies, {elapsed:.0f}s, "
-             f"{rate:.1f} companies/sec avg ──")
+    if time_budget_hit:
+        log.info(f"── shard{label} STOPPED EARLY (time budget): "
+                 f"{stats['companies_attempted']}/{len(companies)} companies attempted "
+                 f"({stats['companies_attempted'] / max(len(companies), 1) * 100:.1f}% of this "
+                 f"shard's slice), {elapsed:.0f}s, {rate:.1f} companies/sec avg ──")
+    else:
+        log.info(f"── shard{label} complete: {len(companies)} companies, {elapsed:.0f}s, "
+                 f"{rate:.1f} companies/sec avg ──")
     log.info(f"  companies: hit={pct_co(total_hits):.1f}% ({total_hits}) | "
              f"no_ats_found={pct_co(no_ats_found):.1f}% ({no_ats_found}) | "
              f"unreachable={pct_co(stats['homepage_unreachable']):.1f}% ({stats['homepage_unreachable']})")
@@ -732,8 +778,13 @@ def main():
     parser.add_argument("--concurrency", type=int, default=CRAWL_CONCURRENCY,
                          help=f"Companies processed in parallel (default {CRAWL_CONCURRENCY}, "
                               f"env CRAWL_CONCURRENCY)")
+    parser.add_argument("--time-budget-minutes", type=int, default=TIME_BUDGET_MINUTES,
+                         help=f"Stop gracefully (saving everything found so far) after this many "
+                              f"minutes, instead of risking a hard kill at the workflow's own "
+                              f"timeout-minutes (default {TIME_BUDGET_MINUTES}, env "
+                              f"CRAWL_TIME_BUDGET_MINUTES — see TIME_BUDGET_MINUTES comment)")
     args = parser.parse_args()
-    asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency))
+    asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency, args.time_budget_minutes))
 
 
 if __name__ == "__main__":
