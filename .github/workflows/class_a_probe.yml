@@ -55,6 +55,10 @@ on:
         description: "Companies crawled in parallel PER shard (no rate limiting — see class_a_probe.py)"
         required: false
         default: "400"
+      countries:
+        description: "'default' = US/UK/Canada/Australia + EU-27 (31 countries — see class_a_probe.py's DEFAULT_COUNTRIES). 'all' = no filter, every country. Or a comma-separated custom list of PDL country values, e.g. 'united states,canada,japan'."
+        required: false
+        default: "default"
 
 concurrency:
   group: class-a-probe-${{ github.ref }}
@@ -126,7 +130,25 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
+          # Translate the 'countries' input into the right class_a_probe.py
+          # flag — 'default' needs NO flag at all (DEFAULT_COUNTRIES is
+          # already what the script does with no --country/--all-countries
+          # given), 'all' maps to --all-countries, and anything else is
+          # treated as a comma-separated list of --country values.
+          COUNTRIES="${{ github.event.inputs.countries || 'default' }}"
+          COUNTRY_ARGS=()
+          if [ "$COUNTRIES" = "all" ]; then
+            COUNTRY_ARGS=(--all-countries)
+          elif [ "$COUNTRIES" != "default" ]; then
+            IFS=',' read -ra COUNTRY_LIST <<< "$COUNTRIES"
+            for c in "${COUNTRY_LIST[@]}"; do
+              COUNTRY_ARGS+=(--country "$c")
+            done
+          fi
+          echo "countries input: '$COUNTRIES' -> flags: ${COUNTRY_ARGS[*]:-(none — uses DEFAULT_COUNTRIES)}"
+
           python class_a_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '20' }} \
-            --concurrency ${{ github.event.inputs.concurrency || '400' }}
+            --concurrency ${{ github.event.inputs.concurrency || '400' }} \
+            "${COUNTRY_ARGS[@]}"
