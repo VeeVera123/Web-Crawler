@@ -229,6 +229,14 @@ _alias("Congo-Kinshasa", "Democratic Republic of the Congo")
 _alias("Congo-Brazzaville", "Republic of the Congo")
 _alias("Cape Verde", "Cabo Verde")
 _alias("Swaziland", "Eswatini")
+# "Czechia" is the country's official short name (UN/EU-recognized, and
+# confirmed to be the LITERAL value PDL's own dataset uses — a live
+# check of the user's real PDL file found 12,684 rows with
+# country="czechia", zero with "czech republic") — added 2026-08 after
+# confirming extract_countries("Prague, Czechia") returned an EMPTY set
+# (no match at all) before this alias existed, which would have silently
+# dropped every Czech company from any pipeline using this function.
+_alias("Czechia", "Czech Republic")
 _alias("South Korea", "South Korea")
 _alias("Republic of Korea", "South Korea")
 
@@ -307,23 +315,50 @@ _STATE_CODE_TO_COUNTRY = {
 # stand-alone word inside "New South Wales".
 _COMMA_SPLIT_RE = re.compile(r"\s*,\s*")
 _TRAILING_PAREN_RE = re.compile(r"\(.*?\)", re.I)
+# Stray, UNbalanced parens — e.g. "Remote (Ottawa, Ontario, CA)" splits on
+# comma into ["Remote (Ottawa", "Ontario", "CA)"], where the last part
+# carries a lone trailing ")" with no matching "(" in the same part, so
+# _TRAILING_PAREN_RE (which needs a balanced pair) can't strip it. Left
+# in place, "CA)" fails every country/ISO2 lookup and falls through to
+# the ambiguous plain state-code path, misreading Canada as California.
+_STRAY_PAREN_RE = re.compile(r"^[(]+|[)]+$")
 
 
 def _extract_from_segment(seg: str) -> set[str]:
     found: set[str] = set()
+    # Strip a stray, unbalanced trailing ")" (or leading "(") up front —
+    # this segment came from splitting a larger string on ';'/'|', which
+    # can slice a parenthesized aside like "Remote (British Columbia, CA)"
+    # apart from its opening paren. Left in place, "CA)" fails every
+    # country/ISO2 lookup everywhere downstream (rules 0b/0c AND the
+    # plain state-code fallback), not just the one place it was first
+    # noticed.
+    if seg.count("(") < seg.count(")"):
+        seg = re.sub(r"\)+\s*$", "", seg)
+    if seg.count(")") < seg.count("("):
+        seg = re.sub(r"^\s*\(+", "", seg)
     seg_stripped = seg.strip()
 
-    # 0a. "PROVINCE, CA" 2-part shape, e.g. "ON, CA" / "BC, CA" — CA here
-    # is the ISO2 country code Canada, not the US state California,
-    # because the part before it is ITSELF a Canadian province code (no
-    # real city is named "ON" or "BC" or "AB"). Narrow, deliberately
-    # exact-match only.
-    m0 = re.match(r"^([A-Za-z]{2})\s*,\s*CA$", seg_stripped, re.I)
-    if m0 and m0.group(1).upper() in _CA_PROVINCES:
-        return {"Canada"}
+    # Each part gets stray leading "("/trailing ")" stripped individually
+    # — splitting "Remote (British Columbia, CA)" on commas produces
+    # ["Remote (British Columbia", "CA)"], where the paren characters
+    # land on DIFFERENT parts even though the original text was balanced.
+    parts = [_STRAY_PAREN_RE.sub("", p).strip() for p in _COMMA_SPLIT_RE.split(seg_stripped) if p]
+    parts = [p for p in parts if p]
+
+    # 0a. "...PROVINCE, CA" 2-part shape, e.g. "ON, CA" / "BC, CA" /
+    # "Remote (British Columbia, CA)" — CA here is the ISO2 country code
+    # Canada, not the US state California, because the part before it
+    # ENDS WITH a Canadian province code or full name (no real city is
+    # named "ON"/"BC"/"AB", and "British Columbia" isn't a US place
+    # either). Matched at the end of the part rather than requiring an
+    # exact match, since wrapper text like "Remote (" often precedes it.
+    if len(parts) == 2 and parts[-1].upper() == "CA":
+        if re.search(r"\b(" + "|".join(_CA_PROVINCES.keys()) + r")$", parts[0], re.I) or \
+           re.search(r"\b(" + "|".join(re.escape(n) for n in _CA_PROVINCES.values()) + r")$", parts[0], re.I):
+            return {"Canada"}
 
     # 0b. Trusted terminal country — see module-level comment above.
-    parts = [p for p in _COMMA_SPLIT_RE.split(seg_stripped) if p]
     if len(parts) >= 3:
         last = _TRAILING_PAREN_RE.sub("", parts[-1]).strip()
         canon = COUNTRY_ALIASES.get(last.lower()) or _ISO2_COUNTRY_PREFIX.get(last.upper())
