@@ -486,20 +486,45 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
     chunk_size = 1000
     chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
 
+    # RETRY HERE IS NOT THE SAME "no rate limiting" principle the crawl
+    # requests follow (see module docstring) — that principle is about not
+    # throttling ourselves against millions of INDEPENDENT company
+    # domains, where a single miss just means one company/path didn't pan
+    # out and there's nothing to gain by retrying it. This is different:
+    # ctlog_probe_results is ONE shared endpoint, up to 20 shards' worth
+    # of concurrent runners all POST to it at once, and a transient 500
+    # from momentary contention there is a real, recoverable failure —
+    # not retrying means those hits are gone for good with no way to
+    # recover them (this happened in practice: a 500 mid-run silently
+    # dropped 270 real hits before this retry existed). 3 attempts total,
+    # short exponential backoff, only for 5xx/network-level failures — a
+    # 4xx (bad request/auth) retrying wouldn't fix anything, so those
+    # still fail fast.
     async def _write_chunk(chunk):
-        try:
-            async with session.post(
-                f"{SUPABASE_URL}/rest/v1/ctlog_probe_results",
-                headers=headers,
-                params={"on_conflict": "ats,slug"},
-                json=chunk,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as r:
-                r.raise_for_status()
-                return len(chunk)
-        except Exception as e:
-            log.error(f"Failed to write a chunk to staging table: {e}")
-            return 0
+        last_err = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(1.5 * (2 ** (attempt - 1)))  # 1.5s, then 3s
+            try:
+                async with session.post(
+                    f"{SUPABASE_URL}/rest/v1/ctlog_probe_results",
+                    headers=headers,
+                    params={"on_conflict": "ats,slug"},
+                    json=chunk,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as r:
+                    if r.status >= 500:
+                        last_err = f"{r.status} {await r.text()}"
+                        continue  # transient server-side — worth retrying
+                    r.raise_for_status()  # 4xx — not retryable, raises immediately below
+                    return len(chunk)
+            except Exception as e:
+                last_err = str(e)
+                if isinstance(e, aiohttp.ClientResponseError) and e.status < 500:
+                    break  # 4xx via raise_for_status — don't waste retries on it
+        log.error(f"Failed to write a chunk of {len(chunk)} rows to staging table after "
+                  f"retries — DATA LOST for this chunk: {last_err}")
+        return 0
 
     results = await asyncio.gather(*(_write_chunk(c) for c in chunks))
     written = sum(results)
