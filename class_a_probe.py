@@ -26,10 +26,22 @@ company's slug:
   Ashby:           api.ashbyhq.com/posting-api/job-board/{slug}
   Workable:        www.workable.com/api/accounts/{slug}?details=true
   SmartRecruiters: api.smartrecruiters.com/v1/companies/{slug}/postings
-Each returns 200 for a real slug and 404 for a wrong guess. That turns
-"discover Greenhouse/Lever/Ashby/Workable/SmartRecruiters companies" into "cheaply check
-whether a GUESSED slug is real" — i.e. a seed-and-probe problem, not a
-crawl.
+Four of the five return 200 for a real slug and 404 for a wrong guess.
+That turns "discover Greenhouse/Lever/Ashby/Workable companies" into
+"cheaply check whether a GUESSED slug is real" — i.e. a seed-and-probe
+problem, not a crawl. SMARTRECRUITERS IS THE EXCEPTION, confirmed by
+direct live testing (2026-08): its /postings endpoint 200s with the
+SAME {"totalFound":0,"content":[]} shell for EVERY slug, real or
+completely made up — it never validates that the company exists, and
+there is no separate company-info route on the public API to fall back
+on. The only usable signal is totalFound > 0 (see _looks_like_real_board)
+— a real number of actual current postings, present for real companies,
+reliably 0 for a fake slug. This means SmartRecruiters hits are
+UNDERCOUNTED by design now (a real company with zero currently-open
+postings can't be told apart from a fake slug and is correctly skipped)
+— the earlier version of this script used a body-shape check that
+returned true for EVERY response regardless of validity, which produced
+4.5M+ false "hits" in one run before this was caught and fixed.
 
 SEED SOURCES (2026-08, expanded after the first run came back small — see
 CLASS_A_SEED_LIST_HELP_REQUEST.md for the diagnosis): THREE free, no-auth
@@ -126,6 +138,7 @@ Usage:
 """
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -219,24 +232,63 @@ DEFAULT_RETRY_AFTER = {
     "workable": 5.0,
 }
 
+# CIRCUIT BREAKER (2026-08): backing off on soft-block statuses (see
+# SOFT_BLOCK_DEFAULT_DELAY above) is the right move for a TRANSIENT,
+# volume-triggered throttle — wait it out, resume. But if a platform is
+# under a SUSTAINED IP-level ban instead (the same status on every single
+# request, indefinitely), backing off just means "wait 60s, get blocked
+# again, wait 60s, get blocked again" forever — far SLOWER than the old
+# no-backoff behavior, and at that rate a multi-hundred-thousand-company
+# shard would never finish within any reasonable timeout. So: track a
+# rolling window of recent outcomes per platform, and if the block rate
+# in that window crosses GIVE_UP_BLOCK_RATIO, stop probing this shard
+# entirely rather than grinding for hours with zero real signal — see
+# RateLimiter.record_outcome / _probe_one's abort check.
+GIVE_UP_WINDOW = 200
+GIVE_UP_BLOCK_RATIO = 0.9
+
 
 class RateLimiter:
     """Tiny shared per-platform backoff gate. Every probe coroutine checks
-    in before making a request; a 429 anywhere pushes a shared
+    in before making a request; a 429/soft-block anywhere pushes a shared
     'backoff_until' timestamp forward, and every subsequent probe (not
-    just the one that got 429'd) waits it out before firing its next
+    just the one that got blocked) waits it out before firing its next
     request. This is what turns "we got rate-limited" into an actual
-    pause instead of hammering straight through it 80-wide."""
+    pause instead of hammering straight through it. It ALSO tracks a
+    rolling block-rate and sets `abort` if the platform looks sustained-
+    blocked rather than transiently throttled — see GIVE_UP_WINDOW."""
 
     def __init__(self, ats: str):
         self.ats = ats
         self.backoff_until = 0.0
         self._lock = asyncio.Lock()
+        self.window_attempts = 0
+        self.window_blocks = 0
+        self.abort = False
 
     async def wait_if_needed(self):
         now = time.monotonic()
         if now < self.backoff_until:
             await asyncio.sleep(self.backoff_until - now)
+
+    def record_outcome(self, blocked: bool):
+        """Called once per completed HTTP attempt (not per company — a
+        company can make several attempts across its slug variants).
+        `blocked` = this specific response was a 429 or a soft-block
+        status. Deliberately synchronous/no-lock: asyncio is single-
+        threaded and this never spans an `await`, so plain int increments
+        here can't race between coroutines."""
+        if self.abort:
+            return
+        self.window_attempts += 1
+        if blocked:
+            self.window_blocks += 1
+        if self.window_attempts >= GIVE_UP_WINDOW:
+            if self.window_blocks / self.window_attempts >= GIVE_UP_BLOCK_RATIO:
+                self.abort = True
+            else:
+                self.window_attempts = 0
+                self.window_blocks = 0
 
     async def register_429(self, retry_after_header: str | None, default_delay: float | None = None):
         """default_delay overrides the platform's normal 429 default —
@@ -507,6 +559,13 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
     url_template = PROBE_URL[ats]
     async with sem:
         for idx, slug in enumerate(variants):
+            if limiter.abort:
+                # Circuit breaker already tripped (see GIVE_UP_WINDOW) —
+                # this platform/shard is being sustained-blocked, not
+                # transiently throttled. Bail out immediately rather than
+                # spending more requests (and more backoff waiting) on a
+                # dead connection.
+                return None
             url = url_template.format(slug=slug)
             await limiter.wait_if_needed()
             try:
@@ -515,10 +574,12 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                     if r.status == 429:
                         stats["429"] += 1
                         stats["status_codes"][r.status] += 1
+                        limiter.record_outcome(blocked=True)
                         await limiter.register_429(r.headers.get("Retry-After"))
                         continue
                     if r.status == 404:
                         stats["404"] += 1
+                        limiter.record_outcome(blocked=False)
                         continue
                     if r.status != 200:
                         stats["other_error"] += 1
@@ -526,12 +587,19 @@ async def _probe_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                         if r.status in _SOFT_BLOCK_STATUSES:
                             # Treat as an implicit rate-limit/block signal
                             # even without a 429 — see docstring above.
+                            limiter.record_outcome(blocked=True)
                             await limiter.register_429(r.headers.get("Retry-After"),
                                                         default_delay=SOFT_BLOCK_DEFAULT_DELAY)
+                        else:
+                            limiter.record_outcome(blocked=False)
                         continue
                     body = await r.text()
+                    limiter.record_outcome(blocked=False)
             except Exception:
                 stats["exception"] += 1
+                # Not counted toward the block-rate window — a handful of
+                # network hiccups shouldn't trip the circuit breaker, only
+                # a sustained run of actual 429/soft-block responses should.
                 continue
 
             if _looks_like_real_board(ats, body):
@@ -562,14 +630,39 @@ def _looks_like_real_board(ats: str, body: str) -> bool:
     if ats == "workable":
         return '"name"' in lowered or '"jobs"' in lowered
     if ats == "smartrecruiters":
-        # SmartRecruiters' postings endpoint returns a JSON object with a
-        # "content" array (possibly empty for a real company with zero
-        # current postings — still a valid hit, same "empty board still
-        # counts" reasoning as Lever above) and a "totalFound" count field
-        # on a real company id; a bad id 404s outright rather than 200ing
-        # an empty shell, so body-shape checking here is a secondary
-        # safety net, not the primary signal.
-        return '"content"' in lowered or '"totalfound"' in lowered
+        # CORRECTED (2026-08): the original assumption here — "a bad id
+        # 404s outright" — was WRONG, confirmed by direct live testing.
+        # The /v1/companies/{slug}/postings endpoint returns HTTP 200
+        # with the EXACT SAME {"totalFound":0,"content":[]} shell for a
+        # completely made-up slug as it does for any other unmatched
+        # string — it never validates that the company exists at all.
+        # There is also no separate company-info endpoint on the public
+        # API to fall back on (confirmed: /v1/companies/{slug} without
+        # /postings is not a real route, 404s as "Cannot GET" regardless
+        # of slug). That means simple body-shape checking (the old
+        # '"content"' / '"totalfound"' substring check) was matching on
+        # EVERY response, real or fake — this is what produced 4.5M+
+        # false "hits" in ctlog_probe_results before this fix (real
+        # SmartRecruiters penetration is nowhere near that scale).
+        #
+        # The only usable live signal confirmed by direct testing:
+        # totalFound is a real number of actual current job postings for
+        # real companies (Colliers: 99, SilfabSolar: 24) and is reliably
+        # 0 for a made-up slug. So a hit now REQUIRES totalFound > 0 —
+        # this WILL miss real SmartRecruiters companies that currently
+        # have zero open postings (a false negative), but that's the
+        # correct tradeoff: this technique cannot tell "real company,
+        # zero postings" apart from "fake slug" at all, so undercounting
+        # is the only honest option now that overcounting is confirmed
+        # broken.
+        try:
+            parsed = json.loads(body)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        total_found = parsed.get("totalFound")
+        return isinstance(total_found, int) and total_found > 0
     return True
 
 
@@ -640,6 +733,7 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
                       # interrupted run loses at most one batch's worth),
                       # while cutting total request overhead a lot
                       # compared to a smaller batch.
+        gave_up = False
         for i in range(0, len(tasks), BATCH):
             batch = tasks[i:i + BATCH]
             results = await asyncio.gather(*batch)
@@ -667,6 +761,16 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
                      + (f"  [codes: {top_codes}]" if top_codes else "")
                      + (f"  ⚠ currently backing off {(limiter.backoff_until - time.monotonic()):.0f}s "
                         f"after a 429/soft-block status" if time.monotonic() < limiter.backoff_until else ""))
+            if limiter.abort:
+                gave_up = True
+                remaining = len(tasks) - min(i + BATCH, len(tasks))
+                log.warning(f"  ⚠ CIRCUIT BREAKER TRIPPED: {limiter.window_blocks}/{limiter.window_attempts} "
+                            f"of the last {GIVE_UP_WINDOW} requests were 429/soft-block responses "
+                            f"(>={GIVE_UP_BLOCK_RATIO * 100:.0f}%) — this looks like a SUSTAINED block, "
+                            f"not a transient throttle that backing off would fix. Stopping this "
+                            f"platform/shard early ({remaining} companies not probed) rather than "
+                            f"grinding through the rest of the timeout with near-zero real signal.")
+                break
 
         # Only fetch the Workable feed on ONE shard (shard 0, or the
         # unsharded case) — it's a single request covering ALL accounts,
@@ -687,7 +791,9 @@ async def run_platform(ats: str, shard_index: int | None = None, shard_count: in
              f"domain-derived variants, {strategy_hits['name']} hits from name-derived variants")
 
     net_new = len(set(found) - existing)
-    log.info(f"  TOTAL: {len(found)} real slugs found ({net_new} net-new vs slug_registry)")
+    log.info(f"  TOTAL: {len(found)} real slugs found ({net_new} net-new vs slug_registry)"
+             + ("  ⚠ INCOMPLETE — stopped early by the circuit breaker, see warning above"
+                if gave_up else ""))
     total_probed = stats["hit"] + stats["bad_shape_200"] + stats["404"] + stats["429"] + \
         stats["other_error"] + stats["exception"]
     codes_str = ", ".join(f"{code}={n}" for code, n in stats["status_codes"].most_common(10))
