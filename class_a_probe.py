@@ -197,7 +197,28 @@ CAREER_PATHS = [
     "/hiring", "/we-are-hiring",
     "/apply",
 ]
-SITEMAP_MAX_FOLLOW = 3  # cap how many sitemap-discovered URLs get fetched
+
+# One shared pattern for "does this URL look like a careers page" (2026-08)
+# — used to filter sitemap.xml <loc> entries down to the ones worth
+# fetching. Built FROM CAREER_PATHS itself (each path's own word, with any
+# hyphens loosened to optional) instead of a separately hand-maintained
+# regex, so the two can never drift apart again — previously the sitemap
+# filter only knew a handful of these terms (career/jobs/join/work-with-
+# us) and silently skipped sitemap URLs matching the rest (hiring/apply/
+# openings/work-for-us/open-positions), even though CAREER_PATHS itself
+# already covers them for direct-path fetching.
+CAREER_LIKE_RE = re.compile(
+    "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS),
+    re.I,
+)
+SITEMAP_MAX_FOLLOW = 8  # widened 2026-08 from 3 — these are already filtered to
+# career-like URLs by CAREER_LIKE_RE, so each additional one followed is a
+# targeted, low-junk-risk chance at a real hit, not indiscriminate crawling.
+SITEMAP_INDEX_PATHS = ("/sitemap.xml", "/sitemap_index.xml")  # tried in order,
+# stopping at the first that yields a usable sitemap — WordPress and several
+# other common platforms publish an index at the second path instead of a
+# flat /sitemap.xml, and a site using that convention was previously never
+# reached by the sitemap fallback tier at all.
 
 PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companies.csv")
 PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap
@@ -670,17 +691,56 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
         return None
 
 
+async def _fetch_sitemap(session: aiohttp.ClientSession, origin: str, stats: dict):
+    """Tries each of SITEMAP_INDEX_PATHS in order, returning the first that
+    resolves to a usable page. 2026-08: previously only /sitemap.xml was
+    ever tried — a site publishing its sitemap only at /sitemap_index.xml
+    (WordPress and several other common platforms' default) was silently
+    never reached by the sitemap fallback tier at all."""
+    for path in SITEMAP_INDEX_PATHS:
+        page = await _fetch_page(session, urljoin(origin, path), stats)
+        if page:
+            return page
+    return None
+
+
+def _collapse_hits(hit_lists: list[list[tuple[str, str, str]]]) -> list[tuple[str, str, str]]:
+    """Merges hits found across MULTIPLE pages at the same tier into one
+    deduped list, keeping the first (ats, slug, matched_url) seen for each
+    distinct (ats, slug) pair. 2026-08: previously a tier stopped and
+    returned as soon as ANY one page in it had a hit, so a company running
+    two ATS platforms at once (e.g. old + new during a migration) only
+    ever got the first one found, even though every other career-page/
+    sitemap-page candidate was already fetched anyway — checking and
+    merging all of them costs no extra requests, only extra (already-
+    fetched) parsing, and can only ever ADD real, individually-validated
+    hits, never introduce a false one (each hit still went through the
+    same anchored URL_TO_SLUG detection as before)."""
+    seen: set[tuple[str, str]] = set()
+    merged: list[tuple[str, str, str]] = []
+    for hits in hit_lists:
+        for ats, slug, url in hits:
+            key = (ats, slug)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append((ats, slug, url))
+    return merged
+
+
 async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                       company_name: str, domain: str, stats: dict,
                       parse_pool: concurrent.futures.ProcessPoolExecutor) -> list[tuple[str, str, str, str, str]]:
     """Crawls one company's site end to end: homepage -> (if nothing
-    found) common career-page paths -> (if still nothing) sitemap.xml
+    found) common career-page paths -> (if still nothing) sitemap
     fallback. Returns a list of (ats, slug, matched_url, domain, tier) —
     a company CAN yield more than one hit (e.g. an old and new ATS both
-    still linked during a migration); all distinct (ats, slug) pairs
-    found at whichever tier first produced a hit are kept, not just the
-    first pair. `tier` is "homepage" / "career_path" / "sitemap",
-    whichever fetch tier actually produced this hit."""
+    still linked during a migration): EVERY page fetched at whichever tier
+    produces at least one hit is checked and merged (see _collapse_hits),
+    not just the first page in that tier with a hit. `tier` is "homepage"
+    / "career_path" / "sitemap", whichever tier the hits came from — the
+    first tier to produce anything wins; later tiers are only tried if the
+    current one comes up completely empty."""
     loop = asyncio.get_running_loop()
     async with sem:
         stats["companies_attempted"] += 1
@@ -705,38 +765,45 @@ async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
             stats["hits_from_homepage"] += 1
             return [(ats, slug, url, domain, "homepage") for ats, slug, url in hits]
 
-        # Fallback tier 1: common career-page paths, fetched concurrently.
+        # Fallback tier 1: common career-page paths, fetched concurrently,
+        # every hit-bearing page merged (see _collapse_hits).
         origin_parts = urlparse(final_url)
         origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
         career_pages = await asyncio.gather(
             *[_fetch_page(session, urljoin(origin, p), stats) for p in CAREER_PATHS]
         )
+        career_hit_lists = []
         for cp in career_pages:
             if not cp:
                 continue
             cp_url, cp_html = cp
-            hits = await loop.run_in_executor(parse_pool, _parse_and_detect, cp_html, cp_url)
-            if hits:
-                stats["hits_from_career_path"] += 1
-                return [(ats, slug, url, domain, "career_path") for ats, slug, url in hits]
+            career_hit_lists.append(
+                await loop.run_in_executor(parse_pool, _parse_and_detect, cp_html, cp_url))
+        merged = _collapse_hits(career_hit_lists)
+        if merged:
+            stats["hits_from_career_path"] += 1
+            return [(ats, slug, url, domain, "career_path") for ats, slug, url in merged]
 
-        # Fallback tier 2: sitemap.xml, only reached if everything above found nothing.
-        sitemap = await _fetch_page(session, urljoin(origin, "/sitemap.xml"), stats)
+        # Fallback tier 2: sitemap, only reached if everything above found nothing.
+        sitemap = await _fetch_sitemap(session, origin, stats)
         if sitemap:
             sm_url, sm_xml = sitemap
             loc_urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", sm_xml, re.I)
-            career_like = [u for u in loc_urls if re.search(r"career|jobs?|join|work-with-us", u, re.I)]
+            career_like = [u for u in loc_urls if CAREER_LIKE_RE.search(u)]
             sm_pages = await asyncio.gather(
                 *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]]
             )
+            sitemap_hit_lists = []
             for sp in sm_pages:
                 if not sp:
                     continue
                 sp_url, sp_html = sp
-                hits = await loop.run_in_executor(parse_pool, _parse_and_detect, sp_html, sp_url)
-                if hits:
-                    stats["hits_from_sitemap"] += 1
-                    return [(ats, slug, url, domain, "sitemap") for ats, slug, url in hits]
+                sitemap_hit_lists.append(
+                    await loop.run_in_executor(parse_pool, _parse_and_detect, sp_html, sp_url))
+            merged = _collapse_hits(sitemap_hit_lists)
+            if merged:
+                stats["hits_from_sitemap"] += 1
+                return [(ats, slug, url, domain, "sitemap") for ats, slug, url in merged]
 
         return []
 
