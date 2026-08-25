@@ -311,6 +311,18 @@ SKIP_SLUGS = {
     "api", "www", "app", "static", "assets", "cdn", "docs", "help",
     "support", "blog", "login", "register", "test", "demo", "example",
     "staging", "dev", "sandbox", "admin", "",
+    # Defense-in-depth (2026-08): these are literal PATH SEGMENTS from
+    # known widget/embed/API URL families, not real company slugs. A
+    # converter that blindly trusts path.split("/")[0] without first
+    # checking for these families will mis-extract one of these as if it
+    # were the company — see _url_to_slug_greenhouse's "embed" case below
+    # for the confirmed real-world example (every company using
+    # Greenhouse's standard <script src="boards.greenhouse.io/embed/
+    # job_board/js?for=...">  embed snippet was being recorded with the
+    # literal slug "embed", colliding every such company onto one fake
+    # row and crashing the upsert batch with a duplicate-key error the
+    # first time two of them landed in the same write).
+    "embed", "job_board", "js", "widget", "iframe",
 }
 
 
@@ -319,13 +331,36 @@ SKIP_SLUGS = {
 # ══════════════════════════════════════════════════════════
 
 def _url_to_slug_greenhouse(url: str) -> str | None:
+    """Handles TWO distinct real-world URL families, confirmed via live
+    search results (boards.greenhouse.io/embed/job_board/js?for=vaco,
+    .../for=onbe, boards.eu.greenhouse.io/embed/job_board/js?for=ANS):
+      1. The board URL itself: boards.greenhouse.io/{slug}
+      2. Greenhouse's standard embeddable-widget snippet:
+         boards.greenhouse.io/embed/job_board(/js)?for={slug} — this is
+         THE documented way Greenhouse tells customers to put jobs on
+         their OWN site (see support.greenhouse.io "Host internal job
+         board outside of Greenhouse"), so it is common, not an edge
+         case. Path-family (2) carries NO real slug in parts[0] — that's
+         always the literal word "embed" — the slug is in the `for`
+         query param instead. Previously mishandled: parts[0]="embed"
+         was returned as if it were the company, silently corrupting
+         every Greenhouse-embedding company onto one fake ('greenhouse',
+         'embed') row (see SKIP_SLUGS comment)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if "greenhouse.io" in host:
-        parts = parsed.path.strip("/").split("/")
-        slug = parts[0] if parts else None
+    if "greenhouse.io" not in host:
+        return None
+    path = parsed.path.strip("/")
+    if path.startswith("embed/"):
+        qs = parse_qs(parsed.query)
+        slug = (qs.get("for") or [None])[0]
         if slug and slug.lower() not in SKIP_SLUGS:
             return slug
+        return None
+    parts = path.split("/")
+    slug = parts[0] if parts else None
+    if slug and slug.lower() not in SKIP_SLUGS:
+        return slug
     return None
 
 
