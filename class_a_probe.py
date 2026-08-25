@@ -847,16 +847,22 @@ def main():
     parser.add_argument("--country", action="append", default=None,
                          help="Only crawl companies whose PDL 'country' column matches this "
                               "(case-insensitive exact string, e.g. 'united states'). Repeatable — "
-                              "--country 'united states' --country canada. Omit for no filter "
-                              "(default — crawls every country, including PDL's ~2.35M "
-                              "blank-country rows). See --use-default-countries for a ready-made "
-                              "US/UK/Canada/Australia + EU-27 set instead of typing all of them.")
-    parser.add_argument("--use-default-countries", action="store_true",
-                         help=f"Shortcut for filtering to DEFAULT_COUNTRIES "
+                              "--country 'united states' --country canada. Overrides "
+                              "DEFAULT_COUNTRIES (the default — see --all-countries to disable "
+                              "filtering entirely instead).")
+    parser.add_argument("--all-countries", action="store_true",
+                         help=f"Disable the country filter — crawl every country, including PDL's "
+                              f"~2.35M blank-country rows. Without this flag (and without "
+                              f"--country), the default is DEFAULT_COUNTRIES "
                               f"({len(DEFAULT_COUNTRIES)} countries: US/UK/Canada/Australia + "
-                              f"EU-27). Ignored if --country is also given.")
+                              f"EU-27).")
     args = parser.parse_args()
-    countries = set(args.country) if args.country else (DEFAULT_COUNTRIES if args.use_default_countries else None)
+    if args.country:
+        countries = set(args.country)
+    elif args.all_countries:
+        countries = None
+    else:
+        countries = DEFAULT_COUNTRIES  # default behavior (2026-08) — see --all-countries to disable
     asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency,
                            args.time_budget_minutes, countries))
 
