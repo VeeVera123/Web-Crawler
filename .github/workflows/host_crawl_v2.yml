@@ -99,7 +99,7 @@ jobs:
             CRAWL_ARGS=(--crawl "${{ github.event.inputs.crawl_partition }}")
           fi
 
-          python host_crawl_v2.py \
+          python "host crawl/host_crawl_v2.py" \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --partitions ${{ github.event.inputs.partitions || '1' }} \
