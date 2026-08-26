@@ -1,242 +1,46 @@
 """
-CLASS A DOMAIN-CRAWL DISCOVERY (2026-08 rewrite) — replaces the earlier
-seed-and-probe (guess-a-slug, ask-the-platform) technique entirely with
-the method host_crawl.py used before it was deprecated: visit each
-company's OWN website and look for a REAL link to a known ATS platform
-that they themselves published, instead of guessing candidate slugs and
-asking a platform's API to confirm/deny them.
-
-WHY THIS REPLACES SLUG-GUESSING, NOT JUST SUPPLEMENTS IT:
-  1. PRECISION: a match here means the literal URL is present on the
-     company's own page — there is no equivalent of the SmartRecruiters
-     false-positive bug (where an API 200'd identically for real and
-     fake slugs) possible with this method, because we're not asking a
-     third party to validate a guess; we're reading what the company
-     itself published. See the 4.5M-row false-positive incident this
-     project hit with the old technique for exactly the failure mode
-     this avoids structurally, not just via a patched check.
-  2. NO SHARED CHOKE POINT: the old technique hammered ONE shared host
-     per platform (boards-api.greenhouse.io) with millions of requests,
-     which is exactly the traffic pattern that got it soft-blocked by
-     Greenhouse's WAF (see the now-removed PLATFORM_CONCURRENCY /
-     RateLimiter / circuit-breaker machinery this file used to carry).
-     This technique instead sends a handful of requests to each of
-     millions of DIFFERENT company domains — no single target ever sees
-     enough volume from us to trip an anti-abuse system. That's why all
-     of that throttling/backoff/circuit-breaker code is GONE here: it
-     solved a problem specific to the old technique's shared-host
-     traffic shape, and doesn't apply to this one.
-  3. ONE PASS, ALL PLATFORMS: the old script probed one ATS platform at a
-     time (--platform greenhouse, --platform lever, ...). This script
-     detects ALL 25+ platforms discovery.py knows how to recognize
-     (see URL_TO_SLUG there) from a SINGLE fetch of a company's page —
-     visiting acme.com once can find a Greenhouse link, a Lever link, or
-     any other platform's link, whichever is actually there. Far more
-     work extracted per request than the old one-platform-per-probe
-     design.
-
-HOW DETECTION WORKS (multiple independent fallback methods per page, all
-run on every fetch — see _detect_ats_hits / _extract_candidate_urls):
-  A. Parsed <a href> links, resolved against the page's own URL (handles
-     relative/protocol-relative links a raw-text scan could miss).
-  B. A raw full-text regex scan for absolute http(s) URLs anywhere in the
-     page source — covers links embedded in <script> blocks, inline JS,
-     iframe src attributes, or anywhere else that isn't a plain <a> tag.
-  C. Dedicated JSON-LD extraction: every <script type="application/
-     ld+json"> block is parsed as real JSON and recursively walked for
-     URL-shaped string values (schema.org JobPosting/Organization
-     markup commonly carries a hiringOrganization/sameAs/url field).
-     This overlaps somewhat with method B (JSON-LD text is also inside
-     the raw page source B already scans) but parses it as structured
-     data rather than pattern-matching text, catching values method B's
-     plain-text regex could mangle (encoded characters, values split
-     across formatting) and giving a distinctly-labeled signal.
-  Every URL surfaced by A/B/C is run through discovery.py's URL_TO_SLUG —
-  the SAME per-platform converters every other source in this project
-  already trusts, so detection logic isn't duplicated or reinvented here.
-
-FALLBACK TIERS (only spent if the homepage itself yields nothing — see
-_crawl_one): if A/B/C find nothing on the homepage, a widened set of
-common career-page paths (see CAREER_PATHS — careers/jobs singular and
-plural, "join us"/"work with us" phrasing, nested under /about or
-/company, plus /hiring) are fetched CONCURRENTLY and scanned the same
-way. If THOSE also find nothing, /sitemap.xml is
-checked for any <loc> entries that look career-related and up to 3 of
-those are fetched and scanned too. This means a company genuinely gets
-several real chances before being marked as no-ATS-found, without
-unconditionally quadrupling the request volume for the (large) majority
-of companies that already resolve on the homepage alone.
-
-SEED SOURCE — PDL ONLY, DOMAIN REQUIRED: this technique needs a real
-domain to crawl. Of the three seed sources the old script combined (PDL,
-SEC EDGAR, YC), only PDL carries a domain field — SEC EDGAR and YC only
-ever gave a company NAME, which is useless here (there's nothing to
-guess-a-domain-from without risking crawling the wrong company entirely,
-a correctness problem worse than just skipping them). So this version
-uses PDL exclusively, filtered to rows with a non-empty domain. See
-fetch_pdl_companies_with_domain.
-
-DELIBERATELY NO RATE LIMITING: unlike the old script, there is no
-per-request backoff, no soft-block detection, and no circuit breaker
-here. That machinery existed specifically to survive hammering ONE
-shared host — it would be actively counterproductive against millions of
-independent domains, where the constraint is our own network/CPU
-throughput, not any single target's tolerance for our traffic. Per-
-request TIMEOUTS still exist (a dead/slow site can't be allowed to stall
-the crawl forever), but that's a liveness safeguard, not a rate limit.
+CLASS A DOMAIN-CRAWL DISCOVERY — a thin, disposable seed source on top of
+node.py (the permanent engine). This file's only job: read PDL's Free
+Company Dataset, extract {name, domain, country}, hand domains to
+node.crawl_batch(). All fetch/parse/detect/write logic lives in node.py —
+fix a bug there once, this and every other seed source gets the fix.
 
 Usage:
-    pip install aiohttp selectolax python-dotenv requests
+    pip install aiohttp aiodns selectolax python-dotenv requests
     python class_a_probe.py
     python class_a_probe.py --shard-index 0 --shard-count 20
-    python class_a_probe.py --concurrency 600
 """
 import argparse
 import asyncio
-import concurrent.futures
-import json
 import logging
 import os
 import re
 import sys
 import time
 from collections import Counter
-from urllib.parse import urljoin, urlparse
 
 import aiohttp
-import requests
 from dotenv import load_dotenv
-from selectolax.lexbor import LexborHTMLParser
 
 load_dotenv()
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from discovery import SKIP_SLUGS, URL_TO_SLUG  # noqa: E402
-import geo  # noqa: E402  — country-name extraction, reused by detect_country()
+from discovery import SKIP_SLUGS  # noqa: E402
+import node  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
-                     datefmt="%H:%M:%S")
 log = logging.getLogger("class_a_probe")
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-
-# Per-request safety timeout — NOT a rate limit. A handful of dead/slow
-# sites can't be allowed to stall the whole crawl; this just caps how
-# long any single fetch is allowed to hang before being abandoned.
-REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=6)
-
-# CONCURRENCY: how many companies are processed in parallel. Each company
-# may issue 1 request (homepage hit found) up to ~8 (homepage miss ->
-# career-path fallback -> sitemap fallback, all attempted). Tunable via
-# env/CLI since the right number depends on the runner's own network
-# capacity, not any external constraint (see module docstring — there is
-# deliberately nothing on the other side of this that we're pacing
-# against). Default is high on purpose.
-CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_CONCURRENCY", "400"))
-# Hard ceiling on simultaneous TCP connections at the connector level —
-# set a bit above CRAWL_CONCURRENCY to give the fallback-tier burst
-# requests (a company that reaches career-path/sitemap fallback opens
-# several requests at once) room without being needlessly serialized.
-CONNECTOR_LIMIT = int(os.environ.get("CRAWL_CONNECTOR_LIMIT", str(CRAWL_CONCURRENCY + 150)))
-
-# Cap how much of any single page we read — a handful of pathological
-# multi-hundred-MB responses can't be allowed to eat all the crawl's
-# time/memory. Way more than any real HTML page needs (few hundred KB is
-# typical); this is a safety ceiling, not a realistic limit.
-MAX_PAGE_BYTES = 3_000_000
-
-# PARSE WORKERS (2026-08): HTML/JSON-LD parsing + regex scanning is real
-# synchronous Python/C-extension work, and asyncio's single event-loop
-# thread can't spread that across cores no matter how many the runner
-# has — past some concurrency, parsing becomes the bottleneck, not
-# network wait (see the --concurrency discussion in project notes). This
-# offloads _parse_and_detect to a real multi-process pool via
-# loop.run_in_executor, so parsing genuinely uses every core the runner
-# has instead of queueing behind one. Network I/O (the actual aiohttp
-# fetch) stays on the main event loop as before — only the CPU-bound
-# part moves. Default leaves one core for the event loop/OS/network
-# stack itself; override with PARSE_WORKERS if that's not the right
-# split for a given runner.
-PARSE_WORKERS = int(os.environ.get("PARSE_WORKERS", str(max(1, (os.cpu_count() or 4) - 1))))
-
-# TIME BUDGET (2026-08): a graceful internal cutoff, separate from and
-# well UNDER the workflow's own timeout-minutes (350 — see
-# class_a_probe.yml). Without this, if a shard's real throughput ends up
-# slower than expected (throughput depends on which companies land in
-# that shard, network conditions on the day, etc — not something that
-# can be predicted exactly ahead of time), GitHub just hard-kills the job
-# at 350 min: whatever batch was mid-flight is lost entirely, INCLUDING
-# any hits found in it that hadn't been written to Supabase yet, and the
-# run ends with no clean summary. This checks elapsed time at each batch
-# boundary and, if the budget's spent, stops taking new batches and falls
-# through to the normal end-of-shard summary/cleanup path — so a run that
-# would've gone over just finishes early with everything found so far
-# safely written, logged, and accounted for, instead of being cut off
-# mid-write. Default leaves a 20-minute margin under the workflow's
-# 350-minute ceiling.
-TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_TIME_BUDGET_MINUTES", "330"))
-
-# WIDENED (2026-08): real company sites use a lot of different paths for
-# their careers page — the original 4-path list was too narrow and would
-# have missed genuinely findable companies. Covers the common English-
-# language conventions (careers/jobs singular+plural, "join us"/"work
-# with us" phrasing, nested under /about or /company, and an explicit
-# "hiring" variant) without exploding into every possible i18n/phrasing
-# variant, which would mostly just add request volume for little extra
-# yield. All fetched CONCURRENTLY per company (see _crawl_one), so this
-# widening costs more total requests, not more time per company.
-CAREER_PATHS = [
-    "/careers", "/career",
-    "/jobs", "/job-openings", "/open-positions", "/openings",
-    "/join-us", "/join", "/work-with-us", "/work-for-us",
-    "/about/careers", "/about-us/careers", "/company/careers", "/company/jobs",
-    "/team/careers",
-    "/hiring", "/we-are-hiring",
-    "/apply",
-]
-
-# One shared pattern for "does this URL look like a careers page" (2026-08)
-# — used to filter sitemap.xml <loc> entries down to the ones worth
-# fetching. Built FROM CAREER_PATHS itself (each path's own word, with any
-# hyphens loosened to optional) instead of a separately hand-maintained
-# regex, so the two can never drift apart again — previously the sitemap
-# filter only knew a handful of these terms (career/jobs/join/work-with-
-# us) and silently skipped sitemap URLs matching the rest (hiring/apply/
-# openings/work-for-us/open-positions), even though CAREER_PATHS itself
-# already covers them for direct-path fetching.
-CAREER_LIKE_RE = re.compile(
-    "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS),
-    re.I,
-)
-SITEMAP_MAX_FOLLOW = 8  # widened 2026-08 from 3 — these are already filtered to
-# career-like URLs by CAREER_LIKE_RE, so each additional one followed is a
-# targeted, low-junk-risk chance at a real hit, not indiscriminate crawling.
-SITEMAP_INDEX_PATHS = ("/sitemap.xml", "/sitemap_index.xml")  # tried in order,
-# stopping at the first that yields a usable sitemap — WordPress and several
-# other common platforms publish an index at the second path instead of a
-# flat /sitemap.xml, and a site using that convention was previously never
-# reached by the sitemap fallback tier at all.
 
 PDL_DATASET_PATH = os.environ.get("PDL_DATASET_PATH", "people_data_labs_companies.csv")
 PDL_ROW_LIMIT = int(os.environ.get("PDL_ROW_LIMIT", "0"))  # 0 = no cap
 
+# Same {name,domain,country} CSV shape is also produced by
+# github_org_seed.py — this env var is the only thing that changes
+# between seed files, so rows are correctly attributed regardless of
+# which one actually found them.
+SEED_SOURCE_LABEL = os.environ.get("SEED_SOURCE_LABEL", "pdl_domain_crawl")
 
-# NARROWED (2026-08, explicit request — was US/UK/Canada/Australia +
-# EU-27, 31 countries). Now a deliberately small, hand-picked 13-country
-# list: 'united states'/'united kingdom'/'canada'/'australia'/'france'/
-# 'germany'/'ireland' are all CONFIRMED real PDL country-column strings
-# (seen directly in the user's real country-count output — see prior
-# comment history in git blame for the exact row counts). 'singapore',
-# 'malta', 'new zealand', 'bahamas', 'guyana', 'barbados' were NOT visible
-# in that (top-60-by-row-count) output — plausibly real but low-row-count,
-# not confirmed absent. Included anyway on the same reasoning this
-# project has used throughout: a country string that doesn't actually
-# appear in the file just matches 0 rows, harmless, so there's no
-# downside to listing a country you're not 100% sure is present, only to
-# leaving one out that is.
+# Hand-picked, narrowed 2026-08 (was a 31-country US/UK/Canada/Australia+EU-27
+# set). 'singapore'/'malta'/'new zealand'/'bahamas'/'guyana'/'barbados' aren't
+# confirmed present in PDL's real data but cost nothing to list if absent.
 DEFAULT_COUNTRIES = {
     "united states", "united kingdom", "canada", "australia",
     "ireland", "new zealand", "singapore", "malta",
@@ -247,35 +51,20 @@ DEFAULT_COUNTRIES = {
 
 def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
                                      countries: set[str] | None = None) -> list[dict]:
-    """Reads the People Data Labs Free Company Dataset from a LOCAL file
-    (Kaggle-hosted, one-time authenticated download — see README/prior
-    docs) and keeps ONLY rows with a real, non-empty domain — this
-    technique needs something to crawl, and PDL is the only seed source
-    this project has that carries a domain field at all. Missing file is
-    NOT an error — logs once and returns empty, same as any other
-    optional source, so this script still runs (finding nothing) rather
-    than crashing for anyone who hasn't done the one-time download yet.
-
-    countries: PDL's real 'country' column (confirmed — the exact literal
-    column name, verified directly against the user's own file, no more
-    guessing across candidate header names). Case-insensitive exact-string
-    match — pass None (default) for NO filter at all, matching every
-    country including PDL's ~2.35M blank-country rows (blank is the
-    single largest bucket, bigger than any one country, so 'no filter' is
-    NOT the same as 'only known countries' — a filter, even a wide one,
-    always drops every unclassified row too). See DEFAULT_COUNTRIES for
-    the ready-made 13-country default set."""
+    """Reads the seed CSV (PDL's own dataset, or any other source that
+    matches its {name,domain,country} shape). Missing file logs once and
+    returns empty rather than crashing. countries: case-insensitive exact
+    match against the 'country' column; None = no filter (includes every
+    blank-country row too)."""
     import csv
 
     if not os.path.exists(PDL_DATASET_PATH):
-        log.warning(f"PDL dataset not found at '{PDL_DATASET_PATH}' — nothing to crawl without it. "
-                    f"Download it once (see project README) and set PDL_DATASET_PATH if needed.")
+        log.warning(f"Seed dataset not found at '{PDL_DATASET_PATH}' — nothing to crawl.")
         return []
 
     countries_lower = {c.strip().lower() for c in countries} if countries else None
     if countries_lower:
-        log.info(f"  filtering PDL rows to {len(countries_lower)} countries "
-                 f"(column: 'country', case-insensitive)")
+        log.info(f"  filtering to {len(countries_lower)} countries")
 
     out = []
     total_rows = 0
@@ -294,604 +83,26 @@ def fetch_pdl_companies_with_domain(limit: int = PDL_ROW_LIMIT,
                         continue
                 name = (row.get("name") or "").strip()
                 domain = (row.get("domain") or "").strip().lower()
-                # Strip any accidental scheme/path a dirty CSV value might carry
                 domain = re.sub(r"^https?://", "", domain).split("/")[0].strip()
                 if name and domain and "." in domain and domain not in SKIP_SLUGS:
                     out.append({"name": name, "domain": domain})
     except Exception as e:
-        log.error(f"Failed to read PDL dataset: {e}")
+        log.error(f"Failed to read seed dataset: {e}")
         return []
     filter_note = f", {skipped_wrong_country} skipped by country filter" if countries_lower else ""
-    log.info(f"PDL dataset: {total_rows} total rows{filter_note}, {len(out)} with a usable domain "
+    log.info(f"Seed dataset: {total_rows} total rows{filter_note}, {len(out)} with a usable domain "
              f"({len(out) / max(total_rows, 1) * 100:.1f}%)")
     return out
 
 
-# ── detection ─────────────────────────────────────────────────────────
-
-_URL_RE = re.compile(r'https?://[^\s"\'<>\\]{4,300}', re.I)
-_MAX_CANDIDATE_URLS_PER_PAGE = 4000  # pathological-page safety cap
-
-# Junk cleanup (2026-08): _URL_RE's terminator set ([^\s"'<>\\]) stops at a
-# literal '"' but NOT at an HTML-ENCODED quote like '&quot;'/'&#34;', and
-# not at a curly/smart quote character either — both are common right
-# after a URL sitting inside inline JS/JSON blobs that the page's own HTML
-# source already entity-encoded before this regex ever sees it. Confirmed
-# live in ctlog_probe_results (2026-08 audit): real, correctly-matched
-# rows for recruitee/smartrecruiters/teamtailor/bamboohr/icims/
-# oracle_cloud_hcm had usable, correct hosts with garbage stuck on — NOT a
-# false-positive domain match (that's the separate, already-fixed
-# _host_matches_domain bug), just an extraction-boundary bug on top of an
-# otherwise-real hit. In the worst observed case (a whole inline JSON blob
-# — {"atsHost":"recruitee.com","captcha":{"apiHost":"https://...
-# — that the page had already HTML-entity-escaped, so EVERY quote in it
-# became a bare, unexcluded '&quot;') the true URL ended right after
-# 'recruitee.com', but the entity junk continued for another 150+ chars
-# with no literal quote/whitespace/bracket anywhere in between to stop
-# _URL_RE — trimming only from the very end of the eventual match can
-# never recover that; the first entity occurrence has to be found and cut
-# to, not just the last.
-_HTML_ENTITY_RE = re.compile(
-    r'&(?:quot|apos|amp|gt|lt|nbsp|#[0-9]+|#x[0-9a-fA-F]+);', re.I)
-_CURLY_QUOTE_RE = re.compile(r'[“”‘’]')
-_TRAILING_STATUS_CODE_RE = re.compile(r'(?:;[0-9]{2,4})+;?$')  # e.g. ';307;' — an
-# HTTP status/redirect code that ended up concatenated onto the URL text
-# somewhere upstream of this function; never part of a real ATS URL.
-
-
-def _clean_extracted_url(url: str) -> str:
-    """Recover the real URL out of a raw _URL_RE match that may have
-    over-consumed into surrounding entity-encoded JSON/JS junk.
-
-    Step 1 — cut, don't trim: find the FIRST occurrence anywhere in the
-    string of a real HTML entity ('&quot;'/'&#34;'/etc. — the pattern only
-    matches a complete, semicolon-terminated entity name, so a legitimate
-    query-string '&' like '?a=1&b=2' can never match it) or a curly/smart
-    quote character, and truncate there. This has to be a cut at the
-    FIRST occurrence, not a trim of trailing junk, because a fully
-    entity-encoded JSON blob can run on for hundreds of characters past
-    the real end of the URL with nothing in between that _URL_RE's own
-    terminator set would stop at.
-    Step 2 — trim: with the entity/curly-quote junk already cut away,
-    iteratively strip whatever ordinary trailing junk is left (JS/JSON
-    statement punctuation, a stray ';307;'-style status-code fragment, an
-    unbalanced trailing closing bracket/paren) — looped because it can
-    arrive in mixed order (e.g. ',' before a status-code fragment or
-    after it, depending on the page)."""
-    m = _HTML_ENTITY_RE.search(url)
-    if m:
-        url = url[:m.start()]
-    m = _CURLY_QUOTE_RE.search(url)
-    if m:
-        url = url[:m.start()]
-
-    prev = None
-    while prev != url:
-        prev = url
-        url = url.strip()
-        url = url.rstrip(",;")
-        url = _TRAILING_STATUS_CODE_RE.sub("", url)
-        for open_c, close_c in (("(", ")"), ("[", "]"), ("{", "}")):
-            while url.endswith(close_c) and url.count(open_c) < url.count(close_c):
-                url = url[:-1]
-    return url
-
-
-def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
-    """Method A + B combined: parsed <a href> links (resolved against the
-    page's own URL, catching relative/protocol-relative links) PLUS a raw
-    full-text scan for absolute URLs anywhere in the source (catching
-    links embedded in <script> blocks, JS strings, iframe src, or
-    anywhere else that isn't a plain <a> tag). Every URL, from either
-    method, is run through _clean_extracted_url() before being added —
-    see that function's docstring for why (trailing HTML-entity / smart-
-    quote / JS-punctuation junk that _URL_RE's own terminator set misses)."""
-    urls: set[str] = set()
-
-    try:
-        tree = LexborHTMLParser(html)
-        for node in tree.css("a[href]"):
-            href = node.attributes.get("href")
-            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
-                continue
-            try:
-                urls.add(_clean_extracted_url(urljoin(base_url, href)))
-            except ValueError:
-                continue
-            if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
-                break
-    except Exception:
-        pass  # a malformed page shouldn't kill the whole crawl of this company
-
-    for m in _URL_RE.finditer(html):
-        urls.add(_clean_extracted_url(m.group(0)))
-        if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
-            break
-
-    return urls
-
-
-def _walk_json_strings(obj, depth: int = 0):
-    """Recursively yield every string value inside a parsed JSON
-    structure — used to pull URL-shaped values out of JSON-LD blocks
-    regardless of which field they're under (hiringOrganization.url,
-    sameAs, publisher.url, etc. all vary by page)."""
-    if depth > 12:  # guard against pathological/self-referential structures
-        return
-    if isinstance(obj, str):
-        yield obj
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            yield from _walk_json_strings(v, depth + 1)
-    elif isinstance(obj, list):
-        for v in obj:
-            yield from _walk_json_strings(v, depth + 1)
-
-
-def _extract_jsonld_urls(html: str) -> set[str]:
-    """Method C: dedicated JSON-LD structured-data extraction. Distinct
-    from the raw-text regex scan (method B) — this actually PARSES each
-    <script type="application/ld+json"> block as JSON and walks it, which
-    catches values the raw-text pattern-match could mangle (escaped
-    characters, values assembled from multiple JSON fields) and gives a
-    separately-labeled, more precise signal than pattern-matching text."""
-    urls: set[str] = set()
-    try:
-        tree = LexborHTMLParser(html)
-        for node in tree.css('script[type="application/ld+json"]'):
-            text = node.text(strip=True)
-            if not text:
-                continue
-            try:
-                parsed = json.loads(text)
-            except (ValueError, TypeError):
-                continue
-            for s in _walk_json_strings(parsed):
-                if s.startswith("http://") or s.startswith("https://"):
-                    urls.add(s)
-                    if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
-                        return urls
-    except Exception:
-        pass
-    return urls
-
-
-def _detect_ats_hits(urls: set[str]) -> list[tuple[str, str, str]]:
-    """Runs every candidate URL through discovery.py's real per-platform
-    URL_TO_SLUG converters — the same trusted logic every other source in
-    this project uses, not reinvented here. Returns (ats, slug,
-    matched_url) for every real match found."""
-    hits = []
-    seen = set()
-    for url in urls:
-        for ats, converter in URL_TO_SLUG.items():
-            try:
-                slug = converter(url)
-            except Exception:
-                continue
-            if slug:
-                key = (ats, slug)
-                if key not in seen:
-                    seen.add(key)
-                    hits.append((ats, slug, url))
-    return hits
-
-
-def _parse_and_detect(html: str, base_url: str) -> list[tuple[str, str, str]]:
-    """The full CPU-bound half of processing one page — methods A+B+C
-    (link extraction, raw-text URL regex scan, JSON-LD parsing) plus
-    running every candidate through URL_TO_SLUG — bundled into ONE
-    function so it can be shipped to a worker process as a single unit
-    (see PARSE_WORKERS / run_crawl's ProcessPoolExecutor). Must stay a
-    plain module-level function taking only picklable arguments (a
-    string page body + a string URL) — that's what makes it safe to run
-    via loop.run_in_executor across process boundaries, including on
-    Windows where multiprocessing needs importable top-level functions."""
-    urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
-    return _detect_ats_hits(urls)
-
-
-# ── country detection (2026-08, built for host_crawl_v2.py — see that
-# file's module docstring for why: Common Crawl's Host Index, unlike
-# PDL, carries NO country field at all, confirmed via Common Crawl's own
-# documentation, so a country signal has to come from the crawled page
-# content itself, not a seed-file column) ──────────────────────────────
-
-# geo.py's canonical country names don't always match PDL's own spelling
-# 1:1 — confirmed via a live check: geo.py canonically emits "Czech
-# Republic" from extract_countries(), while PDL's real CSV uses
-# "czechia" (see geo.py's Czechia-alias comment for the full story, and
-# note the alias fix there makes extract_countries() UNDERSTAND the word
-# "Czechia" in scraped text — it just still always OUTPUTS the canonical
-# "Czech Republic" spelling, which is the thing this override reconciles
-# against DEFAULT_COUNTRIES' PDL-style spelling). This is the only
-# mismatch found across all 31 DEFAULT_COUNTRIES entries — everything
-# else matches via a plain .title() call.
-_PDL_TO_GEO_COUNTRY_OVERRIDES = {"czechia": "Czech Republic"}
-
-
-def target_countries_geo_form(pdl_style_countries: set[str]) -> set[str]:
-    """Converts a DEFAULT_COUNTRIES-style set (lowercase, PDL spelling)
-    into the canonical Title-Case spellings geo.py's extract_countries()
-    actually returns, so detect_country's result can be checked against
-    it directly without either side silently missing the other over a
-    spelling difference."""
-    return {_PDL_TO_GEO_COUNTRY_OVERRIDES.get(c, c.title()) for c in pdl_style_countries}
-
-
-def _extract_address_zone_text(html: str) -> str:
-    """Pulls text from ONLY <footer> and <address> tags — narrow,
-    targeted zones where a company's real HQ/legal address is most
-    likely to appear — rather than scanning the whole page body.
-    Scanning the whole page risks false country matches from incidental
-    mentions (blog posts about other markets, other office locations,
-    case studies, "we ship to 40 countries" marketing copy) that say
-    nothing about where the company is actually headquartered."""
-    try:
-        tree = LexborHTMLParser(html)
-        parts = []
-        for tag in ("footer", "address"):
-            for node in tree.css(tag):
-                text = node.text(separator=" ", strip=True)
-                if text:
-                    parts.append(text)
-        return " | ".join(parts)
-    except Exception:
-        return ""
-
-
-def _walk_for_address_country(obj, depth: int = 0) -> str | None:
-    """Recursively look for an 'addressCountry' key anywhere in a parsed
-    JSON-LD structure (nested under Organization.address,
-    LocalBusiness.address, or other schema.org shapes), returning its
-    raw string value. Only the FIRST one found is used — a page
-    declaring multiple different addressCountry values (multiple listed
-    office locations) is exactly the ambiguous case this isn't meant to
-    resolve on its own; see detect_country's single-match requirement."""
-    if depth > 12:
-        return None
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(k, str) and k.lower() == "addresscountry" and isinstance(v, str) and v.strip():
-                return v.strip()
-        for v in obj.values():
-            result = _walk_for_address_country(v, depth + 1)
-            if result:
-                return result
-    elif isinstance(obj, list):
-        for item in obj:
-            result = _walk_for_address_country(item, depth + 1)
-            if result:
-                return result
-    return None
-
-
-def detect_country(html: str, target_geo_countries: set[str]) -> tuple[str | None, str | None]:
-    """Precision-ordered country-detection waterfall. Returns (country,
-    method) — method is 'jsonld' or 'footer_address' — or (None, None)
-    if nothing confidently resolves to exactly one country in
-    target_geo_countries (geo.py's canonical spelling — see
-    target_countries_geo_form). DELIBERATELY does NOT use ccTLD or IP
-    geolocation as a signal at all: live research (Common Crawl's own
-    Host Index schema docs, MaxMind's own accuracy disclosures) confirmed
-    both are unreliable/systematically biased for a COMPANY'S actual HQ
-    country specifically — ccTLD because .com is used globally, IP
-    geolocation because most modern sites sit behind a CDN (Cloudflare/
-    AWS/Fastly/etc) whose edge-node location has nothing to do with the
-    company's real location. Only content the company itself actually
-    published is trusted.
-
-    Tier 1 — JSON-LD structured data (highest confidence): an explicit
-    addressCountry value the page's own markup declares. Trusted outright
-    if it resolves to exactly one country — and if that country is a
-    confident, explicit declaration of a NON-target country, this stops
-    right there rather than letting a weaker footer-text signal overrule
-    an explicit statement.
-
-    Tier 2 — footer/<address> tag text, run through geo.py's
-    extract_countries() (the same precision-hardened country-extraction
-    logic this project already trusts for job-location classification,
-    not reinvented here). Trusted ONLY if exactly one country is found —
-    zero or multiple countries mentioned in that zone is genuinely
-    ambiguous, not guessed at."""
-    jsonld_country = None
-    try:
-        tree = LexborHTMLParser(html)
-        for node in tree.css('script[type="application/ld+json"]'):
-            text = node.text(strip=True)
-            if not text:
-                continue
-            try:
-                parsed = json.loads(text)
-            except (ValueError, TypeError):
-                continue
-            raw = _walk_for_address_country(parsed)
-            if raw:
-                resolved = geo.extract_countries(raw)
-                if len(resolved) == 1:
-                    jsonld_country = next(iter(resolved))
-                    break
-    except Exception:
-        pass
-    if jsonld_country:
-        if jsonld_country in target_geo_countries:
-            return jsonld_country, "jsonld"
-        return None, None  # explicit, confident — just not a target country
-
-    zone_text = _extract_address_zone_text(html)
-    if zone_text:
-        resolved = geo.extract_countries(zone_text)
-        if len(resolved) == 1:
-            only = next(iter(resolved))
-            if only in target_geo_countries:
-                return only, "footer_address"
-    return None, None
-
-
-def _parse_detect_ats_and_country(html: str, base_url: str, target_geo_countries: set[str]
-                                   ) -> tuple[list[tuple[str, str, str]], str | None, str | None]:
-    """host_crawl_v2's CPU-bound per-page work, bundled into one function
-    for the same ProcessPoolExecutor-picklability reason _parse_and_detect
-    is (see that function's docstring) — ATS detection AND country
-    detection on the SAME already-fetched page, so the page never needs
-    fetching twice."""
-    urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
-    hits = _detect_ats_hits(urls)
-    country, method = detect_country(html, target_geo_countries)
-    return hits, country, method
-
-
-# ── fetching ──────────────────────────────────────────────────────────
-
-async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> tuple[str, str] | None:
-    """Fetches one page, capped at MAX_PAGE_BYTES, returns (final_url,
-    html_text) on a usable HTML response or None on anything else
-    (unreachable, non-HTML, too large, error status). No retries, no
-    backoff — see module docstring for why that machinery doesn't belong
-    here; a single miss just means this company/path didn't pan out."""
-    # requests_attempted is a REQUEST-level counter — a single company can
-    # fire dozens of these (homepage candidates + up to 18 career paths +
-    # up to 3 sitemap follows), unlike companies_attempted which is
-    # COMPANY-level. Error-rate percentages below are computed against
-    # THIS counter, not companies_attempted — dividing request counts by
-    # company counts is what produced nonsensical >100% figures before.
-    stats["requests_attempted"] += 1
-    try:
-        async with session.get(url, timeout=REQUEST_TIMEOUT,
-                                headers={"User-Agent": USER_AGENT},
-                                allow_redirects=True, max_redirects=5,
-                                ssl=False) as r:
-            if r.status >= 400:
-                stats["http_error"] += 1
-                if r.status == 404:
-                    stats["status_404"] += 1
-                return None
-            content_type = r.headers.get("Content-Type", "")
-            if content_type and "html" not in content_type.lower():
-                stats["non_html"] += 1
-                return None
-            chunks = []
-            total = 0
-            async for chunk in r.content.iter_chunked(65536):
-                chunks.append(chunk)
-                total += len(chunk)
-                if total >= MAX_PAGE_BYTES:
-                    break
-            html = b"".join(chunks).decode("utf-8", errors="ignore")
-            if not html.strip():
-                stats["non_html"] += 1
-                return None
-            stats["fetched_ok"] += 1
-            return str(r.url), html
-    except asyncio.TimeoutError:
-        stats["timeout"] += 1
-        return None
-    except Exception:
-        stats["unreachable"] += 1
-        return None
-
-
-async def _fetch_sitemap(session: aiohttp.ClientSession, origin: str, stats: dict):
-    """Tries each of SITEMAP_INDEX_PATHS in order, returning the first that
-    resolves to a usable page. 2026-08: previously only /sitemap.xml was
-    ever tried — a site publishing its sitemap only at /sitemap_index.xml
-    (WordPress and several other common platforms' default) was silently
-    never reached by the sitemap fallback tier at all."""
-    for path in SITEMAP_INDEX_PATHS:
-        page = await _fetch_page(session, urljoin(origin, path), stats)
-        if page:
-            return page
-    return None
-
-
-def _collapse_hits(hit_lists: list[list[tuple[str, str, str]]]) -> list[tuple[str, str, str]]:
-    """Merges hits found across MULTIPLE pages at the same tier into one
-    deduped list, keeping the first (ats, slug, matched_url) seen for each
-    distinct (ats, slug) pair. 2026-08: previously a tier stopped and
-    returned as soon as ANY one page in it had a hit, so a company running
-    two ATS platforms at once (e.g. old + new during a migration) only
-    ever got the first one found, even though every other career-page/
-    sitemap-page candidate was already fetched anyway — checking and
-    merging all of them costs no extra requests, only extra (already-
-    fetched) parsing, and can only ever ADD real, individually-validated
-    hits, never introduce a false one (each hit still went through the
-    same anchored URL_TO_SLUG detection as before)."""
-    seen: set[tuple[str, str]] = set()
-    merged: list[tuple[str, str, str]] = []
-    for hits in hit_lists:
-        for ats, slug, url in hits:
-            key = (ats, slug)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append((ats, slug, url))
-    return merged
-
-
-async def _crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                      company_name: str, domain: str, stats: dict,
-                      parse_pool: concurrent.futures.ProcessPoolExecutor) -> list[tuple[str, str, str, str, str]]:
-    """Crawls one company's site end to end: homepage -> (if nothing
-    found) common career-page paths -> (if still nothing) sitemap
-    fallback. Returns a list of (ats, slug, matched_url, domain, tier) —
-    a company CAN yield more than one hit (e.g. an old and new ATS both
-    still linked during a migration): EVERY page fetched at whichever tier
-    produces at least one hit is checked and merged (see _collapse_hits),
-    not just the first page in that tier with a hit. `tier` is "homepage"
-    / "career_path" / "sitemap", whichever tier the hits came from — the
-    first tier to produce anything wins; later tiers are only tried if the
-    current one comes up completely empty."""
-    loop = asyncio.get_running_loop()
-    async with sem:
-        stats["companies_attempted"] += 1
-        candidates = [f"https://{domain}"]
-        if not domain.startswith("www."):
-            candidates.append(f"https://www.{domain}")
-        candidates.append(f"http://{domain}")  # last resort only
-
-        page = None
-        for base_url in candidates:
-            page = await _fetch_page(session, base_url, stats)
-            if page:
-                break
-        if not page:
-            stats["homepage_unreachable"] += 1
-            return []
-
-        final_url, html = page
-        stats["homepage_fetched"] += 1
-        hits = await loop.run_in_executor(parse_pool, _parse_and_detect, html, final_url)
-        if hits:
-            stats["hits_from_homepage"] += 1
-            return [(ats, slug, url, domain, "homepage") for ats, slug, url in hits]
-
-        # Fallback tier 1: common career-page paths, fetched concurrently,
-        # every hit-bearing page merged (see _collapse_hits).
-        origin_parts = urlparse(final_url)
-        origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
-        career_pages = await asyncio.gather(
-            *[_fetch_page(session, urljoin(origin, p), stats) for p in CAREER_PATHS]
-        )
-        career_hit_lists = []
-        for cp in career_pages:
-            if not cp:
-                continue
-            cp_url, cp_html = cp
-            career_hit_lists.append(
-                await loop.run_in_executor(parse_pool, _parse_and_detect, cp_html, cp_url))
-        merged = _collapse_hits(career_hit_lists)
-        if merged:
-            stats["hits_from_career_path"] += 1
-            return [(ats, slug, url, domain, "career_path") for ats, slug, url in merged]
-
-        # Fallback tier 2: sitemap, only reached if everything above found nothing.
-        sitemap = await _fetch_sitemap(session, origin, stats)
-        if sitemap:
-            sm_url, sm_xml = sitemap
-            loc_urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", sm_xml, re.I)
-            career_like = [u for u in loc_urls if CAREER_LIKE_RE.search(u)]
-            sm_pages = await asyncio.gather(
-                *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]]
-            )
-            sitemap_hit_lists = []
-            for sp in sm_pages:
-                if not sp:
-                    continue
-                sp_url, sp_html = sp
-                sitemap_hit_lists.append(
-                    await loop.run_in_executor(parse_pool, _parse_and_detect, sp_html, sp_url))
-            merged = _collapse_hits(sitemap_hit_lists)
-            if merged:
-                stats["hits_from_sitemap"] += 1
-                return [(ats, slug, url, domain, "sitemap") for ats, slug, url in merged]
-
-        return []
-
-
-# ── Supabase I/O ─────────────────────────────────────────────────────
-
-async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list[dict]) -> int:
-    """rows: list of {"ats", "slug", "source_hostname", "root_domain"}.
-    root_domain is now the ACTUAL company domain that was crawled (a
-    correct, literal use of that column for the first time — the old
-    seed-and-probe technique had no real domain to put there and used a
-    flat technique-marker string instead). source_hostname carries the
-    exact page URL the match was found on, tagged with which detection
-    tier found it — the most specific, actionable piece of information
-    available, and something the old technique never had access to."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        log.warning("SUPABASE_URL/SUPABASE_KEY not set — cannot write to staging table.")
-        return 0
-    if not rows:
-        return 0
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Prefer": "resolution=merge-duplicates",
-    }
-    chunk_size = 1000
-    chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
-
-    # RETRY HERE IS NOT THE SAME "no rate limiting" principle the crawl
-    # requests follow (see module docstring) — that principle is about not
-    # throttling ourselves against millions of INDEPENDENT company
-    # domains, where a single miss just means one company/path didn't pan
-    # out and there's nothing to gain by retrying it. This is different:
-    # ctlog_probe_results is ONE shared endpoint, up to 20 shards' worth
-    # of concurrent runners all POST to it at once, and a transient 500
-    # from momentary contention there is a real, recoverable failure —
-    # not retrying means those hits are gone for good with no way to
-    # recover them (this happened in practice: a 500 mid-run silently
-    # dropped 270 real hits before this retry existed). 3 attempts total,
-    # short exponential backoff, only for 5xx/network-level failures — a
-    # 4xx (bad request/auth) retrying wouldn't fix anything, so those
-    # still fail fast.
-    async def _write_chunk(chunk):
-        last_err = None
-        for attempt in range(3):
-            if attempt:
-                await asyncio.sleep(1.5 * (2 ** (attempt - 1)))  # 1.5s, then 3s
-            try:
-                async with session.post(
-                    f"{SUPABASE_URL}/rest/v1/ctlog_probe_results",
-                    headers=headers,
-                    params={"on_conflict": "ats,slug"},
-                    json=chunk,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as r:
-                    if r.status >= 500:
-                        last_err = f"{r.status} {await r.text()}"
-                        continue  # transient server-side — worth retrying
-                    r.raise_for_status()  # 4xx — not retryable, raises immediately below
-                    return len(chunk)
-            except Exception as e:
-                last_err = str(e)
-                if isinstance(e, aiohttp.ClientResponseError) and e.status < 500:
-                    break  # 4xx via raise_for_status — don't waste retries on it
-        log.error(f"Failed to write a chunk of {len(chunk)} rows to staging table after "
-                  f"retries — DATA LOST for this chunk: {last_err}")
-        return 0
-
-    results = await asyncio.gather(*(_write_chunk(c) for c in chunks))
-    written = sum(results)
-    # Logged by run_crawl's per-batch summary line instead (keeps writes
-    # to a single, consistently-placed "written to supabase" line rather
-    # than an extra one interleaved mid-batch from here).
-    log.debug(f"  Wrote {written}/{len(rows)} rows to ctlog_probe_results")
-    return written
-
-
-# ── main crawl loop ──────────────────────────────────────────────────
-
 async def run_crawl(shard_index: int | None = None, shard_count: int | None = None,
-                     concurrency: int = CRAWL_CONCURRENCY,
-                     time_budget_minutes: int = TIME_BUDGET_MINUTES,
+                     concurrency: int = node.CRAWL_CONCURRENCY,
+                     time_budget_minutes: int = node.TIME_BUDGET_MINUTES,
                      countries: set[str] | None = None) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(f"── Class A domain-crawl discovery{label} ──")
-    log.info(f"  concurrency={concurrency} (see module docstring — no rate limiting, "
-             f"only a per-request timeout for liveness)")
-    log.info(f"  time_budget={time_budget_minutes}min (graceful cutoff — see TIME_BUDGET_MINUTES comment)")
+    log.info(f"  concurrency={concurrency}  parse_workers={node.PARSE_WORKERS}  "
+             f"time_budget={time_budget_minutes}min  source={SEED_SOURCE_LABEL}")
     time_budget_seconds = time_budget_minutes * 60
 
     companies = fetch_pdl_companies_with_domain(countries=countries)
@@ -900,222 +111,41 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
         return
 
     if shard_index is not None and shard_count is not None:
-        # MODULO sharding (not a contiguous slice) — PDL's rows are
-        # sorted largest-company-first, so a contiguous chunk would skew
-        # which shard gets the highest-signal companies.
+        # MODULO sharding — PDL's rows are sorted largest-company-first,
+        # so a contiguous chunk would skew which shard gets the signal.
         companies = companies[shard_index::shard_count]
         log.info(f"  {len(companies)} companies in this shard's slice")
 
-    # At this concurrency, resolving DNS for millions of DIFFERENT new
-    # domains (not one warm host reused over and over) can itself become
-    # the bottleneck under Python's default resolver (thread-pool based).
-    # aiodns gives aiohttp a real concurrent async resolver — use it when
-    # available, fall back cleanly (still correct, just slower under
-    # heavy load) if the package isn't installed.
-    resolver = None
-    try:
-        import aiodns  # noqa: F401
-        resolver = aiohttp.AsyncResolver()
-    except ImportError:
-        log.warning("  aiodns not installed — DNS resolution will use the slower default "
-                    "resolver. `pip install aiodns` for real throughput at this concurrency.")
-    connector = aiohttp.TCPConnector(limit=CONNECTOR_LIMIT, ttl_dns_cache=300, resolver=resolver)
+    domains = [c["domain"] for c in companies]
+    target_geo_countries = (node.target_countries_geo_form(countries) if countries
+                             else node.ACCEPT_ANY_COUNTRY)
+
+    connector = node.new_connector()
     sem = asyncio.Semaphore(concurrency)
     stats = Counter()
     found_rows: list[dict] = []
-
-    # Real multi-core parsing (see PARSE_WORKERS comment). NOTE: this is
-    # passed EXPLICITLY into every run_in_executor call in _crawl_one —
-    # asyncio's loop.set_default_executor() only accepts a
-    # ThreadPoolExecutor (a hard CPython restriction, confirmed by
-    # actually hitting the TypeError it raises), so a ProcessPoolExecutor
-    # can't be installed as "the" default; it has to be threaded through
-    # explicitly instead.
-    log.info(f"  parse_workers={PARSE_WORKERS} (separate process pool for HTML/JSON-LD "
-             f"parsing — see PARSE_WORKERS comment)")
-    parse_pool = concurrent.futures.ProcessPoolExecutor(max_workers=PARSE_WORKERS)
+    parse_pool = node.new_parse_pool()
+    crawl_start = time.monotonic()
 
     try:
-        # DummyCookieJar (2026-08): we never send cookies back or need
-        # session state — every fetch is an independent, one-shot GET.
-        # Without this, aiohttp's default CookieJar tries to parse every
-        # Set-Cookie header from millions of unrelated sites, and a
-        # malformed one (a stray unquoted comma in the value — a bug on
-        # THEIR end, e.g. an unescaped "zip=San Jose,CA") raises
-        # http.cookies.CookieError, which aiohttp catches and logs as a
-        # WARNING ("Can not load cookies: Illegal cookie name ..."). Real,
-        # harmless, and was going to keep firing at scale across a crawl
-        # this size — DummyCookieJar skips cookie parsing/storage
-        # entirely, so it can't fail, and there's no free-lunch downside
-        # since we were throwing the cookies away anyway.
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
-            tasks = [_crawl_one(session, sem, c["name"], c["domain"], stats, parse_pool) for c in companies]
-
-            BATCH = 3000
-            total_distinct_hits = 0
-            crawl_start = time.monotonic()
-            elapsed, rate = 0.0, 0.0  # in case tasks is empty (0 companies in this shard's slice)
-            time_budget_hit = False
-            for i in range(0, len(tasks), BATCH):
-                if time.monotonic() - crawl_start >= time_budget_seconds:
-                    # Graceful stop — see TIME_BUDGET_MINUTES comment. The
-                    # remaining tasks are plain, never-awaited coroutine
-                    # objects at this point (asyncio doesn't schedule them
-                    # until gathered) — close() them explicitly so Python
-                    # doesn't emit a "coroutine was never awaited"
-                    # RuntimeWarning per leftover task when they're GC'd.
-                    for t in tasks[i:]:
-                        t.close()
-                    time_budget_hit = True
-                    log.warning(f"  time budget ({time_budget_minutes}min) reached at "
-                                f"{i}/{len(tasks)} companies — stopping here, everything found "
-                                f"so far is written. {len(tasks) - i} companies in this shard's "
-                                f"slice were NOT attempted this run.")
-                    break
-                batch = tasks[i:i + BATCH]
-                results = await asyncio.gather(*batch)
-                batch_rows = []
-                seen_keys = set()  # (ats, slug) — see dedup note below
-                duplicates_collapsed = 0
-                for company_hits in results:
-                    for ats, slug, matched_url, domain, tier in company_hits:
-                        # DEDUP WITHIN THIS BATCH (2026-08): the table's
-                        # real unique constraint is (ats, slug) — TWO
-                        # DIFFERENT COMPANIES can legitimately resolve to
-                        # the same key (a staffing agency linking a
-                        # client's board, a misconfigured/mis-slugged
-                        # extraction, two domains for one company, etc),
-                        # and Postgres's ON CONFLICT DO UPDATE cannot
-                        # touch the same row twice in one command — it
-                        # errors the ENTIRE batch (21000 "cannot affect
-                        # row a second time"), silently losing every row
-                        # in that batch, not just the duplicate. Keeping
-                        # only the first occurrence per key before
-                        # writing avoids that; the on_conflict upsert
-                        # against EARLIER-BATCH rows still applies as
-                        # before, this only guards duplicates landing
-                        # inside the SAME outgoing request.
-                        key = (ats, slug)
-                        if key in seen_keys:
-                            duplicates_collapsed += 1
-                            continue
-                        seen_keys.add(key)
-                        # source_hostname is the plain matched URL, nothing
-                        # prepended (2026-08 — was "[tier] url", changed
-                        # per explicit request: the field should just be
-                        # the website). The detection tier isn't lost —
-                        # it's still tracked in aggregate via
-                        # stats['hits_from_{homepage,career_path,sitemap}']
-                        # and reported in the per-batch/end-of-shard "hit
-                        # source" log lines; it's just not embedded in
-                        # this per-row field anymore.
-                        batch_rows.append({
-                            "ats": ats,
-                            "slug": slug,
-                            "source_hostname": matched_url[:250],
-                            "root_domain": domain,
-                            # 2026-08: this script was writing rows with
-                            # discovery_method left NULL the whole time —
-                            # confirmed via direct inspection (grep) that
-                            # this key never appeared here before. Existing
-                            # NULL rows were retroactively classified and
-                            # backfilled in Supabase (root_domain == a
-                            # known ATS platform's OWN domain, e.g.
-                            # bamboohr.com, means a ctlog_extract/
-                            # ctlogs_probe_direct.py row; everything else
-                            # with a real distinct company domain was this
-                            # script). Setting it explicitly here going
-                            # forward so that backfill never has to be
-                            # redone.
-                            "discovery_method": "pdl_domain_crawl",
-                        })
-                if duplicates_collapsed:
-                    log.info(f"    ({duplicates_collapsed} duplicate (ats,slug) hits within this batch "
-                             f"collapsed before writing — see dedup note)")
-                written = 0
-                if batch_rows:
-                    total_distinct_hits += len(batch_rows)
-                    written = await write_rows_to_staging_table(session, batch_rows)
-                    found_rows.extend(batch_rows)
-
-                done = min(i + BATCH, len(tasks))
-                elapsed = time.monotonic() - crawl_start
-                rate = done / elapsed if elapsed > 0 else 0
-
-                # TWO different denominators, deliberately kept separate:
-                #   pct_co   — % of COMPANIES attempted. One company = one
-                #              outcome (hit / no_ats_found / unreachable),
-                #              so this is what "X% hit" should mean.
-                #   pct_req  — % of individual HTTP REQUESTS attempted. A
-                #              single company can fire 20+ requests via the
-                #              career-path/sitemap fallback tiers, so
-                #              request-level counters (404, timeout,
-                #              non_html, ...) divided by company count would
-                #              (and previously did) exceed 100%.
-                companies_n = max(stats["companies_attempted"], 1)
-                requests_n = max(stats["requests_attempted"], 1)
-                pct_co = lambda n: n / companies_n * 100  # noqa: E731
-                pct_req = lambda n: n / requests_n * 100  # noqa: E731
-
-                hit_n = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
-                no_ats_n = max(stats["companies_attempted"] - hit_n - stats["homepage_unreachable"], 0)
-                other_http_error_n = stats['http_error'] - stats['status_404']
-
-                # Line 1 — throughput.
-                log.info(f"  batch {done}/{len(tasks)} companies — {rate:.1f} companies/sec "
-                         f"— {elapsed:.0f}s elapsed")
-                # Line 2 — what got written to Supabase this batch vs. cumulative.
-                log.info(f"    → supabase: {written}/{len(batch_rows)} rows written this batch "
-                         f"({total_distinct_hits} hits total so far)")
-                # Line 3 — per-company hit/miss rates + per-request error rates, so far.
-                log.info(f"    companies so far: hit={pct_co(hit_n):.1f}% "
-                         f"no_ats_found={pct_co(no_ats_n):.1f}% "
-                         f"unreachable={pct_co(stats['homepage_unreachable']):.1f}%  ||  "
-                         f"requests so far: 404={pct_req(stats['status_404']):.1f}% "
-                         f"other_error={pct_req(other_http_error_n):.1f}% "
-                         f"timeout={pct_req(stats['timeout']):.1f}% "
-                         f"conn_failed={pct_req(stats['unreachable']):.1f}% "
-                         f"non_html={pct_req(stats['non_html']):.1f}%")
+            _, elapsed, rate, time_budget_hit = await node.crawl_batch(
+                domains, session, sem, stats, parse_pool, target_geo_countries,
+                SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
+                time_budget_minutes, batch_size=3000, unit_label="companies")
     finally:
         parse_pool.shutdown(wait=True)
 
-    # ── end-of-shard cumulative summary — same two-denominator split as
-    # the per-batch lines above (company outcomes vs. request outcomes),
-    # so it's directly comparable across shards/runs of different sizes.
-    # Uses companies_attempted (not len(companies)) as the base — if the
-    # time budget cut this run short, len(companies) is the shard's FULL
-    # slice, not how many were actually reached, and dividing by the full
-    # slice would understate every percentage below. ──
+    hit_n = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
     companies_n = max(stats["companies_attempted"], 1)
-    requests_n = max(stats["requests_attempted"], 1)
-    pct_co = lambda n: n / companies_n * 100  # noqa: E731
-    pct_req = lambda n: n / requests_n * 100  # noqa: E731
-
-    total_hits = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
-    no_ats_found = max(stats["companies_attempted"] - total_hits - stats["homepage_unreachable"], 0)
-    other_http_error = stats['http_error'] - stats['status_404']
-
-    if time_budget_hit:
-        log.info(f"── shard{label} STOPPED EARLY (time budget): "
-                 f"{stats['companies_attempted']}/{len(companies)} companies attempted "
-                 f"({stats['companies_attempted'] / max(len(companies), 1) * 100:.1f}% of this "
-                 f"shard's slice), {elapsed:.0f}s, {rate:.1f} companies/sec avg ──")
-    else:
-        log.info(f"── shard{label} complete: {len(companies)} companies, {elapsed:.0f}s, "
-                 f"{rate:.1f} companies/sec avg ──")
-    log.info(f"  companies: hit={pct_co(total_hits):.1f}% ({total_hits}) | "
-             f"no_ats_found={pct_co(no_ats_found):.1f}% ({no_ats_found}) | "
-             f"unreachable={pct_co(stats['homepage_unreachable']):.1f}% ({stats['homepage_unreachable']})")
-    log.info(f"  requests ({stats['requests_attempted']} total): "
-             f"404={pct_req(stats['status_404']):.1f}% ({stats['status_404']}) | "
-             f"other_http_error={pct_req(other_http_error):.1f}% ({other_http_error}) | "
-             f"timeout={pct_req(stats['timeout']):.1f}% ({stats['timeout']}) | "
-             f"conn_failed={pct_req(stats['unreachable']):.1f}% ({stats['unreachable']}) | "
-             f"non_html={pct_req(stats['non_html']):.1f}% ({stats['non_html']})")
-    if total_hits:
-        log.info(f"  hit source: homepage={stats['hits_from_homepage'] / total_hits * 100:.1f}% "
-                 f"career_path={stats['hits_from_career_path'] / total_hits * 100:.1f}% "
-                 f"sitemap={stats['hits_from_sitemap'] / total_hits * 100:.1f}%")
+    status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
+    log.info(f"── shard{label} {status}: {stats['companies_attempted']}/{len(companies)} companies, "
+             f"{elapsed:.0f}s, {rate:.1f}/sec, hit={hit_n / companies_n * 100:.1f}% "
+             f"({hit_n}), unreachable={stats['homepage_unreachable'] / companies_n * 100:.1f}% ──")
+    if hit_n:
+        log.info(f"  hit source: homepage={stats['hits_from_homepage'] / hit_n * 100:.1f}% "
+                 f"career_path={stats['hits_from_career_path'] / hit_n * 100:.1f}% "
+                 f"sitemap={stats['hits_from_sitemap'] / hit_n * 100:.1f}%")
     ats_breakdown = Counter(r["ats"] for r in found_rows)
     if ats_breakdown:
         log.info(f"  by platform: {dict(ats_breakdown.most_common())}")
@@ -1123,37 +153,21 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
 
 def main():
     parser = argparse.ArgumentParser(description="Class A domain-crawl discovery (async)")
-    parser.add_argument("--shard-index", type=int, default=None,
-                         help="This job's shard index (0-based) when splitting the seed list "
-                              "across multiple parallel jobs — modulo sharding, see run_crawl")
-    parser.add_argument("--shard-count", type=int, default=None,
-                         help="Total number of shards (must be passed together with --shard-index)")
-    parser.add_argument("--concurrency", type=int, default=CRAWL_CONCURRENCY,
-                         help=f"Companies processed in parallel (default {CRAWL_CONCURRENCY}, "
-                              f"env CRAWL_CONCURRENCY)")
-    parser.add_argument("--time-budget-minutes", type=int, default=TIME_BUDGET_MINUTES,
-                         help=f"Stop gracefully (saving everything found so far) after this many "
-                              f"minutes, instead of risking a hard kill at the workflow's own "
-                              f"timeout-minutes (default {TIME_BUDGET_MINUTES}, env "
-                              f"CRAWL_TIME_BUDGET_MINUTES — see TIME_BUDGET_MINUTES comment)")
+    parser.add_argument("--shard-index", type=int, default=None)
+    parser.add_argument("--shard-count", type=int, default=None)
+    parser.add_argument("--concurrency", type=int, default=node.CRAWL_CONCURRENCY)
+    parser.add_argument("--time-budget-minutes", type=int, default=node.TIME_BUDGET_MINUTES)
     parser.add_argument("--country", action="append", default=None,
-                         help="Only crawl companies whose PDL 'country' column matches this "
-                              "(case-insensitive exact string, e.g. 'united states'). Repeatable — "
-                              "--country 'united states' --country canada. Overrides "
-                              "DEFAULT_COUNTRIES (the default — see --all-countries to disable "
-                              "filtering entirely instead).")
+                         help="Only crawl this PDL 'country' value (repeatable). Default: DEFAULT_COUNTRIES.")
     parser.add_argument("--all-countries", action="store_true",
-                         help=f"Disable the country filter — crawl every country, including PDL's "
-                              f"~2.35M blank-country rows. Without this flag (and without "
-                              f"--country), the default is DEFAULT_COUNTRIES "
-                              f"({len(DEFAULT_COUNTRIES)} countries — see DEFAULT_COUNTRIES).")
+                         help="Disable the country filter — crawl every country, including blank ones.")
     args = parser.parse_args()
     if args.country:
         countries = set(args.country)
     elif args.all_countries:
         countries = None
     else:
-        countries = DEFAULT_COUNTRIES  # default behavior (2026-08) — see --all-countries to disable
+        countries = DEFAULT_COUNTRIES
     asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency,
                            args.time_budget_minutes, countries))
 
