@@ -82,7 +82,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GITHUB_ORG_CSV_PATH: github_org_companies.csv
         run: |
-          python github_org_seed/github_org_probe.py \
+          python github_org/github_org_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }}
