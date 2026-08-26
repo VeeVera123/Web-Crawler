@@ -30,7 +30,9 @@ from dotenv import load_dotenv
 from selectolax.lexbor import LexborHTMLParser
 
 load_dotenv()
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _ROOT)
+sys.path.insert(0, os.path.join(_ROOT, "Main"))  # geo.py/discovery.py live here
 
 import geo  # noqa: E402
 from discovery import URL_TO_SLUG  # noqa: E402
@@ -41,6 +43,7 @@ log = logging.getLogger("node")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+STAGING_TABLE = "quarantine"  # was ctlog_probe_results — one place to rename it again
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=6)
@@ -482,7 +485,7 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
                 await asyncio.sleep(1.5 * (2 ** (attempt - 1)))
             try:
                 async with session.post(
-                    f"{SUPABASE_URL}/rest/v1/ctlog_probe_results",
+                    f"{SUPABASE_URL}/rest/v1/{STAGING_TABLE}",
                     headers=headers, params={"on_conflict": "ats,slug"}, json=chunk,
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as r:
