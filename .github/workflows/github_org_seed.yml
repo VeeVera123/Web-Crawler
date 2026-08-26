@@ -61,16 +61,28 @@ jobs:
         env:
           GITHUB_PAT: ${{ secrets.GH_ENUM_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          python github_org_seed.py \
+          python github_org/github_org_seed.py \
             --id-start ${{ github.event.inputs.id_start || '1' }} \
             --id-ceiling ${{ github.event.inputs.id_ceiling || '300000000' }} \
             --time-budget-minutes ${{ github.event.inputs.time_budget_minutes || '330' }} \
             --output github_org_companies.csv
 
       - name: Publish CSV as a GitHub Release asset
+        # if: always() — runs even if the seed step above was cancelled
+        # (e.g. you stopped the run manually instead of waiting out
+        # --time-budget-minutes) or errored partway through. flush() in
+        # github_org_seed.py writes the CSV incrementally per page, so
+        # whatever was captured before the stop is still on disk and
+        # worth publishing — losing it here would waste already-spent
+        # GitHub API budget for nothing.
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [ ! -s github_org_companies.csv ]; then
+            echo "No github_org_companies.csv (or it's empty) — nothing to publish."
+            exit 0
+          fi
           TAG="${{ github.event.inputs.release_tag || 'github-org-seed-data' }}"
           zip -9 github_org_companies.zip github_org_companies.csv
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
