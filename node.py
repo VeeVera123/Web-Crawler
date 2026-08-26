@@ -54,14 +54,23 @@ CONNECTOR_LIMIT = int(os.environ.get("CRAWL_CONNECTOR_LIMIT", str(CRAWL_CONCURRE
 PARSE_WORKERS = int(os.environ.get("PARSE_WORKERS", str(max(1, (os.cpu_count() or 4) - 1))))
 TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_TIME_BUDGET_MINUTES", "330"))
 
+# Expanded 2026-08 to cover every common phrasing seen across company
+# sites, not just the half-dozen most frequent ones — this list also
+# feeds CAREER_LIKE_RE below (used to filter sitemap URLs), so a wider
+# list improves BOTH the direct-guess tier and the sitemap tier at once.
 CAREER_PATHS = [
-    "/careers", "/career",
-    "/jobs", "/job-openings", "/open-positions", "/openings",
-    "/join-us", "/join", "/work-with-us", "/work-for-us",
+    "/careers", "/career", "/careers-home", "/careers-and-jobs",
+    "/jobs", "/job-openings", "/open-positions", "/open-roles", "/open-jobs",
+    "/openings", "/current-openings", "/vacancies", "/vacancy", "/job-search",
+    "/find-a-job", "/positions", "/opportunities",
+    "/join-us", "/join", "/join-our-team", "/join-the-team",
+    "/work-with-us", "/work-for-us", "/work-here",
     "/about/careers", "/about-us/careers", "/company/careers", "/company/jobs",
-    "/team/careers",
-    "/hiring", "/we-are-hiring",
-    "/apply",
+    "/about/jobs", "/about-us/jobs", "/team/careers",
+    "/hiring", "/we-are-hiring", "/now-hiring", "/were-hiring",
+    "/employment", "/employment-opportunities",
+    "/recruitment", "/recruiting", "/talent",
+    "/apply", "/apply-now",
 ]
 CAREER_LIKE_RE = re.compile(
     "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS), re.I)
