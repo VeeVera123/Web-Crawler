@@ -1,16 +1,12 @@
 name: GitHub Org Probe — crawl companies seeded from GitHub orgs
 
-# Same crawl engine as class_a_probe.yml (class_a_probe.py, unmodified
-# detection logic — only the seed file and a couple of env vars differ),
-# pointed at github_org_seed.yml's output instead of the PDL dataset. This
-# step is NOT GitHub-API-limited at all — it crawls each discovered
-# company's OWN website, exactly like the PDL run always has — so it
-# shards freely across as many parallel jobs as you like, same as before.
+# Own thin wrapper (github_org_probe.py) around node.py, the shared engine
+# — depends on node.py only, not on class_a_probe.py. Reads
+# github_org_seed.yml's output CSV, crawls each company's OWN website. NOT
+# GitHub-API-limited at all, so it shards freely across parallel jobs.
 #
-# --all-countries IS FORCED, NOT OPTIONAL: GitHub org profiles don't
-# reliably carry a country at all (unlike PDL's own country column), so
-# every row out of github_org_seed.py has country="" — filtering by
-# country here would silently gut nearly this entire seed file.
+# Country is never filtered here: GitHub org profiles don't reliably carry
+# one, so every row out of github_org_seed.py has country="".
 on:
   workflow_dispatch:
     inputs:
@@ -84,11 +80,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          PDL_DATASET_PATH: github_org_companies.csv
-          SEED_SOURCE_LABEL: github_org_domain_crawl
+          GITHUB_ORG_CSV_PATH: github_org_companies.csv
         run: |
-          python class_a_probe.py \
+          python github_org_seed/github_org_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
-            --concurrency ${{ github.event.inputs.concurrency || '400' }} \
-            --all-countries
+            --concurrency ${{ github.event.inputs.concurrency || '400' }}
