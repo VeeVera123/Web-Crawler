@@ -1,4 +1,4 @@
-name: Class A — Domain-Crawl Discovery
+name: Kaggle
 
 # REWRITTEN (2026-08): this used to be a "guess a slug, ask the platform's
 # API" prober (seed-and-probe). It's now a domain-crawl discovery tool
