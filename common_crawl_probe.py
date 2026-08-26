@@ -48,7 +48,7 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Crawler/, for node.py
 import node  # noqa: E402
 
-log = logging.getLogger("host_crawl_v2")
+log = logging.getLogger("common_crawl_probe")
 
 # Optional — HF gives a higher rate-limit tier for anonymous CI traffic;
 # not required, the dataset is fully public.
@@ -313,7 +313,7 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 total_hosts_seen += len(file_hosts)
                 _, elapsed, rate, file_time_hit = await node.crawl_batch(
                     file_hosts, session, sem, stats, parse_pool, node.ACCEPT_ANY_COUNTRY,
-                    "host_crawl_v2", found_rows, crawl_start, time_budget_seconds,
+                    "common_crawl_probe", found_rows, crawl_start, time_budget_seconds,
                     time_budget_minutes, batch_size=2000, unit_label="hosts")
                 if file_time_hit:
                     time_budget_hit = True
