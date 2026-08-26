@@ -29,7 +29,7 @@ import node  # noqa: E402
 log = logging.getLogger("github_org_probe")
 
 CSV_PATH = os.environ.get("GITHUB_ORG_CSV_PATH", "github_org_companies.csv")
-SEED_SOURCE_LABEL = "github_org_domain_crawl"
+SEED_SOURCE_LABEL = "github_org_probe"
 
 
 def fetch_github_org_companies() -> list[dict]:
