@@ -33,6 +33,30 @@ across however many partitions are requested, not multiplied per
 partition, so this trades depth (more historical coverage) for breadth
 per partition within the same wall-clock run, not "more total runtime."
 
+EXPLICIT PARTITION LIST (2026-08, new): --crawl-list takes a comma-
+separated set of EXACT partition names instead of --crawl/--partitions'
+contiguous most-recent-first walk — e.g. picking one partition from each
+of several different years to sample a more diverse company population,
+since adjacent months mostly re-cover largely-the-same host population
+(the flatlining problem this was added for). See _resolve_explicit_crawl_names.
+
+"LATEST" IS NOT WHAT IT SOUNDS LIKE — READ THIS BEFORE ASSUMING A BUG:
+this dataset's own partition list (commoncrawl/host-index-testing-v2 on
+Hugging Face) stopped at CC-MAIN-2025-18 in Nov 2025 and, confirmed live
+against the dataset itself, has not been updated since — that is a real,
+current fact about this specific derived dataset, not a bug in
+_resolve_crawl_names/_list_all_crawl_names here. It is a COMPLETELY
+SEPARATE data product from Common Crawl's raw monthly crawl archives
+(CC-MAIN-2026-34 etc., published on commoncrawl.org itself on a much
+faster cadence) — this project only ever reads the derived, pre-
+aggregated per-host Parquet index (fetch_200/4xx/5xx counts per host),
+which Common Crawl computes and publishes separately from and less often
+than the raw crawls, and apparently hasn't refreshed in nearly a year as
+of this writing. If Common Crawl ever publishes a newer Host Index
+partition, --crawl/no-argument will pick it up automatically (the live
+listing is queried fresh every run) — there is nothing to fix in this
+code for that to happen; there's simply nothing newer to find yet.
+
 COUNTRY FILTER — WHY NOT COMMON CRAWL'S OWN DATA: live research into the
 Host Index's actual schema (fields: surt_host_name, url_host_tld, crawl,
 fetch_200/3xx/4xx/5xx, hcrank/prank, fetch_200_lote/_pct) confirmed
@@ -280,6 +304,35 @@ def _list_all_crawl_names(con) -> list[str]:
     return []
 
 
+def _resolve_explicit_crawl_names(con, requested: list[str]) -> list[str]:
+    """EXPLICIT-LIST seeding (2026-08, new): crawl a specific, possibly
+    non-contiguous set of partitions the caller names directly — e.g.
+    spread across different years to sample a more diverse company
+    population instead of --partitions N's contiguous most-recent-first
+    walk, which mostly re-covers largely-the-same host population month
+    to month (see the flatlining discussion this was born from).
+
+    Validates each requested name against the live listing when that
+    listing succeeds — logging (not silently dropping) any name that
+    doesn't actually exist in the dataset, since a typo'd partition name
+    here would otherwise just silently crawl 0 hosts for it. If the live
+    listing itself fails, there's nothing to validate against, so the
+    requested names are trusted as-is (same "can't verify, so don't
+    block" fallback philosophy _resolve_crawl_names already uses)."""
+    names = _list_all_crawl_names(con)
+    if not names:
+        log.warning("Live partition listing failed — trusting the --crawl-list names as given, "
+                     "unvalidated.")
+        return requested
+    missing = [n for n in requested if n not in names]
+    if missing:
+        log.warning(f"{len(missing)}/{len(requested)} requested partition(s) not found in the "
+                    f"live listing (typo, or genuinely not in this dataset — see module "
+                    f"docstring's note on the Host Index's real update cadence): {missing}")
+    resolved = [n for n in requested if n in names]
+    return resolved
+
+
 def _resolve_crawl_names(con, pinned: str | None, count: int) -> list[str]:
     """Resolves `count` partitions to crawl this run, in most-recent-first
     order, starting from `pinned` if given (or the true latest otherwise)
@@ -323,7 +376,8 @@ def _list_partition_files(con, crawl_name: str) -> list[str]:
     return files
 
 
-def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shard_count: int | None):
+def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shard_count: int | None,
+                             start_file_index: int = 0):
     """Streams candidate hostnames across one or more Common Crawl Host
     Index partitions, ONE PARQUET FILE AT A TIME — yields (partition_name,
     partition_num, total_partitions, file_num, total_files_in_partition,
@@ -363,6 +417,10 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
     for partition_num, crawl_name in enumerate(partitions, start=1):
         log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} ──")
         files = _list_partition_files(con, crawl_name)
+        if partition_num == 1 and start_file_index:
+            skipped = files[:start_file_index]
+            files = files[start_file_index:]
+            log.info(f"  --start-file-index {start_file_index}: skipping {len(skipped)} file(s)")
         log.info(f"  {len(files)} file(s) to scan"
                  + (f" — shard {shard_index}/{shard_count}" if sharded else ""))
 
@@ -586,7 +644,8 @@ async def _crawl_and_write_hosts(hosts: list[str], session, sem, stats, parse_po
 
 async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: int | None,
                           shard_count: int | None, concurrency: int,
-                          time_budget_minutes: int) -> None:
+                          time_budget_minutes: int, crawl_list: list[str] | None = None,
+                          start_file_index: int = 0) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(f"── Host Crawl v2{label} ──")
     log.info(f"  concurrency={concurrency} (network fetches in parallel — no rate limiting)")
@@ -597,7 +656,12 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     con = _get_duckdb_connection()
     if con is None:
         return
-    partitions = _resolve_crawl_names(con, crawl, partitions_count)
+    if crawl_list:
+        log.info(f"  explicit --crawl-list given ({len(crawl_list)} requested) — ignoring "
+                 f"--crawl/--partitions")
+        partitions = _resolve_explicit_crawl_names(con, crawl_list)
+    else:
+        partitions = _resolve_crawl_names(con, crawl, partitions_count)
     if not partitions:
         log.error("No partition(s) resolved — nothing to crawl.")
         return
@@ -636,7 +700,7 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
             for partition_name, partition_num, total_partitions, file_num, total_files, file_hosts \
-                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count):
+                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count, start_file_index):
                 last_partition_name = partition_name
                 if time.monotonic() - crawl_start >= time_budget_seconds:
                     time_budget_hit = True
@@ -713,15 +777,25 @@ def main():
                      "NOT a filter — see module docstring.")
     parser.add_argument("--crawl", type=str, default=None,
                          help="Pin the starting Common Crawl partition (e.g. CC-MAIN-2025-18). "
-                              "Default: the most recent available.")
+                              "Default: the most recent available in this dataset (see module "
+                              "docstring — that is NOT necessarily Common Crawl's most recent "
+                              "raw crawl release; this dataset has its own, slower update cadence). "
+                              "Ignored if --crawl-list is given.")
     parser.add_argument("--partitions", type=int, default=1,
                          help="How many partitions to crawl this run, starting at --crawl (or "
-                              "the latest) and walking backward through older ones. Safe to "
-                              "raise — memory only ever holds one file's worth of hosts "
+                              "the latest) and walking backward through CONTIGUOUS older ones. "
+                              "Safe to raise — memory only ever holds one file's worth of hosts "
                               "regardless of how many partitions are requested (see module "
                               "docstring). The --time-budget-minutes budget is shared across "
                               "all of them, not per-partition, so more partitions means less "
-                              "time per partition, not more total runtime.")
+                              "time per partition, not more total runtime. Ignored if "
+                              "--crawl-list is given.")
+    parser.add_argument("--crawl-list", type=str, default=None,
+                         help="Comma-separated exact partition names, e.g. "
+                              "'CC-MAIN-2025-18,CC-MAIN-2024-42'. Overrides --crawl/--partitions.")
+    parser.add_argument("--start-file-index", type=int, default=0,
+                         help="Skip this many files in the FIRST partition before starting "
+                              "(0-based). Later partitions always start at file 0.")
     parser.add_argument("--shard-index", type=int, default=None,
                          help="This job's shard index (0-based) — filtering happens IN THE SQL "
                               "QUERY itself (hash(surt_host_name) %% shard_count), not by "
@@ -738,9 +812,11 @@ def main():
                               f"— the ONLY thing bounding how much gets covered; there's no "
                               f"separate host-count cap.")
     args = parser.parse_args()
+    crawl_list = [c.strip() for c in args.crawl_list.split(",") if c.strip()] if args.crawl_list else None
 
     asyncio.run(run_host_crawl(args.crawl, args.partitions, args.shard_index, args.shard_count,
-                                args.concurrency, args.time_budget_minutes))
+                                args.concurrency, args.time_budget_minutes, crawl_list=crawl_list,
+                                start_file_index=args.start_file_index))
 
 
 if __name__ == "__main__":
