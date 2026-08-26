@@ -13,13 +13,21 @@ on:
   workflow_dispatch:
     inputs:
       crawl_partition:
-        description: "Starting Common Crawl partition. Blank = latest."
+        description: "Pin a starting partition (e.g. CC-MAIN-2025-18). Blank = auto-detect the latest available EVERY run — leave blank unless you specifically want an older starting point; a hardcoded value here silently stops picking up a newer partition if/when one is published. Ignored if crawl_list is set."
         required: false
-        default: "CC-MAIN-2025-18"
+        default: ""
       partitions:
-        description: "How many partitions to crawl, starting there (walks backward through older ones). Time budget is shared across all of them, not multiplied."
+        description: "How many CONTIGUOUS partitions to crawl, starting there (walks backward through older ones). Time budget is shared across all of them, not multiplied. Ignored if crawl_list is set."
         required: false
         default: "1"
+      crawl_list:
+        description: "Comma-separated exact partitions instead, e.g. CC-MAIN-2025-18,CC-MAIN-2024-42. Overrides crawl_partition/partitions."
+        required: false
+        default: ""
+      start_file_index:
+        description: "Skip this many files in the first partition before starting (0-based)"
+        required: false
+        default: "0"
       shard_count:
         description: "Parallel shards to split the crawl across"
         required: false
@@ -85,7 +93,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           CRAWL_ARGS=()
-          if [ -n "${{ github.event.inputs.crawl_partition }}" ]; then
+          if [ -n "${{ github.event.inputs.crawl_list }}" ]; then
+            CRAWL_ARGS=(--crawl-list "${{ github.event.inputs.crawl_list }}")
+          elif [ -n "${{ github.event.inputs.crawl_partition }}" ]; then
             CRAWL_ARGS=(--crawl "${{ github.event.inputs.crawl_partition }}")
           fi
 
@@ -94,4 +104,5 @@ jobs:
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --partitions ${{ github.event.inputs.partitions || '1' }} \
             --concurrency ${{ github.event.inputs.concurrency || '700' }} \
+            --start-file-index ${{ github.event.inputs.start_file_index || '0' }} \
             "${CRAWL_ARGS[@]}"
