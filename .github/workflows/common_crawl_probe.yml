@@ -1,4 +1,4 @@
-name: Host Crawl v2 — Common Crawl Domain Discovery
+name: Common Crawl Domain Discovery
 
 # Single combined seed+crawl+detect pass over Common Crawl's Host Index —
 # no queue tables, no multi-run convergence. Country is detected and
