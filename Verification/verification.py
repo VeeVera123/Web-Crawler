@@ -425,8 +425,18 @@ async def verify_archive_iii_row(session: aiohttp.ClientSession, row: dict) -> b
 # one-off 401 with zero retry, exactly the failure mode main.py's own
 # SupabaseFetchError docstring describes happening to it before this fix.
 _RETRYABLE_STATUSES = {401, 403, 429, 500, 502, 503, 504}
-MAX_HTTP_RETRIES = 4
+# 4 -> 6 (2026-08): a COUNT query failure blocks the ENTIRE shard from doing
+# any work at all (see _get_count) — worth spending more retry budget on
+# than an ordinary per-row check would need. _MAX_RETRY_WAIT caps the
+# exponential backoff so this doesn't itself balloon into a multi-minute
+# wait per attempt (2^5 * 2.0 would be 64s uncapped).
+MAX_HTTP_RETRIES = 6
 _RETRY_BASE_DELAY = 2.0  # seconds
+_MAX_RETRY_WAIT = 20.0   # seconds
+
+
+def _backoff_wait(attempt: int) -> float:
+    return min(_RETRY_BASE_DELAY * (2 ** attempt), _MAX_RETRY_WAIT) + random.uniform(0, 1)
 
 
 class VerificationFetchError(Exception):
@@ -456,7 +466,7 @@ async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: d
             async with session.get(url, headers=headers, params=params,
                                     timeout=_GET_TIMEOUT) as r:
                 if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
-                    wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    wait = _backoff_wait(attempt)
                     log.warning(f"  GET {url} got HTTP {r.status}, retrying in {wait:.1f}s "
                                 f"(attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
                     await asyncio.sleep(wait)
@@ -471,7 +481,7 @@ async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: d
             # happened on the bamboohr/shard-9 failure this was added for).
             last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             if attempt < MAX_HTTP_RETRIES - 1:
-                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                wait = _backoff_wait(attempt)
                 log.warning(f"  GET {url} failed ({last_error}), retrying in {wait:.1f}s "
                             f"(attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
                 await asyncio.sleep(wait)
@@ -490,7 +500,7 @@ async def _get_count(session: aiohttp.ClientSession, table: str, headers: dict, 
             async with session.get(url, headers=count_headers, params=params,
                                     timeout=_GET_TIMEOUT) as r:
                 if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
-                    wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    wait = _backoff_wait(attempt)
                     await asyncio.sleep(wait)
                     continue
                 r.raise_for_status()
@@ -499,7 +509,7 @@ async def _get_count(session: aiohttp.ClientSession, table: str, headers: dict, 
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             if attempt < MAX_HTTP_RETRIES - 1:
-                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                wait = _backoff_wait(attempt)
                 await asyncio.sleep(wait)
     raise VerificationFetchError(f"COUNT {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
@@ -577,7 +587,7 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
             async with session.delete(url, headers=headers, params={"id": f"eq.{row_id}"},
                                        timeout=_DELETE_TIMEOUT) as r:
                 if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
-                    wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    wait = _backoff_wait(attempt)
                     await asyncio.sleep(wait)
                     continue
                 r.raise_for_status()
@@ -585,7 +595,7 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             if attempt < MAX_HTTP_RETRIES - 1:
-                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                wait = _backoff_wait(attempt)
                 await asyncio.sleep(wait)
     log.error(f"    Failed to delete row id={row_id} from {table} after {MAX_HTTP_RETRIES} attempts: {last_error}")
     return False
@@ -707,6 +717,22 @@ def _empty_counts_iii() -> dict:
     return {"live": 0, "dead": 0, "unverified": 0}
 
 
+async def _stagger_shard_start(shard_index: int | None, shard_count: int | None) -> None:
+    """GitHub Actions matrix jobs for the same workflow typically start
+    within a few seconds of each other — with N shards, that's N COUNT
+    queries (see _get_count) all landing on Supabase in the same instant,
+    right as this run's very first request. Spreading each shard's first
+    request out by a small, index-proportional delay turns that burst into
+    a rolling ramp instead, cutting the odds of the exact bootstrapping
+    request (which blocks the WHOLE shard if it fails — see fetch_rows)
+    getting caught in a self-inflicted thundering herd."""
+    if not shard_count or shard_index is None:
+        return
+    delay = shard_index * 1.5 + random.uniform(0, 1)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: bool,
                           concurrency: int, shard_index: int | None, shard_count: int | None) -> dict:
     sem = asyncio.Semaphore(concurrency)
@@ -721,6 +747,7 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
         log.info(f"── Verifying archive_ii{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
+        await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
         all_rows = await fetch_rows(session, node.STAGING_TABLE, "id,ats,slug", ats_filter, None,
@@ -766,6 +793,7 @@ async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
         log.info(f"── Verifying archive_iii (career pages){shard_note} ──")
+        await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
         rows = await fetch_rows(session, node.ARCHIVE_III_TABLE, "id,career_page_url,website_url",
