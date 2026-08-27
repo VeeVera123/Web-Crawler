@@ -151,6 +151,26 @@ USER_AGENT = node.USER_AGENT
 DEFAULT_CONCURRENCY = 30
 
 
+def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
+    """Deliberately NOT node.new_connector() — that one is sized (limit=550
+    by default, see CONNECTOR_LIMIT) for crawling millions of DIFFERENT
+    external company domains, where each domain's own rate limit is
+    independent of every other. Every call this file makes either hits ONE
+    shared Supabase REST endpoint or, at most, one host per verified row —
+    reusing node's mass-fan-out sizing here means each of N parallel GitHub
+    Actions shards independently opens up to 550 connections, so N shards
+    can aggregate into thousands of concurrent connections all hammering
+    the SAME Supabase project at once. Confirmed real 2026-08: a 20-shard
+    run saw its GET *and every single DELETE* start failing/timing out
+    across multiple shards simultaneously — the signature of Supabase's own
+    connection pooler/rate limits being overwhelmed by aggregate load, not
+    random per-request flakiness. Sizing the connector to this run's own
+    --concurrency (with a little headroom) keeps each shard's footprint
+    proportional to what was actually asked for, so aggregate load across
+    N shards scales with N * concurrency, not N * 550."""
+    return aiohttp.TCPConnector(limit=concurrency + 10, ttl_dns_cache=300)
+
+
 def _shard_of(key: str, total_shards: int) -> int:
     """Same technique as Main/main.py's _shard_of — deterministic hash-
     based shard assignment so every platform/row spreads evenly across
@@ -418,13 +438,24 @@ class VerificationFetchError(Exception):
     pass
 
 
+# Split into connect/read phases (not just one bare "total") so a stalled
+# DNS/TLS handshake to Supabase's own gateway is distinguished from a slow
+# response body — and, critically, so a hang actually gets cut off at a
+# predictable ~20s instead of silently running past whatever "total" turns
+# out to mean for a given hang location. Confirmed real 2026-08: a first
+# attempt against Supabase once took ~148s to fail even with total=60s set,
+# consistent with a cold-start/gateway-wake stall somewhere connect-phase
+# aiohttp's own total timeout doesn't fully bound.
+_GET_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=20, sock_connect=20, sock_read=30)
+
+
 async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: dict,
                              params: dict | None = None) -> list:
     last_error = None
     for attempt in range(MAX_HTTP_RETRIES):
         try:
             async with session.get(url, headers=headers, params=params,
-                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
+                                    timeout=_GET_TIMEOUT) as r:
                 if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
                     wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
                     log.warning(f"  GET {url} got HTTP {r.status}, retrying in {wait:.1f}s "
@@ -434,10 +465,15 @@ async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: d
                 r.raise_for_status()
                 return await r.json()
         except Exception as e:
-            last_error = e
+            # str(e) is EMPTY for several common failures here (e.g.
+            # asyncio.TimeoutError, aiohttp.ServerTimeoutError) — always
+            # include the exception's own type name too, or the log just
+            # reads "failed ()" with zero diagnostic value (exactly what
+            # happened on the bamboohr/shard-9 failure this was added for).
+            last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             if attempt < MAX_HTTP_RETRIES - 1:
                 wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                log.warning(f"  GET {url} failed ({e}), retrying in {wait:.1f}s "
+                log.warning(f"  GET {url} failed ({last_error}), retrying in {wait:.1f}s "
                             f"(attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
                 await asyncio.sleep(wait)
     raise VerificationFetchError(f"GET {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
@@ -468,6 +504,9 @@ async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
     return rows
 
 
+_DELETE_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=15, sock_connect=15, sock_read=20)
+
+
 async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) -> bool:
     headers = {"apikey": node.SUPABASE_KEY, "Authorization": f"Bearer {node.SUPABASE_KEY}"}
     url = f"{node.SUPABASE_URL}/rest/v1/{table}"
@@ -475,7 +514,7 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
     for attempt in range(MAX_HTTP_RETRIES):
         try:
             async with session.delete(url, headers=headers, params={"id": f"eq.{row_id}"},
-                                       timeout=aiohttp.ClientTimeout(total=30)) as r:
+                                       timeout=_DELETE_TIMEOUT) as r:
                 if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
                     wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait)
@@ -483,7 +522,7 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
                 r.raise_for_status()
                 return True
         except Exception as e:
-            last_error = e
+            last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             if attempt < MAX_HTTP_RETRIES - 1:
                 wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
                 await asyncio.sleep(wait)
@@ -610,7 +649,7 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
     counts = _empty_counts_ii()
     lock = asyncio.Lock()
 
-    async with aiohttp.ClientSession(connector=node.new_connector()) as session:
+    async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
         log.info(f"── Verifying archive_ii{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
         all_rows = await fetch_rows(session, node.STAGING_TABLE, "id,ats,slug", ats_filter, None)
@@ -667,7 +706,7 @@ async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
     counts = _empty_counts_iii()
     lock = asyncio.Lock()
 
-    async with aiohttp.ClientSession(connector=node.new_connector()) as session:
+    async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
         log.info(f"── Verifying archive_iii (career pages){shard_note} ──")
         rows = await fetch_rows(session, node.ARCHIVE_III_TABLE, "id,career_page_url,website_url", None, None)
@@ -742,7 +781,7 @@ async def compare_slug_registry() -> None:
     real, still-unpromoted candidate (archive_ii-only) — best run AFTER an
     --execute pass so archive_ii-only doesn't include rows that were just
     confirmed dead and are about to be deleted anyway."""
-    async with aiohttp.ClientSession(connector=node.new_connector()) as session:
+    async with aiohttp.ClientSession(connector=_new_connector(10)) as session:  # sequential pagination only
         log.info("── Comparing archive_ii vs slug_registry (both keyed on ats,slug) ──")
         archive_ii_pairs = await _fetch_pair_set(session, node.STAGING_TABLE)
         slug_registry_pairs = await _fetch_pair_set(session, "slug_registry")
