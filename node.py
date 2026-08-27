@@ -569,7 +569,6 @@ def _collapse_hits(hit_lists: list[list[tuple[str, str, str]]]) -> list[tuple[st
 async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, domain: str,
                      stats: dict, parse_pool: concurrent.futures.ProcessPoolExecutor,
                      target_geo_countries: set[str] = ACCEPT_ANY_COUNTRY,
-                     domain_names: dict[str, str] | None = None
                      ) -> tuple[list[tuple[str, str, str, str, str, str | None, str | None]], dict | None]:
     """Homepage -> career paths -> sitemap (guessed, then robots.txt).
     Every page fetched at a hit-bearing tier is merged (_collapse_hits),
@@ -582,20 +581,17 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
     genuine in-house/unrecognized-platform career page — since anything
     that DID match a known ATS already has a full archive_ii row and
     doesn't need a second, separate record. Shape:
-    {"company_name","career_page_url","website_url"} — no root_domain (
-    dropped 2026-08, was a pure duplicate of website_url; website_url is
-    now archive_iii's own unique/upsert key) — or None if nothing worth
+    {"career_page_url","website_url"} — no root_domain (dropped 2026-08,
+    was a pure duplicate of website_url; website_url is now archive_iii's
+    own unique/upsert key) and no company_name (dropped 2026-08 — the
+    domain/website_url is already the identifier; a separate name lookup
+    just cost extra space for no real use) — or None if nothing worth
     capturing turned up (homepage unreachable, a known ATS was found
-    instead, or no page cleared the quality gate). domain_names is an
-    optional {domain: company_name} lookup a seed source can supply (e.g.
-    kaggle_probe.py has real names); callers that don't have names can
-    omit it — company_name falls back to the domain itself."""
+    instead, or no page cleared the quality gate)."""
     loop = asyncio.get_running_loop()
-    company_name = (domain_names or {}).get(domain) or domain
 
     def _capture(career_url: str) -> dict:
         return {
-            "company_name": company_name,
             "career_page_url": career_url, "website_url": f"https://{domain}",
         }
 
@@ -752,7 +748,7 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
 
 
 async def write_career_pages_to_archive_iii(session: aiohttp.ClientSession, rows: list[dict]) -> int:
-    """rows: {"company_name","career_page_url","website_url",
+    """rows: {"career_page_url","website_url",
     "discovery_method"} (from crawl_one's career_page_capture — only ever
     produced when no known ATS matched — plus discovery_method attached by
     crawl_batch). Upserts on website_url (2026-08: root_domain was dropped
@@ -776,7 +772,6 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        target_geo_countries: set[str], discovery_method: str,
                        found_rows: list[dict], crawl_start: float, time_budget_seconds: float,
                        time_budget_minutes: int, batch_size: int = 3000, unit_label: str = "companies",
-                       domain_names: dict[str, str] | None = None
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
@@ -786,10 +781,8 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
 
     2026-08: also writes to archive_iii — every in-house/unsupported
     career page crawl_one found (never a known-ATS one — those already
-    got a full archive_ii row). domain_names is optional ({domain: name},
-    e.g. kaggle_probe.py has real company names); omit it and archive_iii
-    rows just use the domain as company_name."""
-    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, domain_names)
+    got a full archive_ii row)."""
+    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries)
              for d in domains]
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
