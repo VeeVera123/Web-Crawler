@@ -1,0 +1,87 @@
+name: Verification Engine — archive_ii + archive_iii
+
+# Scans archive_ii (ats + slug boards) and archive_iii (in-house career
+# pages) and removes ONLY rows confirmed dead — the board/page genuinely
+# doesn't exist anymore, never just "zero jobs right now" (see
+# verification.py's own module docstring for the full rule and the
+# 2026-08 research behind which of the 29 ATS platforms have a safe
+# not-found signal — 18 do, 11 explicitly don't and are skipped/left
+# untouched).
+#
+# SAFE BY DEFAULT: `execute` defaults to false, which runs verification.py
+# with NO --execute flag — a dry-run that only logs what it would delete.
+# Nothing is ever actually removed from Supabase until you deliberately
+# re-run this with execute=true, after reading that log. This is the
+# opposite default from certificate_transparency_probe.yml's dry_run
+# input on purpose — that workflow verifies a narrow, already-proven set
+# of platforms; this one is new and covers 4.5x as many, so it starts
+# conservative every time until you've reviewed a run's output.
+#
+# One job, not sharded like discovery.yml/kaggle_probe.yml — each check
+# here is a single lightweight HTTP request per row (not a full crawl),
+# so a single runner at reasonable concurrency comfortably clears
+# archive_ii's current size well within the timeout. Revisit sharding by
+# ats platform (same matrix shape as certificate_transparency_probe.yml)
+# if the table grows enough that a single run starts timing out.
+on:
+  workflow_dispatch:
+    inputs:
+      table:
+        description: "Which table(s) to verify"
+        required: false
+        type: choice
+        options:
+          - both
+          - archive_ii
+          - archive_iii
+        default: both
+      execute:
+        description: "Actually delete confirmed-dead rows (unchecked = dry-run, logs only)"
+        required: false
+        type: boolean
+        default: false
+      ats:
+        description: "archive_ii only — restrict to one ATS platform (e.g. greenhouse). Leave blank for all."
+        required: false
+        default: ""
+      limit:
+        description: "Only check the first N rows (0 = no limit)"
+        required: false
+        default: "0"
+      concurrency:
+        description: "Concurrent checks in flight"
+        required: false
+        default: "30"
+
+concurrency:
+  group: verification-engine-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax python-dotenv
+
+      - name: "Verify (table: ${{ github.event.inputs.table || 'both' }}, execute: ${{ github.event.inputs.execute || 'false' }})"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python Verification/verification.py \
+            --table ${{ github.event.inputs.table || 'both' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '30' }} \
+            ${{ github.event.inputs.execute == 'true' && '--execute' || '' }} \
+            ${{ github.event.inputs.ats != '' && format('--ats {0}', github.event.inputs.ats) || '' }} \
+            ${{ github.event.inputs.limit != '0' && format('--limit {0}', github.event.inputs.limit) || '' }}
