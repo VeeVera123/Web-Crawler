@@ -8,21 +8,11 @@ name: Verification Engine — archive_ii + archive_iii
 # not-found signal — 18 do, 11 explicitly don't and are skipped/left
 # untouched).
 #
-# SAFE BY DEFAULT: `execute` defaults to false, which runs verification.py
-# with NO --execute flag — a dry-run that only logs what it would delete.
-# Nothing is ever actually removed from Supabase until you deliberately
-# re-run this with execute=true, after reading that log. This is the
-# opposite default from certificate_transparency_probe.yml's dry_run
-# input on purpose — that workflow verifies a narrow, already-proven set
-# of platforms; this one is new and covers 4.5x as many, so it starts
-# conservative every time until you've reviewed a run's output.
-#
-# One job, not sharded like discovery.yml/kaggle_probe.yml — each check
-# here is a single lightweight HTTP request per row (not a full crawl),
-# so a single runner at reasonable concurrency comfortably clears
-# archive_ii's current size well within the timeout. Revisit sharding by
-# ats platform (same matrix shape as certificate_transparency_probe.yml)
-# if the table grows enough that a single run starts timing out.
+# Same shard + finalize shape as Main/main.py's ATS scanner: N parallel
+# shards each check their own slice and upload a small JSON summary as a
+# build artifact, then a `finalize` job (needs: verify) downloads every
+# shard's summary and prints ONE combined report — active/empty/dead/
+# unverified totals across the whole run.
 on:
   workflow_dispatch:
     inputs:
@@ -36,20 +26,20 @@ on:
           - archive_iii
         default: both
       execute:
-        description: "Actually delete confirmed-dead rows (unchecked = dry-run, logs only)"
+        description: "Delete confirmed-dead rows (unchecked = report only)"
         required: false
         type: boolean
         default: false
       ats:
-        description: "archive_ii only — restrict to one ATS platform (e.g. greenhouse). Leave blank for all."
+        description: "archive_ii only — restrict to one ATS platform. Leave blank for all."
         required: false
         default: ""
-      limit:
-        description: "Only check the first N rows (0 = no limit)"
+      shard_count:
+        description: "Number of parallel shards"
         required: false
-        default: "0"
+        default: "10"
       concurrency:
-        description: "Concurrent checks in flight"
+        description: "Concurrent checks in flight, per shard"
         required: false
         default: "30"
 
@@ -58,9 +48,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
+  prepare-matrix:
+    # Same reason as kaggle_probe.yml's prepare-matrix job — workflow_dispatch
+    # inputs can't be referenced directly inside a matrix, so shard_count ->
+    # [0, 1, ..., shard_count-1] is computed here first.
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one shard's flakiness shouldn't cancel the rest
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -72,16 +86,61 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install aiohttp aiodns selectolax python-dotenv
+        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
 
-      - name: "Verify (table: ${{ github.event.inputs.table || 'both' }}, execute: ${{ github.event.inputs.execute || 'false' }})"
+      - name: "Verify shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '10' }}"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # ats_scrapers.py (imported for the active/empty job-count split)
+          # pulls in Main/config.py, which requires SOME LLM key to even
+          # finish importing even though nothing here calls an LLM — reusing
+          # the same secret daily_scan.yml already has configured is enough
+          # to satisfy that import. See verification.py's module docstring.
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: |
           python Verification/verification.py \
             --table ${{ github.event.inputs.table || 'both' }} \
             --concurrency ${{ github.event.inputs.concurrency || '30' }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.shard_count || '10' }} \
+            --summary-out "summary-${{ matrix.shard }}.json" \
             ${{ github.event.inputs.execute == 'true' && '--execute' || '' }} \
-            ${{ github.event.inputs.ats != '' && format('--ats {0}', github.event.inputs.ats) || '' }} \
-            ${{ github.event.inputs.limit != '0' && format('--limit {0}', github.event.inputs.limit) || '' }}
+            ${{ github.event.inputs.ats != '' && format('--ats {0}', github.event.inputs.ats) || '' }}
+
+      - name: Upload shard summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-summary-${{ matrix.shard }}
+          path: summary-${{ matrix.shard }}.json
+          retention-days: 14
+
+  finalize:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+
+      - name: Download every shard's summary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verification-summary-*
+          path: summaries
+          merge-multiple: true
+
+      - name: Combined report — all shards
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: python Verification/verification.py --summarize summaries
