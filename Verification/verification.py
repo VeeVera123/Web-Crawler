@@ -76,12 +76,20 @@ SAFETY MODEL (a wrong delete here is real, silent, permanent data loss):
     just means the page moved (common on a real, live site), which is
     not the same as the company disappearing.
 
-SHARDING + FINALIZE (2026-08, same shape as Main/main.py's ATS scanner):
-this file can run as N parallel shards (--shard-index/--shard-count,
-hash-based over ats|slug or the row id — same _shard_of technique
-main.py already uses), each writing its own JSON summary
-(--summary-out). A separate finalize pass (--summarize DIR) then reads
-every shard's JSON summary out of that directory and prints ONE combined
+SHARDING + FINALIZE (2026-08, same overall shape as Main/main.py's ATS
+scanner, but NOT the same sharding mechanism): this file runs as N
+parallel shards (--shard-index/--shard-count), each writing its own JSON
+summary (--summary-out). Unlike main.py's hash-based sharding (which
+needs the WHOLE slug list in memory to hash-partition it), each shard
+here fetches ONLY its own ~1/N slice of rows directly from Supabase — a
+cheap COUNT query first, then a server-side Range-based slice ordered by
+id (see fetch_rows). This matters: an earlier version fetched the ENTIRE
+table in every shard and threw away the other (N-1)/N client-side, so N
+shards collectively pulled N times the table's actual size from Supabase
+at once — confirmed real 2026-08 as the cause of a 20-shard run seeing
+GETs and DELETEs alike time out ("increased errors" on Supabase's own
+side). A separate finalize pass (--summarize DIR) then reads every
+shard's JSON summary out of that directory and prints ONE combined
 report — total active/empty/dead/unverified counts across all shards —
 mirroring how main.py's `--finalize` step runs once after every shard
 has finished. See verification.yml for how the two are wired together
@@ -109,7 +117,6 @@ import argparse
 import asyncio
 import concurrent.futures
 import glob
-import hashlib
 import json
 import logging
 import os
@@ -169,14 +176,6 @@ def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
     proportional to what was actually asked for, so aggregate load across
     N shards scales with N * concurrency, not N * 550."""
     return aiohttp.TCPConnector(limit=concurrency + 10, ttl_dns_cache=300)
-
-
-def _shard_of(key: str, total_shards: int) -> int:
-    """Same technique as Main/main.py's _shard_of — deterministic hash-
-    based shard assignment so every platform/row spreads evenly across
-    shards regardless of table ordering."""
-    h = hashlib.md5(key.encode()).hexdigest()
-    return int(h, 16) % total_shards
 
 
 # ── archive_ii: platforms with NO safe "does not exist" signal ────────────
@@ -479,28 +478,90 @@ async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: d
     raise VerificationFetchError(f"GET {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
 
+async def _get_count(session: aiohttp.ClientSession, table: str, headers: dict, params: dict) -> int:
+    """Cheap COUNT via Prefer: count=exact on a single-row request — reads
+    the real total straight out of the Content-Range response header
+    (e.g. '0-0/186494'), no need to pull any actual rows to get it."""
+    url = f"{node.SUPABASE_URL}/rest/v1/{table}"
+    count_headers = {**headers, "Range": "0-0", "Prefer": "count=exact"}
+    last_error = None
+    for attempt in range(MAX_HTTP_RETRIES):
+        try:
+            async with session.get(url, headers=count_headers, params=params,
+                                    timeout=_GET_TIMEOUT) as r:
+                if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
+                    wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                    continue
+                r.raise_for_status()
+                content_range = r.headers.get("Content-Range", "")
+                return int(content_range.split("/")[-1])
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            if attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(wait)
+    raise VerificationFetchError(f"COUNT {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
+
+
 async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
-                      ats_filter: str | None, limit: int | None) -> list[dict]:
+                      ats_filter: str | None, limit: int | None,
+                      shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
+    """Fetches rows ordered by id, optionally restricted to ONE contiguous
+    shard's row range (computed server-side from a COUNT query — see
+    _get_count). This is deliberately NOT "fetch everything, then keep only
+    this shard's rows in Python": confirmed real 2026-08 — with the old
+    fetch-everything approach, N parallel shards each independently
+    downloaded the ENTIRE table (every shard re-paginating through all
+    ~186K rows just to discard (N-1)/N of them), so N shards put N times
+    the load on Supabase's REST endpoint that the actual work needed. That
+    matches exactly what was observed: GETs and DELETEs alike timing out
+    ("increased errors" on Supabase's own side) under a 20-shard run. This
+    version has each shard fetch ONLY its own ~1/N slice directly, so total
+    aggregate row-fetch volume across all shards is ~1x the table, not Nx.
+    `order=id.asc` is required for this to be correct at all — without a
+    stable order, two separate Range-paginated requests (whether within
+    one shard's own pagination, or across different shards' independent
+    slices) aren't guaranteed to return consistent results, which could
+    silently skip or duplicate rows."""
     rows = []
     page_size = 1000
-    offset = 0
     headers = {"apikey": node.SUPABASE_KEY, "Authorization": f"Bearer {node.SUPABASE_KEY}"}
-    params = {"select": select}
+    params = {"select": select, "order": "id.asc"}
     if ats_filter:
         params["ats"] = f"eq.{ats_filter}"
+
+    start_offset = 0
+    end_offset = None  # exclusive upper bound on absolute row position; None = no shard cap
+    if shard_count:
+        total = await _get_count(session, table, headers, params)
+        shard_size = -(-total // shard_count)  # ceil division
+        start_offset = shard_index * shard_size
+        end_offset = min(start_offset + shard_size, total)
+        if start_offset >= total:
+            return []  # more shards than rows — this shard legitimately gets nothing
+
+    offset = start_offset
     while True:
         if limit is not None and len(rows) >= limit:
             rows = rows[:limit]
             break
-        page_headers = {**headers, "Range": f"{offset}-{offset + page_size - 1}"}
+        page_end = offset + page_size - 1
+        if end_offset is not None:
+            page_end = min(page_end, end_offset - 1)
+            if offset > page_end:
+                break
+        page_headers = {**headers, "Range": f"{offset}-{page_end}"}
         batch = await _get_with_retries(session, f"{node.SUPABASE_URL}/rest/v1/{table}",
                                          page_headers, params)
         if not batch:
             break
         rows.extend(batch)
-        if len(batch) < page_size:
+        if len(batch) < (page_end - offset + 1):
             break
-        offset += page_size
+        offset = page_end + 1
+        if end_offset is not None and offset >= end_offset:
+            break
     return rows
 
 
@@ -572,6 +633,9 @@ async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_r
 
 async def verify_archive_iii_row_task(session: aiohttp.ClientSession, row: dict, dry_run: bool,
                                        sem: asyncio.Semaphore, counts: dict, lock: asyncio.Lock) -> None:
+    # The delete stays INSIDE the semaphore, same as verify_archive_ii_row —
+    # otherwise a batch of rows all confirming dead at once could fire every
+    # delete concurrently, uncapped by --concurrency.
     async with sem:
         try:
             is_dead = await verify_archive_iii_row(session, row)
@@ -581,22 +645,22 @@ async def verify_archive_iii_row_task(session: aiohttp.ClientSession, row: dict,
             log.debug(f"    {row['website_url']}: check failed ({e}) — leaving in place")
             return
 
-    if not is_dead:
-        async with lock:
-            counts["live"] += 1
-        return
+        if not is_dead:
+            async with lock:
+                counts["live"] += 1
+            return
 
-    if dry_run:
-        async with lock:
-            counts["dead"] += 1
-        log.info(f"    {row['website_url']}: DEAD — would delete (report-only)")
-        return
+        if dry_run:
+            async with lock:
+                counts["dead"] += 1
+            log.info(f"    {row['website_url']}: DEAD — would delete (report-only)")
+            return
 
-    ok = await delete_row(session, node.ARCHIVE_III_TABLE, row["id"])
-    async with lock:
-        counts["dead" if ok else "unverified"] += 1
-    if ok:
-        log.info(f"    {row['website_url']}: DEAD — deleted")
+        ok = await delete_row(session, node.ARCHIVE_III_TABLE, row["id"])
+        async with lock:
+            counts["dead" if ok else "unverified"] += 1
+        if ok:
+            log.info(f"    {row['website_url']}: DEAD — deleted")
 
 
 async def _run_progress(counts: dict, total: int, label: str):
@@ -649,25 +713,18 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
     counts = _empty_counts_ii()
     lock = asyncio.Lock()
 
+    if ats_filter and ats_filter in _UNVERIFIABLE_ATS:
+        log.warning(f"  '{ats_filter}' has no confirmed-safe not-found signal — nothing to verify, "
+                    f"see _UNVERIFIABLE_ATS in this file's module docstring for why.")
+        return counts
+
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
         log.info(f"── Verifying archive_ii{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
-        all_rows = await fetch_rows(session, node.STAGING_TABLE, "id,ats,slug", ats_filter, None)
-
-        if ats_filter and ats_filter in _UNVERIFIABLE_ATS:
-            log.warning(f"  '{ats_filter}' has no confirmed-safe not-found signal — nothing to verify, "
-                        f"see _UNVERIFIABLE_ATS in this file's module docstring for why.")
-            return counts
-
-        # Shard BEFORE splitting verifiable/unverifiable — both groups need
-        # to land in the same shard's counts, or summing shard JSONs later
-        # would either double-count or drop the unverifiable-platform rows
-        # (that's exactly what happened before this was fixed: those rows
-        # were dropped from every shard's summary entirely, so the combined
-        # total silently undercounted the real table size).
-        if shard_count:
-            all_rows = [r for r in all_rows
-                        if _shard_of(f"{r['ats']}|{r['slug']}", shard_count) == shard_index]
+        # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
+        # own ~1/N slice, not the whole table filtered down client-side.
+        all_rows = await fetch_rows(session, node.STAGING_TABLE, "id,ats,slug", ats_filter, None,
+                                     shard_index, shard_count)
 
         verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
         skipped_rows = [r for r in all_rows if r["ats"] not in ARCHIVE_II_VERIFIERS]
@@ -709,12 +766,10 @@ async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
         log.info(f"── Verifying archive_iii (career pages){shard_note} ──")
-        rows = await fetch_rows(session, node.ARCHIVE_III_TABLE, "id,career_page_url,website_url", None, None)
-
-        if shard_count:
-            rows = [r for r in rows if _shard_of(r["website_url"], shard_count) == shard_index]
-        if limit is not None:
-            rows = rows[:limit]
+        # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
+        # own ~1/N slice, not the whole table filtered down client-side.
+        rows = await fetch_rows(session, node.ARCHIVE_III_TABLE, "id,career_page_url,website_url",
+                                 None, limit, shard_index, shard_count)
         total = len(rows)
 
         log.info(f"  {total} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
