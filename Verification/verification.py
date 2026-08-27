@@ -113,6 +113,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import socket
 import sys
 from urllib.parse import urlparse
@@ -397,6 +398,51 @@ async def verify_archive_iii_row(session: aiohttp.ClientSession, row: dict) -> b
 
 # ── Supabase I/O (async) ──────────────────────────────────────────────
 
+# Same known-flaky-Supabase-gateway class main.py/supabase_handler.py's
+# _get() already retries against (see supabase_handler.py's _RETRYABLE_STATUSES
+# comment): 401/403 can be a cold-start/gateway hiccup, not just a bad key —
+# a genuinely bad key just keeps failing and we find out after MAX_HTTP_RETRIES
+# anyway. Confirmed real 2026-08: shard 1/20 hard-crashed the whole shard on a
+# one-off 401 with zero retry, exactly the failure mode main.py's own
+# SupabaseFetchError docstring describes happening to it before this fix.
+_RETRYABLE_STATUSES = {401, 403, 429, 500, 502, 503, 504}
+MAX_HTTP_RETRIES = 4
+_RETRY_BASE_DELAY = 2.0  # seconds
+
+
+class VerificationFetchError(Exception):
+    """Raised when a Supabase GET fails after every retry — let this
+    propagate and crash the shard loudly (non-zero exit) rather than
+    silently returning an empty/partial row list that would look
+    identical to "this table/shard legitimately has nothing"."""
+    pass
+
+
+async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: dict,
+                             params: dict | None = None) -> list:
+    last_error = None
+    for attempt in range(MAX_HTTP_RETRIES):
+        try:
+            async with session.get(url, headers=headers, params=params,
+                                    timeout=aiohttp.ClientTimeout(total=60)) as r:
+                if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
+                    wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    log.warning(f"  GET {url} got HTTP {r.status}, retrying in {wait:.1f}s "
+                                f"(attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
+                    await asyncio.sleep(wait)
+                    continue
+                r.raise_for_status()
+                return await r.json()
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                log.warning(f"  GET {url} failed ({e}), retrying in {wait:.1f}s "
+                            f"(attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
+                await asyncio.sleep(wait)
+    raise VerificationFetchError(f"GET {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
+
+
 async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
                       ats_filter: str | None, limit: int | None) -> list[dict]:
     rows = []
@@ -410,14 +456,9 @@ async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
         if limit is not None and len(rows) >= limit:
             rows = rows[:limit]
             break
-        headers["Range"] = f"{offset}-{offset + page_size - 1}"
-        async with session.get(
-            f"{node.SUPABASE_URL}/rest/v1/{table}",
-            headers=headers, params=params,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as r:
-            r.raise_for_status()
-            batch = await r.json()
+        page_headers = {**headers, "Range": f"{offset}-{offset + page_size - 1}"}
+        batch = await _get_with_retries(session, f"{node.SUPABASE_URL}/rest/v1/{table}",
+                                         page_headers, params)
         if not batch:
             break
         rows.extend(batch)
@@ -428,18 +469,26 @@ async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
 
 
 async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) -> bool:
-    try:
-        async with session.delete(
-            f"{node.SUPABASE_URL}/rest/v1/{table}",
-            headers={"apikey": node.SUPABASE_KEY, "Authorization": f"Bearer {node.SUPABASE_KEY}"},
-            params={"id": f"eq.{row_id}"},
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as r:
-            r.raise_for_status()
-            return True
-    except Exception as e:
-        log.error(f"    Failed to delete row id={row_id} from {table}: {e}")
-        return False
+    headers = {"apikey": node.SUPABASE_KEY, "Authorization": f"Bearer {node.SUPABASE_KEY}"}
+    url = f"{node.SUPABASE_URL}/rest/v1/{table}"
+    last_error = None
+    for attempt in range(MAX_HTTP_RETRIES):
+        try:
+            async with session.delete(url, headers=headers, params={"id": f"eq.{row_id}"},
+                                       timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
+                    wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                    continue
+                r.raise_for_status()
+                return True
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(wait)
+    log.error(f"    Failed to delete row id={row_id} from {table} after {MAX_HTTP_RETRIES} attempts: {last_error}")
+    return False
 
 
 # ── orchestration ───────────────────────────────────────────────────
