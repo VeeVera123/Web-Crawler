@@ -81,6 +81,7 @@ DEFAULT_COUNTRIES = {
     "united states", "united kingdom", "canada", "australia",
     "ireland", "new zealand", "singapore",
     "netherlands", "norway", "sweden", "denmark", "finland", "austria", "belgium",
+    "iceland", "luxembourg",
     "france", "germany",
 }
 
