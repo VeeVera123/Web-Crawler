@@ -194,11 +194,13 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
         log.error("  No seed companies with a usable domain — aborting.")
         return
 
+    # "name" itself is no longer carried past this point (2026-08: archive_iii
+    # dropped its company_name column — stored no real identifying info beyond
+    # the domain/website_url it already keys on, just cost extra space) — it's
+    # still required as a data-quality gate above (rows with no company name at
+    # all are skipped as likely-junk records), just never collected into a
+    # domain->name lookup anymore.
     domains = [c["domain"] for c in companies]
-    # Real company names, for scrape_test's company_name column — other
-    # seed sources that call node.crawl_batch without this just fall back
-    # to the domain itself (see node.crawl_one's domain_names default).
-    domain_names = {c["domain"]: c["name"] for c in companies if c.get("name")}
     target_geo_countries = (node.target_countries_geo_form(countries) if countries
                              else node.ACCEPT_ANY_COUNTRY)
 
@@ -214,8 +216,7 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
             _, elapsed, rate, time_budget_hit = await node.crawl_batch(
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
-                time_budget_minutes, batch_size=3000, unit_label="companies",
-                domain_names=domain_names)
+                time_budget_minutes, batch_size=3000, unit_label="companies")
     finally:
         parse_pool.shutdown(wait=True)
 
@@ -237,8 +238,8 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     career_pages_total = known_ats_found + inhouse_captured
     if career_pages_total:
         log.info(f"  career pages found: {career_pages_total} total — {known_ats_found} known-ats "
-                 f"(→ quarantine, as usual) + {inhouse_captured} in-house/unsupported "
-                 f"(→ scrape_test, {inhouse_captured / career_pages_total * 100:.1f}% of all career pages found)")
+                 f"(→ archive_ii, as usual) + {inhouse_captured} in-house/unsupported "
+                 f"(→ archive_iii, {inhouse_captured / career_pages_total * 100:.1f}% of all career pages found)")
 
 
 def main():
