@@ -73,12 +73,14 @@ DOMAIN_COLS = ("domain", "website")
 COUNTRY_COLS = ("country",)
 
 # Hand-picked, narrowed 2026-08 (was a 31-country US/UK/Canada/Australia+EU-27
-# set). 'singapore'/'malta'/'new zealand'/'bahamas'/'guyana'/'barbados' aren't
-# confirmed present in PDL's real data but cost nothing to list if absent.
+# set). Malta/Bahamas/Guyana/Barbados dropped (2026-08, too small a
+# population to be worth it) in favor of Netherlands/Norway/Sweden/
+# Denmark/Finland/Austria/Belgium — all countries with a real base of
+# English-language-friendly companies actually present in PDL's data.
 DEFAULT_COUNTRIES = {
     "united states", "united kingdom", "canada", "australia",
-    "ireland", "new zealand", "singapore", "malta",
-    "bahamas", "guyana", "barbados",
+    "ireland", "new zealand", "singapore",
+    "netherlands", "norway", "sweden", "denmark", "finland", "austria", "belgium",
     "france", "germany",
 }
 
@@ -192,6 +194,10 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
         return
 
     domains = [c["domain"] for c in companies]
+    # Real company names, for scrape_test's company_name column — other
+    # seed sources that call node.crawl_batch without this just fall back
+    # to the domain itself (see node.crawl_one's domain_names default).
+    domain_names = {c["domain"]: c["name"] for c in companies if c.get("name")}
     target_geo_countries = (node.target_countries_geo_form(countries) if countries
                              else node.ACCEPT_ANY_COUNTRY)
 
@@ -207,7 +213,8 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
             _, elapsed, rate, time_budget_hit = await node.crawl_batch(
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
-                time_budget_minutes, batch_size=3000, unit_label="companies")
+                time_budget_minutes, batch_size=3000, unit_label="companies",
+                domain_names=domain_names)
     finally:
         parse_pool.shutdown(wait=True)
 
@@ -224,6 +231,13 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     ats_breakdown = Counter(r["ats"] for r in found_rows)
     if ats_breakdown:
         log.info(f"  by platform: {dict(ats_breakdown.most_common())}")
+    known_ats_found = stats["known_ats_found"]
+    inhouse_captured = stats["inhouse_career_page_captured"]
+    career_pages_total = known_ats_found + inhouse_captured
+    if career_pages_total:
+        log.info(f"  career pages found: {career_pages_total} total — {known_ats_found} known-ats "
+                 f"(→ quarantine, as usual) + {inhouse_captured} in-house/unsupported "
+                 f"(→ scrape_test, {inhouse_captured / career_pages_total * 100:.1f}% of all career pages found)")
 
 
 def main():
