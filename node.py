@@ -73,10 +73,50 @@ CAREER_PATHS = [
     "/recruitment", "/recruiting", "/talent",
     "/apply", "/apply-now",
 ]
+# 2026-08: wrapped in \b...\b (word-boundary anchored) — the unanchored
+# version matched as a raw substring ANYWHERE in a sitemap URL, so
+# "unemployment" matched via "employment", and "joints" matched via
+# "join" (e.g. a blog post at /blog/3-pizza-joints-near-me was pulled in
+# as a "career-like" URL purely because of that substring). Confirmed via
+# a real scrape_test audit — see _BLOG_LIKE_PATH_RE and
+# _looks_like_sentence_slug below for the other two fixes from that
+# same audit; this one alone doesn't catch every case (a blog post
+# titled "you-bet-your-career" genuinely contains the whole word
+# "career"), which is why those two additional checks exist.
 CAREER_LIKE_RE = re.compile(
-    "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS), re.I)
+    r"\b(?:" + "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS) + r")\b",
+    re.I)
 SITEMAP_MAX_FOLLOW = 8
 SITEMAP_INDEX_PATHS = ("/sitemap.xml", "/sitemap_index.xml")
+
+# 2026-08 scrape_test audit: sitemap URLs shaped like a blog post, news
+# article, or press release — even ones CAREER_LIKE_RE legitimately
+# matches on a real word (e.g. "...why-hiring-a-property-manager-is-
+# smart", "...how-to-stand-out-in-energy-recruitment") — are almost never
+# real career pages; they're editorial content that happens to discuss
+# hiring/recruiting as a TOPIC. Filtering these out before they're even
+# fetched also saves the request.
+_BLOG_LIKE_PATH_RE = re.compile(
+    r"/(?:blog|news|press|media|insights|articles?|resources|case-studies)/"
+    r"|/\d{4}/\d{1,2}(?:/\d{1,2})?/", re.I)
+
+
+def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
+    """2026-08 scrape_test audit: a real career page's path is a short
+    page NAME ("careers", "current-openings", "join-our-team" — 1-3
+    hyphen-separated words). An article/blog TITLE used as a slug runs
+    much longer ("sap-successfactors-talent-modules-implementation-for-
+    global-organizations" — 9 words; confirmed real false-positive from
+    an HR-consulting company's own site, not caught by the blog-path
+    check above since it wasn't under /blog/). True means "too long,
+    reads like a sentence, reject it" — checked against the LAST
+    non-empty path segment, since that's where the descriptive title
+    lives (earlier segments are usually just category folders)."""
+    segments = [s for s in path.strip("/").split("/") if s]
+    if not segments:
+        return False
+    words = [w for w in segments[-1].split("-") if w]
+    return len(words) > max_words
 
 # scrape_test quality gate (2026-08): a career-path/sitemap fetch that
 # 200'd isn't automatically "a real career page" — plenty of sites soft-
@@ -374,16 +414,46 @@ def _parse_detect(html: str, base_url: str, target_geo_countries: set[str]
     return hits, country, method, text_len, has_hiring_vocab
 
 
+# 2026-08 scrape_test audit: a real case found — vaxcare.com's site had a
+# bare "https://www.bamboohr.com" badge/footer link (their real job-board
+# subdomain apparently wasn't linked anywhere findable), which
+# _url_to_slug_bamboohr correctly returns None for (slug would be "www"),
+# so it fell through and got captured as if it were an "in-house" career
+# page — when the company is actually ON a supported ATS, just not
+# detectably so from this page. Mirrors the 29 supported platforms'
+# domains from discovery.py's URL_TO_SLUG (kept in sync manually — update
+# both if a platform's domain changes). Any hit here means "this is ATS-
+# related, not in-house," full stop, regardless of whether a slug could
+# be extracted — better to drop the candidate than mislabel it.
+_ATS_VENDOR_DOMAINS = (
+    "greenhouse.io", "lever.co", "ashbyhq.com", "bamboohr.com", "icims.com",
+    "myworkdayjobs.com", "rippling.com", "workable.com", "recruitee.com",
+    "smartrecruiters.com", "taleo.net", "oraclecloud.com", "brassring.com",
+    "teamtailor.com", "successfactors.com", "successfactors.eu", "sapsf.com", "sapsf.eu",
+    "breezy.hr", "hrmdirect.com", "softgarden.io", "softgarden.de", "zohorecruit.com",
+    "zohorecruit.eu", "paylocity.com", "join.com", "personio.de", "personio.com",
+    "workatastartup.com", "ycombinator.com", "eploy.net", "folksats.app", "glowinthecloud.com",
+    "jobadder.com", "jobvite.com", "adp.com", "avature.net",
+)
+
+
 def _looks_like_real_career_page(url: str, text_len: int, has_hiring_vocab: bool, origin: str) -> bool:
     """Rejects near-empty stub pages, homepage-in-disguise redirects
-    (unknown path -> 200 the actual homepage), and pages that are simply
+    (unknown path -> 200 the actual homepage), pages that are simply
     unrelated content sitting at a guessed path (a blog post at /join,
-    a generic page at /opportunities) — all common enough on real sites
-    that skipping these checks would flood scrape_test with junk that
-    isn't a genuine in-house career page."""
+    a generic page at /opportunities), and pages that ARE on a known ATS
+    vendor's own domain but didn't yield a parseable slug — all common
+    enough on real sites that skipping these checks would flood
+    scrape_test with junk that isn't a genuine in-house career page."""
     if text_len < MIN_CAREER_PAGE_TEXT_CHARS:
         return False
     if not has_hiring_vocab:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    # Suffix match, NOT substring — "d in host" would falsely flag a real
+    # company like multilever.com as being on lever.co (it isn't; that's
+    # the exact unanchored-substring bug this whole audit started from).
+    if any(host == d or host.endswith("." + d) for d in _ATS_VENDOR_DOMAINS):
         return False
     path = urlparse(url).path.strip("/")
     if path == "" and url.rstrip("/") == origin.rstrip("/"):
@@ -587,7 +657,16 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
         if sitemap:
             sm_url, sm_xml = sitemap
             loc_urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", sm_xml, re.I)
-            career_like = [u for u in loc_urls if CAREER_LIKE_RE.search(u)]
+            # 2026-08: added the blog-path and sentence-slug exclusions
+            # (see their definitions above) alongside the existing
+            # CAREER_LIKE_RE match — confirmed via a scrape_test audit
+            # that CAREER_LIKE_RE alone lets through a meaningful amount
+            # of editorial content (blog posts, press releases) that
+            # merely discusses hiring/recruiting as a topic.
+            career_like = [u for u in loc_urls
+                           if CAREER_LIKE_RE.search(u)
+                           and not _BLOG_LIKE_PATH_RE.search(urlparse(u).path)
+                           and not _looks_like_sentence_slug(urlparse(u).path)]
             sm_pages = await asyncio.gather(
                 *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]])
             sitemap_candidates = []
