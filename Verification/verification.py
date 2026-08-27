@@ -523,20 +523,27 @@ async def _run_progress(counts: dict, total: int, label: str):
             return
 
 
-def _print_summary(label: str, total: int, skipped: int, counts: dict, dry_run: bool):
+def _print_summary(label: str, checked: int, counts: dict, dry_run: bool):
+    # "unverified" already includes both rows whose live check was genuinely
+    # inconclusive AND rows on a platform with no safe not-found signal at
+    # all (see _UNVERIFIABLE_ATS) — every row in the table lands in exactly
+    # one bucket below, so these always sum to the table's true total; no
+    # row is ever silently left out of the count.
+    total_rows = sum(counts.values())
+    retained = total_rows - counts.get("dead", 0)
     print("\n" + "=" * 70)
     print(f"VERIFICATION SUMMARY — {label}")
     print("=" * 70)
-    print(f"  Total rows in table:        {total + skipped}")
-    print(f"  Skipped (unverifiable ATS): {skipped}")
-    print(f"  Checked:                    {total}")
+    print(f"  Total rows:                 {total_rows}")
+    print(f"  Checked (live network call):{checked}")
     for key, display in (("active", "Active (>=1 open job)"),
                           ("empty", "Empty (real board, 0 jobs)"),
                           ("live", "Live (kept)"),
                           ("dead", f"Dead ({'would be ' if dry_run else ''}removed)"),
-                          ("unverified", "Unverified (left in place)")):
+                          ("unverified", "Unverified (kept — incl. unverifiable platforms)")):
         if key in counts:
-            print(f"  {display + ':':<28} {counts[key]}")
+            print(f"  {display + ':':<45} {counts[key]}")
+    print(f"  Total retained (everything NOT deleted):    {retained}")
     print("=" * 70)
 
 
@@ -564,38 +571,44 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
                         f"see _UNVERIFIABLE_ATS in this file's module docstring for why.")
             return counts
 
-        verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
-        skipped = len(all_rows) - len(verifiable_rows)
-
+        # Shard BEFORE splitting verifiable/unverifiable — both groups need
+        # to land in the same shard's counts, or summing shard JSONs later
+        # would either double-count or drop the unverifiable-platform rows
+        # (that's exactly what happened before this was fixed: those rows
+        # were dropped from every shard's summary entirely, so the combined
+        # total silently undercounted the real table size).
         if shard_count:
-            verifiable_rows = [r for r in verifiable_rows
-                                if _shard_of(f"{r['ats']}|{r['slug']}", shard_count) == shard_index]
+            all_rows = [r for r in all_rows
+                        if _shard_of(f"{r['ats']}|{r['slug']}", shard_count) == shard_index]
+
+        verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
+        skipped_rows = [r for r in all_rows if r["ats"] not in ARCHIVE_II_VERIFIERS]
+        counts["unverified"] += len(skipped_rows)
 
         if limit is not None:
             verifiable_rows = verifiable_rows[:limit]
-        total = len(verifiable_rows)
+        checked = len(verifiable_rows)
 
-        skipped_by_ats = {}
-        for r in all_rows:
-            if r["ats"] not in ARCHIVE_II_VERIFIERS:
+        if skipped_rows and not ats_filter:
+            skipped_by_ats = {}
+            for r in skipped_rows:
                 skipped_by_ats[r["ats"]] = skipped_by_ats.get(r["ats"], 0) + 1
-        if skipped_by_ats and not ats_filter and not shard_count:
-            log.info(f"  skipping {skipped} rows on unverifiable platforms: "
+            log.info(f"  {len(skipped_rows)} rows on unverifiable platforms (kept, counted as unverified): "
                      f"{dict(sorted(skipped_by_ats.items(), key=lambda kv: -kv[1]))}")
 
-        log.info(f"  {total} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
-        if not total:
-            print("\nNo verifiable rows to check.")
+        log.info(f"  {checked} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
+        if not checked:
+            _print_summary("archive_ii" + shard_note, checked, counts, dry_run)
             return counts
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             tasks = [verify_archive_ii_row(session, row, dry_run, sem, executor, counts, lock)
                      for row in verifiable_rows]
-            progress_task = asyncio.create_task(_run_progress(counts, total, "archive_ii"))
+            progress_task = asyncio.create_task(_run_progress(counts, checked + len(skipped_rows), "archive_ii"))
             await asyncio.gather(*tasks)
             progress_task.cancel()
 
-    _print_summary("archive_ii" + shard_note, total, skipped if not shard_count else 0, counts, dry_run)
+    _print_summary("archive_ii" + shard_note, checked, counts, dry_run)
     return counts
 
 
@@ -618,7 +631,7 @@ async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
 
         log.info(f"  {total} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
         if not total:
-            print("\nNo rows to verify for archive_iii.")
+            _print_summary("archive_iii" + shard_note, total, counts, dry_run)
             return counts
 
         tasks = [verify_archive_iii_row_task(session, row, dry_run, sem, counts, lock) for row in rows]
@@ -626,7 +639,7 @@ async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
         await asyncio.gather(*tasks)
         progress_task.cancel()
 
-    _print_summary("archive_iii" + shard_note, total, 0, counts, dry_run)
+    _print_summary("archive_iii" + shard_note, total, counts, dry_run)
     return counts
 
 
@@ -659,11 +672,54 @@ def _summarize_dir(directory: str) -> None:
 
     log.info(f"Combined {shards_seen} shard summaries from {directory}")
     if any(combined_ii.values()):
-        _print_summary("archive_ii — ALL SHARDS COMBINED",
-                        sum(combined_ii.values()), 0, combined_ii, bool(dry_run))
+        checked_ii = combined_ii["active"] + combined_ii["empty"] + combined_ii["dead"]
+        _print_summary("archive_ii — ALL SHARDS COMBINED", checked_ii, combined_ii, bool(dry_run))
     if any(combined_iii.values()):
-        _print_summary("archive_iii — ALL SHARDS COMBINED",
-                        sum(combined_iii.values()), 0, combined_iii, bool(dry_run))
+        checked_iii = combined_iii["live"] + combined_iii["dead"]
+        _print_summary("archive_iii — ALL SHARDS COMBINED", checked_iii, combined_iii, bool(dry_run))
+
+
+async def _fetch_pair_set(session: aiohttp.ClientSession, table: str) -> set[tuple[str, str]]:
+    rows = await fetch_rows(session, table, "ats,slug", None, None)
+    return {(r["ats"], r["slug"]) for r in rows}
+
+
+async def compare_slug_registry() -> None:
+    """archive_ii and slug_registry (the production ATS scanner's own
+    source-of-truth table — see Main/main.py's load_slugs) are both keyed
+    on (ats, slug). This compares the two sets directly: how much of what
+    verification just confirmed-good in archive_ii has actually been
+    promoted into slug_registry (overlap), vs sitting in archive_ii as a
+    real, still-unpromoted candidate (archive_ii-only) — best run AFTER an
+    --execute pass so archive_ii-only doesn't include rows that were just
+    confirmed dead and are about to be deleted anyway."""
+    async with aiohttp.ClientSession(connector=node.new_connector()) as session:
+        log.info("── Comparing archive_ii vs slug_registry (both keyed on ats,slug) ──")
+        archive_ii_pairs = await _fetch_pair_set(session, node.STAGING_TABLE)
+        slug_registry_pairs = await _fetch_pair_set(session, "slug_registry")
+
+    overlap = archive_ii_pairs & slug_registry_pairs
+    only_archive_ii = archive_ii_pairs - slug_registry_pairs
+    only_registry = slug_registry_pairs - archive_ii_pairs
+
+    by_ats = {}
+    for ats, _ in only_archive_ii:
+        by_ats[ats] = by_ats.get(ats, 0) + 1
+
+    print("\n" + "=" * 70)
+    print("archive_ii  vs  slug_registry — unique (ats, slug) comparison")
+    print("=" * 70)
+    print(f"  archive_ii unique pairs:                {len(archive_ii_pairs)}")
+    print(f"  slug_registry unique pairs:              {len(slug_registry_pairs)}")
+    print(f"  In both (already promoted):              {len(overlap)}")
+    print(f"  archive_ii only (not yet in registry):   {len(only_archive_ii)}")
+    print(f"  slug_registry only (not in archive_ii):  {len(only_registry)}")
+    print("=" * 70)
+    if by_ats:
+        print("  archive_ii-only, by platform:")
+        for ats, n in sorted(by_ats.items(), key=lambda kv: -kv[1]):
+            print(f"    {ats:<20} {n}")
+        print("=" * 70)
 
 
 def main():
@@ -686,10 +742,20 @@ def main():
     parser.add_argument("--summarize", default=None,
                          help="Skip verification entirely — just combine every *.json in this directory "
                               "(written by earlier --summary-out runs) into one final report")
+    parser.add_argument("--compare-slug-registry", action="store_true",
+                         help="Skip verification entirely — just compare archive_ii's (ats,slug) pairs "
+                              "against slug_registry's and report overlap/unique-to-each counts")
     args = parser.parse_args()
 
     if args.summarize:
         _summarize_dir(args.summarize)
+        return
+
+    if args.compare_slug_registry:
+        if not node.SUPABASE_URL or not node.SUPABASE_KEY:
+            log.error("SUPABASE_URL/SUPABASE_KEY not set — cannot compare.")
+            sys.exit(1)
+        asyncio.run(compare_slug_registry())
         return
 
     if (args.shard_index is None) != (args.shard_count is None):
