@@ -42,6 +42,11 @@ on:
         description: "Concurrent checks in flight, per shard"
         required: false
         default: "30"
+      compare_slug_registry:
+        description: "After finalize, report archive_ii vs slug_registry overlap (unique ats+slug pairs)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: verification-engine-${{ github.ref }}
@@ -144,3 +149,30 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: python Verification/verification.py --summarize summaries
+
+  compare-slug-registry:
+    # Only meaningful AFTER a real --execute run has actually removed the
+    # confirmed-dead rows — otherwise "archive_ii only" would include rows
+    # that were just confirmed dead and are about to disappear anyway.
+    needs: finalize
+    if: ${{ github.event.inputs.compare_slug_registry == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+
+      - name: Compare archive_ii vs slug_registry
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: python Verification/verification.py --compare-slug-registry
