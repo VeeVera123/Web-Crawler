@@ -330,28 +330,6 @@ SKIP_SLUGS = {
 # URL → SLUG CONVERTERS (OpenPostings stores full URLs)
 # ══════════════════════════════════════════════════════════
 
-def _host_matches_domain(host: str, root_domain: str) -> bool:
-    """Anchored host match: True only if `host` IS `root_domain`, or is a
-    real subdomain of it (host ends with '.' + root_domain) — NEVER a
-    coincidental substring appearing elsewhere in an unrelated domain
-    name. Every _url_to_slug_* function below used to do a raw
-    `"root_domain" in host` check instead, which is a real, confirmed
-    bug class, not a theoretical one: the literal string "lever.co" is a
-    substring of "reallyclever.com.au" (...c-LEVER.CO-m.au...) purely by
-    coincidence — that domain has nothing to do with Lever at all — so
-    EVERY internal page host_crawl_v2 visited on that one real company's
-    site (portfolio, about-us, blog, contact-us, even responsive-image
-    variant paths like /phone/ and /tablet/) was being recorded as a
-    separate fake Lever hit, each with a slug pulled from that page's own
-    filename. Fixed everywhere in this file (2026-08) by routing every
-    platform's host check through this one correct, shared helper instead
-    of a bespoke substring check per function — a domain has to actually
-    BE the platform's real domain (or a real subdomain of it), full stop.
-    Case-insensitive; `root_domain` must already be lowercase."""
-    host = (host or "").lower()
-    return host == root_domain or host.endswith("." + root_domain)
-
-
 def _url_to_slug_greenhouse(url: str) -> str | None:
     """Handles TWO distinct real-world URL families, confirmed via live
     search results (boards.greenhouse.io/embed/job_board/js?for=vaco,
@@ -370,7 +348,7 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
          'embed') row (see SKIP_SLUGS comment)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "greenhouse.io"):
+    if "greenhouse.io" not in host:
         return None
     path = parsed.path.strip("/")
     if path.startswith("embed/"):
@@ -387,35 +365,27 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
 
 
 def _url_to_slug_lever(url: str) -> str | None:
-    """Match lever.co and its real subdomains (jobs.lever.co, etc) only —
-    anchored via _host_matches_domain, NOT a raw substring check. The
-    former substring check ("lever.co" in host) matched ANY domain that
-    happened to contain that literal sequence of characters anywhere,
-    including by pure coincidence: "reallyclever.com.au" contains
-    "lever.co" as a substring of "...cLEVER.COm.au..." despite having
-    nothing to do with Lever — every page on that real company's own site
-    was being recorded as a fake Lever hit before this fix (2026-08). The
-    previous second branch (a broad "lever" in host and ".co" in host
-    check, meant to catch speculative "levergreen"/"leverjobs" OpenPostings
-    subdomains with no confirmed real URL example backing it) has been
-    REMOVED entirely — it was even looser than the bug above (didn't even
-    require the two substrings to be adjacent) and had no verified
-    real-world pattern to justify the false-positive risk it carried."""
+    """2026-08: removed the old second fallback branch (`"lever" in host
+    and ".co" in host`) — confirmed via research to be a real false-
+    positive risk, since ".co" is also a substring of ".com", so ANY host
+    containing "lever" anywhere plus ".com" anywhere (e.g. a coincidental
+    "myleverage.example.com") would match and have its first path segment
+    wrongly returned as a slug. No alternate real Lever subdomain was
+    found to justify a broader match than the documented jobs.lever.co."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "lever.co"):
-        return None
-    parts = parsed.path.strip("/").split("/")
-    slug = parts[0] if parts else None
-    if slug and slug.lower() not in SKIP_SLUGS:
-        return slug
+    if host == "lever.co" or host.endswith(".lever.co"):
+        parts = parsed.path.strip("/").split("/")
+        slug = parts[0] if parts else None
+        if slug and slug.lower() not in SKIP_SLUGS:
+            return slug
     return None
 
 
 def _url_to_slug_ashby(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "ashbyhq.com"):
+    if "ashbyhq.com" in host:
         parts = parsed.path.strip("/").split("/")
         slug = parts[0] if parts else None
         if slug and slug.lower() not in SKIP_SLUGS:
@@ -426,7 +396,7 @@ def _url_to_slug_ashby(url: str) -> str | None:
 def _url_to_slug_bamboohr(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "bamboohr.com"):
+    if "bamboohr.com" in host:
         slug = host.replace(".bamboohr.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
@@ -436,7 +406,7 @@ def _url_to_slug_bamboohr(url: str) -> str | None:
 def _url_to_slug_icims(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "icims.com"):
+    if "icims.com" in host:
         # Pattern: careers-{slug}.icims.com or {slug}.icims.com
         slug = host.replace(".icims.com", "").lower()
         slug = re.sub(r"^careers-", "", slug)
@@ -445,16 +415,29 @@ def _url_to_slug_icims(url: str) -> str | None:
     return None
 
 
+_WORKDAY_LOCALE_SEGMENT_RE = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
+
+
 def _url_to_slug_workday(url: str) -> str | None:
+    """2026-08: confirmed via research that many real Workday career-site
+    URLs carry a locale segment (e.g. /en-US/) before the site id —
+    convergys.wd1.myworkdayjobs.com/en-US/external_us/jobs,
+    workday.wd5.myworkdayjobs.com/en-US/Workday/?q=... — both real, live
+    examples. Previously path_parts[0] was taken unconditionally, so on
+    these URLs it wrongly returned "en-US" as the site_id instead of the
+    real one. Locale-free URLs (mastercard.wd1.myworkdayjobs.com/
+    CorporateCareers) are unaffected either way."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "myworkdayjobs.com"):
-        # Pattern: {company}.wd{N}.myworkdayjobs.com/{site_id}
+    if "myworkdayjobs.com" in host:
+        # Pattern: {company}.wd{N}.myworkdayjobs.com/[{locale}/]{site_id}
         parts = host.split(".")
         company = parts[0]
         wd = parts[1] if len(parts) > 1 else ""
-        path_parts = parsed.path.strip("/").split("/")
-        site_id = path_parts[0] if path_parts and path_parts[0] else ""
+        path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+        if path_parts and _WORKDAY_LOCALE_SEGMENT_RE.match(path_parts[0]):
+            path_parts = path_parts[1:]
+        site_id = path_parts[0] if path_parts else ""
         if company and wd and site_id:
             return f"{company}|{wd}|{site_id}"
     return None
@@ -463,7 +446,7 @@ def _url_to_slug_workday(url: str) -> str | None:
 def _url_to_slug_rippling(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "rippling.com"):
+    if "rippling.com" in host:
         # Pattern 1: ats.rippling.com/{company}/jobs (most common in OpenPostings)
         parts = parsed.path.strip("/").split("/")
         if parts and parts[0] and parts[0].lower() not in SKIP_SLUGS:
@@ -475,23 +458,42 @@ def _url_to_slug_rippling(url: str) -> str | None:
     return None
 
 
+# {company}.workable.com is the confirmed, common, real Workable pattern
+# (e.g. https://my-company.workable.com/) — the code previously ONLY
+# matched apply.workable.com/{slug} and silently dropped this far more
+# common subdomain form entirely. Reserved subdomains excluded below are
+# Workable's own infra/marketing hosts, not customer boards.
+_WORKABLE_RESERVED_SUBDOMAINS = {"www", "apply", "jobs", "help", "careers",
+                                  "jobseekers", "partners", "support", "grow"}
+# apply.workable.com/{token}/... also has a legacy job-shortlink family
+# (apply.workable.com/j/{id}, /i/{id}) where the first path segment is a
+# literal single-letter route marker, not a company slug — excluded so
+# it isn't wrongly returned as one.
+_WORKABLE_RESERVED_PATH_TOKENS = {"j", "i"}
+
+
 def _url_to_slug_workable(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "workable.com"):
+    if "workable.com" not in host:
+        return None
+    if host == "apply.workable.com":
         parts = parsed.path.strip("/").split("/")
-        # apply.workable.com/{slug}
-        if host == "apply.workable.com" and parts:
+        if parts and parts[0]:
             slug = parts[0].lower()
-            if slug and slug not in SKIP_SLUGS:
+            if slug and slug not in SKIP_SLUGS and slug not in _WORKABLE_RESERVED_PATH_TOKENS:
                 return slug
+        return None
+    sub = host.replace(".workable.com", "").lower()
+    if sub and sub not in SKIP_SLUGS and sub not in _WORKABLE_RESERVED_SUBDOMAINS:
+        return sub
     return None
 
 
 def _url_to_slug_recruitee(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "recruitee.com"):
+    if "recruitee.com" in host:
         slug = host.replace(".recruitee.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
@@ -499,27 +501,33 @@ def _url_to_slug_recruitee(url: str) -> str | None:
 
 
 def _url_to_slug_smartrecruiters(url: str) -> str | None:
+    """2026-08: tightened to the two real job-board subdomains only.
+    The old blanket `"smartrecruiters.com" in host` check also matched
+    every OTHER smartrecruiters.com subdomain — www (marketing site),
+    developers (API docs), api, etc. — and returned each of THEIR nav
+    paths (blog, resources, pricing, docs...) as if they were company
+    slugs, since none of those happen to be in SKIP_SLUGS. Given this
+    project's past SmartRecruiters false-positive incident (their shared
+    API 200'd identically for real and fake slugs), this class of bug
+    gets zero benefit of the doubt — restricted to the confirmed real
+    job-board hosts, with the old subdomain-fallback branch removed since
+    it's now redundant (those two hosts already covered above)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "smartrecruiters.com"):
-        # Pattern: jobs.smartrecruiters.com/{CompanyName} or
-        # careers.smartrecruiters.com/{CompanyName}
-        parts = parsed.path.strip("/").split("/")
-        if parts and parts[0]:
-            slug = parts[0]
-            if slug.lower() not in SKIP_SLUGS and slug.lower() not in ("jobs", "careers", "posting"):
-                return slug
-        # Fallback: subdomain-based {company}.smartrecruiters.com
-        sub = host.replace(".smartrecruiters.com", "").lower()
-        if sub and sub not in SKIP_SLUGS and sub not in ("jobs", "careers", "www"):
-            return sub
+    if host not in ("jobs.smartrecruiters.com", "careers.smartrecruiters.com"):
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if parts and parts[0]:
+        slug = parts[0]
+        if slug.lower() not in SKIP_SLUGS and slug.lower() not in ("jobs", "careers", "posting"):
+            return slug
     return None
 
 
 def _url_to_slug_taleo(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "taleo.net"):
+    if "taleo.net" in host:
         company = host.replace(".taleo.net", "").lower()
         path_match = re.search(r"/careersection/([^/]+)/", parsed.path)
         if company and path_match:
@@ -533,10 +541,22 @@ def _url_to_slug_oracle_cloud(url: str) -> str | None:
     """Extract slug from Oracle Cloud HCM URLs.
     URL format: {tenant}.fa.{region}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{site}/...
     Slug format: '{host_prefix}|{site_number}' where host_prefix is everything before .oraclecloud.com
-    e.g. 'eeho.fa.us2|CX_1'"""
+    e.g. 'eeho.fa.us2|CX_1'
+
+    2026-08: added the /hcmUI/CandidateExperience/ path requirement.
+    oraclecloud.com is Oracle's SHARED hosting domain for every Fusion
+    Cloud app — ERP, CRM, Financials, HCM, not just recruiting — and the
+    old code would fall back to returning the bare host_prefix as a
+    "slug" for ANY oraclecloud.com URL that didn't match /sites/, which
+    would silently misidentify a login page, an ERP screen, or any other
+    non-recruiting page on the same pod as a job board. Same false-
+    positive shape as the SmartRecruiters incident, caught before it
+    could repeat."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "oraclecloud.com"):
+    if "oraclecloud.com" not in host:
+        return None
+    if "/hcmui/candidateexperience/" not in parsed.path.lower():
         return None
     # Extract full host prefix (e.g. 'eeho.fa.us2' from 'eeho.fa.us2.oraclecloud.com')
     host_prefix = host.replace(".oraclecloud.com", "").lower()
@@ -546,14 +566,15 @@ def _url_to_slug_oracle_cloud(url: str) -> str | None:
     site_match = re.search(r"/sites/([^/]+)", parsed.path)
     if site_match:
         return f"{host_prefix}|{site_match.group(1)}"
-    # Fallback: host prefix only (site can be discovered later)
+    # Fallback: host prefix only (site can be discovered later) — safe
+    # now that the CandidateExperience path check above gates this branch.
     return host_prefix
 
 
 def _url_to_slug_brassring(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "brassring.com"):
+    if "brassring.com" in host:
         qs = parse_qs(parsed.query)
         pid = None
         sid = None
@@ -581,7 +602,7 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
     excluding "scripts" here just stops it from being a WRONG one."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "teamtailor.com"):
+    if "teamtailor.com" in host:
         slug = host.replace(".teamtailor.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "scripts", "cdn", "support"):
             return slug
@@ -615,7 +636,7 @@ def _url_to_slug_successfactors(url: str) -> str | None:
 def _url_to_slug_breezyhr(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "breezy.hr"):
+    if "breezy.hr" in host:
         slug = host.replace(".breezy.hr", "").lower()
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
@@ -629,7 +650,7 @@ def _url_to_slug_breezyhr(url: str) -> str | None:
 def _url_to_slug_applytojob(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "applytojob.com"):
+    if "applytojob.com" in host:
         slug = host.replace(".applytojob.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
@@ -639,7 +660,7 @@ def _url_to_slug_applytojob(url: str) -> str | None:
 def _url_to_slug_hrmdirect(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "hrmdirect.com"):
+    if "hrmdirect.com" in host:
         slug = host.replace(".hrmdirect.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
@@ -647,43 +668,37 @@ def _url_to_slug_hrmdirect(url: str) -> str | None:
 
 
 def _url_to_slug_softgarden(url: str) -> str | None:
+    """2026-08: added .career.softgarden.de / .softgarden.de — confirmed
+    via softgarden's own support docs that companyname.career.softgarden.de
+    is their STANDARD/default career-page domain (not just the .io form),
+    with a real live example found (alloheim.career.softgarden.de). The
+    old code only recognized .softgarden.io and silently missed every
+    customer on this default domain."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "softgarden.io"):
-        slug = host.replace(".softgarden.io", "").lower()
-        if slug and slug not in SKIP_SLUGS and slug != "www":
-            return slug
-    # Also handle api.softgarden.io/api/.../jobboards/{channelId} — anchored
-    # the same way (was a bare "softgarden" in host substring check before,
-    # with no domain suffix requirement at all).
-    if _host_matches_domain(host, "softgarden.io"):
+    for suffix in (".softgarden.io", ".career.softgarden.de", ".softgarden.de"):
+        if host.endswith(suffix):
+            slug = host[: -len(suffix)].lower()
+            if slug and slug not in SKIP_SLUGS and slug != "www":
+                return slug
+    # Also handle api.softgarden.io/api/.../jobboards/{channelId}
+    if "softgarden" in host:
         path_match = re.search(r"/jobboards/([^/]+)", parsed.path)
         if path_match:
             return path_match.group(1)
     return None
 
 
-# Zoho's own regional data centers, each with its own zohorecruit TLD variant
-# (confirmed live 2026-08 against Zoho's own multi-DC documentation — see
-# https://www.zoho.com/recruit/developer-guide/apiv2/multi-dc.html — accounts.zoho.com/.com.au/.eu/.in/.com.cn/.jp).
-# 'zohorecruit.com.au' in particular is a REAL live domain (confirmed via a
-# direct fetch of a knightfrank.zohorecruit.com.au career page during the
-# 2026-08 discovery.py anchoring-fix audit), not a substring-collision false
-# positive — a naive '.zohorecruit.com' suffix check would have wrongly
-# rejected it (it ends in '.com.au', not '.com'), so each regional TLD is
-# checked explicitly rather than derived from the base domain.
-_ZOHORECRUIT_DOMAINS = (
-    "zohorecruit.com", "zohorecruit.com.au", "zohorecruit.eu",
-    "zohorecruit.in", "zohorecruit.com.cn", "zohorecruit.jp",
-)
-
-
 def _url_to_slug_zoho(url: str) -> str | None:
+    """2026-08: added .zohorecruit.eu — confirmed real, in-active-use EU
+    region domain (multiple distinct live customer boards found, e.g.
+    eu.zohorecruit.eu, bpicnetwork.zohorecruit.eu). Old code only matched
+    .zohorecruit.com and silently missed every EU-region customer."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    for domain in _ZOHORECRUIT_DOMAINS:
-        if _host_matches_domain(host, domain):
-            slug = host[: -(len(domain) + 1)].lower()  # strip ".<domain>"
+    for suffix in (".zohorecruit.com", ".zohorecruit.eu"):
+        if host.endswith(suffix):
+            slug = host[: -len(suffix)].lower()
             if slug and slug not in SKIP_SLUGS and slug != "www":
                 return slug
     return None
@@ -695,12 +710,15 @@ def _url_to_slug_paylocity(url: str) -> str | None:
     Only accepts UUID-format IDs (numeric IDs are deprecated and return 404)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "paylocity.com"):
+    if "paylocity.com" not in host:
         return None
     # Path: /recruiting/jobs/All/{uuid}/{CompanyName}
     parts = parsed.path.strip("/").split("/")
-    # Need at least: recruiting/jobs/All/{id}/{name}
-    if len(parts) >= 5 and parts[0] == "recruiting" and parts[1] == "jobs":
+    # Need at least: recruiting/jobs/All/{id}/{name}. 2026-08: lowercase
+    # both segments before comparing — confirmed real customer URLs use
+    # capitalized paths too (e.g. .../Recruiting/Jobs/All/...), which the
+    # old exact-lowercase comparison silently failed to match at all.
+    if len(parts) >= 5 and parts[0].lower() == "recruiting" and parts[1].lower() == "jobs":
         company_id = parts[3]
         company_name = parts[4]
         # Only accept UUID-format IDs (8-4-4-4-12 hex pattern)
@@ -716,7 +734,7 @@ def _url_to_slug_paylocity(url: str) -> str | None:
 def _url_to_slug_joincom(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "join.com"):
+    if "join.com" not in host:
         return None
     # Pattern: join.com/companies/{slug} or join.com/companies/{slug}/jobs/...
     parts = parsed.path.strip("/").split("/")
@@ -741,20 +759,26 @@ def _url_to_slug_personio(url: str) -> str | None:
 def _url_to_slug_ycombinator(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if _host_matches_domain(host, "workatastartup.com"):
+    if "workatastartup.com" in host:
         parts = parsed.path.strip("/").split("/")
         # Pattern: /companies/{slug}
         if len(parts) >= 2 and parts[0] == "companies":
             slug = parts[1]
             if slug and slug.lower() not in SKIP_SLUGS:
                 return slug
-        # Pattern: /{slug} (direct slug in path)
+        # Pattern: /{slug} (direct slug in path). 2026-08: expanded the
+        # reserved-route exclusion list — the site has more top-level nav
+        # routes than just jobs/about/faq that would otherwise be wrongly
+        # returned as a company slug.
         elif len(parts) >= 1 and parts[0]:
             slug = parts[0]
-            if slug.lower() not in SKIP_SLUGS and slug not in ("jobs", "about", "faq"):
+            if (slug.lower() not in SKIP_SLUGS
+                    and slug.lower() not in ("jobs", "about", "faq", "login", "candidates",
+                                              "mission", "legal", "privacy", "terms", "apply",
+                                              "press", "blog", "signup", "companies")):
                 return slug
     # OpenPostings may store YC URLs as ycombinator.com/companies/{slug}
-    if _host_matches_domain(host, "ycombinator.com"):
+    if "ycombinator.com" in host:
         parts = parsed.path.strip("/").split("/")
         if len(parts) >= 2 and parts[0] == "companies":
             slug = parts[1]
@@ -768,7 +792,7 @@ def _url_to_slug_eploy(url: str) -> str | None:
     Pattern: {slug}.eploy.net/candidate/jobboard/..."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "eploy.net"):
+    if "eploy.net" not in host:
         return None
     slug = host.replace(".eploy.net", "").lower()
     if slug and slug not in SKIP_SLUGS and slug != "www":
@@ -785,7 +809,7 @@ def _url_to_slug_folkshr(url: str) -> str | None:
     and better-linked). Same path shape on both, same slug format."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not (_host_matches_domain(host, "folksats.app") or _host_matches_domain(host, "glowinthecloud.com")):
+    if "folksats.app" not in host and "glowinthecloud.com" not in host:
         return None
     parts = parsed.path.strip("/").split("/")
     if parts and parts[0]:
@@ -803,7 +827,7 @@ def _url_to_slug_jobadder(url: str) -> str | None:
     company name alone."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "jobadder.com"):
+    if "jobadder.com" not in host:
         return None
     parts = parsed.path.strip("/").split("/")
     if len(parts) >= 2 and parts[0] and parts[1]:
@@ -818,10 +842,23 @@ def _url_to_slug_jobvite(url: str) -> str | None:
     Pattern: jobs.jobvite.com/{company}[/jobs|/job/{id}|/...] — the board
     homepage itself carries no extra path segment. A second, alias URL
     family also exists: jobs.jobvite.com/careers/{company}/... (same
-    board, "careers/" literal prefix) — both resolve to the same slug."""
+    board, "careers/" literal prefix) — both resolve to the same slug.
+
+    2026-08: added a guard against the legacy app.jobvite.com/CompanyJobs/
+    Careers.aspx?c={code}&j={id} family (confirmed still live/referenced)
+    — its real company identifier is the `c` query param, not the path;
+    the old code would take parts[0] ("companyjobs") as a fake slug since
+    that word isn't in SKIP_SLUGS. Now reads `c` directly for that family
+    and returns None rather than a wrong slug if it's missing."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "jobvite.com"):
+    if "jobvite.com" not in host:
+        return None
+    if "careers.aspx" in parsed.path.lower():
+        qs = parse_qs(parsed.query)
+        code = (qs.get("c") or [None])[0]
+        if code and code.lower() not in SKIP_SLUGS:
+            return code
         return None
     parts = parsed.path.strip("/").split("/")
     if parts and parts[0].lower() == "careers":
@@ -839,7 +876,7 @@ def _url_to_slug_adp(url: str) -> str | None:
     job-requisitions API — our internal slug format is '{cid}|{ccId}'."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "adp.com"):
+    if "adp.com" not in host:
         return None
     qs = parse_qs(parsed.query)
     cid = (qs.get("cid") or qs.get("CID") or [None])[0]
@@ -857,7 +894,7 @@ def _extract_adp_legacy_client(url: str) -> str | None:
     live, working client→cid resolver (see _resolve_adp_legacy_client)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "adp.com") or "/jobs/apply/posting.html" not in parsed.path:
+    if "adp.com" not in host or "/jobs/apply/posting.html" not in parsed.path:
         return None
     qs = parse_qs(parsed.query)
     client = (qs.get("client") or [None])[0]
@@ -931,7 +968,7 @@ def _url_to_slug_avature(url: str) -> str | None:
     subdomain and ignores path entirely; the subdomain alone is the slug."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if not _host_matches_domain(host, "avature.net"):
+    if "avature.net" not in host:
         return None
     slug = host.replace(".avature.net", "").lower()
     if slug and slug not in SKIP_SLUGS and slug != "www":
@@ -1202,7 +1239,12 @@ CC_PLATFORM_PATTERNS = {
     # specific wd numbers, which would silently miss real companies on
     # any instance not explicitly listed.
     "workday": ["*.myworkdayjobs.com/*"],
-    "workable": ["apply.workable.com/*"],
+    # 2026-08: added the broad *.workable.com/* pattern — {company}.workable.com
+    # is the confirmed common real form, not just apply.workable.com/{slug}.
+    # Broad on purpose (same reasoning as avature below): the extractor
+    # itself (_url_to_slug_workable) already filters out Workable's own
+    # reserved/infra subdomains, so this costs nothing in false positives.
+    "workable": ["apply.workable.com/*", "*.workable.com/*"],
     "recruitee": ["*.recruitee.com/api/offers*", "*.recruitee.com/o/*"],
     "smartrecruiters": ["jobs.smartrecruiters.com/*", "careers.smartrecruiters.com/*"],
     "rippling": ["*.rippling.com/careers*", "*.rippling.com/jobs*"],
@@ -1216,18 +1258,19 @@ CC_PLATFORM_PATTERNS = {
     "oracle_cloud_hcm": ["*.oraclecloud.com/hcmUI/CandidateExperience/*"],
     "paylocity": ["recruiting.paylocity.com/recruiting/jobs/*"],
     "hrmdirect": ["*.hrmdirect.com/employment/*"],
-    # Widened 2026-08 to Zoho's other real regional DC domains (see
-    # _ZOHORECRUIT_DOMAINS in _url_to_slug_zoho) — previously only the US
-    # .com domain was searched, silently missing e.g. AU customers on
-    # zohorecruit.com.au (confirmed live during the anchoring-fix audit).
-    "zoho": ["*.zohorecruit.com/jobs/*", "*.zohorecruit.com.au/jobs/*",
-             "*.zohorecruit.eu/jobs/*", "*.zohorecruit.in/jobs/*"],
+    # 2026-08: added the .eu region domain — confirmed real, in-active-use
+    # (multiple distinct live customer boards found on zohorecruit.eu).
+    "zoho": ["*.zohorecruit.com/jobs/*", "*.zohorecruit.eu/jobs/*"],
     # "api.softgarden.io/.../jobboards/{channelId}/..." added 2026-08 —
     # confirmed real (softgarden's own dev docs), and _url_to_slug_softgarden
     # already parses this shape via its /jobboards/ regex — it just wasn't
     # being searched for yet.
+    # 2026-08: added career.softgarden.de — confirmed via softgarden's own
+    # support docs to be their STANDARD/default career-page domain, not
+    # just an alternate — the .io form alone was missing most customers.
     "softgarden": ["*.softgarden.io/en/vacancies*", "*.softgarden.io/vacancies*",
-                    "*.softgarden.io/job/*", "api.softgarden.io/*/jobboards/*"],
+                    "*.softgarden.io/job/*", "api.softgarden.io/*/jobboards/*",
+                    "*.career.softgarden.de/*"],
     # New (2026-08):
     "eploy": ["*.eploy.net/candidate/jobboard/*"],
     # Folks HR: folksats.app is the post-2025-rebrand domain; glowinthecloud.com
