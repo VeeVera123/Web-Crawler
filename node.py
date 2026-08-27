@@ -44,7 +44,8 @@ log = logging.getLogger("node")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-STAGING_TABLE = "quarantine"  # was ctlog_probe_results — one place to rename it again
+STAGING_TABLE = "archive_ii"  # was ctlog_probe_results, then quarantine — one place to rename it again
+ARCHIVE_III_TABLE = "archive_iii"  # was scrape_test
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=6)
@@ -78,7 +79,7 @@ CAREER_PATHS = [
 # "unemployment" matched via "employment", and "joints" matched via
 # "join" (e.g. a blog post at /blog/3-pizza-joints-near-me was pulled in
 # as a "career-like" URL purely because of that substring). Confirmed via
-# a real scrape_test audit — see _BLOG_LIKE_PATH_RE and
+# a real archive_iii audit — see _BLOG_LIKE_PATH_RE and
 # _looks_like_sentence_slug below for the other two fixes from that
 # same audit; this one alone doesn't catch every case (a blog post
 # titled "you-bet-your-career" genuinely contains the whole word
@@ -89,7 +90,7 @@ CAREER_LIKE_RE = re.compile(
 SITEMAP_MAX_FOLLOW = 8
 SITEMAP_INDEX_PATHS = ("/sitemap.xml", "/sitemap_index.xml")
 
-# 2026-08 scrape_test audit: sitemap URLs shaped like a blog post, news
+# 2026-08 archive_iii audit: sitemap URLs shaped like a blog post, news
 # article, or press release — even ones CAREER_LIKE_RE legitimately
 # matches on a real word (e.g. "...why-hiring-a-property-manager-is-
 # smart", "...how-to-stand-out-in-energy-recruitment") — are almost never
@@ -102,7 +103,7 @@ _BLOG_LIKE_PATH_RE = re.compile(
 
 
 def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
-    """2026-08 scrape_test audit: a real career page's path is a short
+    """2026-08 archive_iii audit: a real career page's path is a short
     page NAME ("careers", "current-openings", "join-our-team" — 1-3
     hyphen-separated words). An article/blog TITLE used as a slug runs
     much longer ("sap-successfactors-talent-modules-implementation-for-
@@ -118,7 +119,7 @@ def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
     words = [w for w in segments[-1].split("-") if w]
     return len(words) > max_words
 
-# scrape_test quality gate (2026-08): a career-path/sitemap fetch that
+# archive_iii quality gate (2026-08): a career-path/sitemap fetch that
 # 200'd isn't automatically "a real career page" — plenty of sites soft-
 # redirect any unknown path back to the homepage with a 200 status, or
 # serve a near-empty stub, or just happen to have SOME unrelated content
@@ -132,7 +133,7 @@ MIN_CAREER_PAGE_TEXT_CHARS = 250
 
 # Hiring-vocabulary check (2026-08): deliberately NOT role-specific (no
 # "customer success"/"account management" here — that's ats_scrapers.py's
-# job later, once scrape_test's candidates have been reviewed). This only
+# job later, once archive_iii's candidates have been reviewed). This only
 # answers "does this page actually read like it's about jobs at all,"
 # which a bare text-length check can't tell apart from an unrelated page
 # of similar length. STRONG phrases are specific enough that finding just
@@ -414,7 +415,7 @@ def _parse_detect(html: str, base_url: str, target_geo_countries: set[str]
     return hits, country, method, text_len, has_hiring_vocab
 
 
-# 2026-08 scrape_test audit: a real case found — vaxcare.com's site had a
+# 2026-08 archive_iii audit: a real case found — vaxcare.com's site had a
 # bare "https://www.bamboohr.com" badge/footer link (their real job-board
 # subdomain apparently wasn't linked anywhere findable), which
 # _url_to_slug_bamboohr correctly returns None for (slug would be "www"),
@@ -444,7 +445,7 @@ def _looks_like_real_career_page(url: str, text_len: int, has_hiring_vocab: bool
     a generic page at /opportunities), and pages that ARE on a known ATS
     vendor's own domain but didn't yield a parseable slug — all common
     enough on real sites that skipping these checks would flood
-    scrape_test with junk that isn't a genuine in-house career page."""
+    archive_iii with junk that isn't a genuine in-house career page."""
     if text_len < MIN_CAREER_PAGE_TEXT_CHARS:
         return False
     if not has_hiring_vocab:
@@ -464,7 +465,7 @@ def _looks_like_real_career_page(url: str, text_len: int, has_hiring_vocab: bool
 def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
     """Picks the longest-text page among fetched candidates that had NO
     ATS hit but passes the quality gate — the best guess at a genuine
-    in-house/unsupported-ATS career page worth capturing into scrape_test."""
+    in-house/unsupported-ATS career page worth capturing into archive_iii."""
     best = None
     for c in candidates:
         if c["hits"]:
@@ -575,25 +576,26 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
     not just the first one. Returns (ats_hit_rows, career_page_capture):
     ats_hit_rows is (ats, slug, matched_url, domain, tier, country,
     country_method) same as before; country is opportunistic, never a
-    gate — these rows go to `quarantine` exactly as they always have.
-    career_page_capture (2026-08, for scrape_test) is ONLY ever populated
+    gate — these rows go to `archive_ii` exactly as they always have.
+    career_page_capture (2026-08, for archive_iii) is ONLY ever populated
     when NO known ATS was matched anywhere on the company's site — a
     genuine in-house/unrecognized-platform career page — since anything
-    that DID match a known ATS already has a full quarantine row and
+    that DID match a known ATS already has a full archive_ii row and
     doesn't need a second, separate record. Shape:
-    {"root_domain","company_name","career_page_url","website_url"}, or
-    None if nothing worth capturing turned up (homepage unreachable, a
-    known ATS was found instead, or no page cleared the quality gate).
-    domain_names is an optional {domain: company_name} lookup a seed
-    source can supply (e.g. kaggle_probe.py has real names); callers that
-    don't have names can omit it — company_name falls back to the domain
-    itself."""
+    {"company_name","career_page_url","website_url"} — no root_domain (
+    dropped 2026-08, was a pure duplicate of website_url; website_url is
+    now archive_iii's own unique/upsert key) — or None if nothing worth
+    capturing turned up (homepage unreachable, a known ATS was found
+    instead, or no page cleared the quality gate). domain_names is an
+    optional {domain: company_name} lookup a seed source can supply (e.g.
+    kaggle_probe.py has real names); callers that don't have names can
+    omit it — company_name falls back to the domain itself."""
     loop = asyncio.get_running_loop()
     company_name = (domain_names or {}).get(domain) or domain
 
     def _capture(career_url: str) -> dict:
         return {
-            "root_domain": domain, "company_name": company_name,
+            "company_name": company_name,
             "career_page_url": career_url, "website_url": f"https://{domain}",
         }
 
@@ -628,7 +630,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
         hits, _, _ = await _detect(html, final_url)
         if hits:
             stats["hits_from_homepage"] += 1
-            stats["known_ats_found"] += 1  # -> quarantine only, not scrape_test
+            stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
             return ([(ats, slug, url, domain, "homepage", best_country, best_method) for ats, slug, url in hits],
                     None)
 
@@ -647,7 +649,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
         merged = _collapse_hits([c["hits"] for c in career_candidates])
         if merged:
             stats["hits_from_career_path"] += 1
-            stats["known_ats_found"] += 1  # -> quarantine only, not scrape_test
+            stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
             return ([(ats, slug, url, domain, "career_path", best_country, best_method) for ats, slug, url in merged],
                     None)
 
@@ -659,7 +661,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
             loc_urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", sm_xml, re.I)
             # 2026-08: added the blog-path and sentence-slug exclusions
             # (see their definitions above) alongside the existing
-            # CAREER_LIKE_RE match — confirmed via a scrape_test audit
+            # CAREER_LIKE_RE match — confirmed via a archive_iii audit
             # that CAREER_LIKE_RE alone lets through a meaningful amount
             # of editorial content (blog posts, press releases) that
             # merely discusses hiring/recruiting as a topic.
@@ -680,7 +682,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
             merged = _collapse_hits([c["hits"] for c in sitemap_candidates])
             if merged:
                 stats["hits_from_sitemap"] += 1
-                stats["known_ats_found"] += 1  # -> quarantine only, not scrape_test
+                stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
                 hit_url = next(c["url"] for c in sitemap_candidates if c["hits"])
                 return ([(ats, slug, url, domain, "sitemap", best_country, best_method) for ats, slug, url in merged],
                         None)
@@ -690,7 +692,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
 
         stats["dropped_no_ats"] += 1
         if best_inhouse:
-            stats["inhouse_career_page_captured"] += 1  # -> scrape_test
+            stats["inhouse_career_page_captured"] += 1  # -> archive_iii
             return [], _capture(best_inhouse["url"])
         return [], None
 
@@ -700,7 +702,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
 async def _upsert_rows(session: aiohttp.ClientSession, table: str, on_conflict: str,
                         rows: list[dict]) -> int:
     """Shared upsert plumbing for every Supabase staging table this engine
-    writes to (quarantine, scrape_test, and any future one) — retried
+    writes to (archive_ii, archive_iii, and any future one) — retried
     (unlike crawl requests — this hits ONE shared endpoint many shards
     write to concurrently, where a transient 500 is worth retrying; a
     crawl miss against an independent company domain is not)."""
@@ -749,20 +751,22 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
     return await _upsert_rows(session, STAGING_TABLE, "ats,slug", rows)
 
 
-async def write_career_pages_to_scrape_test(session: aiohttp.ClientSession, rows: list[dict]) -> int:
-    """rows: {"root_domain","company_name","career_page_url","website_url",
+async def write_career_pages_to_archive_iii(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+    """rows: {"company_name","career_page_url","website_url",
     "discovery_method"} (from crawl_one's career_page_capture — only ever
     produced when no known ATS matched — plus discovery_method attached by
-    crawl_batch). Upserts on root_domain —
-    a re-crawled company updates last_seen/career_page_url in place rather
-    than duplicating. date_added is deliberately left OUT of the payload:
-    the column's DEFAULT now() only fires on a true first INSERT, and
-    since we never send it on an UPDATE, Postgres's merge-duplicates
-    ON CONFLICT leaves the original date_added untouched."""
+    crawl_batch). Upserts on website_url (2026-08: root_domain was dropped
+    as a pure duplicate of this field, so website_url is now archive_iii's
+    identity key instead) — a re-crawled company updates last_seen/
+    career_page_url in place rather than duplicating. date_added is
+    deliberately left OUT of the payload: the column's DEFAULT now() only
+    fires on a true first INSERT, and since we never send it on an
+    UPDATE, Postgres's merge-duplicates ON CONFLICT leaves the original
+    date_added untouched."""
     now_iso = datetime.now(timezone.utc).isoformat()
     for r in rows:
         r["last_seen"] = now_iso
-    return await _upsert_rows(session, "scrape_test", "root_domain", rows)
+    return await _upsert_rows(session, ARCHIVE_III_TABLE, "website_url", rows)
 
 
 # ── shared batch driver ───────────────────────────────────────────────────
@@ -780,11 +784,11 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     _crawl_and_write_hosts) with the same batching/dedup/time-budget logic
     copy-pasted twice. Returns (done, elapsed, rate, time_budget_hit).
 
-    2026-08: also writes to scrape_test — every career page crawl_one
-    found (ATS-matched or in-house/unsupported), independent of whether
-    it produced a quarantine row. domain_names is optional ({domain:
-    name}, e.g. kaggle_probe.py has real company names); omit it and
-    scrape_test rows just use the domain as company_name."""
+    2026-08: also writes to archive_iii — every in-house/unsupported
+    career page crawl_one found (never a known-ATS one — those already
+    got a full archive_ii row). domain_names is optional ({domain: name},
+    e.g. kaggle_probe.py has real company names); omit it and archive_iii
+    rows just use the domain as company_name."""
     tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, domain_names)
              for d in domains]
     elapsed, rate = 0.0, 0.0
@@ -819,8 +823,8 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                     "ats": ats, "slug": slug, "source_hostname": matched_url[:250],
                     "root_domain": domain, "country": country, "discovery_method": discovery_method,
                 })
-            if career_capture and career_capture["root_domain"] not in seen_domains:
-                seen_domains.add(career_capture["root_domain"])
+            if career_capture and career_capture["website_url"] not in seen_domains:
+                seen_domains.add(career_capture["website_url"])
                 scrape_rows.append({**career_capture, "discovery_method": discovery_method})
         written = 0
         if batch_rows:
@@ -828,7 +832,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
             found_rows.extend(batch_rows)
         written_scrape = 0
         if scrape_rows:
-            written_scrape = await write_career_pages_to_scrape_test(session, scrape_rows)
+            written_scrape = await write_career_pages_to_archive_iii(session, scrape_rows)
 
         done = min(i + batch_size, len(tasks))
         elapsed = time.monotonic() - crawl_start
@@ -840,8 +844,8 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                  f"(hit rate so far: {hit_n / max(stats['companies_attempted'], 1) * 100:.2f}%)")
         if scrape_rows:
             log.info(f"    → {written_scrape}/{len(scrape_rows)} in-house/unsupported career pages written to "
-                     f"scrape_test (running totals: {stats['known_ats_found']} known-ats found → quarantine, "
-                     f"{stats['inhouse_career_page_captured']} in-house → scrape_test)")
+                     f"{ARCHIVE_III_TABLE} (running totals: {stats['known_ats_found']} known-ats found → "
+                     f"{STAGING_TABLE}, {stats['inhouse_career_page_captured']} in-house → {ARCHIVE_III_TABLE})")
     return len(tasks), elapsed, rate, time_budget_hit
 
 
