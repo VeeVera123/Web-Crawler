@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -76,6 +77,66 @@ CAREER_LIKE_RE = re.compile(
     "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS), re.I)
 SITEMAP_MAX_FOLLOW = 8
 SITEMAP_INDEX_PATHS = ("/sitemap.xml", "/sitemap_index.xml")
+
+# scrape_test quality gate (2026-08): a career-path/sitemap fetch that
+# 200'd isn't automatically "a real career page" — plenty of sites soft-
+# redirect any unknown path back to the homepage with a 200 status, or
+# serve a near-empty stub, or just happen to have SOME unrelated content
+# (a blog post, a generic "solutions" page) sitting at a guessed path
+# like /join or /opportunities. A page must clear the text length AND not
+# be the homepage in disguise AND actually read like a jobs page to count
+# as a genuine in-house career page candidate. None of this applies to
+# ATS-matched hits — a real ATS link found on a page is trusted regardless
+# of surrounding text; this gate exists only for the no-known-ATS branch.
+MIN_CAREER_PAGE_TEXT_CHARS = 250
+
+# Hiring-vocabulary check (2026-08): deliberately NOT role-specific (no
+# "customer success"/"account management" here — that's ats_scrapers.py's
+# job later, once scrape_test's candidates have been reviewed). This only
+# answers "does this page actually read like it's about jobs at all,"
+# which a bare text-length check can't tell apart from an unrelated page
+# of similar length. STRONG phrases are specific enough that finding just
+# one is real evidence on its own; WEAK single words are common enough
+# elsewhere that two DISTINCT ones are required together before they
+# count (one incidental word shouldn't be enough).
+_STRONG_HIRING_PHRASES = [
+    "apply now", "apply today", "apply here", "apply online",
+    "current openings", "current opening", "current vacancies", "current vacancy",
+    "open positions", "open position", "open roles", "open role",
+    "job openings", "job opening", "we're hiring", "we are hiring", "now hiring",
+    "join our team", "join the team", "join our growing team",
+    "submit your application", "submit an application", "submit your resume",
+    "send us your resume", "send your resume", "send your cv", "submit your cv",
+    "employment opportunities", "career opportunities", "job opportunities",
+    "view openings", "view our openings", "view current openings", "view all jobs",
+    "see our openings", "browse openings", "browse our jobs", "browse open positions",
+    "explore careers", "explore our careers", "explore open positions",
+    "search jobs", "search openings", "search open positions",
+    "find your next role", "find a job", "meet our hiring team",
+    "equal opportunity employer", "we are an equal opportunity employer",
+    "join us and", "grow your career with us", "build your career with us",
+]
+_WEAK_HIRING_WORDS = [
+    "career", "careers", "job", "jobs", "position", "positions",
+    "vacancy", "vacancies", "hiring", "recruit", "recruiting", "recruitment",
+    "recruiter", "talent", "opening", "openings", "employment",
+    "internship", "internships", "apprenticeship", "apprenticeships",
+    "resume", "cv", "candidate", "candidates", "applicant", "applicants",
+    "onboarding", "workforce", "headcount",
+]
+_STRONG_HIRING_RE = re.compile("|".join(re.escape(p) for p in _STRONG_HIRING_PHRASES), re.I)
+_WEAK_HIRING_RE = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in _WEAK_HIRING_WORDS) + r")\b", re.I)
+
+
+def _has_hiring_vocabulary(text: str) -> bool:
+    """True if the page's visible text actually reads like a jobs page —
+    one STRONG phrase is sufficient on its own; otherwise at least two
+    DIFFERENT weak words are required (guards against one incidental word
+    — e.g. a single stray "career" in an About Us blurb — being enough)."""
+    if _STRONG_HIRING_RE.search(text):
+        return True
+    weak_hits = {m.group(0).lower() for m in _WEAK_HIRING_RE.finditer(text)}
+    return len(weak_hits) >= 2
 
 ACCEPT_ANY_COUNTRY = set(geo.COUNTRY_ALIASES.values()) | set(geo.COUNTRY_CONTINENT.keys())
 
@@ -287,14 +348,62 @@ def detect_country(html: str, target_geo_countries: set[str]) -> tuple[str | Non
     return None, None
 
 
+def _extract_visible_text(html: str) -> str:
+    """Visible body text, reusing the tree already being parsed in
+    _parse_detect (no extra fetch/parse pass) — feeds both the text-length
+    check and the hiring-vocabulary check, so it's deliberately cheap and
+    approximate rather than a full readability-style extraction."""
+    try:
+        tree = LexborHTMLParser(html)
+        body = tree.css_first("body")
+        return body.text(strip=True) if body else tree.root.text(strip=True)
+    except Exception:
+        return ""
+
+
 def _parse_detect(html: str, base_url: str, target_geo_countries: set[str]
-                   ) -> tuple[list[tuple[str, str, str]], str | None, str | None]:
+                   ) -> tuple[list[tuple[str, str, str]], str | None, str | None, int, bool]:
     """CPU-bound per-page work, bundled into one picklable function so it
     can run in a ProcessPoolExecutor worker (see crawl_one/PARSE_WORKERS)."""
     urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
     hits = _detect_ats_hits(urls)
     country, method = detect_country(html, target_geo_countries)
-    return hits, country, method
+    text = _extract_visible_text(html)
+    text_len = len(text)
+    has_hiring_vocab = _has_hiring_vocabulary(text)
+    return hits, country, method, text_len, has_hiring_vocab
+
+
+def _looks_like_real_career_page(url: str, text_len: int, has_hiring_vocab: bool, origin: str) -> bool:
+    """Rejects near-empty stub pages, homepage-in-disguise redirects
+    (unknown path -> 200 the actual homepage), and pages that are simply
+    unrelated content sitting at a guessed path (a blog post at /join,
+    a generic page at /opportunities) — all common enough on real sites
+    that skipping these checks would flood scrape_test with junk that
+    isn't a genuine in-house career page."""
+    if text_len < MIN_CAREER_PAGE_TEXT_CHARS:
+        return False
+    if not has_hiring_vocab:
+        return False
+    path = urlparse(url).path.strip("/")
+    if path == "" and url.rstrip("/") == origin.rstrip("/"):
+        return False
+    return True
+
+
+def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
+    """Picks the longest-text page among fetched candidates that had NO
+    ATS hit but passes the quality gate — the best guess at a genuine
+    in-house/unsupported-ATS career page worth capturing into scrape_test."""
+    best = None
+    for c in candidates:
+        if c["hits"]:
+            continue
+        if not _looks_like_real_career_page(c["url"], c["text_len"], c["has_hiring_vocab"], origin):
+            continue
+        if best is None or c["text_len"] > best["text_len"]:
+            best = c
+    return best
 
 
 # ── fetching ─────────────────────────────────────────────────────────────
@@ -388,15 +497,36 @@ def _collapse_hits(hit_lists: list[list[tuple[str, str, str]]]) -> list[tuple[st
 
 async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, domain: str,
                      stats: dict, parse_pool: concurrent.futures.ProcessPoolExecutor,
-                     target_geo_countries: set[str] = ACCEPT_ANY_COUNTRY
-                     ) -> list[tuple[str, str, str, str, str, str | None, str | None]]:
+                     target_geo_countries: set[str] = ACCEPT_ANY_COUNTRY,
+                     domain_names: dict[str, str] | None = None
+                     ) -> tuple[list[tuple[str, str, str, str, str, str | None, str | None]], dict | None]:
     """Homepage -> career paths -> sitemap (guessed, then robots.txt).
     Every page fetched at a hit-bearing tier is merged (_collapse_hits),
-    not just the first one. Returns (ats, slug, matched_url, domain, tier,
-    country, country_method) — country is opportunistic, never a gate;
-    rows are returned as soon as a tier produces any ATS hits regardless
-    of whether country resolved."""
+    not just the first one. Returns (ats_hit_rows, career_page_capture):
+    ats_hit_rows is (ats, slug, matched_url, domain, tier, country,
+    country_method) same as before; country is opportunistic, never a
+    gate — these rows go to `quarantine` exactly as they always have.
+    career_page_capture (2026-08, for scrape_test) is ONLY ever populated
+    when NO known ATS was matched anywhere on the company's site — a
+    genuine in-house/unrecognized-platform career page — since anything
+    that DID match a known ATS already has a full quarantine row and
+    doesn't need a second, separate record. Shape:
+    {"root_domain","company_name","career_page_url","website_url"}, or
+    None if nothing worth capturing turned up (homepage unreachable, a
+    known ATS was found instead, or no page cleared the quality gate).
+    domain_names is an optional {domain: company_name} lookup a seed
+    source can supply (e.g. kaggle_probe.py has real names); callers that
+    don't have names can omit it — company_name falls back to the domain
+    itself."""
     loop = asyncio.get_running_loop()
+    company_name = (domain_names or {}).get(domain) or domain
+
+    def _capture(career_url: str) -> dict:
+        return {
+            "root_domain": domain, "company_name": company_name,
+            "career_page_url": career_url, "website_url": f"https://{domain}",
+        }
+
     async with sem:
         stats["companies_attempted"] += 1
         candidates = [f"https://{domain}"]
@@ -411,7 +541,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                 break
         if not page:
             stats["homepage_unreachable"] += 1
-            return []
+            return [], None
 
         final_url, html = page
         stats["homepage_fetched"] += 1
@@ -419,31 +549,39 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
 
         async def _detect(html_, url_):
             nonlocal best_country, best_method
-            hits, country, method = await loop.run_in_executor(
+            hits, country, method, text_len, has_hiring_vocab = await loop.run_in_executor(
                 parse_pool, _parse_detect, html_, url_, target_geo_countries)
             if country and best_country is None:
                 best_country, best_method = country, method
-            return hits
+            return hits, text_len, has_hiring_vocab
 
-        hits = await _detect(html, final_url)
+        hits, _, _ = await _detect(html, final_url)
         if hits:
             stats["hits_from_homepage"] += 1
-            return [(ats, slug, url, domain, "homepage", best_country, best_method) for ats, slug, url in hits]
+            stats["known_ats_found"] += 1  # -> quarantine only, not scrape_test
+            return ([(ats, slug, url, domain, "homepage", best_country, best_method) for ats, slug, url in hits],
+                    None)
 
         origin_parts = urlparse(final_url)
         origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
         career_pages = await asyncio.gather(
             *[_fetch_page(session, urljoin(origin, p), stats) for p in CAREER_PATHS])
-        career_hit_lists = []
+        career_candidates = []
         for cp in career_pages:
             if not cp:
                 continue
             cp_url, cp_html = cp
-            career_hit_lists.append(await _detect(cp_html, cp_url))
-        merged = _collapse_hits(career_hit_lists)
+            cp_hits, cp_text_len, cp_hiring_vocab = await _detect(cp_html, cp_url)
+            career_candidates.append({"url": cp_url, "hits": cp_hits, "text_len": cp_text_len,
+                                       "has_hiring_vocab": cp_hiring_vocab})
+        merged = _collapse_hits([c["hits"] for c in career_candidates])
         if merged:
             stats["hits_from_career_path"] += 1
-            return [(ats, slug, url, domain, "career_path", best_country, best_method) for ats, slug, url in merged]
+            stats["known_ats_found"] += 1  # -> quarantine only, not scrape_test
+            return ([(ats, slug, url, domain, "career_path", best_country, best_method) for ats, slug, url in merged],
+                    None)
+
+        best_inhouse = _best_inhouse_candidate(career_candidates, origin)
 
         sitemap = await _fetch_sitemap(session, origin, stats)
         if sitemap:
@@ -452,30 +590,43 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
             career_like = [u for u in loc_urls if CAREER_LIKE_RE.search(u)]
             sm_pages = await asyncio.gather(
                 *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]])
-            sitemap_hit_lists = []
+            sitemap_candidates = []
             for sp in sm_pages:
                 if not sp:
                     continue
                 sp_url, sp_html = sp
-                sitemap_hit_lists.append(await _detect(sp_html, sp_url))
-            merged = _collapse_hits(sitemap_hit_lists)
+                sp_hits, sp_text_len, sp_hiring_vocab = await _detect(sp_html, sp_url)
+                sitemap_candidates.append({"url": sp_url, "hits": sp_hits, "text_len": sp_text_len,
+                                            "has_hiring_vocab": sp_hiring_vocab})
+            merged = _collapse_hits([c["hits"] for c in sitemap_candidates])
             if merged:
                 stats["hits_from_sitemap"] += 1
-                return [(ats, slug, url, domain, "sitemap", best_country, best_method) for ats, slug, url in merged]
+                stats["known_ats_found"] += 1  # -> quarantine only, not scrape_test
+                hit_url = next(c["url"] for c in sitemap_candidates if c["hits"])
+                return ([(ats, slug, url, domain, "sitemap", best_country, best_method) for ats, slug, url in merged],
+                        None)
+            sitemap_inhouse = _best_inhouse_candidate(sitemap_candidates, origin)
+            if sitemap_inhouse and (not best_inhouse or sitemap_inhouse["text_len"] > best_inhouse["text_len"]):
+                best_inhouse = sitemap_inhouse
 
         stats["dropped_no_ats"] += 1
-        return []
+        if best_inhouse:
+            stats["inhouse_career_page_captured"] += 1  # -> scrape_test
+            return [], _capture(best_inhouse["url"])
+        return [], None
 
 
 # ── Supabase I/O ─────────────────────────────────────────────────────────
 
-async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list[dict]) -> int:
-    """rows: {"ats","slug","source_hostname","root_domain","country","discovery_method"}.
-    Retried (unlike crawl requests — this hits ONE shared endpoint many
-    shards write to concurrently, where a transient 500 is worth retrying;
-    a crawl miss against an independent company domain is not)."""
+async def _upsert_rows(session: aiohttp.ClientSession, table: str, on_conflict: str,
+                        rows: list[dict]) -> int:
+    """Shared upsert plumbing for every Supabase staging table this engine
+    writes to (quarantine, scrape_test, and any future one) — retried
+    (unlike crawl requests — this hits ONE shared endpoint many shards
+    write to concurrently, where a transient 500 is worth retrying; a
+    crawl miss against an independent company domain is not)."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        log.warning("SUPABASE_URL/SUPABASE_KEY not set — cannot write to staging table.")
+        log.warning(f"SUPABASE_URL/SUPABASE_KEY not set — cannot write to {table}.")
         return 0
     if not rows:
         return 0
@@ -494,8 +645,8 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
                 await asyncio.sleep(1.5 * (2 ** (attempt - 1)))
             try:
                 async with session.post(
-                    f"{SUPABASE_URL}/rest/v1/{STAGING_TABLE}",
-                    headers=headers, params={"on_conflict": "ats,slug"}, json=chunk,
+                    f"{SUPABASE_URL}/rest/v1/{table}",
+                    headers=headers, params={"on_conflict": on_conflict}, json=chunk,
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as r:
                     if r.status >= 500:
@@ -507,11 +658,32 @@ async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list
                 last_err = str(e)
                 if isinstance(e, aiohttp.ClientResponseError) and e.status < 500:
                     break
-        log.error(f"Failed to write a chunk of {len(chunk)} rows after retries — DATA LOST: {last_err}")
+        log.error(f"Failed to write a chunk of {len(chunk)} rows to {table} after retries — DATA LOST: {last_err}")
         return 0
 
     results = await asyncio.gather(*(_write_chunk(c) for c in chunks))
     return sum(results)
+
+
+async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+    """rows: {"ats","slug","source_hostname","root_domain","country","discovery_method"}."""
+    return await _upsert_rows(session, STAGING_TABLE, "ats,slug", rows)
+
+
+async def write_career_pages_to_scrape_test(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+    """rows: {"root_domain","company_name","career_page_url","website_url",
+    "discovery_method"} (from crawl_one's career_page_capture — only ever
+    produced when no known ATS matched — plus discovery_method attached by
+    crawl_batch). Upserts on root_domain —
+    a re-crawled company updates last_seen/career_page_url in place rather
+    than duplicating. date_added is deliberately left OUT of the payload:
+    the column's DEFAULT now() only fires on a true first INSERT, and
+    since we never send it on an UPDATE, Postgres's merge-duplicates
+    ON CONFLICT leaves the original date_added untouched."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        r["last_seen"] = now_iso
+    return await _upsert_rows(session, "scrape_test", "root_domain", rows)
 
 
 # ── shared batch driver ───────────────────────────────────────────────────
@@ -520,14 +692,22 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        stats: dict, parse_pool: concurrent.futures.ProcessPoolExecutor,
                        target_geo_countries: set[str], discovery_method: str,
                        found_rows: list[dict], crawl_start: float, time_budget_seconds: float,
-                       time_budget_minutes: int, batch_size: int = 3000, unit_label: str = "companies"
+                       time_budget_minutes: int, batch_size: int = 3000, unit_label: str = "companies",
+                       domain_names: dict[str, str] | None = None
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
     be duplicated (class_a_probe's inline loop, host_crawl_v2's
     _crawl_and_write_hosts) with the same batching/dedup/time-budget logic
-    copy-pasted twice. Returns (done, elapsed, rate, time_budget_hit)."""
-    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries) for d in domains]
+    copy-pasted twice. Returns (done, elapsed, rate, time_budget_hit).
+
+    2026-08: also writes to scrape_test — every career page crawl_one
+    found (ATS-matched or in-house/unsupported), independent of whether
+    it produced a quarantine row. domain_names is optional ({domain:
+    name}, e.g. kaggle_probe.py has real company names); omit it and
+    scrape_test rows just use the domain as company_name."""
+    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, domain_names)
+             for d in domains]
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
     for i in range(0, len(tasks), batch_size):
@@ -541,9 +721,11 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         batch = tasks[i:i + batch_size]
         results = await asyncio.gather(*batch)
         batch_rows = []
+        scrape_rows = []
         seen_keys = set()
+        seen_domains = set()
         duplicates_collapsed = 0
-        for hits in results:
+        for hits, career_capture in results:
             for ats, slug, matched_url, domain, tier, country, method in hits:
                 # (ats, slug) is the table's real unique constraint —
                 # Postgres's ON CONFLICT can't touch the same row twice in
@@ -558,10 +740,16 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                     "ats": ats, "slug": slug, "source_hostname": matched_url[:250],
                     "root_domain": domain, "country": country, "discovery_method": discovery_method,
                 })
+            if career_capture and career_capture["root_domain"] not in seen_domains:
+                seen_domains.add(career_capture["root_domain"])
+                scrape_rows.append({**career_capture, "discovery_method": discovery_method})
         written = 0
         if batch_rows:
             written = await write_rows_to_staging_table(session, batch_rows)
             found_rows.extend(batch_rows)
+        written_scrape = 0
+        if scrape_rows:
+            written_scrape = await write_career_pages_to_scrape_test(session, scrape_rows)
 
         done = min(i + batch_size, len(tasks))
         elapsed = time.monotonic() - crawl_start
@@ -569,8 +757,12 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         hit_n = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
         dup_note = f", {duplicates_collapsed} dup collapsed" if duplicates_collapsed else ""
         log.info(f"  {done}/{len(tasks)} {unit_label} — {rate:.1f}/sec — {elapsed:.0f}s elapsed")
-        log.info(f"    → {written}/{len(batch_rows)} written{dup_note} — {len(found_rows)} hits total "
+        log.info(f"    → {written}/{len(batch_rows)} written to {STAGING_TABLE}{dup_note} — {len(found_rows)} hits total "
                  f"(hit rate so far: {hit_n / max(stats['companies_attempted'], 1) * 100:.2f}%)")
+        if scrape_rows:
+            log.info(f"    → {written_scrape}/{len(scrape_rows)} in-house/unsupported career pages written to "
+                     f"scrape_test (running totals: {stats['known_ats_found']} known-ats found → quarantine, "
+                     f"{stats['inhouse_career_page_captured']} in-house → scrape_test)")
     return len(tasks), elapsed, rate, time_budget_hit
 
 
