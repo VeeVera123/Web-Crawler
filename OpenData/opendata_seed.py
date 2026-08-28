@@ -61,7 +61,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Crawler/
-sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for discovery.py
+sys.path.insert(0, _ROOT)                       # discovery.py lives at repo root on GitHub
+sys.path.insert(0, os.path.join(_ROOT, "Main"))  # fallback, for a local Main/ layout
 from discovery import SKIP_SLUGS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
