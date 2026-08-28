@@ -35,13 +35,13 @@ on:
         required: false
         default: ""
       shard_count:
-        description: "Number of parallel shards"
+        description: "Parallel shards. shard_count x concurrency must stay well under Supabase's free connection pool (~30 headroom confirmed 2026-08-28) — 3 x 8 = 24 is the safe default."
         required: false
-        default: "10"
+        default: "3"
       concurrency:
-        description: "Concurrent checks in flight, per shard"
+        description: "Concurrent checks in flight, per shard. See shard_count note — don't raise either without confirming real DB headroom first."
         required: false
-        default: "30"
+        default: "8"
       compare_slug_registry:
         description: "After finalize, report archive_ii vs slug_registry overlap (unique ats+slug pairs)"
         required: false
