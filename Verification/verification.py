@@ -155,7 +155,24 @@ log = logging.getLogger("verification")
 
 REQUEST_TIMEOUT = node.REQUEST_TIMEOUT
 USER_AGENT = node.USER_AGENT
-DEFAULT_CONCURRENCY = 30
+# 2026-08-28 incident: confirmed via direct query that this Supabase project's
+# max_connections=60, and ~30 of those are permanently held by Supabase's own
+# internals (pooler/realtime/auth/storage/dashboard) even at idle — leaving
+# roughly 30 connections of real headroom, TOTAL, shared across every shard
+# AND every other workflow (daily_scan, kaggle_probe) that might be running
+# at the same time. The old default of 30 here, multiplied across
+# shard_count shards (10 by default in verification.yml), asked for up to
+# 300 simultaneous requests — ~10x the actual budget — and reliably caused
+# "PGRST003 Timed out acquiring connection from connection pool" followed by
+# cascading 504s (visible directly in Supabase's postgres/edge logs). This
+# is NOT fixable with client-side retry/backoff: the server-side pool is
+# genuinely out of connections, so retrying just resubmits into the same
+# exhausted queue. Lowered so shard_count(3, see verification.yml) x
+# concurrency(8) = 24 stays under the ~30-connection headroom with margin
+# for other workflows. Raise only after confirming real headroom via
+# `select count(*) from pg_stat_activity` and this project's
+# max_connections — never by guessing.
+DEFAULT_CONCURRENCY = 8
 
 
 def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
