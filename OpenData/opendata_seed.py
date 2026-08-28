@@ -53,6 +53,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
 import zipfile
 
@@ -109,14 +110,26 @@ def _open_streaming_source(url: str):
     if url.endswith(".zip"):
         # zipfile needs seekable access — a ZIP's central directory is at
         # the END of the file, so reading it requires a seek that a pure
-        # HTTP stream can't do. This is the one path that isn't fully
-        # streaming: it buffers the compressed (not decompressed) bytes in
-        # memory. Prefer a .gz or plain .csv source URL if the dataset
-        # offers one — both stay genuinely streaming end-to-end.
-        log.warning("Source is a .zip — buffering the compressed file in memory for its "
-                    "central directory (a .gz or plain .csv URL would avoid this).")
-        buf = io.BytesIO(r.content)
-        zf = zipfile.ZipFile(buf)
+        # HTTP stream can't do. FIXED 2026-08 (was io.BytesIO(r.content) —
+        # buffered the whole compressed file in RAM and reliably OOM'd on
+        # a multi-GB zip: GitHub-hosted runners have ~7GB RAM but ~14GB
+        # disk, and a bare MemoryError's str() is EMPTY, which is exactly
+        # what showed up as "Failed to open/read source: " with nothing
+        # after the colon). Streams to a local temp file on disk instead —
+        # only the compressed zip touches disk in full; the inner CSV is
+        # still read back via ZipExtFile, which decompresses on read, so
+        # the decompressed data is never held in full anywhere.
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        log.info(f"  Zip source — streaming download to disk first ({tmp.name}), not RAM...")
+        downloaded = 0
+        try:
+            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                tmp.write(chunk)
+                downloaded += len(chunk)
+        finally:
+            tmp.close()
+        log.info(f"  Downloaded {downloaded / 1e9:.2f}GB to disk")
+        zf = zipfile.ZipFile(tmp.name)
         inner_name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
         return io.TextIOWrapper(zf.open(inner_name), encoding="utf-8", errors="ignore")
     elif url.endswith(".gz"):
@@ -170,7 +183,12 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
         reader = csv.reader(text_stream)
         header = next(reader, None)
     except Exception as e:
-        log.error(f"Failed to open/read source: {e}")
+        # str(e) can be EMPTY for some exceptions (MemoryError raised by
+        # the allocator, for one) — falling back to repr()/type name means
+        # the log line always says something instead of a bare trailing
+        # colon (see _open_streaming_source's zip-OOM fix for the actual
+        # case this happened).
+        log.error(f"Failed to open/read source: {e or repr(e) or type(e).__name__}")
         return 0, False, skip_rows
     if not header:
         log.error("Source is empty (no header row).")
@@ -242,7 +260,8 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
                 writer.writerow([name, domain, row_country])
                 kept += 1
     except Exception as e:
-        log.error(f"Failed mid-stream at raw row {raw_row_index:,}, {kept:,} written this run: {e}. "
+        log.error(f"Failed mid-stream at raw row {raw_row_index:,}, {kept:,} written this run: "
+                  f"{e or repr(e) or type(e).__name__}. "
                   f"To resume, set the Restart ID input to {raw_row_index} on the next seed run.")
         # Whatever was written before the failure is still a valid partial
         # file — don't delete it — but the caller must still treat this as
