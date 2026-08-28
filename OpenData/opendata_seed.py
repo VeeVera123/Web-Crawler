@@ -130,7 +130,26 @@ def _open_streaming_source(url: str):
             tmp.close()
         log.info(f"  Downloaded {downloaded / 1e9:.2f}GB to disk")
         zf = zipfile.ZipFile(tmp.name)
-        inner_name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
+        names = zf.namelist()
+        csv_names = [n for n in names if n.lower().endswith((".csv", ".tsv"))]
+        if not csv_names:
+            # FIXED 2026-08: this used to be next(n for n in ... if ...
+            # ".csv"), which raises a bare, message-less StopIteration when
+            # nothing matches — that's what actually produced the earlier
+            # "Failed to open/read source: " with nothing after the colon,
+            # NOT the RAM fix above. Rather than guess at an unconfirmed
+            # schema (Senzing's Open Data format is commonly JSON Lines,
+            # not CSV — but that's not verified for THIS file), fail loudly
+            # with the real zip contents so the actual format is visible in
+            # the log instead of silently mis-parsed or opaquely crashing.
+            preview = names[:30]
+            more = f" ...and {len(names) - 30} more" if len(names) > 30 else ""
+            raise RuntimeError(
+                f"No .csv/.tsv file found inside the zip. Contents ({len(names)} entries): "
+                f"{preview}{more} — update NAME_COLS/DOMAIN_COLS/COUNTRY_COLS (and the file-type "
+                f"handling here) once you know the real format.")
+        inner_name = csv_names[0]
+        log.info(f"  Reading '{inner_name}' from the zip ({len(names)} total entries)")
         return io.TextIOWrapper(zf.open(inner_name), encoding="utf-8", errors="ignore")
     elif url.endswith(".gz"):
         return io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8", errors="ignore")
@@ -188,7 +207,7 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
         # the log line always says something instead of a bare trailing
         # colon (see _open_streaming_source's zip-OOM fix for the actual
         # case this happened).
-        log.error(f"Failed to open/read source: {e or repr(e) or type(e).__name__}")
+        log.error(f"Failed to open/read source: {str(e) or repr(e) or type(e).__name__}")
         return 0, False, skip_rows
     if not header:
         log.error("Source is empty (no header row).")
@@ -261,7 +280,7 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
                 kept += 1
     except Exception as e:
         log.error(f"Failed mid-stream at raw row {raw_row_index:,}, {kept:,} written this run: "
-                  f"{e or repr(e) or type(e).__name__}. "
+                  f"{str(e) or repr(e) or type(e).__name__}. "
                   f"To resume, set the Restart ID input to {raw_row_index} on the next seed run.")
         # Whatever was written before the failure is still a valid partial
         # file — don't delete it — but the caller must still treat this as
