@@ -7,35 +7,34 @@ scraper for archive_ii's in-house/unsupported career pages. Both are
 launched by the single unified crawl.yml workflow (formerly daily_scan.yml).
 =======================================
 Scans 87,000+ company boards across 20+ ATS platforms (ApplyToJob retired
-2026-08 — see ats_scrapers.py's SCRAPERS dict for the current live list),
-plus 8 remote job boards (RemoteOK, Remotive, Himalayas, Arbeitnow,
-Jobicy, WeWorkRemotely, Working Nomads, FreeHire — Jooble retired 2026-08,
-see job_board_scrapers.py; Jobicy widened to cover the same ground with
-full, untruncated descriptions).
+2026-08 — see ats_scrapers.py's SCRAPERS dict for the current live list).
+
+2026-08: job board aggregators (RemoteOK, Remotive, Himalayas, Arbeitnow,
+Jobicy, WeWorkRemotely, Working Nomads, FreeHire) were disabled and
+job_board_scrapers.py removed entirely — ATS boards are now the only
+source. --job-boards-only mode is gone; discovery of new slugs from
+aggregator job URLs (populate_slug_registry(source="job_board_discovery"))
+is gone with it.
 
 Reads slugs from Supabase archive_i (formerly slug_registry — single
 source of truth, populated by node.py's crawl_batch() writing ATS-pattern
 hits directly, no intermediate staging/verify step; see node.py's module
-docstring). Job boards are scraped directly via free public JSON APIs (no
-slugs needed). Filters for CSM/Account Management roles hiring globally or
+docstring). Filters for CSM/Account Management roles hiring globally or
 in Africa. Pushes matches to Supabase (PostgreSQL), tagged
 source_pipeline='crawl_i' (the jobs table column's default).
 
 LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
 
 CLI modes (see .github/workflows/crawl.yml for how these compose):
-  python crawl_i.py                                   Full run: all ATS boards + job boards +
-                                                        cleanup, in one process. Default for
-                                                        manual/local use — unchanged behavior.
+  python crawl_i.py                                   Full run: all ATS boards + cleanup,
+                                                        in one process. Default for manual/
+                                                        local use — unchanged behavior.
   python crawl_i.py --shard 0 --total-shards 8         ATS boards only, this shard's 1/8 slice.
-                                                        No job boards, no cleanup (see run_finalize()).
-  python crawl_i.py --job-boards-only                  Job board aggregators only, no ATS boards,
-                                                        no cleanup. Runs once per scan (not once per
-                                                        shard), as its own CI job.
+                                                        No cleanup (see run_finalize()).
   python crawl_i.py --finalize                         Cleanup only (mark/delete stale jobs, 31-day
                                                         hard-delete threshold — was 60). Run ONCE,
-                                                        after every shard + the job-boards job have
-                                                        finished (gate with `needs:` in CI).
+                                                        after every shard has finished (gate with
+                                                        `needs:` in CI).
 """
 
 import argparse
@@ -46,7 +45,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import LLM_PROVIDER, LOCATION_PROVIDERS
 from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions, SCRAPERS
-from job_board_scrapers import scrape_all_job_boards, get_discovered_slugs
 from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
@@ -56,7 +54,7 @@ from classifier import (
 )
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
-    get_all_slugs, cleanup_stale_jobs, populate_slug_registry,
+    get_all_slugs, cleanup_stale_jobs,
     SupabaseFetchError,
 )
 
@@ -337,10 +335,14 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     return matched, matched_confidences
 
 
-def _run_pipeline(boards: list[tuple[str, str]], include_job_boards: bool) -> None:
+def _run_pipeline(boards: list[tuple[str, str]]) -> None:
     """Shared core: scrape → filter → enrich → push, with its own
     scan_report row. Does NOT run cleanup_stale_jobs() — see
-    run_finalize() for why that's split out."""
+    run_finalize() for why that's split out.
+
+    2026-08: job board aggregators (RemoteOK, Remotive, etc. — see
+    job_board_scrapers.py) were disabled and the file removed entirely —
+    ATS boards are now the only source Crawl I scrapes."""
     report_id = start_scan_report()
 
     try:
@@ -351,17 +353,6 @@ def _run_pipeline(boards: list[tuple[str, str]], include_job_boards: bool) -> No
             log.info(f"\nScraping {len(boards)} boards across "
                      f"{len(set(a for a, _ in boards))} ATS platforms...")
             all_jobs, boards_ok, boards_failed = scrape_all(boards)
-
-        if include_job_boards:
-            log.info(f"\nScraping remote job boards...")
-            board_jobs = scrape_all_job_boards()
-            all_jobs.extend(board_jobs)
-
-            # Save any new company slugs discovered from aggregator job URLs
-            discovered = get_discovered_slugs()
-            if discovered:
-                log.info(f"\nDiscovered {len(discovered)} new slugs from job board URLs → saving to archive_i")
-                populate_slug_registry(discovered, source="job_board_discovery")
 
         if not all_jobs:
             log.info("No jobs found across any source.")
@@ -437,9 +428,9 @@ def _run_pipeline(boards: list[tuple[str, str]], include_job_boards: bool) -> No
 
 
 def run_finalize() -> None:
-    """Cleanup pass — call this ONCE, after every scraping shard and the
-    job-boards job have all finished (gate with `needs:` in CI so this
-    doesn't start until they're done).
+    """Cleanup pass — call this ONCE, after every scraping shard has
+    finished (gate with `needs:` in CI so this doesn't start until
+    they're done).
 
     This is deliberately a separate step rather than the last line of each
     shard's own run. cleanup_stale_jobs() marks/deletes jobs across the
@@ -470,17 +461,13 @@ def main():
                          help="This shard's index (0-based), for GitHub Actions matrix parallelism")
     parser.add_argument("--total-shards", type=int, default=1,
                          help="Total number of shards; each processes ~1/N of the ATS boards")
-    parser.add_argument("--job-boards-only", action="store_true",
-                         help="Only scrape job board aggregators (RemoteOK, Remotive, etc.) — no ATS boards")
     parser.add_argument("--finalize", action="store_true",
-                         help="Only run cleanup (mark/delete stale jobs) — call once after all shards/jobs finish")
+                         help="Only run cleanup (mark/delete stale jobs) — call once after all shards finish")
     args = parser.parse_args()
 
     mode_note = ""
     if args.total_shards > 1:
         mode_note = f" (shard {args.shard}/{args.total_shards})"
-    elif args.job_boards_only:
-        mode_note = " (job-boards-only)"
     elif args.finalize:
         mode_note = " (finalize)"
 
@@ -492,42 +479,32 @@ def main():
         run_finalize()
         return
 
-    boards: list[tuple[str, str]] = []
-    if not args.job_boards_only:
-        log.info("Loading company slugs from Supabase...")
-        try:
-            boards = load_slugs(shard=args.shard, total_shards=args.total_shards)
-        except SupabaseFetchError as e:
-            # A real fetch failure (e.g. the one-off 401 that made shard 2/8
-            # silently scrape nothing) is NOT the same as "this shard
-            # legitimately has zero boards" below — it must fail loudly
-            # (non-zero exit) so the GitHub Actions job shows red instead of
-            # a quiet, misleading "completed" with 0 jobs found.
-            log.error(f"Failed to load slugs from Supabase after retries — aborting shard: {e}")
-            sys.exit(1)
-        if not boards:
-            if args.total_shards == 1:
-                log.error("No boards to scrape.")
-                return
-            # A single shard legitimately CAN come back empty (e.g. more
-            # shards than boards on some platform) — not an error, just
-            # nothing for this shard to do.
-            log.warning(f"Shard {args.shard}/{args.total_shards}: no boards assigned, skipping ATS scrape.")
+    log.info("Loading company slugs from Supabase...")
+    try:
+        boards = load_slugs(shard=args.shard, total_shards=args.total_shards)
+    except SupabaseFetchError as e:
+        # A real fetch failure (e.g. the one-off 401 that made shard 2/8
+        # silently scrape nothing) is NOT the same as "this shard
+        # legitimately has zero boards" below — it must fail loudly
+        # (non-zero exit) so the GitHub Actions job shows red instead of
+        # a quiet, misleading "completed" with 0 jobs found.
+        log.error(f"Failed to load slugs from Supabase after retries — aborting shard: {e}")
+        sys.exit(1)
+    if not boards:
+        if args.total_shards == 1:
+            log.error("No boards to scrape.")
+            return
+        # A single shard legitimately CAN come back empty (e.g. more
+        # shards than boards on some platform) — not an error, just
+        # nothing for this shard to do.
+        log.warning(f"Shard {args.shard}/{args.total_shards}: no boards assigned, skipping ATS scrape.")
 
-    # Standalone/manual full run (no sharding, not --job-boards-only) scrapes
-    # job boards inline, same as before. Sharded ATS runs do NOT — job boards
-    # are scraped once per scan via a separate `--job-boards-only` CI job,
-    # not once per shard (the aggregator APIs aren't slug-based, so there's
-    # nothing to shard, and hitting them 8x would just be wasted/duplicate
-    # requests against those APIs' own rate limits).
-    include_job_boards = args.job_boards_only or args.total_shards == 1
-
-    _run_pipeline(boards, include_job_boards=include_job_boards)
+    _run_pipeline(boards)
 
     # Only the unsharded, manual/local full run does cleanup inline.
     # Sharded CI runs call `--finalize` as their own separate, `needs`-gated
     # step instead (see run_finalize() docstring for why that matters).
-    if args.total_shards == 1 and not args.job_boards_only:
+    if args.total_shards == 1:
         run_finalize()
 
 
