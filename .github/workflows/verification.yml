@@ -35,13 +35,13 @@ on:
         required: false
         default: ""
       shard_count:
-        description: "Parallel shards. shard_count x concurrency must stay well under Supabase's free connection pool (~30 headroom confirmed 2026-08-28) — 3 x 8 = 24 is the safe default."
+        description: "Parallel GH Actions shards. Prefer MORE shards over higher concurrency (matches main.py's proven-safe 1-request-at-a-time-per-shard pattern) — 10 x 2 = 20 total in-flight is the safe default. Also mind GitHub's ~20-concurrent-job account cap if daily_scan (9 jobs) might overlap."
         required: false
-        default: "3"
+        default: "10"
       concurrency:
-        description: "Concurrent checks in flight, per shard. See shard_count note — don't raise either without confirming real DB headroom first."
+        description: "Concurrent checks in flight PER SHARD (asyncio, unlike main.py's synchronous 1-at-a-time calls) — keep this LOW (1-2) and raise shard_count instead if you want more throughput. shard_count x concurrency must stay well under Supabase's connection headroom (~30 confirmed 2026-08-28)."
         required: false
-        default: "8"
+        default: "2"
       compare_slug_registry:
         description: "After finalize, report archive_ii vs slug_registry overlap (unique ats+slug pairs)"
         required: false
