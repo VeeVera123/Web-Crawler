@@ -99,7 +99,10 @@ jobs:
 
   crawl:
     needs: [seed, prepare-matrix]
-    if: always()   # runs whether or not `seed` ran this time — reads whatever's on the Release
+    # Checking run_seed means "seed only" — skip crawl entirely that run.
+    # Unchecked means "crawl only" (seed itself is skipped via its own
+    # `if`, so `always()` here just means "don't block on a skipped seed").
+    if: ${{ always() && github.event.inputs.run_seed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
