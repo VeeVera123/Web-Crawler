@@ -167,12 +167,29 @@ USER_AGENT = node.USER_AGENT
 # cascading 504s (visible directly in Supabase's postgres/edge logs). This
 # is NOT fixable with client-side retry/backoff: the server-side pool is
 # genuinely out of connections, so retrying just resubmits into the same
-# exhausted queue. Lowered so shard_count(3, see verification.yml) x
-# concurrency(8) = 24 stays under the ~30-connection headroom with margin
-# for other workflows. Raise only after confirming real headroom via
+# exhausted queue.
+#
+# Follow-up finding: Main/supabase_handler.py (used by main.py / the
+# 8-shard daily_scan.yml and every other proven-stable workflow here) makes
+# ONE synchronous `requests` call at a time, per shard — no asyncio, no
+# in-process concurrency at all. N shards there means ~N connections, ever,
+# further softened because each shard's own scrape/parse work naturally
+# staggers its calls instead of firing them in a synchronized burst.
+# verification.py's asyncio.Semaphore(concurrency) is fundamentally
+# different: it lets ONE shard hold `concurrency` connections open
+# simultaneously, in a tight synchronized burst every time the semaphore
+# admits a new batch — so shard_count x concurrency is both a higher total
+# AND a burstier one than the same total spread across more shards. Given
+# that, prefer MORE shards over higher per-shard concurrency — it mirrors
+# the pattern that's actually been proven safe. Lowered so
+# shard_count(10, see verification.yml) x concurrency(2) = 20 stays
+# comfortably under the ~30-connection headroom with margin for other
+# workflows, while keeping per-shard concurrency close to main.py's
+# 1-at-a-time norm. Raise only after confirming real headroom via
 # `select count(*) from pg_stat_activity` and this project's
-# max_connections — never by guessing.
-DEFAULT_CONCURRENCY = 8
+# max_connections — never by guessing, and raise shard_count before
+# concurrency.
+DEFAULT_CONCURRENCY = 2
 
 
 def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
