@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       run_seed:
-        description: "Run the seed stage (download + filter + upload to Release)? Leave unchecked to only (re-)crawl an existing Release."
+        description: "Check to seed only (download+filter+upload — you only need this once, or to resume/refresh). Leave unchecked to crawl only, using whatever's already on the Release."
         required: false
         type: boolean
         default: false
@@ -26,6 +26,14 @@ on:
         description: "GitHub Release tag to upload to / download from"
         required: false
         default: "opendata-organizations"
+      restart_id:
+        description: "Seed only: resume from this raw row number (from a prior run's 'Restart ID' log line). Leave 0 to start from the beginning."
+        required: false
+        default: "0"
+      seed_time_budget_minutes:
+        description: "Seed only: self-stop after this many minutes and log a Restart ID, instead of risking a hard kill at GitHub's 360min job timeout."
+        required: false
+        default: "340"
       shard_count:
         description: "Crawl stage: parallel shards. Kept high (15) since this is 80M+ rows worth of candidate companies pre-filter — every speed lever available should be used."
         required: false
@@ -52,10 +60,34 @@ jobs:
       - name: Install dependencies
         run: pip install requests python-dotenv
 
+      - name: "Resume: download + rejoin this run's own prior partial output"
+        # Each run gets a fresh runner/filesystem — resuming (Restart ID >
+        # 0) means opendata_seed.py's append-mode write needs the PRIOR
+        # run's partial CSV already sitting here first, or there's nothing
+        # to append onto and progress would be silently lost instead of
+        # continued. Best-effort: a missing/never-uploaded prior file just
+        # means this becomes a fresh run from row 0 despite Restart ID
+        # being set — not fatal, just not actually resuming.
+        if: ${{ github.event.inputs.restart_id != '0' && github.event.inputs.restart_id != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
+          if gh release download "$TAG" --pattern "opendata_chunk_*.csv" --dir chunks 2>/dev/null; then
+            cat chunks/opendata_chunk_*.csv > opendata_organizations_filtered.csv
+            echo "Rejoined prior partial output: $(wc -l < opendata_organizations_filtered.csv) lines"
+          else
+            echo "No prior Release assets found for tag $TAG — starting fresh despite Restart ID being set."
+          fi
+
       - name: Download + stream-filter opendata.org Organizations
         env:
           OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
-        run: python OpenData/opendata_seed.py --output opendata_organizations_filtered.csv
+        run: |
+          python OpenData/opendata_seed.py \
+            --output opendata_organizations_filtered.csv \
+            --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
+            --time-budget-minutes ${{ github.event.inputs.seed_time_budget_minutes || '340' }}
 
       - name: Split filtered output into <2GB chunks (GitHub Release asset cap)
         run: |
