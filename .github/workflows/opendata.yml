@@ -1,145 +1,24 @@
-name: OpenData
-
-# Two-stage pipeline for opendata.org's "Organizations" dataset (see
-# OpenData/opendata_seed.py's module docstring for the full architecture):
-#
-#   seed:  downloads + stream-filters the raw source (one continuous job,
-#          can't be sharded — GitHub's 360min hard job timeout is the real
-#          ceiling here), splits the filtered output into <2GB chunks if
-#          needed, uploads them as assets on a dedicated GitHub Release.
-#          This is a manual, occasional job — NOT part of the daily
-#          schedule — re-run it only when you want to refresh the seed.
-#
-#   probe: downloads + rejoins the Release asset chunks, then shards the
-#          crawl across N parallel jobs, same shape as kaggle_probe.yml/
-#          github_org_probe.yml (both call node.crawl_batch() the same way).
+name: ATS Global Scanner
 
 on:
+  schedule:
+    - cron: "0 6 * * *"       # 06:00 UTC daily (Mon-Sat = scan, Sun = scan + enrich)
   workflow_dispatch:
-    inputs:
-      run_seed:
-        description: "Check to seed only (download+filter+upload — you only need this once, or to resume/refresh). Leave unchecked to crawl only, using whatever's already on the Release."
-        required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: "GitHub Release tag to upload to / download from"
-        required: false
-        default: "opendata-organizations"
-      restart_id:
-        description: "Seed only: resume from this raw row number (from a prior run's 'Restart ID' log line). Leave 0 to start from the beginning."
-        required: false
-        default: "0"
-      seed_time_budget_minutes:
-        description: "Seed only: self-stop after this many minutes and log a Restart ID, instead of risking a hard kill at GitHub's 360min job timeout."
-        required: false
-        default: "340"
-      shard_count:
-        description: "Crawl stage: parallel shards. Kept high (15) since this is 80M+ rows worth of candidate companies pre-filter — every speed lever available should be used."
-        required: false
-        default: "15"
 
 concurrency:
-  group: opendata-${{ github.ref }}
+  group: ats-global-scanner-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  seed:
-    if: ${{ github.event.inputs.run_seed == 'true' }}
+  # ── 8-way matrix: ATS company boards, sharded by MD5(ats|slug) % 8 ──
+  scrape-ats:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # the hard ceiling — see module docstring; this step cannot be sharded
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install requests python-dotenv
-
-      - name: "Resume: download + rejoin this run's own prior partial output"
-        # Each run gets a fresh runner/filesystem — resuming (Restart ID >
-        # 0) means opendata_seed.py's append-mode write needs the PRIOR
-        # run's partial CSV already sitting here first, or there's nothing
-        # to append onto and progress would be silently lost instead of
-        # continued. Best-effort: a missing/never-uploaded prior file just
-        # means this becomes a fresh run from row 0 despite Restart ID
-        # being set — not fatal, just not actually resuming.
-        if: ${{ github.event.inputs.restart_id != '0' && github.event.inputs.restart_id != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
-          if gh release download "$TAG" --pattern "opendata_chunk_*.csv" --dir chunks 2>/dev/null; then
-            cat chunks/opendata_chunk_*.csv > opendata_organizations_filtered.csv
-            echo "Rejoined prior partial output: $(wc -l < opendata_organizations_filtered.csv) lines"
-          else
-            echo "No prior Release assets found for tag $TAG — starting fresh despite Restart ID being set."
-          fi
-
-      - name: Download + stream-filter opendata.org Organizations
-        env:
-          OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
-        run: |
-          python OpenData/opendata_seed.py \
-            --output opendata_organizations_filtered.csv \
-            --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
-            --time-budget-minutes ${{ github.event.inputs.seed_time_budget_minutes || '340' }}
-
-      - name: Split filtered output into <2GB chunks (GitHub Release asset cap)
-        run: |
-          # split at 1.9GB to stay safely under the 2GiB-per-asset limit —
-          # header-only-on-the-first-chunk so a plain `cat chunk_* > joined.csv`
-          # on download reconstructs one valid CSV (see opendata_probe.py's
-          # module docstring / this session's earlier join-strategy discussion).
-          split -b 1900m -d --additional-suffix=.csv opendata_organizations_filtered.csv opendata_chunk_
-          ls -la opendata_chunk_*.csv
-
-      - name: Upload chunks to Release (replacing any existing assets on this tag)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
-            --title "OpenData Organizations (filtered)" \
-            --notes "Filtered opendata.org Organizations dataset — see OpenData/opendata_seed.py. Regenerated $(date -u +%Y-%m-%d)."
-          # Clear old chunks first so a smaller re-filter never leaves stale
-          # extra chunk files behind that a naive `cat chunk_*` would wrongly include.
-          gh release view "$TAG" --json assets -q '.assets[].name' | grep '^opendata_chunk_' | \
-            xargs -r -I{} gh release delete-asset "$TAG" {} -y || true
-          gh release upload "$TAG" opendata_chunk_*.csv --clobber
-
-  prepare-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.build.outputs.matrix }}
-    steps:
-      - name: Build shard-index matrix from shard_count input
-        id: build
-        run: |
-          SHARD_COUNT="${{ github.event.inputs.shard_count || '15' }}"
-          MATRIX_JSON=$(python3 -c "
-          import json
-          shard_count = int('$SHARD_COUNT')
-          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
-          ")
-          echo "shard_count: $SHARD_COUNT"
-          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
-
-  crawl:
-    needs: [seed, prepare-matrix]
-    # Checking run_seed means "seed only" — skip crawl entirely that run.
-    # Unchecked means "crawl only" (seed itself is skipped via its own
-    # `if`, so `always()` here just means "don't block on a skipped seed").
-    if: ${{ always() && github.event.inputs.run_seed != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -150,24 +29,96 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install aiohttp aiodns selectolax requests python-dotenv
+        run: pip install -r requirements.txt
 
-      - name: Download + rejoin Release asset chunks
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
-          gh release download "$TAG" --pattern "opendata_chunk_*.csv" --dir chunks
-          # Header-only-on-first-chunk (see the seed job's split step) — a
-          # plain concatenation is a valid single CSV.
-          cat chunks/opendata_chunk_*.csv > opendata_organizations_filtered.csv
-          wc -l opendata_organizations_filtered.csv
-
-      - name: "OpenData probe — shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '15' }}"
+      - name: Scrape ATS boards (shard ${{ matrix.shard }}/8)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          python OpenData/opendata_probe.py \
-            --shard-index ${{ matrix.shard }} \
-            --shard-count ${{ github.event.inputs.shard_count || '15' }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: cerebras
+        run: python main.py --shard ${{ matrix.shard }} --total-shards 8
+
+  # ── Job board aggregators: single runner, not sharded ──
+  scrape-job-boards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scrape job board aggregators
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
+          LLM_PROVIDER: cerebras
+        run: python main.py --job-boards-only
+
+  # ── Finalize: cleanup stale jobs — runs ONCE after ALL shards finish ──
+  finalize:
+    needs: [scrape-ats, scrape-job-boards]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Finalize (cleanup stale jobs)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python main.py --finalize
+
+  # ── Weekly slug enrichment: Sundays only ──
+  enrich-slugs:
+    if: github.event.schedule == '0 6 * * 0' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Weekly slug enrichment (all sources)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
+        run: python discovery.py --source all
