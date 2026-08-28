@@ -1,0 +1,138 @@
+name: OpenData
+
+# Two-stage pipeline for opendata.org's "Organizations" dataset (see
+# OpenData/opendata_seed.py's module docstring for the full architecture):
+#
+#   seed:  downloads + stream-filters the raw source (one continuous job,
+#          can't be sharded — GitHub's 360min hard job timeout is the real
+#          ceiling here), splits the filtered output into <2GB chunks if
+#          needed, uploads them as assets on a dedicated GitHub Release.
+#          This is a manual, occasional job — NOT part of the daily
+#          schedule — re-run it only when you want to refresh the seed.
+#
+#   probe: downloads + rejoins the Release asset chunks, then shards the
+#          crawl across N parallel jobs, same shape as kaggle_probe.yml/
+#          github_org_probe.yml (both call node.crawl_batch() the same way).
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_seed:
+        description: "Run the seed stage (download + filter + upload to Release)? Leave unchecked to only (re-)crawl an existing Release."
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: "GitHub Release tag to upload to / download from"
+        required: false
+        default: "opendata-organizations"
+      shard_count:
+        description: "Crawl stage: parallel shards. Kept high (15) since this is 80M+ rows worth of candidate companies pre-filter — every speed lever available should be used."
+        required: false
+        default: "15"
+
+concurrency:
+  group: opendata-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    if: ${{ github.event.inputs.run_seed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # the hard ceiling — see module docstring; this step cannot be sharded
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Download + stream-filter opendata.org Organizations
+        env:
+          OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
+        run: python OpenData/opendata_seed.py --output opendata_organizations_filtered.csv
+
+      - name: Split filtered output into <2GB chunks (GitHub Release asset cap)
+        run: |
+          # split at 1.9GB to stay safely under the 2GiB-per-asset limit —
+          # header-only-on-the-first-chunk so a plain `cat chunk_* > joined.csv`
+          # on download reconstructs one valid CSV (see opendata_probe.py's
+          # module docstring / this session's earlier join-strategy discussion).
+          split -b 1900m -d --additional-suffix=.csv opendata_organizations_filtered.csv opendata_chunk_
+          ls -la opendata_chunk_*.csv
+
+      - name: Upload chunks to Release (replacing any existing assets on this tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "OpenData Organizations (filtered)" \
+            --notes "Filtered opendata.org Organizations dataset — see OpenData/opendata_seed.py. Regenerated $(date -u +%Y-%m-%d)."
+          # Clear old chunks first so a smaller re-filter never leaves stale
+          # extra chunk files behind that a naive `cat chunk_*` would wrongly include.
+          gh release view "$TAG" --json assets -q '.assets[].name' | grep '^opendata_chunk_' | \
+            xargs -r -I{} gh release delete-asset "$TAG" {} -y || true
+          gh release upload "$TAG" opendata_chunk_*.csv --clobber
+
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '15' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: [seed, prepare-matrix]
+    if: always()   # runs whether or not `seed` ran this time — reads whatever's on the Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests python-dotenv
+
+      - name: Download + rejoin Release asset chunks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
+          gh release download "$TAG" --pattern "opendata_chunk_*.csv" --dir chunks
+          # Header-only-on-first-chunk (see the seed job's split step) — a
+          # plain concatenation is a valid single CSV.
+          cat chunks/opendata_chunk_*.csv > opendata_organizations_filtered.csv
+          wc -l opendata_organizations_filtered.csv
+
+      - name: "OpenData probe — shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '15' }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python OpenData/opendata_probe.py \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.shard_count || '15' }}
