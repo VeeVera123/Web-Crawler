@@ -17,38 +17,52 @@ that logic in Python when github_org_seed.py already establishes the
 "seed script writes ONE local file, the workflow handles Release upload"
 split for exactly this shape.
 
+SOURCE FORMAT (confirmed 2026-08 against the real Senzing Open Data
+"Organizations" zip): NOT a single CSV. It's a zip of 500 shard files
+named like "Organization/bq_organization_000000000123.json" — a BigQuery
+export split into many same-shaped pieces. Each shard is parsed as either
+JSON Lines (one JSON object per line — the common BigQuery export shape)
+or, if that fails on the very first line, as one whole JSON document per
+file (an array or a single object) — see _detect_json_shard_mode(). A
+plain .csv/.tsv is still supported directly (unzipped, or inside a .zip)
+in case a future source or a different opendata.org table is CSV-shaped;
+JSON is not assumed to be the only possible shape.
+
+Field names inside each JSON record were NOT hardcoded from a guess —
+Senzing's exact schema wasn't independently confirmed before this was
+written. Instead, _deep_find() searches each record's own keys (and one
+level of nesting, e.g. a "NAMES"/"ADDRESSES" list Senzing-style entity
+JSON commonly uses) for anything matching the NAME_ALIASES/DOMAIN_ALIASES/
+COUNTRY_ALIASES lists below, on the FIRST record only, and logs exactly
+what it matched (key path + real value) before processing the other 86M+
+records — so a wrong match is visible in the log immediately, not
+discovered after burning the whole run. If nothing matches, it fails
+loudly with the full first record dumped instead of silently writing
+empty/wrong data — add the real key names to the alias lists once you've
+seen that log line.
+
 Streaming end-to-end: the source is downloaded via requests' streaming
-mode and decompressed/parsed a chunk at a time — the raw file is NEVER
-written to disk in full and NEVER held in memory in full (the one
-exception is a .zip source — see _open_streaming_source's docstring: ZIP's
-central directory needs a seek, so a .gz or plain .csv source URL should
-be preferred if opendata.org offers one). This mirrors how
-common_crawl_probe.py/host_crawl_v2.py stream Common Crawl's much larger
-Parquet files instead of downloading them whole first.
+mode; only the compressed zip itself is written to disk in full (needed
+for zipfile's central-directory seek — see _download_to_tempfile()) —
+decompressed JSON/CSV content is never held in memory or on disk in full.
+This mirrors how common_crawl_probe.py/host_crawl_v2.py stream Common
+Crawl's much larger Parquet files instead of downloading them whole first.
 
 GitHub Actions' 360-minute (6-hour) hard job timeout is the real
 constraint here — the download+filter step can't usefully be sharded
-(it's one continuous stream over one source file), so it gets the whole
+(it's one continuous pass over one source file), so it gets the whole
 budget in a single job; the CRAWL step (opendata_probe.py, run from this
 script's filtered output) shards normally, same as every other probe.
 
-Column names: opendata.org's download form is gated the same way PDL's
-own free-dataset form is (see kaggle_probe.py's module docstring) — its
-exact header names weren't confirmed at the time this was written, so
-column detection uses the same alias-list approach kaggle_probe.py uses
-for PDL's own 'domain' vs 'website' naming difference, covering the
-reasonable variants rather than hardcoding one guess. If the real header
-uses something outside NAME_COLS/DOMAIN_COLS/COUNTRY_COLS below, add it
-there — everything else in this file is schema-agnostic.
-
 Usage:
-    export OPENDATA_SOURCE_URL=https://.../organizations.csv.gz   # or .zip / plain .csv
+    export OPENDATA_SOURCE_URL=https://.../organizations.zip   # .zip / .gz / plain .csv
     python opendata_seed.py --output opendata_organizations_filtered.csv
 """
 import argparse
 import csv
 import gzip
 import io
+import json
 import logging
 import os
 import re
@@ -71,12 +85,30 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(me
 log = logging.getLogger("opendata_seed")
 
 OPENDATA_SOURCE_URL = os.environ.get("OPENDATA_SOURCE_URL", "")
-PROGRESS_EVERY = 2_000_000  # raw rows scanned between progress log lines
+PROGRESS_EVERY = 2_000_000  # raw records scanned between progress log lines
 
-# Same alias-detection approach as kaggle_probe.py — see module docstring.
+# CSV header aliases (exact match, case-insensitive) — same alias-list
+# approach kaggle_probe.py uses for PDL's own 'domain' vs 'website' naming.
 NAME_COLS = ("name", "company_name", "organization_name")
 DOMAIN_COLS = ("domain", "website", "domain_name", "website_domain")
 COUNTRY_COLS = ("country", "country_code")
+
+# JSON key aliases (normalized match: lowercased, non-alphanumeric
+# stripped, so "NAME_ORG", "nameOrg", "name-org" all match "name_org") —
+# used by _deep_find() to locate the right field inside an arbitrary
+# nested JSON record without a confirmed schema. Includes generic names
+# AND Senzing-entity-resolution-typical names (PRIMARY_NAME_ORG,
+# WEBSITE_ADDRESS, ADDR_COUNTRY) as candidates — not assumed correct,
+# just plausible enough to try; the actual match is always logged so it
+# can be verified against the real data (see module docstring).
+NAME_ALIASES_JSON = {"name", "name_org", "primary_name_org", "org_name", "business_name",
+                      "legal_name", "company_name", "organization_name", "entity_name",
+                      "full_name", "display_name"}
+DOMAIN_ALIASES_JSON = {"domain", "website", "website_address", "url", "web", "homepage",
+                        "web_address", "site", "webaddress"}
+COUNTRY_ALIASES_JSON = {"country", "addr_country", "primary_country", "nationality",
+                         "registration_country", "nat_country", "country_code",
+                         "country_of_registration"}
 
 # Same list as kaggle_probe.py's DEFAULT_COUNTRIES, kept in sync deliberately
 # — both are the same "English-language-friendly, real candidate market"
@@ -90,6 +122,18 @@ DEFAULT_COUNTRIES = {
 }
 
 
+def _err(e: Exception) -> str:
+    """str(e) can be EMPTY for some exceptions (StopIteration, a bare
+    MemoryError from the allocator) — and an exception OBJECT is always
+    truthy in Python (no custom __bool__), so `e or repr(e)` never falls
+    through to repr(e) the way it looks like it should; only checking
+    str(e)'s own truthiness actually works. This is the one place that
+    logic lives so it can't regress per call-site again."""
+    return str(e) or repr(e) or type(e).__name__
+
+
+# ── CSV row source (plain .csv/.tsv, or one inside a .zip) ─────────────
+
 def _col_index(header_lower: list[str], aliases: tuple[str, ...]) -> int | None:
     for alias in aliases:
         if alias in header_lower:
@@ -97,89 +141,267 @@ def _col_index(header_lower: list[str], aliases: tuple[str, ...]) -> int | None:
     return None
 
 
-def _open_streaming_source(url: str):
-    """Returns a text-line iterator over the CSV, decompressing on the fly
-    if the URL ends in .gz or .zip. requests' stream=True means the HTTP
-    response body is never buffered whole in memory; the gzip reader below
-    is likewise fed chunk-by-chunk, not given a fully-downloaded blob."""
+def _csv_row_source(text_stream):
+    """Wraps a CSV/TSV text stream: detects the name/domain/country
+    columns from the header via alias matching, then yields (name,
+    domain, country) string triples, same shape as _json_row_source's
+    output — the shared filtering loop in stream_filter() doesn't care
+    which source produced them. Returns None (and logs why) if the header
+    can't be found or doesn't have usable columns."""
+    reader = csv.reader(text_stream)
+    header = next(reader, None)
+    if not header:
+        log.error("Source is empty (no header row).")
+        return None
+    header_lower = [h.strip().lower() for h in header]
+    name_i = _col_index(header_lower, NAME_COLS)
+    domain_i = _col_index(header_lower, DOMAIN_COLS)
+    country_i = _col_index(header_lower, COUNTRY_COLS)
+    if name_i is None or domain_i is None:
+        log.error(f"Couldn't find a name/domain column in the header: {header}")
+        return None
+    log.info(f"  columns: name='{header[name_i]}' domain='{header[domain_i]}'"
+              + (f" country='{header[country_i]}'" if country_i is not None else " (no country column)"))
+
+    def _gen():
+        for row in reader:
+            if len(row) <= domain_i or len(row) <= name_i:
+                continue
+            name = row[name_i].strip()
+            domain = row[domain_i].strip()
+            country = (row[country_i].strip() if country_i is not None and len(row) > country_i else "")
+            yield name, domain, country
+
+    return _gen()
+
+
+# ── JSON row source (a zip of many BigQuery-style shard files) ─────────
+
+def _normalize_key(k: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(k).lower())
+
+
+def _deep_find(obj, aliases: set, max_depth: int = 4, _path: tuple = ()):
+    """Recursively searches a JSON record for the first string value whose
+    key (normalized) matches one of `aliases`. Checks every key at the
+    CURRENT level before descending into any nested dict/list, so a
+    top-level match always wins over a deeper one. Returns (path, value)
+    or None; `path` is a tuple of dict-keys/list-indices that
+    _get_by_path() can replay against every later record without
+    re-searching each one."""
+    if max_depth < 0:
+        return None
+    # Normalize the alias side too — otherwise a key like "WEBSITE_ADDRESS"
+    # normalizes to "websiteaddress" but the alias "website_address" still
+    # has its underscore, so the two never match and this silently finds
+    # nothing at all. Cheap: alias sets are tiny and this only runs a
+    # handful of times total (once per field, on the first record).
+    norm_aliases = {_normalize_key(a) for a in aliases}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, str) and v.strip() and _normalize_key(k) in norm_aliases:
+                return _path + (k,), v.strip()
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)):
+                found = _deep_find(v, aliases, max_depth - 1, _path + (k,))
+                if found:
+                    return found
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            found = _deep_find(item, aliases, max_depth - 1, _path + (i,))
+            if found:
+                return found
+    return None
+
+
+def _get_by_path(obj, path: tuple) -> str:
+    cur = obj
+    try:
+        for p in path:
+            cur = cur[p]
+        return cur.strip() if isinstance(cur, str) else ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _detect_json_shard_mode(zip_path: str, first_name: str) -> str:
+    """Peeks just the first shard file's first line to decide 'lines'
+    (JSON Lines — one object per line, the standard BigQuery-export shape
+    this zip's 'bq_organization_NNNNNN.json' naming strongly suggests) vs
+    'whole' (the file is one single JSON document — an array or object)."""
+    with zipfile.ZipFile(zip_path) as zf:
+        with zf.open(first_name) as fh:
+            first_line = io.TextIOWrapper(fh, encoding="utf-8", errors="ignore").readline()
+    try:
+        json.loads(first_line)
+        return "lines"
+    except (json.JSONDecodeError, ValueError):
+        return "whole"
+
+
+def _iter_zip_json_records(zip_path: str, json_names: list[str], mode: str):
+    """Yields every JSON record across ALL shard files, in a fixed
+    (sorted) order so raw_row_index/Restart ID stays meaningful and
+    reproducible across separate runs regardless of the zip's own
+    internal listing order."""
+    for name in sorted(json_names):
+        with zipfile.ZipFile(zip_path) as zf:
+            if mode == "lines":
+                with zf.open(name) as fh:
+                    text = io.TextIOWrapper(fh, encoding="utf-8", errors="ignore")
+                    for line in text:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            yield json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue  # one malformed line shouldn't kill the whole shard
+            else:
+                with zf.open(name) as fh:
+                    try:
+                        data = json.load(fh)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    yield item
+
+
+def _json_row_source(zip_path: str, json_names: list[str]):
+    """Peeks the first record to auto-detect the name/domain/country key
+    paths (see _deep_find's docstring), logs exactly what it found, then
+    yields (name, domain, country) triples for every record across all
+    shard files — same shape _csv_row_source yields. Returns None (and
+    logs why) if name/domain can't be confidently located on the first
+    record."""
+    mode = _detect_json_shard_mode(zip_path, sorted(json_names)[0])
+    log.info(f"  JSON shard format detected: {mode} ({len(json_names)} files)")
+
+    records = _iter_zip_json_records(zip_path, json_names, mode)
+    try:
+        first = next(records)
+    except StopIteration:
+        log.error("First JSON shard file produced no records.")
+        return None
+
+    name_hit = _deep_find(first, NAME_ALIASES_JSON)
+    domain_hit = _deep_find(first, DOMAIN_ALIASES_JSON)
+    country_hit = _deep_find(first, COUNTRY_ALIASES_JSON)
+    if not name_hit or not domain_hit:
+        log.error(
+            f"Couldn't confidently find a name/domain field in the first JSON record. "
+            f"name match: {name_hit}, domain match: {domain_hit}, country match: {country_hit}. "
+            f"First record (for manual inspection — add the real key names to "
+            f"NAME_ALIASES_JSON/DOMAIN_ALIASES_JSON/COUNTRY_ALIASES_JSON): "
+            f"{json.dumps(first)[:3000]}")
+        return None
+
+    name_path, name_val = name_hit
+    domain_path, domain_val = domain_hit
+    country_path = country_hit[0] if country_hit else None
+    log.info(f"  name field: {name_path} = '{name_val}'")
+    log.info(f"  domain field: {domain_path} = '{domain_val}'")
+    log.info(f"  country field: {country_path} = '{country_hit[1]}'" if country_hit
+             else "  country field: none found (proceeding without a country filter signal)")
+
+    def _gen():
+        yield (_get_by_path(first, name_path), _get_by_path(first, domain_path),
+               _get_by_path(first, country_path) if country_path else "")
+        for rec in records:
+            yield (_get_by_path(rec, name_path), _get_by_path(rec, domain_path),
+                   _get_by_path(rec, country_path) if country_path else "")
+
+    return _gen()
+
+
+# ── Download + dispatch ─────────────────────────────────────────────────
+
+def _download_to_tempfile(url: str) -> tuple[str, int]:
+    """Streams the URL to a local temp file. Only used for .zip sources —
+    zipfile needs seekable access for its central directory (at the END
+    of the file), which a live HTTP stream can't provide. FIXED 2026-08:
+    this used to be io.BytesIO(r.content), buffering the WHOLE compressed
+    file in RAM — reliably OOM's on a multi-GB zip (GitHub-hosted runners
+    have ~7GB RAM but ~14GB disk), and a bare MemoryError's str() is
+    EMPTY, which is exactly what an earlier run's opaque "Failed to
+    open/read source: " with nothing after the colon actually was."""
+    r = requests.get(url, stream=True, timeout=60)
+    r.raise_for_status()
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    log.info(f"  Zip source — streaming download to disk first ({tmp.name}), not RAM...")
+    downloaded = 0
+    try:
+        for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+            tmp.write(chunk)
+            downloaded += len(chunk)
+    finally:
+        tmp.close()
+    log.info(f"  Downloaded {downloaded / 1e9:.2f}GB to disk")
+    return tmp.name, downloaded
+
+
+def _open_row_source(url: str):
+    """Returns a (name, domain, country)-triple generator, dispatching on
+    what's actually inside the source — a plain/gz CSV, or a zip
+    containing either CSV/TSV files or JSON shard files (see module
+    docstring). Returns None (having already logged why) on any failure
+    — callers should treat None as "nothing to process", not raise."""
+    if url.endswith(".zip"):
+        zip_path, _ = _download_to_tempfile(url)
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+        csv_names = [n for n in names if n.lower().endswith((".csv", ".tsv"))]
+        json_names = [n for n in names if n.lower().endswith(".json")]
+        if csv_names:
+            inner_name = csv_names[0]
+            log.info(f"  Reading '{inner_name}' from the zip ({len(names)} total entries)")
+            with zipfile.ZipFile(zip_path) as zf:
+                text = io.TextIOWrapper(zf.open(inner_name), encoding="utf-8", errors="ignore")
+                return _csv_row_source(text)
+        if json_names:
+            log.info(f"  {len(json_names)} JSON shard files found in the zip")
+            return _json_row_source(zip_path, json_names)
+        preview = names[:30]
+        more = f" ...and {len(names) - 30} more" if len(names) > 30 else ""
+        log.error(f"No .csv/.tsv/.json files found inside the zip. Contents ({len(names)} entries): "
+                  f"{preview}{more}")
+        return None
+
     r = requests.get(url, stream=True, timeout=60)
     r.raise_for_status()
     raw = r.raw
     raw.decode_content = True  # let urllib3 handle a gzip Content-Encoding transparently
-
-    if url.endswith(".zip"):
-        # zipfile needs seekable access — a ZIP's central directory is at
-        # the END of the file, so reading it requires a seek that a pure
-        # HTTP stream can't do. FIXED 2026-08 (was io.BytesIO(r.content) —
-        # buffered the whole compressed file in RAM and reliably OOM'd on
-        # a multi-GB zip: GitHub-hosted runners have ~7GB RAM but ~14GB
-        # disk, and a bare MemoryError's str() is EMPTY, which is exactly
-        # what showed up as "Failed to open/read source: " with nothing
-        # after the colon). Streams to a local temp file on disk instead —
-        # only the compressed zip touches disk in full; the inner CSV is
-        # still read back via ZipExtFile, which decompresses on read, so
-        # the decompressed data is never held in full anywhere.
-        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-        log.info(f"  Zip source — streaming download to disk first ({tmp.name}), not RAM...")
-        downloaded = 0
-        try:
-            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                tmp.write(chunk)
-                downloaded += len(chunk)
-        finally:
-            tmp.close()
-        log.info(f"  Downloaded {downloaded / 1e9:.2f}GB to disk")
-        zf = zipfile.ZipFile(tmp.name)
-        names = zf.namelist()
-        csv_names = [n for n in names if n.lower().endswith((".csv", ".tsv"))]
-        if not csv_names:
-            # FIXED 2026-08: this used to be next(n for n in ... if ...
-            # ".csv"), which raises a bare, message-less StopIteration when
-            # nothing matches — that's what actually produced the earlier
-            # "Failed to open/read source: " with nothing after the colon,
-            # NOT the RAM fix above. Rather than guess at an unconfirmed
-            # schema (Senzing's Open Data format is commonly JSON Lines,
-            # not CSV — but that's not verified for THIS file), fail loudly
-            # with the real zip contents so the actual format is visible in
-            # the log instead of silently mis-parsed or opaquely crashing.
-            preview = names[:30]
-            more = f" ...and {len(names) - 30} more" if len(names) > 30 else ""
-            raise RuntimeError(
-                f"No .csv/.tsv file found inside the zip. Contents ({len(names)} entries): "
-                f"{preview}{more} — update NAME_COLS/DOMAIN_COLS/COUNTRY_COLS (and the file-type "
-                f"handling here) once you know the real format.")
-        inner_name = csv_names[0]
-        log.info(f"  Reading '{inner_name}' from the zip ({len(names)} total entries)")
-        return io.TextIOWrapper(zf.open(inner_name), encoding="utf-8", errors="ignore")
-    elif url.endswith(".gz"):
-        return io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8", errors="ignore")
+    if url.endswith(".gz"):
+        text = io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8", errors="ignore")
     else:
-        return io.TextIOWrapper(raw, encoding="utf-8", errors="ignore")
+        text = io.TextIOWrapper(raw, encoding="utf-8", errors="ignore")
+    return _csv_row_source(text)
 
+
+# ── Shared filter/write loop ────────────────────────────────────────────
 
 def stream_filter(url: str, output_path: str, countries: set[str] | None,
                    row_limit: int = 0, skip_rows: int = 0,
                    time_budget_minutes: int = 0) -> tuple[int, bool, int]:
-    """Single streaming pass: download -> decompress -> parse -> filter ->
-    write, all a row at a time. Returns (kept, stopped_early, raw_row_index)
-    — raw_row_index is the "Restart ID": how many raw source rows had been
-    read (including any already skipped from a previous run) when this run
-    ended, whether that's because it finished, hit row_limit, or hit
-    time_budget_minutes. Pass that number back in as skip_rows next run to
-    continue from exactly there.
+    """Single pass over whatever _open_row_source() produces (CSV rows or
+    JSON records, already normalized to (name, domain, country) triples):
+    filter -> write, one record at a time. Returns (kept, stopped_early,
+    raw_row_index) — raw_row_index is the "Restart ID": how many source
+    records had been read (including any already skipped from a previous
+    run) when this run ended, whether that's because it finished, hit
+    row_limit, or hit time_budget_minutes. Pass that number back in as
+    skip_rows next run to continue from exactly there.
 
-    RESUME CAVEAT: there is no byte-range/row-index API into a plain HTTP
-    CSV/GZ stream, so skip_rows still has to download+decompress+parse
-    every row up to that point — it does NOT save network time or CPU on
-    the skipped prefix. What it DOES save: output_path is opened in
-    APPEND mode (not overwritten) when skip_rows > 0, so a resumed run's
-    already-filtered/written rows from earlier runs are never lost or
-    redone, and the run can stop and resume as many times as needed to
-    get through the full 86.6M-row source without ever losing progress.
-    If opendata.org's actual download ever turns out to support HTTP
-    Range requests on the raw file, a byte-offset-based resume could
-    replace this and would be genuinely faster — not implemented here
-    since that support isn't confirmed."""
+    RESUME CAVEAT: there is no byte-range/record-index API into a plain
+    HTTP stream, so skip_rows still has to download+decompress+parse
+    every record up to that point — it does NOT save network time or CPU
+    on the skipped prefix (for the JSON zip source specifically, the
+    whole zip IS re-downloaded each run regardless of skip_rows — only
+    the per-record processing is skipped). What skip_rows DOES save:
+    output_path is opened in APPEND mode (not overwritten) when
+    skip_rows > 0, so a resumed run's already-filtered/written rows from
+    earlier runs are never lost or redone."""
     if not url:
         log.error("OPENDATA_SOURCE_URL not set — nothing to download.")
         return 0, False, skip_rows
@@ -189,38 +411,21 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
     if countries_lower:
         log.info(f"  filtering to {len(countries_lower)} countries")
     if skip_rows:
-        log.info(f"  resuming: skipping the first {skip_rows:,} raw rows (already processed in a prior run)")
+        log.info(f"  resuming: skipping the first {skip_rows:,} records (already processed in a prior run)")
 
     kept = skipped_country = 0
-    raw_row_index = 0  # counts every row seen this run, including skipped ones — this IS the Restart ID
+    raw_row_index = 0  # counts every record seen this run, including skipped ones — this IS the Restart ID
     stopped_early = False
     time_budget_seconds = time_budget_minutes * 60 if time_budget_minutes else None
     start = time.monotonic()
 
     try:
-        text_stream = _open_streaming_source(url)
-        reader = csv.reader(text_stream)
-        header = next(reader, None)
+        row_source = _open_row_source(url)
     except Exception as e:
-        # str(e) can be EMPTY for some exceptions (MemoryError raised by
-        # the allocator, for one) — falling back to repr()/type name means
-        # the log line always says something instead of a bare trailing
-        # colon (see _open_streaming_source's zip-OOM fix for the actual
-        # case this happened).
-        log.error(f"Failed to open/read source: {str(e) or repr(e) or type(e).__name__}")
+        log.error(f"Failed to open/read source: {_err(e)}")
         return 0, False, skip_rows
-    if not header:
-        log.error("Source is empty (no header row).")
-        return 0, False, skip_rows
-    header_lower = [h.strip().lower() for h in header]
-    name_i = _col_index(header_lower, NAME_COLS)
-    domain_i = _col_index(header_lower, DOMAIN_COLS)
-    country_i = _col_index(header_lower, COUNTRY_COLS)
-    if name_i is None or domain_i is None:
-        log.error(f"Couldn't find a name/domain column in the header: {header}")
-        return 0, False, skip_rows
-    log.info(f"  columns: name='{header[name_i]}' domain='{header[domain_i]}'"
-              + (f" country='{header[country_i]}'" if country_i is not None else " (no country column)"))
+    if row_source is None:
+        return 0, False, skip_rows  # _open_row_source already logged why
 
     # Append + no header-rewrite when resuming, so a resumed run's output
     # concatenates cleanly onto what earlier runs already wrote.
@@ -233,21 +438,19 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
             if not resuming:
                 writer.writerow(["name", "domain", "country"])
 
-            for row in reader:
+            for name, domain, row_country in row_source:
                 raw_row_index += 1
                 if raw_row_index <= skip_rows:
                     continue  # already processed in a prior run — see docstring
 
                 if time_budget_seconds and time.monotonic() - start >= time_budget_seconds:
-                    # This row was READ from the stream but not yet
+                    # This record was READ from the source but not yet
                     # evaluated/written — "un-count" it so the Restart ID
-                    # points at it, not past it. Otherwise it would be
-                    # silently skipped forever: skip_rows=raw_row_index on
-                    # the next run would skip straight past an unprocessed
-                    # row, permanently losing it.
+                    # points AT it, not past it, or it would be silently
+                    # skipped forever on the next resumed run.
                     raw_row_index -= 1
                     stopped_early = True
-                    log.warning(f"Time budget ({time_budget_minutes}min) reached at raw row "
+                    log.warning(f"Time budget ({time_budget_minutes}min) reached at record "
                                 f"{raw_row_index:,} — stopping here. To resume, set the Restart ID "
                                 f"input to {raw_row_index} on the next seed run.")
                     break
@@ -257,31 +460,30 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
 
                 if (raw_row_index - skip_rows) % PROGRESS_EVERY == 0:
                     elapsed = time.monotonic() - start
-                    log.info(f"  ...scanned {raw_row_index - skip_rows:,} new rows this run "
-                              f"({(raw_row_index - skip_rows) / max(elapsed, 0.001):,.0f} rows/sec), "
+                    log.info(f"  ...scanned {raw_row_index - skip_rows:,} new records this run "
+                              f"({(raw_row_index - skip_rows) / max(elapsed, 0.001):,.0f} rec/sec), "
                               f"{kept:,} kept so far")
-                if len(row) <= domain_i or len(row) <= name_i:
-                    continue
 
-                row_country = ""
-                if country_i is not None and len(row) > country_i:
-                    row_country = row[country_i].strip().lower()
-                if countries_lower and row_country not in countries_lower:
-                    skipped_country += 1
-                    continue
+                if countries_lower:
+                    row_country_lower = row_country.strip().lower()
+                    if row_country_lower not in countries_lower:
+                        skipped_country += 1
+                        continue
+                else:
+                    row_country_lower = row_country.strip().lower()
 
-                name = row[name_i].strip()
-                domain = row[domain_i].strip().lower()
+                name = (name or "").strip()
+                domain = (domain or "").strip().lower()
                 domain = re.sub(r"^https?://", "", domain).split("/")[0].strip()
                 if not (name and domain and "." in domain and domain not in SKIP_SLUGS):
                     continue
 
-                writer.writerow([name, domain, row_country])
+                writer.writerow([name, domain, row_country_lower])
                 kept += 1
     except Exception as e:
-        log.error(f"Failed mid-stream at raw row {raw_row_index:,}, {kept:,} written this run: "
-                  f"{str(e) or repr(e) or type(e).__name__}. "
-                  f"To resume, set the Restart ID input to {raw_row_index} on the next seed run.")
+        log.error(f"Failed mid-stream at record {raw_row_index:,}, {kept:,} written this run: "
+                  f"{_err(e)}. To resume, set the Restart ID input to {raw_row_index} on the next "
+                  f"seed run.")
         # Whatever was written before the failure is still a valid partial
         # file — don't delete it — but the caller must still treat this as
         # a failed run (see main()'s exit-code handling).
@@ -289,10 +491,10 @@ def stream_filter(url: str, output_path: str, countries: set[str] | None,
 
     elapsed = time.monotonic() - start
     new_rows = raw_row_index - skip_rows
-    log.info(f"Done: {new_rows:,} new rows scanned this run, {skipped_country:,} skipped by country, "
+    log.info(f"Done: {new_rows:,} new records scanned this run, {skipped_country:,} skipped by country, "
              f"{kept:,} written to {output_path} ({kept / max(new_rows, 1) * 100:.2f}%), "
-             f"{elapsed:.0f}s ({new_rows / max(elapsed, 0.001):,.0f} rows/sec). "
-             f"Total raw rows processed so far (this + prior runs): {raw_row_index:,}.")
+             f"{elapsed:.0f}s ({new_rows / max(elapsed, 0.001):,.0f} rec/sec). "
+             f"Total records processed so far (this + prior runs): {raw_row_index:,}.")
     return kept, stopped_early, raw_row_index
 
 
@@ -305,9 +507,9 @@ def main():
     parser.add_argument("--all-countries", action="store_true",
                          help="Disable the country filter — keep every country, including blank ones.")
     parser.add_argument("--skip-rows", type=int, default=0,
-                         help="Restart ID — raw source rows to skip (already processed in a prior "
-                              "run). Get this number from a previous run's 'stopping here' or "
-                              "'Total raw rows processed' log line. 0 = start from the beginning.")
+                         help="Restart ID — records to skip (already processed in a prior run). Get "
+                              "this number from a previous run's 'stopping here' or 'Total records "
+                              "processed' log line. 0 = start from the beginning.")
     parser.add_argument("--time-budget-minutes", type=int, default=0,
                          help="Self-stop gracefully after this many minutes and log a Restart ID for "
                               "next time, instead of risking a hard kill mid-write at GitHub's "
