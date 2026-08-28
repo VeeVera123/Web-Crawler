@@ -1,0 +1,249 @@
+name: Crawl
+
+# Unified daily crawl workflow (formerly daily_scan.yml, ATS Global Scanner).
+# 2026-08 restructure: runs Crawl I (crawl_i.py, formerly main.py — the
+# known-ATS scanner reading archive_i, formerly slug_registry) every time,
+# and optionally Crawl II (crawl_ii.py — the heuristic in-house/
+# unsupported career-page scraper reading archive_ii, formerly archive_iii)
+# when explicitly opted into via the include_archive_ii input. The
+# scheduled/cron trigger NEVER sets that input, so the daily automatic run
+# always skips Crawl II — same behavior as leaving the checkbox unchecked
+# on a manual run. Crawl I and Crawl II write to the SAME `jobs` table but
+# every row is tagged jobs.source_pipeline ('crawl_i' / 'crawl_ii'), and
+# each pipeline's finalize job only cleans up its own tagged rows — see
+# crawl_i.py's and crawl_ii.py's run_finalize() docstrings.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 6:00 UTC = 7:00 AM WAT — Crawl I only, Crawl II always skipped here
+  workflow_dispatch:
+    inputs:
+      include_archive_ii:
+        description: "Also run Crawl II (archive_ii — in-house/unsupported career pages)? Unchecked = Crawl I only, same as the daily cron."
+        required: false
+        type: boolean
+        default: false
+      archive_i_shard_count:
+        description: "Crawl I: parallel shards over archive_i (known ATS boards)"
+        required: false
+        default: "10"
+      archive_ii_shard_count:
+        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if include_archive_ii is checked"
+        required: false
+        default: "10"
+
+# Belt-and-suspenders: GitHub already serializes runs of the same workflow+ref
+# by default for `schedule`/`workflow_dispatch` unless you opt into concurrent
+# runs, but we don't rely on that — each finalize job's `needs:` gate is what
+# actually prevents the stale-job race, not this.
+concurrency:
+  group: crawl-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-matrix:
+    # workflow_dispatch inputs can't be referenced directly inside a
+    # matrix expression, so each shard_count input -> [0, 1, ..., N-1] is
+    # computed here first (same pattern as verification.yml/kaggle_probe.yml).
+    # Runs unconditionally (cheap) even when Crawl II ends up skipped —
+    # simpler than duplicating the shard-count parsing logic per pipeline.
+    runs-on: ubuntu-latest
+    outputs:
+      archive_i_matrix: ${{ steps.build.outputs.archive_i_matrix }}
+      archive_ii_matrix: ${{ steps.build.outputs.archive_ii_matrix }}
+    steps:
+      - name: Build shard-index matrices from shard_count inputs
+        id: build
+        run: |
+          ARCHIVE_I_SHARDS="${{ github.event.inputs.archive_i_shard_count || '10' }}"
+          ARCHIVE_II_SHARDS="${{ github.event.inputs.archive_ii_shard_count || '10' }}"
+          python3 -c "
+          import json
+          for name, count in [('archive_i', int('$ARCHIVE_I_SHARDS')), ('archive_ii', int('$ARCHIVE_II_SHARDS'))]:
+              matrix = json.dumps({'include': [{'shard': s} for s in range(count)]})
+              print(f'{name}_matrix={matrix}')
+          " >> "$GITHUB_OUTPUT"
+          echo "archive_i shards: $ARCHIVE_I_SHARDS, archive_ii shards: $ARCHIVE_II_SHARDS"
+
+  # ── Crawl I — known ATS boards (archive_i) — always runs ────────────────
+
+  crawl-i:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one bad shard shouldn't cancel the rest
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.archive_i_matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: "Crawl I — shard ${{ matrix.shard }}/${{ github.event.inputs.archive_i_shard_count || '10' }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: cerebras
+          # Every AI-classifying job in this workflow shares Gemini/Groq's
+          # free-tier per-key quota — see config.py. Sized generously (12)
+          # to cover the worst case (10 crawl-i shards + crawl-i-job-boards
+          # + up to 10 crawl-ii shards all running at once); a run with
+          # fewer shards or Crawl II skipped just under-uses its share,
+          # which is harmless.
+          AI_RATE_SHARDS: "12"
+        run: python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
+
+  # Job boards (RemoteOK, WeWorkRemotely, Jobicy, etc.) hit entirely different
+  # hosts than the ATS platforms, so they run as their own job in parallel
+  # with the crawl-i matrix rather than serialized after it.
+  crawl-i-job-boards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Crawl I — job boards only
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: cerebras
+          AI_RATE_SHARDS: "12"
+        run: python crawl_i.py --job-boards-only
+
+  # Cleanup only runs once ALL Crawl I shards + the job-boards job have
+  # finished — running it per-shard would race (see crawl_i.py's
+  # run_finalize() docstring). `if: always()` means finalize still runs
+  # (marking jobs seen by whichever shards DID succeed) even if one shard
+  # timed out or failed, instead of silently skipping cleanup. Scoped to
+  # source_pipeline='crawl_i' only — never touches Crawl II's rows.
+  crawl-i-finalize:
+    needs: [crawl-i, crawl-i-job-boards]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Crawl I — finalize (summary + 31-day stale-job cleanup)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: cerebras
+        run: python crawl_i.py --finalize
+
+  # ── Crawl II — in-house/unsupported career pages (archive_ii) ──────────
+  # Opt-in only: skipped entirely (both jobs below) unless include_archive_ii
+  # was explicitly checked on a manual run. The scheduled cron trigger has
+  # no `github.event.inputs` at all, so this condition is always false for
+  # the automatic daily run — Crawl II never runs unattended.
+
+  crawl-ii:
+    needs: prepare-matrix
+    if: ${{ github.event.inputs.include_archive_ii == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.archive_ii_matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: "Crawl II — shard ${{ matrix.shard }}/${{ github.event.inputs.archive_ii_shard_count || '10' }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: cerebras
+          AI_RATE_SHARDS: "12"
+        run: python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
+
+  # Same reasoning as crawl-i-finalize, scoped to source_pipeline='crawl_ii'
+  # only. `if: always()` on TOP of the include_archive_ii check — otherwise
+  # a skipped crawl-ii (needs: satisfied by "skipped", not "failed") would
+  # still let this job through under an unconditional always().
+  crawl-ii-finalize:
+    needs: crawl-ii
+    if: ${{ always() && github.event.inputs.include_archive_ii == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Crawl II — finalize (summary + stale-job cleanup)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: cerebras
+        run: python crawl_ii.py --finalize
