@@ -1,4 +1,4 @@
-name: Kaggle Probe
+name: Kaggle
 
 on:
   workflow_dispatch:
