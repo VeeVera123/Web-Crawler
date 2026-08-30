@@ -44,8 +44,14 @@ log = logging.getLogger("node")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-STAGING_TABLE = "archive_ii"  # was ctlog_probe_results, then quarantine — one place to rename it again
-ARCHIVE_III_TABLE = "archive_iii"  # was scrape_test
+ARCHIVE_I_TABLE = "archive_i"  # was slug_registry — the trusted, actually-scraped-daily list.
+ARCHIVE_II_TABLE = "archive_ii"  # was archive_iii — in-house/unsupported career pages.
+# 2026-08 restructure: the OLD archive_ii (an ATS-match staging/quarantine
+# table that a separate verify step promoted into slug_registry) is GONE —
+# dropped entirely. ATS hits now write directly to ARCHIVE_I_TABLE with no
+# intermediate verify/promote step. See node.py's module docstring and
+# Verification/verification.py's docstring for what still removes rows
+# (dead-link confirmation only, never "0 jobs right now").
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=6)
@@ -575,14 +581,15 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
     not just the first one. Returns (ats_hit_rows, career_page_capture):
     ats_hit_rows is (ats, slug, matched_url, domain, tier, country,
     country_method) same as before; country is opportunistic, never a
-    gate — these rows go to `archive_ii` exactly as they always have.
-    career_page_capture (2026-08, for archive_iii) is ONLY ever populated
-    when NO known ATS was matched anywhere on the company's site — a
-    genuine in-house/unrecognized-platform career page — since anything
-    that DID match a known ATS already has a full archive_ii row and
-    doesn't need a second, separate record. Shape:
+    gate — these rows go to `archive_i` (formerly slug_registry) exactly
+    as they always have. career_page_capture (2026-08, for archive_ii,
+    formerly archive_iii) is ONLY ever populated when NO known ATS was
+    matched anywhere on the company's site — a genuine in-house/
+    unrecognized-platform career page — since anything that DID match a
+    known ATS already has a full archive_i row and doesn't need a second,
+    separate record. Shape:
     {"career_page_url","website_url"} — no root_domain (dropped 2026-08,
-    was a pure duplicate of website_url; website_url is now archive_iii's
+    was a pure duplicate of website_url; website_url is now archive_ii's
     own unique/upsert key) and no company_name (dropped 2026-08 — the
     domain/website_url is already the identifier; a separate name lookup
     just cost extra space for no real use) — or None if nothing worth
@@ -688,7 +695,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
 
         stats["dropped_no_ats"] += 1
         if best_inhouse:
-            stats["inhouse_career_page_captured"] += 1  # -> archive_iii
+            stats["inhouse_career_page_captured"] += 1  # -> archive_ii
             return [], _capture(best_inhouse["url"])
         return [], None
 
@@ -742,27 +749,46 @@ async def _upsert_rows(session: aiohttp.ClientSession, table: str, on_conflict: 
     return sum(results)
 
 
-async def write_rows_to_staging_table(session: aiohttp.ClientSession, rows: list[dict]) -> int:
-    """rows: {"ats","slug","source_hostname","root_domain","country","discovery_method"}."""
-    return await _upsert_rows(session, STAGING_TABLE, "ats,slug", rows)
+async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+    """rows come in shaped {"ats","slug","source_hostname","root_domain",
+    "country","discovery_method"} (crawl_batch's internal shape, kept for
+    found_rows/logging) but archive_i's actual schema is just
+    {ats, slug, source, last_seen} — no source_hostname/root_domain/country
+    columns. 2026-08 restructure: this now writes STRAIGHT to archive_i
+    (formerly slug_registry) with no intermediate staging/verify table —
+    the old archive_ii (ATS-match quarantine table a separate verify step
+    promoted from) is dropped entirely. discovery_method maps to archive_i's
+    `source` column, which is CHECK-constrained — every discovery_method
+    string a live caller passes (kaggle_probe, github_org_probe,
+    common_crawl_probe, plus discovery.py's own set) must already be in
+    archive_i_source_check or the upsert fails for that whole batch."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    slim_rows = [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"],
+                  "last_seen": now_iso} for r in rows]
+    return await _upsert_rows(session, ARCHIVE_I_TABLE, "ats,slug", slim_rows)
 
 
-async def write_career_pages_to_archive_iii(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows: list[dict]) -> int:
     """rows: {"career_page_url","website_url",
     "discovery_method"} (from crawl_one's career_page_capture — only ever
     produced when no known ATS matched — plus discovery_method attached by
     crawl_batch). Upserts on website_url (2026-08: root_domain was dropped
-    as a pure duplicate of this field, so website_url is now archive_iii's
+    as a pure duplicate of this field, so website_url is now archive_ii's
     identity key instead) — a re-crawled company updates last_seen/
     career_page_url in place rather than duplicating. date_added is
     deliberately left OUT of the payload: the column's DEFAULT now() only
     fires on a true first INSERT, and since we never send it on an
     UPDATE, Postgres's merge-duplicates ON CONFLICT leaves the original
-    date_added untouched."""
+    date_added untouched.
+
+    2026-08 restructure: this table was archive_iii before the old
+    archive_ii (ATS-match staging table) was dropped and archive_iii was
+    renamed to take its place — archive_ii now means "in-house/unsupported
+    career pages," feeding Crawl II's heuristic job-listing scraper."""
     now_iso = datetime.now(timezone.utc).isoformat()
     for r in rows:
         r["last_seen"] = now_iso
-    return await _upsert_rows(session, ARCHIVE_III_TABLE, "website_url", rows)
+    return await _upsert_rows(session, ARCHIVE_II_TABLE, "website_url", rows)
 
 
 # ── shared batch driver ───────────────────────────────────────────────────
@@ -779,9 +805,13 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     _crawl_and_write_hosts) with the same batching/dedup/time-budget logic
     copy-pasted twice. Returns (done, elapsed, rate, time_budget_hit).
 
-    2026-08: also writes to archive_iii — every in-house/unsupported
-    career page crawl_one found (never a known-ATS one — those already
-    got a full archive_ii row)."""
+    2026-08 restructure: ATS-pattern hits now write DIRECTLY to
+    ARCHIVE_I_TABLE (archive_i, formerly slug_registry) — there is no more
+    intermediate staging/verify table; Verification/verification.py is the
+    only thing that ever removes a row, and only once confirmed dead.
+    Every in-house/unsupported career page crawl_one finds (never a
+    known-ATS one — those already got a full archive_i row) writes to
+    ARCHIVE_II_TABLE (archive_ii, formerly archive_iii)."""
     tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries)
              for d in domains]
     elapsed, rate = 0.0, 0.0
@@ -821,11 +851,11 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                 scrape_rows.append({**career_capture, "discovery_method": discovery_method})
         written = 0
         if batch_rows:
-            written = await write_rows_to_staging_table(session, batch_rows)
+            written = await write_ats_hits_to_archive_i(session, batch_rows)
             found_rows.extend(batch_rows)
         written_scrape = 0
         if scrape_rows:
-            written_scrape = await write_career_pages_to_archive_iii(session, scrape_rows)
+            written_scrape = await write_career_pages_to_archive_ii(session, scrape_rows)
 
         done = min(i + batch_size, len(tasks))
         elapsed = time.monotonic() - crawl_start
@@ -833,12 +863,10 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         hit_n = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
         dup_note = f", {duplicates_collapsed} dup collapsed" if duplicates_collapsed else ""
         log.info(f"  {done}/{len(tasks)} {unit_label} — {rate:.1f}/sec — {elapsed:.0f}s elapsed")
-        log.info(f"    → {written}/{len(batch_rows)} written to {STAGING_TABLE}{dup_note} — {len(found_rows)} hits total "
+        log.info(f"    → {written}/{len(batch_rows)} written to {ARCHIVE_I_TABLE}{dup_note} — {len(found_rows)} hits total "
                  f"(hit rate so far: {hit_n / max(stats['companies_attempted'], 1) * 100:.2f}%)")
         if scrape_rows:
-            log.info(f"    → {written_scrape}/{len(scrape_rows)} in-house/unsupported career pages written to "
-                     f"{ARCHIVE_III_TABLE} (running totals: {stats['known_ats_found']} known-ats found → "
-                     f"{STAGING_TABLE}, {stats['inhouse_career_page_captured']} in-house → {ARCHIVE_III_TABLE})")
+            log.info(f"    → {written_scrape}/{len(scrape_rows)} career pages written to {ARCHIVE_II_TABLE}")
     return len(tasks), elapsed, rate, time_budget_hit
 
 
