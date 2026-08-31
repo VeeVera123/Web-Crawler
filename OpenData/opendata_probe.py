@@ -157,7 +157,8 @@ def read_seed_csv(limit: int = OPENDATA_ROW_LIMIT, countries: set[str] | None = 
 async def run_crawl(shard_index: int | None = None, shard_count: int | None = None,
                      concurrency: int = node.CRAWL_CONCURRENCY,
                      time_budget_minutes: int = node.TIME_BUDGET_MINUTES,
-                     countries: set[str] | None = None) -> None:
+                     countries: set[str] | None = None,
+                     restart_index: int | None = None) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(f"── OpenData probe{label} ──")
     log.info(f"  concurrency={concurrency}  parse_workers={node.PARSE_WORKERS}  "
@@ -180,8 +181,25 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     parse_pool = node.new_parse_pool()
     crawl_start = time.monotonic()
 
+    start_at = 0
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+            if shard_index is not None and shard_count is not None:
+                if restart_index == 0:
+                    log.info("  restart_index=0 — forcing a full restart of this shard, ignoring any checkpoint")
+                    await node.clear_crawl_checkpoint(session, SEED_SOURCE_LABEL, shard_index, shard_count)
+                elif restart_index:
+                    start_at = restart_index
+                    log.info(f"  restart_index={start_at:,} (manual override) — skipping ahead in this shard")
+                else:
+                    start_at = await node.load_crawl_checkpoint(session, SEED_SOURCE_LABEL, shard_index, shard_count)
+                    if start_at:
+                        log.info(f"  resuming from checkpoint: {start_at:,}/{len(domains):,} companies in this "
+                                 f"shard already done — skipping straight past them")
+                if start_at >= len(domains):
+                    log.info("  checkpoint shows this shard is already fully done — nothing left to crawl.")
+                    return
+                domains = domains[start_at:]
             # capture_inhouse=False (2026-08): OpenData carries no employee-
             # count/size signal, so a no-ATS hit here can't be told apart
             # from a genuine small business — this source no longer feeds
@@ -191,14 +209,16 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                 time_budget_minutes, batch_size=3000, unit_label="companies",
-                capture_inhouse=False)
+                capture_inhouse=False,
+                shard_index=shard_index, shard_count=shard_count, start_at=start_at)
     finally:
         parse_pool.shutdown(wait=True)
 
     hit_n = stats['hits_from_homepage'] + stats['hits_from_career_path'] + stats['hits_from_sitemap']
     companies_n = max(stats["companies_attempted"], 1)
     status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
-    log.info(f"── shard{label} {status}: {stats['companies_attempted']}/{len(companies)} companies, "
+    log.info(f"── shard{label} {status}: {stats['companies_attempted']}/{len(domains)} companies this run "
+             f"({start_at:,} skipped from a prior checkpoint, {len(companies):,} total in shard), "
              f"{elapsed:.0f}s, {rate:.1f}/sec, hit={hit_n / companies_n * 100:.1f}% "
              f"({hit_n}), unreachable={stats['homepage_unreachable'] / companies_n * 100:.1f}% ──")
     if hit_n:
@@ -227,6 +247,10 @@ def main():
                          help="Only crawl this country value (repeatable). Default: DEFAULT_COUNTRIES.")
     parser.add_argument("--all-countries", action="store_true",
                          help="Disable the country filter — crawl every country, including blank ones.")
+    parser.add_argument("--restart-index", type=int, default=None,
+                         help="Per-shard resume. Omit (default) to auto-resume from this shard's own "
+                              "Supabase checkpoint. 0 forces a full restart, ignoring any checkpoint. "
+                              "A positive value manually overrides the checkpoint for this run.")
     args = parser.parse_args()
     if args.country:
         countries = set(args.country)
@@ -235,7 +259,7 @@ def main():
     else:
         countries = DEFAULT_COUNTRIES
     asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency,
-                           args.time_budget_minutes, countries))
+                           args.time_budget_minutes, countries, args.restart_index))
 
 
 if __name__ == "__main__":
