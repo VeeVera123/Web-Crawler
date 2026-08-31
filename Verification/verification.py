@@ -159,7 +159,7 @@ USER_AGENT = node.USER_AGENT
 # max_connections=60, and ~30 of those are permanently held by Supabase's own
 # internals (pooler/realtime/auth/storage/dashboard) even at idle — leaving
 # roughly 30 connections of real headroom, TOTAL, shared across every shard
-# AND every other workflow (daily_scan, kaggle_probe) that might be running
+# AND every other workflow (daily_scan, people_data_labs_probe) that might be running
 # at the same time. The old default of 30 here, multiplied across
 # shard_count shards (10 by default in verification.yml), asked for up to
 # 300 simultaneous requests — ~10x the actual budget — and reliably caused
