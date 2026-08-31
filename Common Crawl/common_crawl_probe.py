@@ -311,10 +311,14 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 if not file_hosts:
                     continue
                 total_hosts_seen += len(file_hosts)
+                # capture_inhouse=False (2026-08): Common Crawl carries no
+                # employee-count/size signal — see opendata_probe.py's
+                # identical comment. archive_i still gets every ATS hit.
                 _, elapsed, rate, file_time_hit = await node.crawl_batch(
                     file_hosts, session, sem, stats, parse_pool, node.ACCEPT_ANY_COUNTRY,
                     "common_crawl_probe", found_rows, crawl_start, time_budget_seconds,
-                    time_budget_minutes, batch_size=2000, unit_label="hosts")
+                    time_budget_minutes, batch_size=2000, unit_label="hosts",
+                    capture_inhouse=False)
                 if file_time_hit:
                     time_budget_hit = True
                     break
