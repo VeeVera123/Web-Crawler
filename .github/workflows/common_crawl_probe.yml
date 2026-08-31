@@ -39,7 +39,7 @@ on:
 
 concurrency:
   group: host-crawl-v2-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   prepare-matrix:
