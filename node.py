@@ -72,6 +72,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 ARCHIVE_I_TABLE = "archive_i"  # was slug_registry — the trusted, actually-scraped-daily list.
 ARCHIVE_II_TABLE = "archive_ii"  # was archive_iii — in-house/unsupported career pages.
+CHECKPOINT_TABLE = "crawl_checkpoints"  # 2026-08: per-shard resume — see save/load/clear_crawl_checkpoint below.
 # 2026-08 restructure: the OLD archive_ii (an ATS-match staging/quarantine
 # table that a separate verify step promoted into slug_registry) is GONE —
 # dropped entirely. ATS hits now write directly to ARCHIVE_I_TABLE with no
@@ -842,6 +843,79 @@ async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows:
     return await _upsert_rows(session, ARCHIVE_II_TABLE, "website_url", rows)
 
 
+# ── per-shard resume checkpointing ──────────────────────────────────────
+# 2026-08: low --concurrency finishes fewer companies per time-budget
+# window, but re-running always restarted every shard from row 0 — hours
+# of already-crawled work redone every time. crawl_batch() now checkpoints
+# each shard's progress to Supabase right after every batch of 3000
+# commits (so a checkpoint value is ALWAYS a clean, fully-written boundary
+# — safe to resume from no matter how the process ends: self-stopped,
+# cancelled, or crashed). Each source's run_crawl() loads this
+# automatically at startup and skips straight past what's already done —
+# no manual bookkeeping across N shards required.
+
+async def save_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
+                                 shard_count: int, companies_done: int) -> None:
+    """Upserts this shard's progress. Best-effort: a failed write just
+    means a future resume falls back to an earlier batch boundary, never
+    data loss (the archive_i/archive_ii rows for that batch are already
+    safely committed regardless of whether this call succeeds)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+               "Prefer": "resolution=merge-duplicates"}
+    row = {"source": source, "shard_index": shard_index, "shard_count": shard_count,
+           "companies_done": companies_done, "updated_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        async with session.post(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
+                                 params={"on_conflict": "source,shard_index,shard_count"},
+                                 json=[row], timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+    except Exception as e:
+        log.warning(f"  couldn't save crawl checkpoint at {companies_done:,} (non-fatal — a future "
+                    f"resume may just redo one extra batch): {e}")
+
+
+async def load_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
+                                 shard_count: int) -> int:
+    """How many companies this exact (source, shard_index, shard_count)
+    already finished on a prior run. 0 if never run, already fully
+    completed (checkpoint cleared on completion), or explicitly reset."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return 0
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    params = {"source": f"eq.{source}", "shard_index": f"eq.{shard_index}",
+              "shard_count": f"eq.{shard_count}", "select": "companies_done"}
+    try:
+        async with session.get(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
+                                params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+            data = await r.json()
+            return data[0]["companies_done"] if data else 0
+    except Exception as e:
+        log.warning(f"  couldn't load crawl checkpoint (starting this shard from 0): {e}")
+        return 0
+
+
+async def clear_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
+                                  shard_count: int) -> None:
+    """Deletes a shard's checkpoint — called once its company list is
+    fully exhausted (not time-budget-stopped), so a LATER run of the same
+    shard layout starts fresh instead of wrongly skipping everything.
+    Also used to honor an explicit restart_index=0 (force full restart)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    params = {"source": f"eq.{source}", "shard_index": f"eq.{shard_index}", "shard_count": f"eq.{shard_count}"}
+    try:
+        async with session.delete(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
+                                   params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+    except Exception as e:
+        log.warning(f"  couldn't clear crawl checkpoint (non-fatal, just means a future full-restart "
+                    f"run might unnecessarily skip ahead once): {e}")
+
+
 # ── shared batch driver ───────────────────────────────────────────────────
 
 async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
@@ -851,6 +925,8 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        time_budget_minutes: int, batch_size: int = 3000, unit_label: str = "companies",
                        capture_inhouse: bool = True,
                        capture_inhouse_domains: set[str] | None = None,
+                       shard_index: int | None = None, shard_count: int | None = None,
+                       start_at: int = 0,
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
@@ -885,7 +961,17 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         `capture_inhouse` bool for every domain (opendata_probe.py/
         common_crawl_probe.py still pass capture_inhouse=False this way —
         they have no size signal for ANY domain, so there's no per-domain
-        set to build)."""
+        set to build).
+
+    shard_index/shard_count/start_at (2026-08, resume support): when both
+    shard_index and shard_count are given, this shard's progress is
+    checkpointed to Supabase after every batch (as start_at + done, i.e.
+    the ABSOLUTE position in the caller's full shard list, since `domains`
+    here may already be a checkpoint-resumed suffix) and the checkpoint is
+    cleared once the whole list is exhausted without hitting the time
+    budget. Callers don't need to do anything with this beyond passing the
+    values through — see save/load/clear_crawl_checkpoint above and each
+    source's run_crawl() for how the resume-on-startup side works."""
     def _capture_for(domain: str) -> bool:
         if capture_inhouse_domains is not None:
             return domain in capture_inhouse_domains
@@ -946,6 +1032,15 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                  f"(hit rate so far: {hit_n / max(stats['companies_attempted'], 1) * 100:.2f}%)")
         if scrape_rows:
             log.info(f"    → {written_scrape}/{len(scrape_rows)} career pages written to {ARCHIVE_II_TABLE}")
+        if shard_index is not None and shard_count is not None:
+            # This batch's rows are already durably committed above, so
+            # start_at + done is always safe to resume from.
+            await save_crawl_checkpoint(session, discovery_method, shard_index, shard_count, start_at + done)
+    if not time_budget_hit and shard_index is not None and shard_count is not None:
+        # Ran to the end of this shard's list without self-stopping — fully
+        # done, so clear the checkpoint rather than leave a stale "done"
+        # count a later, differently-shaped run could misread.
+        await clear_crawl_checkpoint(session, discovery_method, shard_index, shard_count)
     return len(tasks), elapsed, rate, time_budget_hit
 
 
