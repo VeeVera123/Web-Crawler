@@ -1,67 +1,36 @@
 name: Kaggle
 
-# REWRITTEN (2026-08): this used to be a "guess a slug, ask the platform's
-# API" prober (seed-and-probe). It's now a domain-crawl discovery tool
-# instead — visits each company's OWN website (from PDL's domain field)
-# and looks for a REAL link to any of the 25+ ATS platforms
-# discovery.py's URL_TO_SLUG recognizes, using multiple independent
-# detection methods per page (parsed links, raw-text regex scan for
-# embedded/JS links, dedicated JSON-LD structured-data parsing) with a
-# fallback chain (homepage -> common career-page paths -> sitemap.xml) if
-# the homepage alone doesn't turn anything up. See class_a_probe.py's
-# module docstring for the full rationale — short version: guessing
-# slugs against Greenhouse's shared API is what got this project soft-
-# blocked by their WAF, and separately produced a 4.5M-row false-positive
-# incident against SmartRecruiters (their API 200'd identically for real
-# and fake slugs, so body-shape checking could never have worked).
-# Neither failure mode is possible with this technique: a match here
-# means the literal URL is present on the company's OWN page, and every
-# request goes to a different company's own domain instead of hammering
-# one shared host, so there's no single target for a WAF to trip on.
+# Visits each company's own website (from PDL's domain field) and looks
+# for a real link to any known ATS platform, using multiple detection
+# methods (parsed links, raw-text scan, JSON-LD) with a fallback chain
+# (homepage -> career paths -> sitemap.xml). Every domain is crawled
+# regardless of size — see kaggle_probe.py's docstring for the
+# archive_i/archive_ii split.
 #
-# NO --platform ANYMORE: the old script probed one platform at a time.
-# This one detects ALL platforms simultaneously from a single visit to
-# each company's site, so there's nothing to select — sharding is purely
-# over the company list now (see shard_count input).
-#
-# NO RATE LIMITING: deliberately removed (see class_a_probe.py's module
-# docstring) — it existed specifically to survive hammering one shared
-# host and would be pure overhead here, where the actual constraint is
-# this runner's own network/CPU throughput, not any single target's
-# tolerance for traffic.
-#
-# PDL SEED FILE: same as before — too large to commit into the repo
-# (~1GB uncompressed), uploaded once as a GitHub Release asset (tag:
-# pdl_release_tag below) and downloaded fresh each run via `gh release
-# download` using the workflow's own built-in token.
-#
-# Writes into the SAME ctlog_probe_results staging table the CT-logs
-# pipeline uses, now with root_domain finally holding the actual company
-# domain that was crawled (previously a placeholder marker string, since
-# the old technique had no real domain to put there) and source_hostname
-# holding the exact page URL + detection tier the match was found on.
+# PDL SEED FILE: too large to commit (~1GB), uploaded once as a GitHub
+# Release asset (tag: pdl_release_tag) and downloaded fresh each run.
 on:
   workflow_dispatch:
     inputs:
       pdl_release_tag:
-        description: "Tag of the GitHub Release holding the PDL dataset zip asset"
+        description: "GitHub Release tag holding the PDL dataset zip"
         required: false
         default: "pdl-seed-data"
       shard_count:
-        description: "Number of parallel shards to split the company list across"
+        description: "Parallel shards to split the company list across"
         required: false
         default: "20"
       concurrency:
-        description: "Companies crawled in parallel PER shard (no rate limiting — see kaggle_probe.py)"
+        description: "Companies crawled in parallel per shard"
         required: false
         default: "400"
       min_size:
-        description: "Does NOT affect which companies get crawled (every company is crawled/ATS-checked regardless of size). Only controls which no-ATS-match companies are allowed into archive_ii (min employee count). 0 disables the filter."
+        description: "Min employee count for a no-ATS company to enter archive_ii (doesn't affect which companies get crawled). 0 = no filter."
         required: false
         default: "100"
 
 concurrency:
-  group: class-a-probe-${{ github.ref }}
+  group: kaggle-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
