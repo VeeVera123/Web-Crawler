@@ -41,7 +41,7 @@ on:
 
 concurrency:
   group: opendata-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   seed:
@@ -136,7 +136,7 @@ jobs:
     # `if`, so `always()` here just means "don't block on a skipped seed").
     if: ${{ always() && github.event.inputs.run_seed != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 345
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
