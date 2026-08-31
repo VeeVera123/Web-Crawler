@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import re
-import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -43,30 +42,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(me
                      datefmt="%H:%M:%S")
 log = logging.getLogger("node")
 
-# 2026-08: "Cancel workflow" in GitHub Actions was reported as unreliable
-# on live crawl runs — a click that should stop the job in seconds
-# sometimes hung far longer. Python's DEFAULT SIGINT/SIGTERM handling
-# should already exit fairly fast, but any moment spent inside a
-# blocking C-level call (DNS resolution via aiodns/pycares is the prime
-# suspect — it has its own event loop underneath asyncio's, and signal
-# delivery into a foreign C event loop isn't as immediate as into plain
-# Python bytecode) delays how soon the interpreter even gets to act on
-# the pending signal. Installing an explicit handler here — imported by
-# every probe/seed source via `import node` — guarantees an immediate,
-# unconditional process exit (os._exit skips atexit/finally/GC entirely,
-# on purpose: correctness on a cancelled run doesn't matter, speed does)
-# the moment Python next gets a chance to run the handler, rather than
-# depending on whatever the default disposition happens to be doing
-# through several layers of C extensions. Applies project-wide — every
-# source (kaggle/PDL, opendata, bigpicture, common_crawl, github_org)
-# calls into node.py, so this one fix covers all of them.
-def _fast_exit_on_signal(signum, frame):
-    log.warning(f"Received signal {signum} (cancel requested) — exiting immediately, no cleanup.")
-    os._exit(1)
-
-
-signal.signal(signal.SIGTERM, _fast_exit_on_signal)
-signal.signal(signal.SIGINT, _fast_exit_on_signal)
+# 2026-08, REVERTED: a prior version of this file installed a custom
+# Python-level SIGTERM/SIGINT handler here (os._exit-based "fast exit"),
+# reasoning that Python's default handling might be slow to respond
+# mid-blocking-call. That reasoning was backwards and made cancellation
+# WORSE, not better — proven by a live comparison: enrich_slugs.py (a
+# separate, plain synchronous script that never touches signal handling
+# at all) stops within moments of a Cancel click, while every node.py-
+# based crawler (which HAD the custom handler) did not.
+#
+# The actual mechanics: SIGTERM's real OS default disposition (SIG_DFL)
+# is an unconditional KERNEL-LEVEL terminate — the kernel kills the
+# process outright, with zero cooperation required from the Python
+# interpreter, no matter what the process is doing at that instant
+# (deep in a C extension, blocked on I/O, anything). Python does NOT
+# override SIGTERM's default at startup — only SIGINT gets special
+# treatment (converted to a KeyboardInterrupt via signal.default_int_
+# handler). By installing our OWN Python-level SIGTERM handler, we threw
+# away that free, unconditional, instant kill and replaced it with one
+# that can only run once the interpreter's bytecode eval loop gets a
+# chance to check for pending signals — which can be delayed for a long
+# time while the process is inside a native C call that doesn't yield
+# back to Python (aiodns/pycares's own event loop, or a big lexbor parse
+# holding the GIL). The earlier "verified via subprocess test" check
+# used time.sleep() as the blocking call, which IS interruptible by a
+# Python-level handler almost instantly (it cooperates with signal
+# delivery) — it just didn't represent this project's actual blocking
+# calls, so it passed for the wrong reason.
+#
+# Fix: don't touch SIGTERM/SIGINT disposition at all. GitHub's own
+# Cancel-workflow escalation (SIGINT, then SIGTERM, then an unconditional
+# SIGKILL a short time later) does the rest — and with nothing here
+# overriding it, SIGTERM keeps its instant, no-cooperation-needed default
+# exactly like enrich_slugs.py already benefits from.
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
