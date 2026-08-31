@@ -1,6 +1,6 @@
 """
 NODE — the one permanent crawl/detect/write engine every seed source
-depends on. Seed scripts (class_a_probe.py, host_crawl_v2.py, and any
+depends on. Seed scripts (kaggle_probe.py, host_crawl_v2.py, and any
 future one) are thin and disposable: they find domains and hand them to
 crawl_batch(). This file is not disposable — fix a bug here once, every
 source gets the fix.
@@ -828,7 +828,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
-    be duplicated (class_a_probe's inline loop, host_crawl_v2's
+    be duplicated (kaggle_probe's inline loop, host_crawl_v2's
     _crawl_and_write_hosts) with the same batching/dedup/time-budget logic
     copy-pasted twice. Returns (done, elapsed, rate, time_budget_hit).
 
@@ -926,7 +926,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
 def new_parse_pool() -> concurrent.futures.Executor:
     """ThreadPoolExecutor (2026-08, was ProcessPoolExecutor) — see
     PARSE_WORKERS' comment above for why. Every caller (kaggle_probe.py,
-    opendata_probe.py, common_crawl_probe.py, class_a_probe.py,
+    opendata_probe.py, common_crawl_probe.py, bigpicture_probe.py,
     github_org_probe.py, host_crawl_v2.py) just passes this straight into
     crawl_batch()'s loop.run_in_executor() call, so no caller-side changes
     were needed for this fix to take effect."""
