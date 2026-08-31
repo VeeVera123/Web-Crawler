@@ -62,6 +62,7 @@ CLI modes (mirrors crawl_i.py; see .github/workflows/crawl.yml):
 
 import argparse
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -82,7 +83,10 @@ _ROOT = os.path.dirname(_MAIN_DIR)  # repo root — node.py lives here
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, _MAIN_DIR)
 
-import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_parse_pool-free (no CPU parse pool needed here)
+import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_parse_pool
+# (2026-08: this file used to do all its HTML parsing inline on the event
+# loop with no pool at all — see extract_postings_from_page's docstring —
+# it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
 from classifier import (  # noqa: E402
     keyword_classify_role, ai_classify_roles,
     _keyword_classify_location_detail, ai_classify_locations,
@@ -367,9 +371,28 @@ def _company_name_from_domain(website_url: str) -> str:
 # ── Per-page extraction ─────────────────────────────────────────────────
 
 async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                                      page: dict, stats: dict) -> list[dict]:
+                                      page: dict, stats: dict,
+                                      parse_pool: concurrent.futures.Executor) -> list[dict]:
     """page: {"career_page_url","website_url"}. Returns candidate job dicts
-    — NOT yet role/location filtered, see _run_pipeline_ii for that."""
+    — NOT yet role/location filtered, see _run_pipeline_ii for that.
+
+    2026-08 — two real bottlenecks fixed here:
+
+    1. Every CPU-bound parse call (_extract_jsonld_jobs, LexborHTMLParser-
+       based _find_heuristic_candidates, _confirm_and_build_posting) used
+       to run INLINE on the event loop — worse than node.py's old
+       ProcessPoolExecutor(1 worker) bug, since it wasn't even offloaded
+       to a second worker: it blocked the entire event loop, including
+       every other page's in-flight fetch, for the full duration of each
+       parse. Now offloaded via loop.run_in_executor(parse_pool, ...),
+       same ThreadPoolExecutor pattern as node.py's crawl_one/PARSE_WORKERS.
+
+    2. The up-to-MAX_HEURISTIC_CANDIDATES_PER_PAGE (25) detail-page
+       fetches were a sequential `for cand in candidates: await ...` loop
+       — one at a time, not concurrent, on a page that could have up to
+       25 candidates. Now fetched concurrently via asyncio.gather (same
+       per-fetch semaphore gating as before, just no longer serialized)."""
+    loop = asyncio.get_running_loop()
     async with sem:
         fetched = await node._fetch_page(session, page["career_page_url"], stats)
     if not fetched:
@@ -378,28 +401,29 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     final_url, html = fetched
     company = _company_name_from_domain(page["website_url"])
 
-    jsonld_jobs = _extract_jsonld_jobs(html, final_url, company)
+    jsonld_jobs = await loop.run_in_executor(parse_pool, _extract_jsonld_jobs, html, final_url, company)
     if jsonld_jobs:
         stats["jsonld_pages"] += 1
         stats["jsonld_postings"] += len(jsonld_jobs)
         return jsonld_jobs
 
-    candidates = _find_heuristic_candidates(html, final_url)
+    candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, final_url)
     if not candidates:
         stats["no_postings_found"] += 1
         return []
     stats["heuristic_pages"] += 1
+    candidates = candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
 
-    confirmed = []
-    for cand in candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]:
+    async def _fetch_and_confirm(cand: dict) -> dict | None:
         async with sem:
             detail = await node._fetch_page(session, cand["url"], stats)
         if not detail:
-            continue
+            return None
         _, detail_html = detail
-        posting = _confirm_and_build_posting(detail_html, cand, company)
-        if posting:
-            confirmed.append(posting)
+        return await loop.run_in_executor(parse_pool, _confirm_and_build_posting, detail_html, cand, company)
+
+    results = await asyncio.gather(*(_fetch_and_confirm(c) for c in candidates))
+    confirmed = [r for r in results if r]
     stats["heuristic_postings"] += len(confirmed)
     return confirmed
 
@@ -505,7 +529,8 @@ def _push_batch(candidate_jobs: list[dict], existing_urls: set[str]) -> int:
 
 async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                           stats: dict, crawl_start: float, time_budget_seconds: float,
-                          time_budget_minutes: int, batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
+                          time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
+                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
     """Crawls archive_ii pages in sub-batches: fetch+extract concurrently
     per page, then run the classification funnel and push once per
     sub-batch (same shape as node.py's crawl_batch/crawl_i.py's scrape_all
@@ -530,7 +555,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
             break
         batch = pages[i:i + batch_size]
         results = await asyncio.gather(
-            *(extract_postings_from_page(session, sem, p, stats) for p in batch))
+            *(extract_postings_from_page(session, sem, p, stats, parse_pool) for p in batch))
         candidate_jobs = [job for page_jobs in results for job in page_jobs]
         added = _push_batch(candidate_jobs, existing_urls)
         total_added += added
@@ -602,10 +627,18 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     connector = new_connector()
     crawl_start = time.monotonic()
     time_budget_seconds = TIME_BUDGET_MINUTES * 60
+    # Shared ThreadPoolExecutor for every CPU-bound parse call this shard
+    # makes (see extract_postings_from_page's docstring) — same
+    # new_parse_pool() node.py's own crawl engine uses.
+    parse_pool = node.new_parse_pool()
 
-    async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
-        done, added, time_budget_hit = await crawl_batch_ii(
-            pages, session, sem, stats, crawl_start, time_budget_seconds, TIME_BUDGET_MINUTES)
+    try:
+        async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+            done, added, time_budget_hit = await crawl_batch_ii(
+                pages, session, sem, stats, crawl_start, time_budget_seconds,
+                TIME_BUDGET_MINUTES, parse_pool)
+    finally:
+        parse_pool.shutdown(wait=False)
 
     status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
     log.info(f"── shard {shard}/{total_shards} {status}: {done}/{len(pages)} pages, "
