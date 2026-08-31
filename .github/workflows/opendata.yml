@@ -24,10 +24,6 @@ on:
         description: "Seed only: resume from this row number (from a prior 'Restart ID' log line). 0 = start over."
         required: false
         default: "0"
-      seed_time_budget_minutes:
-        description: "Seed only: self-stop after this many minutes and log a Restart ID"
-        required: false
-        default: "340"
       shard_count:
         description: "Crawl stage: parallel shards"
         required: false
@@ -36,10 +32,14 @@ on:
         description: "Crawl stage: companies crawled in parallel per shard"
         required: false
         default: "400"
-      crawl_time_budget_minutes:
-        description: "Crawl stage: each shard self-stops after this many minutes (independent of seed_time_budget_minutes)"
+      run_time_minutes:
+        description: "Self-stop after this many minutes — applies to whichever stage this run does (seed OR crawl, never both in one run)"
         required: false
         default: "330"
+      restart_index:
+        description: "Crawl stage: per-shard resume override. Blank (default) = each shard auto-resumes from its own Supabase checkpoint. 0 = force a full restart on every shard, ignoring checkpoints."
+        required: false
+        default: ""
 
 concurrency:
   group: opendata-${{ github.ref }}
@@ -89,7 +89,7 @@ jobs:
           python OpenData/opendata_seed.py \
             --output opendata_organizations_filtered.csv \
             --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
-            --time-budget-minutes ${{ github.event.inputs.seed_time_budget_minutes || '340' }}
+            --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }}
 
       - name: Split filtered output into <2GB chunks (GitHub Release asset cap)
         run: |
@@ -171,8 +171,13 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
+          RESTART_ARGS=()
+          if [ -n "${{ github.event.inputs.restart_index }}" ]; then
+            RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
+          fi
           python OpenData/opendata_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
-            --time-budget-minutes ${{ github.event.inputs.crawl_time_budget_minutes || '330' }}
+            --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
+            "${RESTART_ARGS[@]}"
