@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -41,6 +42,31 @@ from discovery import URL_TO_SLUG  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
 log = logging.getLogger("node")
+
+# 2026-08: "Cancel workflow" in GitHub Actions was reported as unreliable
+# on live crawl runs — a click that should stop the job in seconds
+# sometimes hung far longer. Python's DEFAULT SIGINT/SIGTERM handling
+# should already exit fairly fast, but any moment spent inside a
+# blocking C-level call (DNS resolution via aiodns/pycares is the prime
+# suspect — it has its own event loop underneath asyncio's, and signal
+# delivery into a foreign C event loop isn't as immediate as into plain
+# Python bytecode) delays how soon the interpreter even gets to act on
+# the pending signal. Installing an explicit handler here — imported by
+# every probe/seed source via `import node` — guarantees an immediate,
+# unconditional process exit (os._exit skips atexit/finally/GC entirely,
+# on purpose: correctness on a cancelled run doesn't matter, speed does)
+# the moment Python next gets a chance to run the handler, rather than
+# depending on whatever the default disposition happens to be doing
+# through several layers of C extensions. Applies project-wide — every
+# source (kaggle/PDL, opendata, bigpicture, common_crawl, github_org)
+# calls into node.py, so this one fix covers all of them.
+def _fast_exit_on_signal(signum, frame):
+    log.warning(f"Received signal {signum} (cancel requested) — exiting immediately, no cleanup.")
+    os._exit(1)
+
+
+signal.signal(signal.SIGTERM, _fast_exit_on_signal)
+signal.signal(signal.SIGINT, _fast_exit_on_signal)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
