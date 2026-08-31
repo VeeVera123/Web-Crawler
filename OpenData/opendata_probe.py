@@ -1,7 +1,7 @@
 """
 OPENDATA PROBE — a thin, disposable probe source on top of node.py (the
-permanent engine), same role kaggle_probe.py plays for PDL's dataset.
-Copied directly from kaggle_probe.py (2026-08) since the shape is
+permanent engine), same role people_data_labs_probe.py plays for PDL's dataset.
+Copied directly from people_data_labs_probe.py (2026-08) since the shape is
 identical: read a {name, domain, country} CSV, hand domains to
 node.crawl_batch(). All fetch/parse/detect/write logic lives in node.py —
 fix a bug there once, every probe source gets the fix.
@@ -12,7 +12,7 @@ it was split across multiple <2GB chunks — see opendata_seed.py's module
 docstring for the full download->filter->upload->rejoin pipeline). Column
 names are fixed ("name","domain","country") since opendata_seed.py always
 writes that exact header regardless of what the raw upstream source called
-its own columns — no alias-detection needed here, unlike kaggle_probe.py
+its own columns — no alias-detection needed here, unlike people_data_labs_probe.py
 reading PDL's file directly.
 
 Usage:
@@ -45,23 +45,23 @@ log = logging.getLogger("opendata_probe")
 OPENDATA_FILTERED_PATH = os.environ.get("OPENDATA_FILTERED_PATH", "opendata_organizations_filtered.csv")
 OPENDATA_ROW_LIMIT = int(os.environ.get("OPENDATA_ROW_LIMIT", "0"))  # 0 = no cap
 
-# Same {name,domain,country} shape kaggle_probe.py/github_org_seed.py
+# Same {name,domain,country} shape people_data_labs_probe.py/github_org_seed.py
 # produce — this env var is the only thing that changes between seed
 # files, so rows are correctly attributed regardless of which one found
 # them (see archive_i's `source` column / archive_i_source_check).
 SEED_SOURCE_LABEL = os.environ.get("SEED_SOURCE_LABEL", "opendata_probe")
 
 # opendata_seed.py always writes exactly this header — no alias detection
-# needed (contrast kaggle_probe.py, which reads PDL's own raw file and has
+# needed (contrast people_data_labs_probe.py, which reads PDL's own raw file and has
 # to tolerate 'domain' vs 'website' etc.).
 NAME_COL, DOMAIN_COL, COUNTRY_COL = "name", "domain", "country"
 
-# Kept identical to kaggle_probe.py's/opendata_seed.py's DEFAULT_COUNTRIES
+# Kept identical to people_data_labs_probe.py's/opendata_seed.py's DEFAULT_COUNTRIES
 # deliberately — opendata_seed.py already filtered to this set upstream,
 # so this second pass is normally a no-op; it stays here as a safety net
 # in case OPENDATA_FILTERED_PATH ever points at an unfiltered/differently
 # filtered file, and so --country/--all-countries work the same way
-# kaggle_probe.py's do if someone wants a narrower crawl than the seed.
+# people_data_labs_probe.py's do if someone wants a narrower crawl than the seed.
 DEFAULT_COUNTRIES = {
     "united states", "united kingdom", "canada", "australia",
     "ireland", "new zealand", "singapore",
@@ -76,7 +76,7 @@ PROGRESS_EVERY = 2_000_000  # raw rows scanned between progress log lines
 def read_seed_csv(limit: int = OPENDATA_ROW_LIMIT, countries: set[str] | None = None,
                    shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
     """Single streaming pass over opendata_seed.py's filtered CSV — same
-    shard-aware inline modulo filter as kaggle_probe.py's read_seed_csv
+    shard-aware inline modulo filter as people_data_labs_probe.py's read_seed_csv
     (see that function's docstring for why: each shard only builds the
     companies list it's actually going to crawl, no full-list materialize-
     then-slice). Missing file logs once and returns empty rather than
