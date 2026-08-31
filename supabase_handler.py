@@ -383,10 +383,89 @@ def _build_row(job: dict, location_confidence: str, source_pipeline: str = "craw
     }
 
 
+# ── Pre-classification dedup (2026-08) ──────────────────
+# Both crawl_i.py and crawl_ii.py now call get_existing_urls() BEFORE
+# role/location classification, not just at write time — a job whose URL
+# is already in the table is a job we've already classified before;
+# sending its title/description through keyword_classify_role/
+# ai_classify_roles/ai_classify_locations again is a pure waste of LLM
+# calls (and time) for a result we already know. touch_seen_jobs_raw()
+# below is what refreshes last_seen/is_active for those skipped jobs
+# instead — the cheap, always-available raw-scrape fields (title/company/
+# ats/location/salary) are refreshed too, but visa_sponsorship/clearance/
+# location_priority are deliberately left untouched (see _build_row_raw)
+# since this job was never reclassified this run and we must not
+# overwrite its real, previously-computed values with defaults.
+
+def _build_row_raw(job: dict) -> dict:
+    """Minimal touch-only row for a job whose URL is ALREADY in the DB and
+    is being skipped past classification entirely this run. Omits
+    visa_sponsorship/clearance/location_priority/date_added/source_pipeline
+    — not even as null — so PostgREST's on_conflict=job_url upsert leaves
+    those classification-owned columns exactly as they already are (same
+    trick _touch_last_seen uses for date_added/source_pipeline).
+    title/job_url/ats are still required even for a touch: they're NOT
+    NULL with no default, and Postgres validates NOT NULL against the
+    INSERT's full target column list before it ever reaches the ON
+    CONFLICT branch — see _touch_last_seen's 2026-08 bug note for the
+    full story on why omitting them would fail even on a guaranteed
+    update-only upsert."""
+    today = date.today().isoformat()
+    return {
+        "title": _safe_str(job.get("title"), 500),
+        "job_url": job.get("url", ""),
+        "company_name": _safe_str(job.get("company"), 300),
+        "ats": job.get("source_ats", "unknown"),
+        "location": _safe_str(job.get("location"), 500),
+        "salary": _safe_str(job.get("salary"), 200),
+        "last_seen": today,
+        "is_active": True,
+    }
+
+
+def touch_seen_jobs_raw(jobs: list[dict]) -> int:
+    """Bulk-refresh last_seen/is_active for jobs skipped BEFORE
+    classification because their job_url is already known (see
+    crawl_i.py's/crawl_ii.py's pre-filter step). Unlike _touch_last_seen
+    there's no (job, confidence) pair with real classification output to
+    send — these jobs never ran through filter_roles/filter_locations/
+    detect_visa_sponsorship this run — so _build_row_raw() is used
+    instead of _build_row(), omitting the classification-owned columns
+    entirely rather than overwriting them with defaults."""
+    if not jobs:
+        return 0
+    CHUNK = 500
+    headers = {**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
+    touched = 0
+    for i in range(0, len(jobs), CHUNK):
+        chunk = jobs[i:i + CHUNK]
+        rows = [_build_row_raw(j) for j in chunk if j.get("url")]
+        if not rows:
+            continue
+        try:
+            r = http_requests.post(
+                f"{REST}/jobs", headers=headers, json=rows, timeout=60,
+                params={"on_conflict": "job_url"},
+            )
+            r.raise_for_status()
+            touched += len(rows)
+        except Exception as e:
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f" | body: {resp.text[:500]}"
+            log.error(f"Supabase touch-upsert (jobs, pre-classification skip) "
+                      f"failed for chunk of {len(rows)}: {e}{detail}")
+    log.info(f"Touched last_seen for {touched}/{len(jobs)} already-known jobs "
+             f"(skipped role/location classification — saved the LLM calls)")
+    return touched
+
+
 # ── Job insertion ────────────────────────────────────────
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
-                    source_pipeline: str = "crawl_i") -> int:
+                    source_pipeline: str = "crawl_i",
+                    existing_urls: set[str] | None = None) -> int:
     """
     Upsert jobs in bulk. New jobs are inserted; existing jobs get
     last_seen and is_active updated.  Returns count of new jobs added.
@@ -394,8 +473,16 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
     `source_pipeline` tags true first-inserts only — see _build_row's
     docstring. Crawl II (crawl_ii.py) calls this with source_pipeline=
     'crawl_ii'; Crawl I leaves the default.
+
+    `existing_urls` (2026-08): pass in a set already fetched by the
+    caller's own pre-classification dedup pass to skip ANOTHER full
+    get_existing_urls() table scan here — every job reaching this
+    function already cleared that pre-filter, so re-fetching would just
+    be a second redundant full `jobs` table pull. Still falls back to
+    fetching it here (backward compatible) when the caller doesn't have
+    one — e.g. any direct/manual call to this function.
     """
-    existing = get_existing_urls()
+    existing = existing_urls if existing_urls is not None else get_existing_urls()
     today = date.today().isoformat()
 
     new_rows = []
