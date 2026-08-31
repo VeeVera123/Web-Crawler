@@ -91,6 +91,7 @@ from classifier import (  # noqa: E402
 )
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
+    get_existing_urls, touch_seen_jobs_raw,
 )
 
 logging.basicConfig(
@@ -456,13 +457,38 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     return matched, confidences
 
 
-def _push_batch(candidate_jobs: list[dict]) -> int:
+def _push_batch(candidate_jobs: list[dict], existing_urls: set[str]) -> int:
     """Runs one micro-batch of raw candidate postings through the same
     role → location → visa funnel crawl_i.py uses, then upserts survivors,
-    tagged source_pipeline='crawl_ii'. Returns count of new jobs added."""
+    tagged source_pipeline='crawl_ii'. Returns count of new jobs added.
+
+    2026-08: dedups against `existing_urls` BEFORE the role/location
+    funnel — a posting whose URL is already in `jobs` was already
+    classified in a prior run (or an earlier micro-batch this same
+    shard), so re-running keyword_classify_role/ai_classify_roles/
+    ai_classify_locations on it is a pure waste of LLM calls. Those
+    skipped postings just get last_seen/is_active refreshed via
+    touch_seen_jobs_raw() instead. `existing_urls` is shared/mutated
+    across every micro-batch in this shard (see crawl_batch_ii) so a
+    posting re-surfacing across batches only ever gets classified once."""
     if not candidate_jobs:
         return 0
-    role_matched = _filter_roles(candidate_jobs)
+
+    new_jobs, already_seen = [], []
+    for job in candidate_jobs:
+        url = job.get("url", "")
+        if url and url in existing_urls:
+            already_seen.append(job)
+        else:
+            new_jobs.append(job)
+    if already_seen:
+        touch_seen_jobs_raw(already_seen)
+        for job in already_seen:
+            existing_urls.add(job.get("url", ""))
+    if not new_jobs:
+        return 0
+
+    role_matched = _filter_roles(new_jobs)
     if not role_matched:
         return 0
     global_jobs, confidences = _filter_locations(role_matched)
@@ -470,7 +496,8 @@ def _push_batch(candidate_jobs: list[dict]) -> int:
         return 0
     for job in global_jobs:
         job["visa_sponsorship"] = detect_visa_sponsorship(job)
-    added = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE)
+    added = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE,
+                            existing_urls=existing_urls)
     return added
 
 
@@ -484,9 +511,16 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     sub-batch (same shape as node.py's crawl_batch/crawl_i.py's scrape_all
     — micro-batching keeps memory bounded and gives partial progress if
     the time budget is hit mid-run). Returns (pages_done, jobs_added,
-    time_budget_hit)."""
+    time_budget_hit).
+
+    2026-08: fetches `jobs.job_url` from Supabase ONCE here, up front, and
+    threads that same set through every micro-batch's _push_batch() call
+    — both so already-known postings skip LLM classification (see
+    _push_batch's docstring) and so add_jobs_batch() never re-pulls the
+    whole `jobs` table on every single micro-batch like it used to."""
     total_added = 0
     time_budget_hit = False
+    existing_urls = get_existing_urls()
 
     for i in range(0, len(pages), batch_size):
         if time.monotonic() - crawl_start >= time_budget_seconds:
@@ -498,7 +532,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         results = await asyncio.gather(
             *(extract_postings_from_page(session, sem, p, stats) for p in batch))
         candidate_jobs = [job for page_jobs in results for job in page_jobs]
-        added = _push_batch(candidate_jobs)
+        added = _push_batch(candidate_jobs, existing_urls)
         total_added += added
 
         done = min(i + batch_size, len(pages))
