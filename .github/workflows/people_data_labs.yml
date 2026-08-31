@@ -1,0 +1,171 @@
+name: People Data Labs
+
+# Visits each company's own website (from PDL's domain field) and looks
+# for a real link to any known ATS platform, using multiple detection
+# methods (parsed links, raw-text scan, JSON-LD) with a fallback chain
+# (homepage -> career paths -> sitemap.xml). Every domain is crawled
+# regardless of size — see people_data_labs_probe.py's docstring for the
+# archive_i/archive_ii split.
+#
+# Two-stage pipeline, same shape as bigpicture.yml/opendata.yml:
+#
+#   seed:  downloads + filters PDL's Free Company Dataset from its direct
+#          no-signup CSV link (see people_data_labs_seed.py), uploads the
+#          result as GitHub Release asset chunks. Manual, occasional —
+#          not part of the daily schedule.
+#
+#   crawl: downloads the Release chunks, shards the crawl across N jobs.
+#          min_size only gates which no-ATS-match companies reach
+#          archive_ii — see people_data_labs_probe.py's docstring.
+on:
+  workflow_dispatch:
+    inputs:
+      run_seed:
+        description: "Check to seed only (download+filter+upload). Leave unchecked to crawl only, using what's already on the Release."
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: "GitHub Release tag to upload to / download from"
+        required: false
+        default: "pdl-seed-data"
+      restart_id:
+        description: "Seed only: resume from this row number (from a prior 'Restart ID' log line). 0 = start over."
+        required: false
+        default: "0"
+      seed_time_budget_minutes:
+        description: "Seed only: self-stop after this many minutes and log a Restart ID"
+        required: false
+        default: "340"
+      shard_count:
+        description: "Crawl stage: parallel shards"
+        required: false
+        default: "20"
+      concurrency:
+        description: "Crawl stage: companies crawled in parallel per shard"
+        required: false
+        default: "400"
+      min_size:
+        description: "Crawl stage: min employee count for a no-ATS company to enter archive_ii (doesn't affect which companies get crawled). 0 = no filter."
+        required: false
+        default: "100"
+
+concurrency:
+  group: people-data-labs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seed:
+    if: ${{ github.event.inputs.run_seed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # the hard ceiling — this step cannot be sharded
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: "Resume: download + rejoin this run's own prior partial output"
+        if: ${{ github.event.inputs.restart_id != '0' && github.event.inputs.restart_id != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'pdl-seed-data' }}"
+          if gh release download "$TAG" --pattern "pdl_chunk_*.csv" --dir chunks 2>/dev/null; then
+            cat chunks/pdl_chunk_*.csv > pdl_companies_filtered.csv
+            echo "Rejoined prior partial output: $(wc -l < pdl_companies_filtered.csv) lines"
+          else
+            echo "No prior Release assets found for tag $TAG — starting fresh despite Restart ID being set."
+          fi
+
+      - name: Download + stream-filter PDL Free Company Dataset
+        run: |
+          python "People Data Labs/people_data_labs_seed.py" \
+            --output pdl_companies_filtered.csv \
+            --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
+            --time-budget-minutes ${{ github.event.inputs.seed_time_budget_minutes || '340' }}
+
+      - name: Split filtered output into <2GB chunks (GitHub Release asset cap)
+        run: |
+          split -b 1900m -d --additional-suffix=.csv pdl_companies_filtered.csv pdl_chunk_
+          ls -la pdl_chunk_*.csv
+
+      - name: Upload chunks to Release (replacing any existing assets on this tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'pdl-seed-data' }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "People Data Labs (Free Company Dataset)" \
+            --notes "Filtered PDL Free Company Dataset — see People Data Labs/people_data_labs_seed.py. Regenerated $(date -u +%Y-%m-%d)."
+          gh release view "$TAG" --json assets -q '.assets[].name' | grep '^pdl_chunk_' | \
+            xargs -r -I{} gh release delete-asset "$TAG" {} -y || true
+          gh release upload "$TAG" pdl_chunk_*.csv --clobber
+
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '20' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT  |  total jobs: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: [seed, prepare-matrix]
+    if: ${{ always() && github.event.inputs.run_seed != 'true' }}
+    runs-on: ubuntu-latest
+    # 350 keeps real headroom under GitHub-hosted runners' hard 360-min
+    # ceiling. There's no backoff/circuit-breaker that could stall a shard
+    # indefinitely — a slow shard is just genuinely slow (network-bound
+    # crawling of however many companies landed in its slice).
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false   # one shard's issue shouldn't cancel the others
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests python-dotenv
+
+      - name: Download + rejoin Release asset chunks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'pdl-seed-data' }}"
+          gh release download "$TAG" --pattern "pdl_chunk_*.csv" --dir chunks
+          cat chunks/pdl_chunk_*.csv > pdl_companies_filtered.csv
+          wc -l pdl_companies_filtered.csv
+
+      - name: "Crawl companies (shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '20' }})"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PDL_DATASET_PATH: pdl_companies_filtered.csv
+        run: |
+          python "People Data Labs/people_data_labs_probe.py" \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.shard_count || '20' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '400' }} \
+            --min-size ${{ github.event.inputs.min_size || '100' }}
