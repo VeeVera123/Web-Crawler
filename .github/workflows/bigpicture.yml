@@ -1,0 +1,165 @@
+name: BigPicture
+
+# Two-stage pipeline for BigPicture.io's free companies dataset, hosted
+# publicly on HuggingFace (no signup/API key needed — see
+# BigPicture/bigpicture_seed.py's module docstring):
+#
+#   seed:  downloads + stream-filters (by country only — NOT by size; every
+#          company in the target countries must be crawled regardless of
+#          size, see bigpicture_seed.py's module docstring) the raw source
+#          (one continuous job — same shape as opendata.yml's seed job),
+#          splits the filtered output into <2GB chunks if needed, uploads
+#          them as assets on a dedicated GitHub Release titled "BigPicture".
+#          Manual, occasional job — NOT part of the daily schedule —
+#          re-run only to refresh the seed.
+#
+#   probe: downloads + rejoins the Release asset chunks, then shards the
+#          crawl across N parallel jobs — same shape as kaggle_probe.yml/
+#          opendata.yml's crawl job (both call node.crawl_batch() the same
+#          way). min_size here does NOT gate crawl-eligibility — every
+#          domain gets crawled/ATS-checked regardless of size — it only
+#          controls which no-ATS-match companies are allowed into
+#          archive_ii. See bigpicture_probe.py's docstring for why.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_seed:
+        description: "Check to seed only (download+filter+upload — you only need this once, or to resume/refresh). Leave unchecked to crawl only, using whatever's already on the Release."
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: "GitHub Release tag to upload to / download from"
+        required: false
+        default: "bigpicture-companies"
+      restart_id:
+        description: "Seed only: resume from this raw row number (from a prior run's 'Restart ID' log line). Leave 0 to start from the beginning."
+        required: false
+        default: "0"
+      seed_time_budget_minutes:
+        description: "Seed only: self-stop after this many minutes and log a Restart ID, instead of risking a hard kill at GitHub's 360min job timeout."
+        required: false
+        default: "340"
+      min_size:
+        description: "Crawl stage only: does NOT affect which companies get crawled (every company is crawled/ATS-checked regardless of size). Only controls which no-ATS-match companies are allowed into archive_ii (min employee count). 0 disables the filter."
+        required: false
+        default: "100"
+      shard_count:
+        description: "Crawl stage: parallel shards."
+        required: false
+        default: "15"
+
+concurrency:
+  group: bigpicture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seed:
+    if: ${{ github.event.inputs.run_seed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # the hard ceiling — this step cannot be sharded, same as opendata.yml's seed job
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: "Resume: download + rejoin this run's own prior partial output"
+        if: ${{ github.event.inputs.restart_id != '0' && github.event.inputs.restart_id != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'bigpicture-companies' }}"
+          if gh release download "$TAG" --pattern "bigpicture_chunk_*.csv" --dir chunks 2>/dev/null; then
+            cat chunks/bigpicture_chunk_*.csv > bigpicture_companies_filtered.csv
+            echo "Rejoined prior partial output: $(wc -l < bigpicture_companies_filtered.csv) lines"
+          else
+            echo "No prior Release assets found for tag $TAG — starting fresh despite Restart ID being set."
+          fi
+
+      - name: Download + stream-filter BigPicture companies
+        run: |
+          python BigPicture/bigpicture_seed.py \
+            --output bigpicture_companies_filtered.csv \
+            --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
+            --time-budget-minutes ${{ github.event.inputs.seed_time_budget_minutes || '340' }}
+
+      - name: Split filtered output into <2GB chunks (GitHub Release asset cap)
+        run: |
+          split -b 1900m -d --additional-suffix=.csv bigpicture_companies_filtered.csv bigpicture_chunk_
+          ls -la bigpicture_chunk_*.csv
+
+      - name: Upload chunks to Release (replacing any existing assets on this tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'bigpicture-companies' }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "BigPicture" \
+            --notes "Filtered BigPicture.io companies dataset — see BigPicture/bigpicture_seed.py. Regenerated $(date -u +%Y-%m-%d)."
+          gh release view "$TAG" --json assets -q '.assets[].name' | grep '^bigpicture_chunk_' | \
+            xargs -r -I{} gh release delete-asset "$TAG" {} -y || true
+          gh release upload "$TAG" bigpicture_chunk_*.csv --clobber
+
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '15' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: [seed, prepare-matrix]
+    if: ${{ always() && github.event.inputs.run_seed != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests python-dotenv
+
+      - name: Download + rejoin Release asset chunks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'bigpicture-companies' }}"
+          gh release download "$TAG" --pattern "bigpicture_chunk_*.csv" --dir chunks
+          cat chunks/bigpicture_chunk_*.csv > bigpicture_companies_filtered.csv
+          wc -l bigpicture_companies_filtered.csv
+
+      - name: "BigPicture probe — shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '15' }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python BigPicture/bigpicture_probe.py \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.shard_count || '15' }} \
+            --min-size ${{ github.event.inputs.min_size || '100' }}
