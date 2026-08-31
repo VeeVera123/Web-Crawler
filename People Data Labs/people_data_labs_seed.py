@@ -95,22 +95,55 @@ def _col_index(header_lower: list[str], aliases: tuple[str, ...]) -> int | None:
     return None
 
 
+class _PeekedStream:
+    """Wraps a raw file-like stream, prepending bytes already consumed
+    from it via an initial peek, so a downstream consumer (gzip.GzipFile,
+    TextIOWrapper) sees the complete stream from byte 0. Needed because
+    pdl.ai/company-dataset-csv serves a raw gzip body with no
+    Content-Encoding header and no `.gz` suffix in the URL — the actual
+    gzip magic bytes (1f 8b) only show up once you look at the content
+    itself, not the headers or URL, so a plain `url.endswith(".gz")`
+    check (as bigpicture_seed.py's/opendata_seed.py's simpler sources
+    get away with) silently fed raw compressed bytes into the CSV parser
+    here. requests/urllib3's decode_content=True only helps when a
+    Content-Encoding header is actually present, which this response
+    doesn't send."""
+    def __init__(self, head: bytes, raw):
+        self._buf = head
+        self._raw = raw
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            data, self._buf = self._buf + self._raw.read(), b""
+            return data
+        if self._buf:
+            if len(self._buf) >= size:
+                chunk, self._buf = self._buf[:size], self._buf[size:]
+                return chunk
+            need = size - len(self._buf)
+            chunk, self._buf = self._buf + self._raw.read(need), b""
+            return chunk
+        return self._raw.read(size)
+
+
 def _open_row_source(url: str):
-    """Streams the CSV directly — no temp file. requests/urllib3 already
-    transparently gunzips a proper `Content-Encoding: gzip` response via
-    decode_content=True, which covers the normal case; a `.gz`-suffixed
-    URL (not expected here, but see bigpicture_seed.py's identical check)
-    is handled explicitly too. Returns a (name, domain, country, size)-
+    """Streams the CSV directly — no temp file. Peeks the first 2 raw
+    bytes to sniff for the gzip magic number (1f 8b) since the source
+    doesn't reliably signal gzip via headers or URL suffix — see
+    _PeekedStream's docstring. Returns a (name, domain, country, size)-
     quadruple generator, or None (having already logged why) if the
     header can't be parsed."""
     r = requests.get(url, stream=True, timeout=60)
     r.raise_for_status()
     raw = r.raw
     raw.decode_content = True
-    if url.endswith(".gz"):
-        text = io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8", errors="ignore")
+    head = raw.read(2)
+    stream = _PeekedStream(head, raw)
+    if head == b"\x1f\x8b":
+        log.info("  detected gzip-compressed body (magic bytes) — decompressing")
+        text = io.TextIOWrapper(gzip.GzipFile(fileobj=stream), encoding="utf-8", errors="ignore")
     else:
-        text = io.TextIOWrapper(raw, encoding="utf-8", errors="ignore")
+        text = io.TextIOWrapper(stream, encoding="utf-8", errors="ignore")
 
     reader = csv.reader(text)
     header = next(reader, None)
