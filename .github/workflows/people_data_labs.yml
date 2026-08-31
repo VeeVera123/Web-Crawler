@@ -49,6 +49,10 @@ on:
         description: "Crawl stage: min employee count for a no-ATS company to enter archive_ii (doesn't affect which companies get crawled). 0 = no filter."
         required: false
         default: "100"
+      crawl_time_budget_minutes:
+        description: "Crawl stage: each shard self-stops after this many minutes (independent of seed_time_budget_minutes)"
+        required: false
+        default: "330"
 
 concurrency:
   group: people-data-labs-${{ github.ref }}
@@ -168,4 +172,5 @@ jobs:
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '20' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
-            --min-size ${{ github.event.inputs.min_size || '100' }}
+            --min-size ${{ github.event.inputs.min_size || '100' }} \
+            --time-budget-minutes ${{ github.event.inputs.crawl_time_budget_minutes || '330' }}
