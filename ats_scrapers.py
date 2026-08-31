@@ -3765,7 +3765,7 @@ def _find_embedded_questions(html_text: str) -> list[dict]:
 def _parse_form_elements(html_text: str) -> list[dict]:
     """Absolute Level-3 fallback: blindly parse <input>/<textarea>/<select>
     elements in the page and resolve each one's label."""
-    soup = BeautifulSoup(html_text, "html.parser")
+    soup = BeautifulSoup(html_text, "lxml")
     form = soup.find("form") or soup
 
     questions = []
@@ -3912,7 +3912,7 @@ def _fetch_lever_questions(job: dict) -> str:
 
     questions = []
     if r:
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.text, "lxml")
         for li in soup.select("li.application-question"):
             label_el = li.select_one(".application-label .text") or li.select_one(".application-label")
             label = _clean_label(label_el.get_text(" ", strip=True)) if label_el else ""
@@ -4009,7 +4009,7 @@ def _fetch_teamtailor_questions(job: dict) -> str:
 
     questions = []
     if r:
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.text, "lxml")
         for div in soup.select("div.question"):
             label = _clean_label(div.get_text(" ", strip=True))
             if not label:
@@ -4079,7 +4079,7 @@ def _fetch_applytojob_questions(job: dict) -> str:
 
     questions = []
     if r:
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.text, "lxml")
         container = soup.select_one("div.job-form-fields") or soup
         for label_el in container.select('label[id^="resumator-questionnaire-"]'):
             raw_label = label_el.get_text(" ", strip=True)
