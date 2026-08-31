@@ -182,10 +182,16 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+            # capture_inhouse=False (2026-08): OpenData carries no employee-
+            # count/size signal, so a no-ATS hit here can't be told apart
+            # from a genuine small business — this source no longer feeds
+            # archive_ii at all, only archive_i (known-ATS hits still write
+            # normally either way).
             _, elapsed, rate, time_budget_hit = await node.crawl_batch(
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
-                time_budget_minutes, batch_size=3000, unit_label="companies")
+                time_budget_minutes, batch_size=3000, unit_label="companies",
+                capture_inhouse=False)
     finally:
         parse_pool.shutdown(wait=True)
 
