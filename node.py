@@ -926,6 +926,59 @@ async def clear_crawl_checkpoint(session: aiohttp.ClientSession, source: str, sh
 
 # ── shared batch driver ───────────────────────────────────────────────────
 
+# 2026-08: the time budget used to only be checked BETWEEN batches, right
+# before starting the next asyncio.gather(*batch) — which blocks until
+# EVERY task in that batch finishes. crawl_one holds a semaphore slot
+# through up to 3 homepage candidates (10s timeout each) plus career-path
+# and sitemap fallback tiers, so a batch of up to 3000 domains, bottlenecked
+# by a low --concurrency semaphore, could take many minutes to fully drain
+# — dominated by whichever handful of dead/slow domains land in the last
+# concurrency wave. The time-budget check simply never got a chance to run
+# until that entire batch finished, so a run could blow way past its
+# budget (a 5-minute budget finishing at 12+ minutes was one real case).
+#
+# _run_with_deadline replaces the blocking asyncio.gather(*batch) with a
+# polling wait: it reaps each task's result as soon as that task finishes,
+# and re-checks the wall clock every POLL_INTERVAL seconds. The instant the
+# deadline passes, it cancels every task still in flight immediately —
+# even mid-batch — rather than waiting for stragglers. 0.5s (not 0.5ms —
+# that would just busy-loop the event loop for zero real benefit, since no
+# human or downstream system can tell the difference between a 2ms delay
+# and a 500ms one, and constant re-polling steals scheduler time from the
+# actual crawling) keeps the worst-case overshoot past the budget under a
+# second, which is what "immediately" actually means here.
+POLL_INTERVAL = 0.5
+
+
+async def _run_with_deadline(coros, deadline: float) -> tuple[list, bool]:
+    """Runs `coros` concurrently, starting them as real asyncio Tasks
+    right away (not just creating coroutine objects), and returns
+    (results_from_whatever_completed, hit_deadline). The moment
+    time.monotonic() passes `deadline`, cancels every task still pending
+    and waits for that cancellation to actually land (crawl_one's awaits —
+    aiohttp requests, executor calls — all raise CancelledError and unwind
+    cleanly) before returning, so nothing is left running in the
+    background once this returns."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    pending = set(tasks)
+    results = []
+    hit_deadline = False
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            hit_deadline = True
+            break
+        done, pending = await asyncio.wait(pending, timeout=min(remaining, POLL_INTERVAL),
+                                            return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            results.append(t.result())
+    if pending:
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    return results, hit_deadline
+
+
 async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                        stats: dict, parse_pool: concurrent.futures.Executor,
                        target_geo_countries: set[str], discovery_method: str,
@@ -989,8 +1042,9 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
              for d in domains]
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
+    deadline = crawl_start + time_budget_seconds
     for i in range(0, len(tasks), batch_size):
-        if time.monotonic() - crawl_start >= time_budget_seconds:
+        if time.monotonic() >= deadline:
             for t in tasks[i:]:
                 t.close()
             time_budget_hit = True
@@ -998,7 +1052,12 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                         f"{unit_label} — stopping here, everything found so far is written.")
             break
         batch = tasks[i:i + batch_size]
-        results = await asyncio.gather(*batch)
+        # Polls the deadline instead of blocking until every task in this
+        # batch finishes — see _run_with_deadline above. `results` may be
+        # SHORT of the full batch if hit_deadline fired mid-batch; whatever
+        # DID complete is still processed/written/checkpointed below like
+        # normal, nothing found gets thrown away.
+        results, hit_deadline = await _run_with_deadline(batch, deadline)
         batch_rows = []
         scrape_rows = []
         seen_keys = set()
@@ -1030,7 +1089,11 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         if scrape_rows:
             written_scrape = await write_career_pages_to_archive_ii(session, scrape_rows)
 
-        done = min(i + batch_size, len(tasks))
+        # i + len(results), NOT i + batch_size: if hit_deadline fired mid-
+        # batch, results is short of the full batch — this reflects what
+        # ACTUALLY finished and got written just above, not what was merely
+        # scheduled. When the batch completes normally these are identical.
+        done = i + len(results)
         elapsed = time.monotonic() - crawl_start
         rate = stats["companies_attempted"] / elapsed if elapsed > 0 else 0
         hit_n = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
@@ -1044,6 +1107,16 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
             # This batch's rows are already durably committed above, so
             # start_at + done is always safe to resume from.
             await save_crawl_checkpoint(session, discovery_method, shard_index, shard_count, start_at + done)
+        if hit_deadline:
+            # Deadline hit MID-batch (not just between batches, the older
+            # check above) — the stragglers still in flight when the clock
+            # ran out were already cancelled inside _run_with_deadline.
+            # Everything that DID finish is written and checkpointed above;
+            # stop here instead of starting another batch.
+            time_budget_hit = True
+            log.warning(f"  time budget ({time_budget_minutes}min) reached mid-batch at {done}/{len(tasks)} "
+                        f"{unit_label} — stopping here, everything found so far is written.")
+            break
     if not time_budget_hit and shard_index is not None and shard_count is not None:
         # Ran to the end of this shard's list without self-stopping — fully
         # done, so clear the checkpoint rather than leave a stale "done"
