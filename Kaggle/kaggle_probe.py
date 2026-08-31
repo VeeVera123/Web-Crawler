@@ -1,6 +1,6 @@
 """
-KAGGLE PROBE (renamed from class_a_probe.py, 2026-08) — a thin, disposable
-probe source on top of node.py (the permanent engine). Reads People Data
+KAGGLE PROBE — a thin, disposable probe source on top of node.py (the
+permanent engine). Reads People Data
 Labs' Free Company Dataset, extracts {name, domain, country}, hands
 domains to node.crawl_batch(). All fetch/parse/detect/write logic lives
 in node.py — fix a bug there once, every probe/seed source gets the fix.
