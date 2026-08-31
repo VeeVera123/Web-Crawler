@@ -54,7 +54,7 @@ concurrency:
 
 jobs:
   prepare-matrix:
-    # Same reason as kaggle_probe.yml's prepare-matrix job — workflow_dispatch
+    # Same reason as people_data_labs.yml's prepare-matrix job — workflow_dispatch
     # inputs can't be referenced directly inside a matrix, so shard_count ->
     # [0, 1, ..., shard_count-1] is computed here first.
     runs-on: ubuntu-latest
