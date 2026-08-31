@@ -4,6 +4,10 @@ openai>=1.0
 anthropic>=0.34
 groq>=0.4
 beautifulsoup4>=4.12
+lxml>=5.0  # 2026-08: ats_scrapers.py's 4 BeautifulSoup() call sites switched
+           # from "html.parser" (pure-Python, slowest option) to "lxml"
+           # (C-accelerated) — same find()/select()/get_text() API, just
+           # much faster parsing per page.
 
 # node.py (the shared crawl/detect/write engine every seed source — kaggle_probe.py,
 # github_org_probe.py, tranco_crawl.py, common_crawl_probe.py — imports directly) and
