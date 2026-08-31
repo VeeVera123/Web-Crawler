@@ -234,7 +234,7 @@ def read_seed_csv(limit: int = PDL_ROW_LIMIT, countries: set[str] | None = None,
     elapsed = time.monotonic() - start
     filter_note = f", {skipped_wrong_country:,} skipped by country filter" if countries_lower else ""
     shard_note = f", {len(out):,} in this shard" if shard_index is not None else ""
-    log.info(f"Seed dataset: {total_rows:,} total rows{filter_note}{size_note}, "
+    log.info(f"Seed dataset: {total_rows:,} total rows{filter_note}, "
              f"{kept_before_shard:,} usable "
              f"({kept_before_shard / max(total_rows, 1) * 100:.1f}%){shard_note}, parsed in {elapsed:.1f}s")
     return out
