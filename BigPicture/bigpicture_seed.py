@@ -7,9 +7,9 @@ signup-gated download, which requires a business email):
 17.2M companies, a single companies-2023-q4-sm.csv.gz (~629MB compressed).
 Columns: handle, name, website, industry, size, type, founded, city,
 state, country_code — the 'size' column (an employee-count RANGE string
-like "501-1K", "1-10", "10K+") is exactly what kaggle_probe.py's PDL seed
+like "501-1K", "1-10", "10K+") is exactly what people_data_labs_probe.py's PDL seed
 also carries and OpenData/Common Crawl don't, which is why this source —
-like Kaggle — is allowed to feed BOTH archive_i (known-ATS hits) AND
+like People Data Labs — is allowed to feed BOTH archive_i (known-ATS hits) AND
 archive_ii (in-house/unsupported career pages): a no-ATS hit from a
 company already confirmed to be above MIN_COMPANY_SIZE isn't the same
 kind of noise a no-signal source's hit would be. See node.py's
@@ -78,7 +78,7 @@ COUNTRY_COLS = ("country_code", "country")
 SIZE_COLS = ("size",)
 
 # ISO 3166-1 alpha-2 codes — country_code is a 2-letter code here (unlike
-# kaggle_probe.py's/opendata_seed.py's full lowercase country NAMES), so
+# people_data_labs_probe.py's/opendata_seed.py's full lowercase country NAMES), so
 # this is the same underlying country list re-expressed as codes, not a
 # different policy. Keep in sync with those two if the list changes.
 DEFAULT_COUNTRY_CODES = {
