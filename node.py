@@ -1,6 +1,6 @@
 """
 NODE — the one permanent crawl/detect/write engine every seed source
-depends on. Seed scripts (kaggle_probe.py, host_crawl_v2.py, and any
+depends on. Seed scripts (people_data_labs_probe.py, host_crawl_v2.py, and any
 future one) are thin and disposable: they find domains and hand them to
 crawl_batch(). This file is not disposable — fix a bug here once, every
 source gets the fix.
@@ -713,7 +713,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
         # means "don't feed archive_ii from this source" — neither of those
         # sources carries an employee-count/size signal, so a no-ATS hit from
         # them is indistinguishable from a genuine small business; archive_ii
-        # was getting flooded with exactly that noise. kaggle_probe.py (and
+        # was getting flooded with exactly that noise. people_data_labs_probe.py (and
         # any future size-aware source) still captures normally — but note
         # both of THOSE also now pre-filter to companies above the size
         # threshold before ever reaching crawl_one, so what lands in
@@ -784,7 +784,7 @@ async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list
     the old archive_ii (ATS-match quarantine table a separate verify step
     promoted from) is dropped entirely. discovery_method maps to archive_i's
     `source` column, which is CHECK-constrained — every discovery_method
-    string a live caller passes (kaggle_probe, github_org_probe,
+    string a live caller passes (people_data_labs_probe, github_org_probe,
     common_crawl_probe, plus discovery.py's own set) must already be in
     archive_i_source_check or the upsert fails for that whole batch."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -828,7 +828,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
-    be duplicated (kaggle_probe's inline loop, host_crawl_v2's
+    be duplicated (people_data_labs_probe's inline loop, host_crawl_v2's
     _crawl_and_write_hosts) with the same batching/dedup/time-budget logic
     copy-pasted twice. Returns (done, elapsed, rate, time_budget_hit).
 
@@ -847,7 +847,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         allowed to produce an archive_ii row this run (every other domain
         behaves as capture_inhouse=False for that one company only, ATS
         matching unaffected). This is the 2026-08 fix for over-filtering:
-        kaggle_probe.py/bigpicture_probe.py used to drop small companies
+        people_data_labs_probe.py/bigpicture_probe.py used to drop small companies
         from the crawl LIST entirely at seed time, which filtered out
         their archive_i-eligible ATS hits too, for almost nothing gained
         — now every company in the target countries gets crawled (feeding
@@ -925,7 +925,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
 
 def new_parse_pool() -> concurrent.futures.Executor:
     """ThreadPoolExecutor (2026-08, was ProcessPoolExecutor) — see
-    PARSE_WORKERS' comment above for why. Every caller (kaggle_probe.py,
+    PARSE_WORKERS' comment above for why. Every caller (people_data_labs_probe.py,
     opendata_probe.py, common_crawl_probe.py, bigpicture_probe.py,
     github_org_probe.py, host_crawl_v2.py) just passes this straight into
     crawl_batch()'s loop.run_in_executor() call, so no caller-side changes
