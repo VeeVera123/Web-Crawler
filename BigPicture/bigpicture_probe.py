@@ -217,7 +217,9 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     # mechanism this feeds.
     capture_inhouse_domains = {c["domain"] for c in companies
                                 if (c.get("size_floor") or -1) >= min_size}
-    log.info(f"  archive_ii eligible (size >= {min_size}): {len(capture_inhouse_domains):,}/{len(companies):,} companies")
+    log.info(f"  every one of these {len(companies):,} companies gets crawled regardless of size — "
+             f"{len(capture_inhouse_domains):,}/{len(companies):,} are size >= {min_size} and will be "
+             f"allowed into archive_ii later, IF they turn out to have no known ATS but a real career page")
 
     connector = node.new_connector()
     sem = asyncio.Semaphore(concurrency)
