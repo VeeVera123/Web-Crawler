@@ -1,87 +1,98 @@
-name: Kaggle
+name: Class A — Domain-Crawl Discovery
 
+# REWRITTEN (2026-08): this used to be a "guess a slug, ask the platform's
+# API" prober (seed-and-probe). It's now a domain-crawl discovery tool
+# instead — visits each company's OWN website (from PDL's domain field)
+# and looks for a REAL link to any of the 25+ ATS platforms
+# discovery.py's URL_TO_SLUG recognizes, using multiple independent
+# detection methods per page (parsed links, raw-text regex scan for
+# embedded/JS links, dedicated JSON-LD structured-data parsing) with a
+# fallback chain (homepage -> common career-page paths -> sitemap.xml) if
+# the homepage alone doesn't turn anything up. See class_a_probe.py's
+# module docstring for the full rationale — short version: guessing
+# slugs against Greenhouse's shared API is what got this project soft-
+# blocked by their WAF, and separately produced a 4.5M-row false-positive
+# incident against SmartRecruiters (their API 200'd identically for real
+# and fake slugs, so body-shape checking could never have worked).
+# Neither failure mode is possible with this technique: a match here
+# means the literal URL is present on the company's OWN page, and every
+# request goes to a different company's own domain instead of hammering
+# one shared host, so there's no single target for a WAF to trip on.
+#
+# NO --platform ANYMORE: the old script probed one platform at a time.
+# This one detects ALL platforms simultaneously from a single visit to
+# each company's site, so there's nothing to select — sharding is purely
+# over the company list now (see shard_count input).
+#
+# NO RATE LIMITING: deliberately removed (see class_a_probe.py's module
+# docstring) — it existed specifically to survive hammering one shared
+# host and would be pure overhead here, where the actual constraint is
+# this runner's own network/CPU throughput, not any single target's
+# tolerance for traffic.
+#
+# PDL SEED FILE: same as before — too large to commit into the repo
+# (~1GB uncompressed), uploaded once as a GitHub Release asset (tag:
+# pdl_release_tag below) and downloaded fresh each run via `gh release
+# download` using the workflow's own built-in token.
+#
+# Writes into the SAME ctlog_probe_results staging table the CT-logs
+# pipeline uses, now with root_domain finally holding the actual company
+# domain that was crawled (previously a placeholder marker string, since
+# the old technique had no real domain to put there) and source_hostname
+# holding the exact page URL + detection tier the match was found on.
 on:
   workflow_dispatch:
     inputs:
-      run_seed:
-        description: "Check to download/filter the Kaggle dataset. Uncheck to just crawl existing Release assets."
+      pdl_release_tag:
+        description: "Tag of the GitHub Release holding the PDL dataset zip asset"
         required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: "GitHub Release tag to upload to / download from"
-        required: false
-        default: "kaggle-companies"
+        default: "pdl-seed-data"
       shard_count:
-        description: "Crawl stage: parallel shards."
+        description: "Number of parallel shards to split the company list across"
         required: false
-        default: "10"
+        default: "20"
+      concurrency:
+        description: "Companies crawled in parallel PER shard (no rate limiting — see class_a_probe.py)"
+        required: false
+        default: "400"
 
 concurrency:
-  group: kaggle-${{ github.ref }}
+  group: class-a-probe-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  seed:
-    if: ${{ github.event.inputs.run_seed == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install requests python-dotenv
-
-      - name: Download + stream-filter Kaggle Dataset
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          python Kaggle/kaggle_seed.py --output kaggle_companies_filtered.csv
-
-      - name: Upload to Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.release_tag || 'kaggle-companies' }}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
-            --title "Kaggle Companies (filtered)" \
-            --notes "Filtered Kaggle dataset. Regenerated $(date -u +%Y-%m-%d)."
-          
-          # Clear old assets
-          gh release view "$TAG" --json assets -q '.assets[].name' | grep '^kaggle_' | \
-            xargs -r -I{} gh release delete-asset "$TAG" {} -y || true
-            
-          # Kaggle datasets are usually small enough to not need splitting, 
-          # but we rename it to match the probe's expected download pattern
-          mv kaggle_companies_filtered.csv kaggle_chunk_00.csv
-          gh release upload "$TAG" kaggle_chunk_*.csv --clobber
-
   prepare-matrix:
+    # GitHub Actions matrices can't reference workflow_dispatch inputs
+    # directly, so shard_count -> [0, 1, ..., shard_count-1] is computed
+    # here first and passed to the crawl job via fromJson (same pattern
+    # this workflow already used for its old platform x shard matrix).
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
-      - name: Build shard-index matrix
+      - name: Build shard-index matrix from shard_count input
         id: build
         run: |
-          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
-          MATRIX_JSON=$(python3 -c "import json; print(json.dumps({'include': [{'shard': s} for s in range(int('$SHARD_COUNT'))]}))")
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '20' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT  |  total jobs: $SHARD_COUNT"
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
   crawl:
-    needs: [seed, prepare-matrix]
-    if: ${{ always() && github.event.inputs.run_seed != 'true' }}
+    needs: prepare-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 350 keeps real headroom under GitHub-hosted runners' hard 360-min
+    # ceiling. Unlike the old probe, there's no backoff/circuit-breaker
+    # that could stall a shard indefinitely here — a slow shard is just
+    # genuinely slow (network-bound crawling of however many companies
+    # landed in its slice), not stuck waiting on a block.
+    timeout-minutes: 350
     strategy:
-      fail-fast: false
+      fail-fast: false   # one shard's issue shouldn't cancel the others
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
     steps:
       - name: Checkout
@@ -95,21 +106,27 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp aiodns selectolax requests python-dotenv
 
-      - name: Download Release asset
+      - name: Download PDL seed dataset from GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.release_tag || 'kaggle-companies' }}"
-          gh release download "$TAG" --pattern "kaggle_chunk_*.csv" --dir chunks
-          cat chunks/kaggle_chunk_*.csv > kaggle_companies_filtered.csv
+          TAG="${{ github.event.inputs.pdl_release_tag || 'pdl-seed-data' }}"
+          if gh release download "$TAG" --repo "${{ github.repository }}" -p "*.zip" -D . ; then
+            unzip -o ./*.zip
+            if [ -f companies_sorted.csv ] && [ ! -f people_data_labs_companies.csv ]; then
+              mv companies_sorted.csv people_data_labs_companies.csv
+            fi
+            echo "PDL dataset ready: $(ls -la people_data_labs_companies.csv 2>/dev/null || echo 'NOT FOUND after unzip — check the zip contents/filename')"
+          else
+            echo "No PDL release asset found (tag: $TAG) — nothing to crawl without it, this shard will find 0 companies."
+          fi
 
-      - name: "Kaggle probe — shard ${{ matrix.shard }}"
+      - name: "Crawl companies (shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '20' }})"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          OPENDATA_FILTERED_PATH: "kaggle_companies_filtered.csv"
-          SEED_SOURCE_LABEL: "kaggle_probe"
         run: |
           python Kaggle/kaggle_probe.py \
             --shard-index ${{ matrix.shard }} \
-            --shard-count ${{ github.event.inputs.shard_count || '10' }}
+            --shard-count ${{ github.event.inputs.shard_count || '20' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '400' }}
