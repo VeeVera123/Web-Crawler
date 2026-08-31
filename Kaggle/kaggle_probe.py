@@ -75,22 +75,25 @@ COUNTRY_COLS = ("country",)
 # RANGE string like "501-1000", "10001+") — see MIN_COMPANY_SIZE below.
 SIZE_COLS = ("size", "size_range", "employee_count", "employees")
 
-# 2026-08: archive_ii was getting flooded with small-business noise from
-# no-size-signal sources (opendata_probe.py/common_crawl_probe.py now set
-# capture_inhouse=False for exactly this reason — see node.py's
-# crawl_batch docstring). Kaggle/PDL is one of the few sources that
-# actually carries a size signal, so it's used HERE, before crawling even
-# starts, to only ever send companies at or above this floor to node.py.
-# 501 (PDL's own "501-1000" bucket boundary) was picked as the default
-# floor: below that, a company is still plausibly a small/early-stage
-# business without the budget or global-hiring infrastructure a CSM/AM
-# role targeting worldwide or Africa-wide candidates implies; 501+ is
-# solidly past that into "established, multi-office, formal HR" territory
-# without cutting the pool down to ONLY the largest few thousand
-# enterprises the way a 1000+ or 5000+ floor would. Override via
-# MIN_COMPANY_SIZE env var or --min-size if this default proves wrong in
-# practice once real hit-rate data comes back.
-MIN_COMPANY_SIZE = int(os.environ.get("MIN_COMPANY_SIZE", "501"))
+# 2026-08, REVISED: archive_ii was getting flooded with small-business
+# noise from no-size-signal sources (opendata_probe.py/common_crawl_probe.py
+# set capture_inhouse=False for exactly that — see node.py's crawl_batch
+# docstring). Kaggle/PDL DOES carry a size signal, but an earlier version
+# of this file used it to drop small companies from the CRAWL LIST at seed
+# time — wrong, because that also threw away their perfectly good
+# archive_i-eligible ATS hits, for almost nothing gained (archive_i was
+# never the problem). Fixed: EVERY country-matched company gets crawled
+# now regardless of size (archive_i is never size-gated), and
+# MIN_COMPANY_SIZE is applied ONLY in run_crawl(), to decide which
+# no-ATS-match companies are allowed to land in archive_ii — see
+# node.py's crawl_batch docstring for the capture_inhouse_domains
+# mechanism this feeds. Lowered from 501 to 100 (2026-08): 501 was too
+# strict — plenty of real global-hiring companies (e.g. Kumospace, an
+# 11-50-employee company that has hired globally) sit well under it. 100
+# still filters out the smallest/most local-only end while catching a lot
+# more of the genuinely-hiring-globally range. Override via
+# MIN_COMPANY_SIZE env var or --min-size at any time.
+MIN_COMPANY_SIZE = int(os.environ.get("MIN_COMPANY_SIZE", "100"))
 _SIZE_NUM_RE = re.compile(r"[\d,]+")
 
 
@@ -135,20 +138,23 @@ def _col_index(header_lower: list[str], aliases: tuple[str, ...]) -> int | None:
 
 
 def read_seed_csv(limit: int = PDL_ROW_LIMIT, countries: set[str] | None = None,
-                   shard_index: int | None = None, shard_count: int | None = None,
-                   min_size: int = MIN_COMPANY_SIZE) -> list[dict]:
+                   shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
     """Single streaming pass over the seed CSV — no full-file list-of-dicts
-    build. Applies country + domain-validity + employee-size filtering,
-    THEN (only if sharding) a modulo filter on a running counter of rows
-    that passed those checks, so each shard keeps roughly 1/shard_count of
-    the usable rows regardless of shard_count. Missing file logs once and
-    returns empty rather than crashing.
+    build. Applies country + domain-validity filtering ONLY, THEN (only if
+    sharding) a modulo filter on a running counter of rows that passed
+    those checks, so each shard keeps roughly 1/shard_count of the usable
+    rows regardless of shard_count. Missing file logs once and returns
+    empty rather than crashing.
 
-    2026-08: if the seed file has no recognizable size column at all (an
-    older download, or a column-name PDL hasn't been seen using yet),
-    this WARNS and skips the size filter entirely rather than silently
-    dropping every row — the whole point is a size floor, not an accidental
-    empty crawl because a header didn't match."""
+    2026-08, REVISED: no size filter here anymore — every company in the
+    target countries gets crawled and checked for a known-ATS match
+    regardless of employee count (archive_i is never size-gated; see
+    MIN_COMPANY_SIZE's comment above for why the old seed-time size skip
+    was wrong). Each row's size STRING is still carried through (as
+    "size_floor", pre-parsed via _size_floor()) so run_crawl() can use it
+    later to decide which no-ATS-match companies are large enough to
+    become an archive_ii candidate — see node.py's crawl_batch docstring
+    for the capture_inhouse_domains mechanism this feeds."""
     if not os.path.exists(PDL_DATASET_PATH):
         log.warning(f"Seed dataset not found at '{PDL_DATASET_PATH}' — nothing to crawl.")
         return []
@@ -161,7 +167,6 @@ def read_seed_csv(limit: int = PDL_ROW_LIMIT, countries: set[str] | None = None,
     total_rows = 0
     kept_before_shard = 0
     skipped_wrong_country = 0
-    skipped_too_small = 0
     start = time.monotonic()
 
     try:
@@ -182,10 +187,10 @@ def read_seed_csv(limit: int = PDL_ROW_LIMIT, countries: set[str] | None = None,
                 return []
             if size_i is None:
                 log.warning(f"No size/employee-count column found in the header ({header}) — "
-                             f"proceeding WITHOUT the >={min_size}-employee filter this run.")
+                             f"every company will be treated as size-unknown (never archive_ii-eligible).")
             log.info(f"  columns: name='{header[name_i]}' domain='{header[domain_i]}'"
                       + (f" country='{header[country_i]}'" if country_i is not None else " (no country column)")
-                      + (f" size='{header[size_i]}' (min={min_size})" if size_i is not None else ""))
+                      + (f" size='{header[size_i]}'" if size_i is not None else ""))
 
             for i, row in enumerate(reader):
                 if limit and i >= limit:
@@ -204,18 +209,15 @@ def read_seed_csv(limit: int = PDL_ROW_LIMIT, countries: set[str] | None = None,
                         skipped_wrong_country += 1
                         continue
 
-                if size_i is not None and min_size > 0:
-                    row_size = row[size_i].strip() if len(row) > size_i else ""
-                    floor = _size_floor(row_size)
-                    if floor is None or floor < min_size:
-                        skipped_too_small += 1
-                        continue
-
                 name = row[name_i].strip()
                 domain = row[domain_i].strip().lower()
                 domain = re.sub(r"^https?://", "", domain).split("/")[0].strip()
                 if not (name and domain and "." in domain and domain not in SKIP_SLUGS):
                     continue
+
+                size_floor = None
+                if size_i is not None and len(row) > size_i:
+                    size_floor = _size_floor(row[size_i].strip())
 
                 # Modulo filter applied HERE (on kept_before_shard, not the
                 # raw row index) — same effective shard boundaries as
@@ -225,15 +227,13 @@ def read_seed_csv(limit: int = PDL_ROW_LIMIT, countries: set[str] | None = None,
                                     or kept_before_shard % shard_count == shard_index)
                 kept_before_shard += 1
                 if keep_this_shard:
-                    out.append({"name": name, "domain": domain})
+                    out.append({"name": name, "domain": domain, "size_floor": size_floor})
     except Exception as e:
         log.error(f"Failed to read seed dataset: {e}")
         return []
 
     elapsed = time.monotonic() - start
     filter_note = f", {skipped_wrong_country:,} skipped by country filter" if countries_lower else ""
-    size_note = (f", {skipped_too_small:,} skipped as under {min_size} employees"
-                 if size_i is not None and min_size > 0 else "")
     shard_note = f", {len(out):,} in this shard" if shard_index is not None else ""
     log.info(f"Seed dataset: {total_rows:,} total rows{filter_note}{size_note}, "
              f"{kept_before_shard:,} usable "
@@ -252,8 +252,7 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
              f"time_budget={time_budget_minutes}min  min_size={min_size}  source={SEED_SOURCE_LABEL}")
     time_budget_seconds = time_budget_minutes * 60
 
-    companies = read_seed_csv(countries=countries, shard_index=shard_index, shard_count=shard_count,
-                               min_size=min_size)
+    companies = read_seed_csv(countries=countries, shard_index=shard_index, shard_count=shard_count)
     if not companies:
         log.error("  No seed companies with a usable domain — aborting.")
         return
@@ -268,6 +267,15 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
     target_geo_countries = (node.target_countries_geo_form(countries) if countries
                              else node.ACCEPT_ANY_COUNTRY)
 
+    # min_size no longer gates crawl-eligibility (ALL 18-country domains get
+    # crawled/ATS-checked regardless of size — archive_i is never size-gated).
+    # It only decides which no-ATS-match domains are allowed to become
+    # archive_ii candidates — see node.py's crawl_batch docstring for the
+    # capture_inhouse_domains mechanism this feeds.
+    capture_inhouse_domains = {c["domain"] for c in companies
+                                if (c.get("size_floor") or -1) >= min_size}
+    log.info(f"  archive_ii eligible (size >= {min_size}): {len(capture_inhouse_domains):,}/{len(companies):,} companies")
+
     connector = node.new_connector()
     sem = asyncio.Semaphore(concurrency)
     stats = Counter()
@@ -280,7 +288,8 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
             _, elapsed, rate, time_budget_hit = await node.crawl_batch(
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
-                time_budget_minutes, batch_size=3000, unit_label="companies")
+                time_budget_minutes, batch_size=3000, unit_label="companies",
+                capture_inhouse_domains=capture_inhouse_domains)
     finally:
         parse_pool.shutdown(wait=True)
 
@@ -318,8 +327,10 @@ def main():
     parser.add_argument("--all-countries", action="store_true",
                          help="Disable the country filter — crawl every country, including blank ones.")
     parser.add_argument("--min-size", type=int, default=MIN_COMPANY_SIZE,
-                         help="Skip any company with a size-column lower bound under this many "
-                              "employees (default 501). 0 disables the filter entirely.")
+                         help="Does NOT affect which companies get crawled — every company in the "
+                              "target countries is crawled/ATS-checked regardless of size. Only "
+                              "controls which no-ATS-match companies are allowed into archive_ii "
+                              "(default 100 employees). 0 lets every no-ATS-match company through.")
     args = parser.parse_args()
     if args.country:
         countries = set(args.country)
