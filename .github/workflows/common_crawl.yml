@@ -31,7 +31,7 @@ on:
         description: "Hosts crawled in parallel per shard"
         required: false
         default: "700"
-      time_budget_minutes:
+      run_time_minutes:
         description: "Each shard self-stops after this many minutes (shared across all its requested partitions)"
         required: false
         default: "330"
@@ -101,5 +101,5 @@ jobs:
             --partitions ${{ github.event.inputs.partitions || '1' }} \
             --concurrency ${{ github.event.inputs.concurrency || '700' }} \
             --start-file-index ${{ github.event.inputs.start_file_index || '0' }} \
-            --time-budget-minutes ${{ github.event.inputs.time_budget_minutes || '330' }} \
+            --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
             "${CRAWL_ARGS[@]}"
