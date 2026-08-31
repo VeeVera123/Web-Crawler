@@ -39,6 +39,10 @@ on:
         description: "Crawl stage: parallel shards"
         required: false
         default: "15"
+      concurrency:
+        description: "Crawl stage: companies crawled in parallel per shard"
+        required: false
+        default: "400"
 
 concurrency:
   group: bigpicture-${{ github.ref }}
@@ -152,4 +156,5 @@ jobs:
           python BigPicture/bigpicture_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '400' }} \
             --min-size ${{ github.event.inputs.min_size || '100' }}
