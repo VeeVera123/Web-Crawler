@@ -1,24 +1,18 @@
 name: OpenData
 
-# Two-stage pipeline for opendata.org's "Organizations" dataset (see
-# OpenData/opendata_seed.py's module docstring for the full architecture):
+# Two-stage pipeline for opendata.org's "Organizations" dataset:
 #
-#   seed:  downloads + stream-filters the raw source (one continuous job,
-#          can't be sharded — GitHub's 360min hard job timeout is the real
-#          ceiling here), splits the filtered output into <2GB chunks if
-#          needed, uploads them as assets on a dedicated GitHub Release.
-#          This is a manual, occasional job — NOT part of the daily
-#          schedule — re-run it only when you want to refresh the seed.
+#   seed:  downloads + filters the raw source (one job, can't be sharded),
+#          uploads the result as GitHub Release asset chunks. Manual,
+#          occasional — not part of the daily schedule.
 #
-#   probe: downloads + rejoins the Release asset chunks, then shards the
-#          crawl across N parallel jobs, same shape as kaggle_probe.yml/
-#          github_org_probe.yml (both call node.crawl_batch() the same way).
+#   probe: downloads the Release chunks, shards the crawl across N jobs.
 
 on:
   workflow_dispatch:
     inputs:
       run_seed:
-        description: "Check to seed only (download+filter+upload — you only need this once, or to resume/refresh). Leave unchecked to crawl only, using whatever's already on the Release."
+        description: "Check to seed only (download+filter+upload). Leave unchecked to crawl only, using what's already on the Release."
         required: false
         type: boolean
         default: false
@@ -27,15 +21,15 @@ on:
         required: false
         default: "opendata-organizations"
       restart_id:
-        description: "Seed only: resume from this raw row number (from a prior run's 'Restart ID' log line). Leave 0 to start from the beginning."
+        description: "Seed only: resume from this row number (from a prior 'Restart ID' log line). 0 = start over."
         required: false
         default: "0"
       seed_time_budget_minutes:
-        description: "Seed only: self-stop after this many minutes and log a Restart ID, instead of risking a hard kill at GitHub's 360min job timeout."
+        description: "Seed only: self-stop after this many minutes and log a Restart ID"
         required: false
         default: "340"
       shard_count:
-        description: "Crawl stage: parallel shards. Kept high (15) since this is 80M+ rows worth of candidate companies pre-filter — every speed lever available should be used."
+        description: "Crawl stage: parallel shards"
         required: false
         default: "15"
 
