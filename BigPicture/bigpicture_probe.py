@@ -1,6 +1,6 @@
 """
 BIGPICTURE PROBE — a thin, disposable probe source on top of node.py (the
-permanent engine), same role kaggle_probe.py/opendata_probe.py play for
+permanent engine), same role people_data_labs_probe.py/opendata_probe.py play for
 their own seeds. Copied directly from opendata_probe.py (2026-08) since
 the shape is identical: read a {name, domain, country} CSV, hand domains
 to node.crawl_batch(). All fetch/parse/detect/write logic lives in
@@ -44,7 +44,7 @@ def _size_floor(size_str: str) -> int | None:
     """Extract the LOWER bound of a BigPicture-style size range string
     ("501-1K", "10K+", "1-10") as an int, or None if blank/unparseable.
     Handles the 'K'/'M' suffix BigPicture uses that PDL's raw numeric
-    ranges don't (kaggle_probe.py's own _size_floor has no K/M case) —
+    ranges don't (people_data_labs_probe.py's own _size_floor has no K/M case) —
     same helper that used to live in bigpicture_seed.py before size
     filtering moved from seed-time to probe-time."""
     if not size_str:
@@ -80,7 +80,7 @@ BIGPICTURE_ROW_LIMIT = int(os.environ.get("BIGPICTURE_ROW_LIMIT", "0"))  # 0 = n
 
 SEED_SOURCE_LABEL = os.environ.get("SEED_SOURCE_LABEL", "bigpicture_probe")
 
-# Same reasoning/default as kaggle_probe.py's MIN_COMPANY_SIZE — see that
+# Same reasoning/default as people_data_labs_probe.py's MIN_COMPANY_SIZE — see that
 # file's comment for the full "why 100" writeup (Kumospace, 11-50
 # employees, hired globally — 501 was too strict). Only gates archive_ii
 # eligibility, never crawl-eligibility — see module docstring.
@@ -106,7 +106,7 @@ PROGRESS_EVERY = 2_000_000
 def read_seed_csv(limit: int = BIGPICTURE_ROW_LIMIT, countries: set[str] | None = None,
                    shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
     """Single streaming pass over bigpicture_seed.py's filtered CSV — same
-    shard-aware inline modulo filter as kaggle_probe.py's/opendata_probe.py's
+    shard-aware inline modulo filter as people_data_labs_probe.py's/opendata_probe.py's
     read_seed_csv. Missing file logs once and returns empty rather than
     crashing."""
     if not os.path.exists(BIGPICTURE_FILTERED_PATH):
