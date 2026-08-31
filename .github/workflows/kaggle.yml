@@ -55,6 +55,10 @@ on:
         description: "Companies crawled in parallel PER shard (no rate limiting — see class_a_probe.py)"
         required: false
         default: "400"
+      min_size:
+        description: "Does NOT affect which companies get crawled (every company is crawled/ATS-checked regardless of size). Only controls which no-ATS-match companies are allowed into archive_ii (min employee count). 0 disables the filter."
+        required: false
+        default: "100"
 
 concurrency:
   group: class-a-probe-${{ github.ref }}
@@ -129,4 +133,5 @@ jobs:
           python Kaggle/kaggle_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '20' }} \
-            --concurrency ${{ github.event.inputs.concurrency || '400' }}
+            --concurrency ${{ github.event.inputs.concurrency || '400' }} \
+            --min-size ${{ github.event.inputs.min_size || '100' }}
