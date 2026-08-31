@@ -55,6 +55,7 @@ from classifier import (
 from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
     get_all_slugs, cleanup_stale_jobs,
+    get_existing_urls, touch_seen_jobs_raw,
     SupabaseFetchError,
 )
 
@@ -360,6 +361,38 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
                 finish_scan_report(report_id, boards_scanned=boards_ok, boards_failed=boards_failed)
             return
 
+        raw_scraped_count = len(all_jobs)
+
+        # 2026-08: dedup against Supabase BEFORE classification — a job
+        # whose URL is already in `jobs` is one we've already classified
+        # in a prior run; sending it through keyword_classify_role/
+        # ai_classify_roles/ai_classify_locations again just burns LLM
+        # calls (and time) to re-derive an answer we already have. Only
+        # genuinely new URLs go on to filter_roles() below; already-known
+        # ones just get last_seen/is_active refreshed directly.
+        log.info(f"\nChecking Supabase for already-known jobs (skip re-classification)...")
+        existing_urls = get_existing_urls()
+        new_jobs, already_seen = [], []
+        for job in all_jobs:
+            url = job.get("url", "")
+            if url and url in existing_urls:
+                already_seen.append(job)
+            else:
+                new_jobs.append(job)
+        if already_seen:
+            log.info(f"  {len(already_seen)}/{raw_scraped_count} jobs already known — "
+                     f"skipping LLM classification, just refreshing last_seen")
+            touch_seen_jobs_raw(already_seen)
+        if not new_jobs:
+            log.info("No new (previously unseen) jobs to classify.")
+            if report_id:
+                finish_scan_report(
+                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
+                    total_jobs_raw=raw_scraped_count, duplicates=len(already_seen),
+                )
+            return
+        all_jobs = new_jobs
+
         # Filter for CSM/AM roles
         log.info(f"\nFiltering for CSM/AM roles...")
         csm_jobs = filter_roles(all_jobs)
@@ -368,7 +401,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
             if report_id:
                 finish_scan_report(
                     report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
-                    total_jobs_raw=len(all_jobs),
+                    total_jobs_raw=raw_scraped_count,
                 )
             return
 
@@ -390,7 +423,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
             if report_id:
                 finish_scan_report(
                     report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
-                    total_jobs_raw=len(all_jobs), csm_roles=len(csm_jobs),
+                    total_jobs_raw=raw_scraped_count, csm_roles=len(csm_jobs),
                 )
             return
 
@@ -398,18 +431,22 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         for job in global_jobs:
             job["visa_sponsorship"] = detect_visa_sponsorship(job)
 
-        # Push to Supabase
+        # Push to Supabase — pass the already-fetched existing_urls through
+        # so add_jobs_batch doesn't re-pull the whole `jobs` table again.
         log.info(f"\nPushing {len(global_jobs)} jobs to Supabase...")
-        added = add_jobs_batch(global_jobs, confidences)
+        added = add_jobs_batch(global_jobs, confidences, existing_urls=existing_urls)
 
-        # Finalize this run's report
-        duplicates = len(global_jobs) - added
+        # Finalize this run's report. `duplicates` now counts BOTH kinds:
+        # pre-classification skips (already_seen) and any post-classification
+        # re-matches (global_jobs that still weren't a true first-insert —
+        # should be rare now, but not impossible with in-run URL reuse).
+        duplicates = len(already_seen) + (len(global_jobs) - added)
         if report_id:
             finish_scan_report(
                 report_id,
                 boards_scanned=boards_ok,
                 boards_failed=boards_failed,
-                total_jobs_raw=len(all_jobs),
+                total_jobs_raw=raw_scraped_count,
                 csm_roles=len(csm_jobs),
                 global_jobs=len(global_jobs),
                 new_jobs_added=added,
@@ -417,7 +454,8 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
             )
 
         log.info(f"\nDone! {added} new jobs added to Supabase.")
-        log.info(f"   Pipeline: {len(all_jobs)} scraped -> {len(csm_jobs)} CSM/AM -> "
+        log.info(f"   Pipeline: {raw_scraped_count} scraped ({len(already_seen)} already known, "
+                 f"skipped) -> {len(all_jobs)} new -> {len(csm_jobs)} CSM/AM -> "
                  f"{len(global_jobs)} global -> {added} new")
 
     except Exception as e:
