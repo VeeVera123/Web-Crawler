@@ -824,6 +824,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        found_rows: list[dict], crawl_start: float, time_budget_seconds: float,
                        time_budget_minutes: int, batch_size: int = 3000, unit_label: str = "companies",
                        capture_inhouse: bool = True,
+                       capture_inhouse_domains: set[str] | None = None,
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
@@ -834,17 +835,37 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     2026-08 restructure: ATS-pattern hits now write DIRECTLY to
     ARCHIVE_I_TABLE (archive_i, formerly slug_registry) — there is no more
     intermediate staging/verify table; Verification/verification.py is the
-    only thing that ever removes a row, and only once confirmed dead.
+    only thing that ever removes a row, and only once confirmed dead. ALL
+    domains passed in get crawled and checked for a known-ATS match
+    regardless of size — archive_i is never size-gated.
+
     Every in-house/unsupported career page crawl_one finds (never a
     known-ATS one — those already got a full archive_i row) writes to
-    ARCHIVE_II_TABLE (archive_ii, formerly archive_iii) — UNLESS
-    capture_inhouse=False, in which case archive_i is still fully fed as
-    normal but no archive_ii rows are ever produced for this source (see
-    crawl_one's docstring for why: no-size-signal sources were flooding
-    archive_ii with small-business noise indistinguishable from real
-    targets). kaggle_probe.py and any future size-aware source leave this
-    True; opendata_probe.py and common_crawl_probe.py pass False."""
-    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, capture_inhouse)
+    ARCHIVE_II_TABLE (archive_ii, formerly archive_iii) — gated per-domain:
+
+      - capture_inhouse_domains, if given, is the exact set of domains
+        allowed to produce an archive_ii row this run (every other domain
+        behaves as capture_inhouse=False for that one company only, ATS
+        matching unaffected). This is the 2026-08 fix for over-filtering:
+        kaggle_probe.py/bigpicture_probe.py used to drop small companies
+        from the crawl LIST entirely at seed time, which filtered out
+        their archive_i-eligible ATS hits too, for almost nothing gained
+        — now every company in the target countries gets crawled (feeding
+        archive_i normally no matter its size), and the employee-count
+        floor is applied ONLY at the point a company would otherwise
+        become an archive_ii in-house-page candidate, computed by the
+        caller from its own already-loaded size data.
+      - If capture_inhouse_domains is None, falls back to the flat
+        `capture_inhouse` bool for every domain (opendata_probe.py/
+        common_crawl_probe.py still pass capture_inhouse=False this way —
+        they have no size signal for ANY domain, so there's no per-domain
+        set to build)."""
+    def _capture_for(domain: str) -> bool:
+        if capture_inhouse_domains is not None:
+            return domain in capture_inhouse_domains
+        return capture_inhouse
+
+    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, _capture_for(d))
              for d in domains]
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
