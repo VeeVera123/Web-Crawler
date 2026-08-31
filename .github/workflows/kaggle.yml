@@ -52,7 +52,7 @@ on:
         required: false
         default: "20"
       concurrency:
-        description: "Companies crawled in parallel PER shard (no rate limiting — see class_a_probe.py)"
+        description: "Companies crawled in parallel PER shard (no rate limiting — see kaggle_probe.py)"
         required: false
         default: "400"
       min_size:
