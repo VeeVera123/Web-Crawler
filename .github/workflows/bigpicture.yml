@@ -1,31 +1,21 @@
 name: BigPicture
 
 # Two-stage pipeline for BigPicture.io's free companies dataset, hosted
-# publicly on HuggingFace (no signup/API key needed — see
-# BigPicture/bigpicture_seed.py's module docstring):
+# on HuggingFace (no signup/API key needed):
 #
-#   seed:  downloads + stream-filters (by country only — NOT by size; every
-#          company in the target countries must be crawled regardless of
-#          size, see bigpicture_seed.py's module docstring) the raw source
-#          (one continuous job — same shape as opendata.yml's seed job),
-#          splits the filtered output into <2GB chunks if needed, uploads
-#          them as assets on a dedicated GitHub Release titled "BigPicture".
-#          Manual, occasional job — NOT part of the daily schedule —
-#          re-run only to refresh the seed.
+#   seed:  downloads + filters by country only (not size — every company
+#          is crawled regardless of size, see bigpicture_seed.py). Manual,
+#          occasional — not part of the daily schedule.
 #
-#   probe: downloads + rejoins the Release asset chunks, then shards the
-#          crawl across N parallel jobs — same shape as kaggle_probe.yml/
-#          opendata.yml's crawl job (both call node.crawl_batch() the same
-#          way). min_size here does NOT gate crawl-eligibility — every
-#          domain gets crawled/ATS-checked regardless of size — it only
-#          controls which no-ATS-match companies are allowed into
-#          archive_ii. See bigpicture_probe.py's docstring for why.
+#   probe: downloads the Release chunks, shards the crawl across N jobs.
+#          min_size only gates which no-ATS-match companies reach
+#          archive_ii — see bigpicture_probe.py's docstring.
 
 on:
   workflow_dispatch:
     inputs:
       run_seed:
-        description: "Check to seed only (download+filter+upload — you only need this once, or to resume/refresh). Leave unchecked to crawl only, using whatever's already on the Release."
+        description: "Check to seed only (download+filter+upload). Leave unchecked to crawl only, using what's already on the Release."
         required: false
         type: boolean
         default: false
@@ -34,19 +24,19 @@ on:
         required: false
         default: "bigpicture-companies"
       restart_id:
-        description: "Seed only: resume from this raw row number (from a prior run's 'Restart ID' log line). Leave 0 to start from the beginning."
+        description: "Seed only: resume from this row number (from a prior 'Restart ID' log line). 0 = start over."
         required: false
         default: "0"
       seed_time_budget_minutes:
-        description: "Seed only: self-stop after this many minutes and log a Restart ID, instead of risking a hard kill at GitHub's 360min job timeout."
+        description: "Seed only: self-stop after this many minutes and log a Restart ID"
         required: false
         default: "340"
       min_size:
-        description: "Crawl stage only: does NOT affect which companies get crawled (every company is crawled/ATS-checked regardless of size). Only controls which no-ATS-match companies are allowed into archive_ii (min employee count). 0 disables the filter."
+        description: "Crawl stage: min employee count for a no-ATS company to enter archive_ii (doesn't affect which companies get crawled). 0 = no filter."
         required: false
         default: "100"
       shard_count:
-        description: "Crawl stage: parallel shards."
+        description: "Crawl stage: parallel shards"
         required: false
         default: "15"
 
