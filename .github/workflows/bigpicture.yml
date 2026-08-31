@@ -43,6 +43,10 @@ on:
         description: "Crawl stage: companies crawled in parallel per shard"
         required: false
         default: "400"
+      crawl_time_budget_minutes:
+        description: "Crawl stage: each shard self-stops after this many minutes (independent of seed_time_budget_minutes)"
+        required: false
+        default: "330"
 
 concurrency:
   group: bigpicture-${{ github.ref }}
@@ -157,4 +161,5 @@ jobs:
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
-            --min-size ${{ github.event.inputs.min_size || '100' }}
+            --min-size ${{ github.event.inputs.min_size || '100' }} \
+            --time-budget-minutes ${{ github.event.inputs.crawl_time_budget_minutes || '330' }}
