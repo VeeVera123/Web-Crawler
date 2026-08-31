@@ -44,7 +44,7 @@ jobs:
   prepare-matrix:
     # workflow_dispatch inputs can't be referenced directly inside a
     # matrix expression, so each shard_count input -> [0, 1, ..., N-1] is
-    # computed here first (same pattern as verification.yml/kaggle_probe.yml).
+    # computed here first (same pattern as verification.yml/people_data_labs.yml).
     # Runs unconditionally (cheap) even when Crawl II ends up skipped —
     # simpler than duplicating the shard-count parsing logic per pipeline.
     runs-on: ubuntu-latest
