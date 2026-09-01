@@ -976,6 +976,95 @@ def _url_to_slug_avature(url: str) -> str | None:
     return None
 
 
+# 2026-09: 5 new platforms added from a user-supplied candidate list of 36
+# names (sourced from bloomberry.com/data ATS market-share pages). Only
+# these 5 got a working extractor — each pattern below was confirmed
+# against 2+ live example URLs found via web search, not guessed. The
+# other candidates from that list are deliberately NOT added — see the
+# comment block right after URL_TO_SLUG for exactly which ones and why
+# (some have no fixed per-tenant hosted domain at all — e.g. GoHire lets
+# customers set a fully custom URL — some aren't verifiable without a
+# live example, and JazzHR is literally the same platform as the already-
+# removed "applytojob", not a new one).
+
+def _url_to_slug_trakstar(url: str) -> str | None:
+    """Extract slug from Trakstar Hire URLs (formerly Recruiterbox).
+    Pattern: {tenant}.hire.trakstar.com/... — confirmed via multiple live
+    examples (e.g. recruiterbox.hire.trakstar.com, teamcoworker.hire.
+    trakstar.com)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".hire.trakstar.com"):
+        return None
+    slug = host[: -len(".hire.trakstar.com")].lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
+    return None
+
+
+def _url_to_slug_jobscore(url: str) -> str | None:
+    """Extract slug from JobScore URLs. Pattern: careers.jobscore.com/
+    careers/{tenant}[/jobs/...] — confirmed via multiple live examples
+    (careers/vec, careers/solutions2go, careers/ariasystems)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host.lower() != "careers.jobscore.com":
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) >= 2 and parts[0].lower() == "careers":
+        slug = parts[1].lower()
+        if slug and slug not in SKIP_SLUGS:
+            return slug
+    return None
+
+
+def _url_to_slug_eightfold(url: str) -> str | None:
+    """Extract slug from Eightfold AI URLs. Pattern: {tenant}.eightfold.ai/
+    careers — confirmed via a live example (lamresearch.eightfold.ai/
+    careers). app.eightfold.ai / preview.eightfold.ai / employee.eightfold.ai
+    are Eightfold's OWN generic hosts, not a tenant — explicitly excluded."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".eightfold.ai"):
+        return None
+    slug = host[: -len(".eightfold.ai")].lower()
+    if slug in ("app", "preview", "employee", "www", ""):
+        return None
+    if slug not in SKIP_SLUGS:
+        return slug
+    return None
+
+
+def _url_to_slug_gupy(url: str) -> str | None:
+    """Extract slug from Gupy URLs (Brazil-market ATS). Pattern:
+    {tenant}.gupy.io/... — confirmed via a live example (atento.gupy.io/
+    jobs/...)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".gupy.io"):
+        return None
+    slug = host[: -len(".gupy.io")].lower()
+    if slug and slug not in SKIP_SLUGS and slug not in ("www", "developers", "suporte-candidatos"):
+        return slug
+    return None
+
+
+def _url_to_slug_hrmos(url: str) -> str | None:
+    """Extract slug from HRMOS URLs (Japan-market ATS). Pattern:
+    hrmos.co/pages/{tenant}/... — confirmed via a live example
+    (hrmos.co/pages/cornes/jobs/10110)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host.lower() != "hrmos.co":
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) >= 2 and parts[0].lower() == "pages":
+        slug = parts[1].lower()
+        if slug and slug not in SKIP_SLUGS:
+            return slug
+    return None
+
+
 URL_TO_SLUG = {
     "greenhouse": _url_to_slug_greenhouse,
     "lever": _url_to_slug_lever,
@@ -1008,6 +1097,13 @@ URL_TO_SLUG = {
     "jobvite": _url_to_slug_jobvite,
     "adp": _url_to_slug_adp,
     "avature": _url_to_slug_avature,
+    # New (2026-09) — see the big comment above URL_TO_SLUG for what was
+    # verified vs. deliberately left out from the 36-platform candidate list:
+    "trakstar": _url_to_slug_trakstar,
+    "jobscore": _url_to_slug_jobscore,
+    "eightfold": _url_to_slug_eightfold,
+    "gupy": _url_to_slug_gupy,
+    "hrmos": _url_to_slug_hrmos,
 }
 
 
