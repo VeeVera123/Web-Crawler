@@ -104,7 +104,8 @@ jobs:
           # to satisfy that import. See verification.py's module docstring.
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: |
-          python Verification/verification.py \
+          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python Verification/verification.py \
             --table ${{ github.event.inputs.table || 'both' }} \
             --concurrency ${{ github.event.inputs.concurrency || '30' }} \
             --shard-index ${{ matrix.shard }} \
