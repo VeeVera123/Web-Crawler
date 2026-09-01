@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,10 +43,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(me
                      datefmt="%H:%M:%S")
 log = logging.getLogger("node")
 
-# 2026-08, REVERTED: a prior version of this file installed a custom
-# Python-level SIGTERM/SIGINT handler here (os._exit-based "fast exit"),
-# reasoning that Python's default handling might be slow to respond
-# mid-blocking-call. That reasoning was backwards and made cancellation
+# 2026-08, REVERTED (SIGTERM only — see 2026-09 below for SIGINT):
+# a prior version of this file installed a custom Python-level SIGTERM
+# handler here (os._exit-based "fast exit"), reasoning that Python's
+# default handling might be slow to respond mid-blocking-call. That
+# reasoning was backwards for SIGTERM specifically and made cancellation
 # WORSE, not better — proven by a live comparison: enrich_slugs.py (a
 # separate, plain synchronous script that never touches signal handling
 # at all) stops within moments of a Cancel click, while every node.py-
@@ -56,25 +58,45 @@ log = logging.getLogger("node")
 # process outright, with zero cooperation required from the Python
 # interpreter, no matter what the process is doing at that instant
 # (deep in a C extension, blocked on I/O, anything). Python does NOT
-# override SIGTERM's default at startup — only SIGINT gets special
-# treatment (converted to a KeyboardInterrupt via signal.default_int_
-# handler). By installing our OWN Python-level SIGTERM handler, we threw
-# away that free, unconditional, instant kill and replaced it with one
-# that can only run once the interpreter's bytecode eval loop gets a
-# chance to check for pending signals — which can be delayed for a long
-# time while the process is inside a native C call that doesn't yield
-# back to Python (aiodns/pycares's own event loop, or a big lexbor parse
-# holding the GIL). The earlier "verified via subprocess test" check
-# used time.sleep() as the blocking call, which IS interruptible by a
-# Python-level handler almost instantly (it cooperates with signal
-# delivery) — it just didn't represent this project's actual blocking
-# calls, so it passed for the wrong reason.
+# override SIGTERM's default at startup. By installing our OWN
+# Python-level SIGTERM handler, we threw away that free, unconditional,
+# instant kill and replaced it with one that can only run once the
+# interpreter's bytecode eval loop gets a chance to check for pending
+# signals. Fix: leave SIGTERM's disposition alone (SIG_DFL) — nothing
+# below touches it.
 #
-# Fix: don't touch SIGTERM/SIGINT disposition at all. GitHub's own
-# Cancel-workflow escalation (SIGINT, then SIGTERM, then an unconditional
-# SIGKILL a short time later) does the rest — and with nothing here
-# overriding it, SIGTERM keeps its instant, no-cooperation-needed default
-# exactly like enrich_slugs.py already benefits from.
+# 2026-09, SIGINT — different signal, different problem, NOT the same
+# mistake as above: GitHub Actions' "Cancel workflow" was traced (with a
+# live test — a fresh run cancelled via the UI, watched directly, still
+# running 6+ minutes later, had to be force-cancelled) to send SIGINT
+# first, not SIGTERM — and unlike SIGTERM, Python installs its OWN
+# default handler for SIGINT unconditionally at startup, converting it to
+# a KeyboardInterrupt raised in the main thread. There is no "raw kernel
+# default" being lost here the way there was for SIGTERM — Python always
+# intercepts SIGINT, default or not. The problem is what that default
+# interception DOES: the KeyboardInterrupt propagates up through every
+# `finally`/`async with` block on the way out — including
+# parse_pool.shutdown(wait=True) below and aiohttp's ClientSession
+# teardown with however many requests are in flight — and those can each
+# block for a long time. A handler installed here that just calls
+# os._exit() immediately runs INSTEAD of that unwind, not after it — an
+# outer try/except KeyboardInterrupt around asyncio.run() does NOT help,
+# because by the time that outer except is reached the slow teardown has
+# already run (exceptions propagate through intervening finally blocks
+# on their way up, they don't skip them). This still can't do anything
+# about signal delivery arriving late from GitHub's own infrastructure
+# (cancellation is relayed to the runner asynchronously, not instant) —
+# that's a real, separate, unavoidable latency; force-cancel remains the
+# manual fallback for it. What this DOES fix is every case where the
+# signal arrives and the process is anywhere Python's bytecode loop can
+# see it (which is most of the time — this is the same limitation
+# _run_with_deadline's cancellation and the ThreadPoolExecutor parse
+# stragglers already have, not a new one).
+def _hard_exit_on_sigint(signum, frame):
+    os._exit(130)
+
+
+signal.signal(signal.SIGINT, _hard_exit_on_sigint)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
