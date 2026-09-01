@@ -835,18 +835,35 @@ async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list
     """rows come in shaped {"ats","slug","source_hostname","root_domain",
     "country","discovery_method"} (crawl_batch's internal shape, kept for
     found_rows/logging) but archive_i's actual schema is just
-    {ats, slug, source, last_seen} — no source_hostname/root_domain/country
-    columns. 2026-08 restructure: this now writes STRAIGHT to archive_i
-    (formerly slug_registry) with no intermediate staging/verify table —
-    the old archive_ii (ATS-match quarantine table a separate verify step
-    promoted from) is dropped entirely. discovery_method maps to archive_i's
-    `source` column, which is CHECK-constrained — every discovery_method
-    string a live caller passes (people_data_labs_probe, github_org_probe,
-    common_crawl_probe, plus discovery.py's own set) must already be in
-    archive_i_source_check or the upsert fails for that whole batch."""
-    now_iso = datetime.now(timezone.utc).isoformat()
-    slim_rows = [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"],
-                  "last_seen": now_iso} for r in rows]
+    {ats, slug, source, first_seen, last_seen} — no source_hostname/
+    root_domain/country columns. 2026-08 restructure: this now writes
+    STRAIGHT to archive_i (formerly slug_registry) with no intermediate
+    staging/verify table — the old archive_ii (ATS-match quarantine table
+    a separate verify step promoted from) is dropped entirely.
+    discovery_method maps to archive_i's `source` column, which is
+    CHECK-constrained — every discovery_method string a live caller
+    passes (people_data_labs_probe, github_org_probe, common_crawl_probe,
+    plus discovery.py's own set) must already be in archive_i_source_check
+    or the upsert fails for that whole batch.
+
+    2026-09: `last_seen` is DELIBERATELY OMITTED from this payload — per
+    an explicit user instruction, archive_i.last_seen was repurposed from
+    "last time discovery re-confirmed this ATS page/pattern exists" (what
+    this function used to set on every single hit, empty board or not) to
+    "last time a real role was actually found there." Discovery merely
+    recognizing a URL pattern is no longer a signal of anything but the
+    page's existence — Crawl I (crawl_i.py, via
+    supabase_handler.touch_archive_i_last_seen) is now the ONLY thing that
+    touches this column, and only for slugs where a role was actually
+    found. Omitting the field here means: on a re-discovery of an
+    existing row (ON CONFLICT), Postgres's merge-duplicates leaves
+    last_seen exactly as Crawl I last set it, untouched (same "omit to
+    leave alone" trick already used for date_added below); on a genuine
+    first INSERT, the column's own DEFAULT (now()) fires, giving a
+    brand-new slug a full verification cycle's grace period before it
+    could ever be considered stale."""
+    slim_rows = [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"]}
+                 for r in rows]
     return await _upsert_rows(session, ARCHIVE_I_TABLE, "ats,slug", slim_rows)
 
 
@@ -856,20 +873,24 @@ async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows:
     produced when no known ATS matched — plus discovery_method attached by
     crawl_batch). Upserts on website_url (2026-08: root_domain was dropped
     as a pure duplicate of this field, so website_url is now archive_ii's
-    identity key instead) — a re-crawled company updates last_seen/
-    career_page_url in place rather than duplicating. date_added is
-    deliberately left OUT of the payload: the column's DEFAULT now() only
-    fires on a true first INSERT, and since we never send it on an
-    UPDATE, Postgres's merge-duplicates ON CONFLICT leaves the original
-    date_added untouched.
+    identity key instead) — a re-crawled company updates career_page_url
+    in place rather than duplicating. date_added is deliberately left OUT
+    of the payload: the column's DEFAULT now() only fires on a true first
+    INSERT, and since we never send it on an UPDATE, Postgres's
+    merge-duplicates ON CONFLICT leaves the original date_added untouched.
+
+    2026-09: `last_seen` is ALSO now deliberately left out of this
+    payload, for the exact same reason and by the exact same "omit to
+    leave alone / fall back to the column DEFAULT on true insert" trick
+    as archive_i above — see write_ats_hits_to_archive_i's 2026-09 note.
+    Crawl II (crawl_ii.py, via supabase_handler.touch_archive_ii_last_seen)
+    is now the only thing that touches archive_ii.last_seen, and only for
+    pages where a role was actually found.
 
     2026-08 restructure: this table was archive_iii before the old
     archive_ii (ATS-match staging table) was dropped and archive_iii was
     renamed to take its place — archive_ii now means "in-house/unsupported
     career pages," feeding Crawl II's heuristic job-listing scraper."""
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for r in rows:
-        r["last_seen"] = now_iso
     return await _upsert_rows(session, ARCHIVE_II_TABLE, "website_url", rows)
 
 
