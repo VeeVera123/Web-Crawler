@@ -1,6 +1,6 @@
-name: Verification Engine — archive_ii + archive_iii
+name: Verification Engine — archive_i + archive_ii
 
-# Scans archive_ii (ats + slug boards) and archive_iii (in-house career
+# Scans archive_i (ats + slug boards) and archive_ii (in-house career
 # pages) and removes ONLY rows confirmed dead — the board/page genuinely
 # doesn't exist anymore, never just "zero jobs right now" (see
 # verification.py's own module docstring for the full rule and the
@@ -8,12 +8,42 @@ name: Verification Engine — archive_ii + archive_iii
 # not-found signal — 18 do, 11 explicitly don't and are skipped/left
 # untouched).
 #
+# 2026-09: table names here were archive_ii/archive_iii until this
+# update — stale from an EARLIER rename (slug_registry/quarantine ->
+# archive_ii, scrape_test -> archive_iii) that itself got superseded by a
+# LATER 2026-08 restructure (archive_ii -> archive_i, archive_iii ->
+# archive_ii) that this workflow (and verification.py) never picked up.
+# That left verification.py's Supabase calls pointing at node.py
+# constants (STAGING_TABLE/ARCHIVE_III_TABLE) that no longer exist —
+# a real, live AttributeError bug, same class as the slug_registry 404
+# already fixed elsewhere this session. Both files are now caught up to
+# archive_i/archive_ii.
+#
 # Same shard + finalize shape as Main/main.py's ATS scanner: N parallel
 # shards each check their own slice and upload a small JSON summary as a
 # build artifact, then a `finalize` job (needs: verify) downloads every
 # shard's summary and prints ONE combined report — active/empty/dead/
 # unverified totals across the whole run.
+#
+# 2026-09: also added a SEPARATE stale-role-cleanup job — every ~183
+# days (~6 months), delete archive_i/archive_ii rows whose last_seen
+# (repurposed by Crawl I/II to mean "last time a role was actually
+# found," see crawl_i.py/crawl_ii.py and supabase_handler.py's
+# touch_archive_i_last_seen/touch_archive_ii_last_seen) is older than
+# that cutoff. This is DIFFERENT from, and additional to, the live
+# dead-board/page HTTP check above: it doesn't care whether the board is
+# still technically reachable, only whether it has produced a single
+# role (any role — not scoped to CSM/AM) in the last ~6 months. See
+# verification.py's run_stale_role_cleanup.
 on:
+  schedule:
+    # GitHub Actions cron has no native "every N days" — a day-of-month
+    # step value only repeats within a month and resets at month
+    # boundaries, so it can't express a clean 183-day cadence. Jan 1 and
+    # Jul 1 UTC are ~181/~184 days apart (close enough to "every 183
+    # days" for a 6-month prune) and are easy to reason about/audit,
+    # unlike a drifting step value.
+    - cron: "0 3 1 1,7 *"   # ~every 6 months: Jan 1 + Jul 1, 03:00 UTC
   workflow_dispatch:
     inputs:
       table:
@@ -22,8 +52,8 @@ on:
         type: choice
         options:
           - both
+          - archive_i
           - archive_ii
-          - archive_iii
         default: both
       execute:
         description: "Delete confirmed-dead rows (unchecked = report only)"
@@ -31,7 +61,7 @@ on:
         type: boolean
         default: false
       ats:
-        description: "archive_ii only — restrict to one ATS platform. Leave blank for all."
+        description: "archive_i only — restrict to one ATS platform. Leave blank for all."
         required: false
         default: ""
       shard_count:
@@ -42,8 +72,8 @@ on:
         description: "Concurrent checks in flight PER SHARD (asyncio, unlike main.py's synchronous 1-at-a-time calls) — keep this LOW (1-2) and raise shard_count instead if you want more throughput. shard_count x concurrency must stay well under Supabase's connection headroom (~30 confirmed 2026-08-28)."
         required: false
         default: "2"
-      compare_slug_registry:
-        description: "After finalize, report archive_ii vs slug_registry overlap (unique ats+slug pairs)"
+      stale_role_cleanup:
+        description: "Run the ~183-day 'no role found' cleanup on-demand (in addition to the live dead-board/page check above). Runs automatically on the Jan 1 / Jul 1 schedule regardless of this checkbox."
         required: false
         type: boolean
         default: false
@@ -151,14 +181,20 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: python Verification/verification.py --summarize summaries
 
-  compare-slug-registry:
-    # Only meaningful AFTER a real --execute run has actually removed the
-    # confirmed-dead rows — otherwise "archive_ii only" would include rows
-    # that were just confirmed dead and are about to disappear anyway.
-    needs: finalize
-    if: ${{ github.event.inputs.compare_slug_registry == 'true' }}
+  stale-role-cleanup:
+    # Not sharded (unlike `verify` above) — this is a single server-side
+    # PostgREST filter+DELETE per table (Postgres finds every stale row
+    # itself), not a per-row live HTTP check, so one job is enough.
+    # Runs automatically on the Jan 1 / Jul 1 schedule (and always
+    # --execute's for real on a schedule firing — the whole point of this
+    # cron is to actually prune, not just report); on workflow_dispatch,
+    # only runs if the stale_role_cleanup checkbox is on, and only
+    # --execute's if the execute checkbox is also on (report-only
+    # otherwise), matching the safety default the `verify` job already
+    # uses.
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.stale_role_cleanup == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -171,9 +207,13 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
 
-      - name: Compare archive_ii vs slug_registry
+      - name: "Stale-role cleanup (~183 days, no role found)"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-        run: python Verification/verification.py --compare-slug-registry
+        run: |
+          exec python Verification/verification.py \
+            --stale-role-cleanup \
+            --table ${{ github.event.inputs.table || 'both' }} \
+            ${{ (github.event_name == 'schedule' || github.event.inputs.execute == 'true') && '--execute' || '' }}
