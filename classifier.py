@@ -11,7 +11,7 @@ Falls back to single-provider mode if only LLM_PROVIDER is set.
 
 Then a separate location filter:
   Stage 3 — keyword check for Africa/Global locations
-  Stage 4 — AI for ambiguous locations (OpenAI only)
+  Stage 4 — AI for ambiguous locations (Gemini + OpenAI, concurrent)
 """
 
 import re
@@ -22,6 +22,16 @@ from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PR
 import geo
 
 log = logging.getLogger(__name__)
+
+# 2026-09: mute the openai SDK's own httpx/httpcore client logging — every
+# _ai_call() below already logs a clean per-batch summary ("Role
+# classification: N titles → M batches...", "AI classified X/Y locations
+# ..."), so the SDK's own "HTTP Request: POST .../chat/completions HTTP/1.1
+# 200 OK" line per call is pure duplication once you have that, not
+# additional signal. Set here (not just in each entrypoint's basicConfig)
+# so it's muted no matter which script imports this module.
+for _noisy in ("httpx", "httpcore", "openai"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 # ── Provider-specific AI client setup ─────────────────────
 MAX_RETRIES = 4
