@@ -475,74 +475,111 @@ def touch_seen_jobs_raw(jobs: list[dict]) -> int:
 # Crawl II's equivalent for archive_ii is touch_archive_ii_last_seen()
 # below, keyed on website_url instead of (ats, slug).
 
+def _content_range_count(resp, fallback: int) -> int:
+    """Parse the real affected-row count out of a PostgREST PATCH response's
+    Content-Range header (e.g. "0-41/*" or "*/42" under count=exact — the
+    number after the slash), so touch_* logging reports what Postgres
+    actually updated instead of assuming every row in the chunk matched.
+    Falls back to `fallback` (the chunk size) if the header isn't present
+    or doesn't parse, rather than raising."""
+    cr = resp.headers.get("Content-Range", "")
+    try:
+        return int(cr.rsplit("/", 1)[1])
+    except (IndexError, ValueError):
+        return fallback
+
+
 def touch_archive_i_last_seen(pairs: set[tuple[str, str]]) -> int:
     """Bulk-refresh archive_i.last_seen for every (ats, slug) pair that
-    had >=1 role found this run. Upsert payload deliberately omits
-    `source` (archive_i's CHECK-constrained column) — same "omit on
-    conflict, let Postgres's merge-duplicates leave it untouched" trick
-    already used for `jobs.date_added` (see _build_row's docstring) and
-    archive_ii.date_added (see node.py's write_career_pages_to_archive_ii)
-    — a touch here should never overwrite which discovery source
-    originally found this slug. On the (should-never-happen) case this
-    on_conflict=ats,slug upsert instead hits a genuinely new row, `source`
-    falls back to the column's own DEFAULT ('seed') rather than failing."""
+    had >=1 role found this run.
+
+    2026-09: switched from a POST .../on_conflict=ats,slug upsert to a real
+    PATCH (UPDATE ... WHERE ats=X AND slug IN (...)). A PATCH can only ever
+    update rows that already exist — it never inserts — so a pair this run
+    scraped but that isn't (yet, or anymore) an archive_i row just touches
+    0 rows instead of the upsert's failure mode: PostgREST falling back to
+    an INSERT for the unmatched pair, which fails a NOT NULL constraint on
+    whichever column the touch payload doesn't set (see
+    touch_archive_ii_last_seen's docstring for the actual error this caused
+    on the archive_ii side). Grouped by `ats` first because PostgREST's
+    `in.()` filter only matches a single column — there's no direct way to
+    IN-match a compound (ats, slug) key in one filter."""
     if not pairs:
         return 0
-    CHUNK = 500
-    headers = {**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
+    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows = [{"ats": ats, "slug": slug, "last_seen": now_iso} for ats, slug in pairs]
+
+    by_ats: dict[str, list[str]] = {}
+    for ats, slug in pairs:
+        by_ats.setdefault(ats, []).append(slug)
+
+    CHUNK = 200  # slugs per PATCH call — keeps the in.() filter a reasonable URL length
     touched = 0
-    for i in range(0, len(rows), CHUNK):
-        chunk = rows[i:i + CHUNK]
-        try:
-            r = http_requests.post(
-                f"{REST}/archive_i", headers=headers, json=chunk, timeout=60,
-                params={"on_conflict": "ats,slug"},
-            )
-            r.raise_for_status()
-            touched += len(chunk)
-        except Exception as e:
-            detail = ""
-            resp = getattr(e, "response", None)
-            if resp is not None:
-                detail = f" | body: {resp.text[:500]}"
-            log.error(f"Supabase touch-upsert (archive_i.last_seen) failed for "
-                      f"chunk of {len(chunk)}: {e}{detail}")
+    for ats, slugs in by_ats.items():
+        for i in range(0, len(slugs), CHUNK):
+            chunk = slugs[i:i + CHUNK]
+            try:
+                r = http_requests.patch(
+                    f"{REST}/archive_i", headers=headers, json={"last_seen": now_iso},
+                    params={"ats": f"eq.{ats}", "slug": f"in.({','.join(chunk)})"},
+                    timeout=60,
+                )
+                r.raise_for_status()
+                touched += _content_range_count(r, len(chunk))
+            except Exception as e:
+                detail = ""
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    detail = f" | body: {resp.text[:500]}"
+                log.error(f"Supabase touch-update (archive_i.last_seen) failed for "
+                          f"{ats} chunk of {len(chunk)}: {e}{detail}")
     log.info(f"Touched archive_i.last_seen for {touched}/{len(pairs)} slugs with >=1 role found this run")
     return touched
 
 
 def touch_archive_ii_last_seen(website_urls: set[str]) -> int:
-    """archive_ii equivalent of touch_archive_i_last_seen — same
-    repurposed meaning ("last time a role was actually found"), same
-    omit-on-conflict trick (leaves discovery_method/career_page_url
-    untouched), keyed on website_url (archive_ii's identity key, see
-    node.py's write_career_pages_to_archive_ii). Called by crawl_ii.py
-    for every page whose heuristic extractor found >=1 job posting this
-    run."""
+    """archive_ii equivalent of touch_archive_i_last_seen — same repurposed
+    meaning ("last time a role was actually found"), keyed on website_url
+    (archive_ii's identity key, see node.py's write_career_pages_to_archive_ii).
+    Called by crawl_ii.py for every page whose heuristic extractor found
+    >=1 job posting this run.
+
+    2026-09: switched from a POST .../on_conflict=website_url upsert to a
+    real PATCH (UPDATE ... WHERE website_url IN (...)) — same fix and same
+    reason as touch_archive_i_last_seen above. The upsert form was hitting
+    a real, live bug: whenever a website_url in this run's touch batch
+    didn't already have a matching archive_ii row (e.g. a URL-normalization
+    mismatch between what got stored and what this run captured), PostgREST
+    fell back to an INSERT for it — and that INSERT payload only carries
+    website_url + last_seen, so it violated archive_ii.career_page_url's
+    NOT NULL constraint and the whole chunk's error masked every OTHER row
+    in that chunk that would've updated fine. A PATCH can't insert, so a
+    genuinely-missing URL now just touches 0 rows (and is countable — see
+    the "N/M pages" log below — instead of silently killing the batch)."""
     if not website_urls:
         return 0
-    CHUNK = 500
-    headers = {**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
+    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows = [{"website_url": url, "last_seen": now_iso} for url in website_urls]
+    urls = list(website_urls)
+
+    CHUNK = 100  # URLs per PATCH call — longer values than archive_i's slugs, smaller chunk
     touched = 0
-    for i in range(0, len(rows), CHUNK):
-        chunk = rows[i:i + CHUNK]
+    for i in range(0, len(urls), CHUNK):
+        chunk = urls[i:i + CHUNK]
         try:
-            r = http_requests.post(
-                f"{REST}/archive_ii", headers=headers, json=chunk, timeout=60,
-                params={"on_conflict": "website_url"},
+            r = http_requests.patch(
+                f"{REST}/archive_ii", headers=headers, json={"last_seen": now_iso},
+                params={"website_url": f"in.({','.join(chunk)})"},
+                timeout=60,
             )
             r.raise_for_status()
-            touched += len(chunk)
+            touched += _content_range_count(r, len(chunk))
         except Exception as e:
             detail = ""
             resp = getattr(e, "response", None)
             if resp is not None:
                 detail = f" | body: {resp.text[:500]}"
-            log.error(f"Supabase touch-upsert (archive_ii.last_seen) failed for "
+            log.error(f"Supabase touch-update (archive_ii.last_seen) failed for "
                       f"chunk of {len(chunk)}: {e}{detail}")
     log.info(f"Touched archive_ii.last_seen for {touched}/{len(website_urls)} pages with >=1 role found this run")
     return touched
