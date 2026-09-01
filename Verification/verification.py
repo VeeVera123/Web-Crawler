@@ -1,6 +1,6 @@
 """
-VERIFICATION ENGINE (2026-08) — scans archive_ii (ats + slug, formerly
-quarantine) and archive_iii (career pages, formerly scrape_test) and
+VERIFICATION ENGINE (2026-08) — scans archive_i (ats + slug, formerly
+quarantine) and archive_ii (career pages, formerly scrape_test) and
 removes ONLY rows that are CONFIRMED DEAD: the board/page genuinely no
 longer exists. It does NOT remove rows just because a real board
 currently has zero open postings, or a career page's content has
@@ -28,7 +28,7 @@ reuses several of its already-proven per-platform checks):
     only job is pruning slugs/pages that never existed, were mistyped,
     or the company has genuinely torn down — not "currently quiet".
 
-REPORTING (2026-08): every archive_ii row that verifies as NOT dead gets
+REPORTING (2026-08): every archive_i row that verifies as NOT dead gets
 a second, best-effort pass through ats_scrapers.scrape_board() — the
 exact same production scraper the daily ATS scanner uses — purely to
 split the report into ACTIVE (>=1 open job right now) vs EMPTY (real,
@@ -70,7 +70,7 @@ SAFETY MODEL (a wrong delete here is real, silent, permanent data loss):
     an explicit, structural "confirmed dead" return value can lead to a
     delete, mirroring certificate_transparency_probe.py's own
     verify_row() pattern exactly.
-  - archive_iii verification requires BOTH the career_page_url AND the
+  - archive_ii verification requires BOTH the career_page_url AND the
     company's own website_url (root domain) to independently fail before
     a row is treated as dead — a career page alone returning 404 usually
     just means the page moved (common on a real, live site), which is
@@ -107,9 +107,9 @@ the import fails before verification even starts. See verification.yml.
 
 Usage:
     pip install aiohttp python-dotenv requests beautifulsoup4
-    python verification.py --table archive_ii                        # report-only
-    python verification.py --table archive_ii --ats greenhouse
-    python verification.py --table archive_ii --shard-index 0 --shard-count 10 --summary-out shard0.json
+    python verification.py --table archive_i                        # report-only
+    python verification.py --table archive_i --ats greenhouse
+    python verification.py --table archive_i --shard-index 0 --shard-count 10 --summary-out shard0.json
     python verification.py --summarize ./summaries                    # combine + print all shard*.json in a dir
     python verification.py --table both --execute                     # ACTUALLY deletes confirmed-dead rows
 """
@@ -123,6 +123,7 @@ import os
 import random
 import socket
 import sys
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import aiohttp
@@ -212,7 +213,7 @@ def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
     return aiohttp.TCPConnector(limit=concurrency + 10, ttl_dns_cache=300)
 
 
-# ── archive_ii: platforms with NO safe "does not exist" signal ────────────
+# ── archive_i: platforms with NO safe "does not exist" signal ────────────
 # Left completely untouched — never checked, never deleted, only counted.
 # See the module docstring above for why each one is here.
 _UNVERIFIABLE_ATS = {
@@ -233,7 +234,7 @@ _UNVERIFIABLE_ATS = {
 }
 
 
-# ── archive_ii: NEW verifiers (platforms certificate_transparency_probe.py
+# ── archive_i: NEW verifiers (platforms certificate_transparency_probe.py
 # never covered) ────────────────────────────────────────────────────────
 
 async def _verify_rippling(session: aiohttp.ClientSession, slug: str) -> bool:
@@ -393,7 +394,7 @@ async def _verify_eploy(session: aiohttp.ClientSession, slug: str) -> bool:
         session, f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx")
 
 
-ARCHIVE_II_VERIFIERS = {
+ARCHIVE_I_VERIFIERS = {
     "bamboohr": _verify_bamboohr,
     "icims": _verify_icims,
     "teamtailor": _verify_teamtailor,
@@ -415,7 +416,7 @@ ARCHIVE_II_VERIFIERS = {
 }
 
 
-# ── archive_iii: career-page verification ─────────────────────────────
+# ── archive_ii: career-page verification ─────────────────────────────
 
 async def _url_confirmed_dead(session: aiohttp.ClientSession, url: str) -> bool | None:
     """Returns True if this specific URL is confirmed dead (404, or the
@@ -437,7 +438,7 @@ async def _url_confirmed_dead(session: aiohttp.ClientSession, url: str) -> bool 
         return None
 
 
-async def verify_archive_iii_row(session: aiohttp.ClientSession, row: dict) -> bool:
+async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict) -> bool:
     """DEAD only if BOTH the specific career_page_url AND the company's
     root website_url independently confirm dead — a career page 404 alone
     usually just means the page moved on an otherwise-live site, which is
@@ -637,11 +638,11 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
 
 # ── orchestration ───────────────────────────────────────────────────
 
-async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_run: bool,
+async def verify_archive_i_row(session: aiohttp.ClientSession, row: dict, dry_run: bool,
                                  sem: asyncio.Semaphore, executor: concurrent.futures.ThreadPoolExecutor,
                                  counts: dict, lock: asyncio.Lock) -> None:
     ats, slug = row["ats"], row["slug"]
-    verifier = ARCHIVE_II_VERIFIERS[ats]
+    verifier = ARCHIVE_I_VERIFIERS[ats]
     async with sem:
         try:
             is_live = await verifier(session, slug)
@@ -657,7 +658,7 @@ async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_r
                     counts["dead"] += 1
                 log.info(f"    {ats}/{slug}: DEAD — would delete (report-only)")
                 return
-            ok = await delete_row(session, node.STAGING_TABLE, row["id"])
+            ok = await delete_row(session, node.ARCHIVE_I_TABLE, row["id"])
             async with lock:
                 counts["dead" if ok else "unverified"] += 1
             if ok:
@@ -675,14 +676,14 @@ async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_r
             counts["active" if jobs else "empty"] += 1
 
 
-async def verify_archive_iii_row_task(session: aiohttp.ClientSession, row: dict, dry_run: bool,
+async def verify_archive_ii_row_task(session: aiohttp.ClientSession, row: dict, dry_run: bool,
                                        sem: asyncio.Semaphore, counts: dict, lock: asyncio.Lock) -> None:
-    # The delete stays INSIDE the semaphore, same as verify_archive_ii_row —
+    # The delete stays INSIDE the semaphore, same as verify_archive_i_row —
     # otherwise a batch of rows all confirming dead at once could fire every
     # delete concurrently, uncapped by --concurrency.
     async with sem:
         try:
-            is_dead = await verify_archive_iii_row(session, row)
+            is_dead = await verify_archive_ii_row(session, row)
         except Exception as e:
             async with lock:
                 counts["unverified"] += 1
@@ -700,7 +701,7 @@ async def verify_archive_iii_row_task(session: aiohttp.ClientSession, row: dict,
             log.info(f"    {row['website_url']}: DEAD — would delete (report-only)")
             return
 
-        ok = await delete_row(session, node.ARCHIVE_III_TABLE, row["id"])
+        ok = await delete_row(session, node.ARCHIVE_II_TABLE, row["id"])
         async with lock:
             counts["dead" if ok else "unverified"] += 1
         if ok:
@@ -743,11 +744,11 @@ def _print_summary(label: str, checked: int, counts: dict, dry_run: bool):
     print("=" * 70)
 
 
-def _empty_counts_ii() -> dict:
+def _empty_counts_i() -> dict:
     return {"active": 0, "empty": 0, "dead": 0, "unverified": 0}
 
 
-def _empty_counts_iii() -> dict:
+def _empty_counts_ii() -> dict:
     return {"live": 0, "dead": 0, "unverified": 0}
 
 
@@ -767,10 +768,10 @@ async def _stagger_shard_start(shard_index: int | None, shard_count: int | None)
         await asyncio.sleep(delay)
 
 
-async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: bool,
+async def run_archive_i(ats_filter: str | None, limit: int | None, dry_run: bool,
                           concurrency: int, shard_index: int | None, shard_count: int | None) -> dict:
     sem = asyncio.Semaphore(concurrency)
-    counts = _empty_counts_ii()
+    counts = _empty_counts_i()
     lock = asyncio.Lock()
 
     if ats_filter and ats_filter in _UNVERIFIABLE_ATS:
@@ -780,15 +781,15 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
 
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-        log.info(f"── Verifying archive_ii{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
+        log.info(f"── Verifying archive_i{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
         await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
-        all_rows = await fetch_rows(session, node.STAGING_TABLE, "id,ats,slug", ats_filter, None,
+        all_rows = await fetch_rows(session, node.ARCHIVE_I_TABLE, "id,ats,slug", ats_filter, None,
                                      shard_index, shard_count)
 
-        verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
-        skipped_rows = [r for r in all_rows if r["ats"] not in ARCHIVE_II_VERIFIERS]
+        verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_I_VERIFIERS]
+        skipped_rows = [r for r in all_rows if r["ats"] not in ARCHIVE_I_VERIFIERS]
         counts["unverified"] += len(skipped_rows)
 
         if limit is not None:
@@ -804,54 +805,54 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
 
         log.info(f"  {checked} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
         if not checked:
-            _print_summary("archive_ii" + shard_note, checked, counts, dry_run)
+            _print_summary("archive_i" + shard_note, checked, counts, dry_run)
             return counts
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-            tasks = [verify_archive_ii_row(session, row, dry_run, sem, executor, counts, lock)
+            tasks = [verify_archive_i_row(session, row, dry_run, sem, executor, counts, lock)
                      for row in verifiable_rows]
-            progress_task = asyncio.create_task(_run_progress(counts, checked + len(skipped_rows), "archive_ii"))
+            progress_task = asyncio.create_task(_run_progress(counts, checked + len(skipped_rows), "archive_i"))
             await asyncio.gather(*tasks)
             progress_task.cancel()
 
-    _print_summary("archive_ii" + shard_note, checked, counts, dry_run)
+    _print_summary("archive_i" + shard_note, checked, counts, dry_run)
     return counts
 
 
-async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
+async def run_archive_ii(limit: int | None, dry_run: bool, concurrency: int,
                            shard_index: int | None, shard_count: int | None) -> dict:
     sem = asyncio.Semaphore(concurrency)
-    counts = _empty_counts_iii()
+    counts = _empty_counts_ii()
     lock = asyncio.Lock()
 
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-        log.info(f"── Verifying archive_iii (career pages){shard_note} ──")
+        log.info(f"── Verifying archive_ii (career pages){shard_note} ──")
         await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
-        rows = await fetch_rows(session, node.ARCHIVE_III_TABLE, "id,career_page_url,website_url",
+        rows = await fetch_rows(session, node.ARCHIVE_II_TABLE, "id,career_page_url,website_url",
                                  None, limit, shard_index, shard_count)
         total = len(rows)
 
         log.info(f"  {total} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
         if not total:
-            _print_summary("archive_iii" + shard_note, total, counts, dry_run)
+            _print_summary("archive_ii" + shard_note, total, counts, dry_run)
             return counts
 
-        tasks = [verify_archive_iii_row_task(session, row, dry_run, sem, counts, lock) for row in rows]
-        progress_task = asyncio.create_task(_run_progress(counts, total, "archive_iii"))
+        tasks = [verify_archive_ii_row_task(session, row, dry_run, sem, counts, lock) for row in rows]
+        progress_task = asyncio.create_task(_run_progress(counts, total, "archive_ii"))
         await asyncio.gather(*tasks)
         progress_task.cancel()
 
-    _print_summary("archive_iii" + shard_note, total, counts, dry_run)
+    _print_summary("archive_ii" + shard_note, total, counts, dry_run)
     return counts
 
 
 def _summarize_dir(directory: str) -> None:
     """finalize-style aggregation — reads every *.json summary a shard
     wrote (via --summary-out) out of `directory` and prints ONE combined
-    report, the same shape run_archive_ii/run_archive_iii print on their
+    report, the same shape run_archive_i/run_archive_ii print on their
     own, just totaled across every shard. Mirrors Main/main.py's
     `--finalize` step running once after every shard has finished."""
     paths = sorted(glob.glob(os.path.join(directory, "*.json")))
@@ -859,8 +860,8 @@ def _summarize_dir(directory: str) -> None:
         log.error(f"No *.json shard summaries found in {directory!r} — nothing to combine.")
         sys.exit(1)
 
-    combined_ii = _empty_counts_ii()
-    combined_iii = _empty_counts_iii()
+    combined_ii = _empty_counts_i()
+    combined_iii = _empty_counts_ii()
     dry_run = None
     shards_seen = 0
 
@@ -870,70 +871,96 @@ def _summarize_dir(directory: str) -> None:
         shards_seen += 1
         if dry_run is None:
             dry_run = data.get("dry_run", True)
-        for key, val in (data.get("archive_ii") or {}).items():
+        for key, val in (data.get("archive_i") or {}).items():
             combined_ii[key] = combined_ii.get(key, 0) + val
-        for key, val in (data.get("archive_iii") or {}).items():
+        for key, val in (data.get("archive_ii") or {}).items():
             combined_iii[key] = combined_iii.get(key, 0) + val
 
     log.info(f"Combined {shards_seen} shard summaries from {directory}")
     if any(combined_ii.values()):
         checked_ii = combined_ii["active"] + combined_ii["empty"] + combined_ii["dead"]
-        _print_summary("archive_ii — ALL SHARDS COMBINED", checked_ii, combined_ii, bool(dry_run))
+        _print_summary("archive_i — ALL SHARDS COMBINED", checked_ii, combined_ii, bool(dry_run))
     if any(combined_iii.values()):
         checked_iii = combined_iii["live"] + combined_iii["dead"]
-        _print_summary("archive_iii — ALL SHARDS COMBINED", checked_iii, combined_iii, bool(dry_run))
+        _print_summary("archive_ii — ALL SHARDS COMBINED", checked_iii, combined_iii, bool(dry_run))
 
 
-async def _fetch_pair_set(session: aiohttp.ClientSession, table: str) -> set[tuple[str, str]]:
-    rows = await fetch_rows(session, table, "ats,slug", None, None)
-    return {(r["ats"], r["slug"]) for r in rows}
+# ══════════════════════════════════════════════════════════
+# STALE-ROLE CLEANUP (2026-09) — "no role found in 183 days"
+# ══════════════════════════════════════════════════════════
+#
+# Separate from, and additional to, the live dead-board/page HTTP
+# verification above. Per explicit user instruction: archive_i.last_seen
+# and archive_ii.last_seen were repurposed (see crawl_i.py's
+# touch_archive_i_last_seen call and crawl_ii.py's equivalent) to mean
+# "the last time this slug/page actually had a role found on it" rather
+# than "the last time discovery/verification re-confirmed the board
+# exists." Every 183 days (~6 months), this deletes every archive_i/
+# archive_ii row whose last_seen is older than that cutoff — regardless
+# of whether the board/page itself is still technically reachable. A
+# company having a role at all (ANY role — a CEO opening counts exactly
+# as much as a CSM one, this is deliberately NOT scoped to any
+# particular role type) is the signal that it's worth continuing to
+# scan; a slug that hasn't produced a single role in 6 months is dropped.
+#
+# This was explicitly anticipated but deferred by this file's own
+# original 2026-08 design (see the module docstring's THE RULE section:
+# "that's what ats_scrapers.py's own future 183-day-since-last-hit
+# cleanup ... is for, not this file") — it's implemented here now rather
+# than in ats_scrapers.py since it needs no scraping at all, just a
+# single server-side PostgREST filter+DELETE per table (Postgres finds
+# every stale row itself — no per-row live HTTP check, no sharding,
+# unlike the dead-board verification above).
 
+async def run_stale_role_cleanup(table: str, dry_run: bool, stale_days: int = 183) -> dict:
+    """Delete every row in `table` (archive_i or archive_ii) whose
+    last_seen is older than `stale_days`. report-only (the default,
+    dry_run=True) only COUNTs and logs what WOULD be deleted — same
+    safety default as the rest of this file. Returns a small summary
+    dict, written into the same --summary-out JSON shape as the other
+    checks when run standalone (see main())."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
+    headers = {"apikey": node.SUPABASE_KEY, "Authorization": f"Bearer {node.SUPABASE_KEY}"}
+    count_headers = {**headers, "Range": "0-0", "Prefer": "count=exact"}
+    params = {"last_seen": f"lt.{cutoff}"}
+    url = f"{node.SUPABASE_URL}/rest/v1/{table}"
 
-async def compare_slug_registry() -> None:
-    """archive_ii and slug_registry (the production ATS scanner's own
-    source-of-truth table — see Main/main.py's load_slugs) are both keyed
-    on (ats, slug). This compares the two sets directly: how much of what
-    verification just confirmed-good in archive_ii has actually been
-    promoted into slug_registry (overlap), vs sitting in archive_ii as a
-    real, still-unpromoted candidate (archive_ii-only) — best run AFTER an
-    --execute pass so archive_ii-only doesn't include rows that were just
-    confirmed dead and are about to be deleted anyway."""
-    async with aiohttp.ClientSession(connector=_new_connector(10)) as session:  # sequential pagination only
-        log.info("── Comparing archive_ii vs slug_registry (both keyed on ats,slug) ──")
-        archive_ii_pairs = await _fetch_pair_set(session, node.STAGING_TABLE)
-        slug_registry_pairs = await _fetch_pair_set(session, "slug_registry")
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=count_headers, params=params,
+                                    timeout=_GET_TIMEOUT) as r:
+                r.raise_for_status()
+                content_range = r.headers.get("Content-Range", "")
+                stale_count = int(content_range.split("/")[-1])
+        except Exception as e:
+            log.error(f"{table}: stale-role-cleanup COUNT failed: {e}")
+            return {"table": table, "cutoff": cutoff, "stale_count": None, "deleted": False}
 
-    overlap = archive_ii_pairs & slug_registry_pairs
-    only_archive_ii = archive_ii_pairs - slug_registry_pairs
-    only_registry = slug_registry_pairs - archive_ii_pairs
+        log.info(f"{table}: {stale_count} rows with last_seen older than {stale_days} days "
+                 f"(cutoff {cutoff})" + (" — DRY RUN, not deleting" if dry_run else " — DELETING"))
 
-    by_ats = {}
-    for ats, _ in only_archive_ii:
-        by_ats[ats] = by_ats.get(ats, 0) + 1
+        if dry_run or stale_count == 0:
+            return {"table": table, "cutoff": cutoff, "stale_count": stale_count, "deleted": False}
 
-    print("\n" + "=" * 70)
-    print("archive_ii  vs  slug_registry — unique (ats, slug) comparison")
-    print("=" * 70)
-    print(f"  archive_ii unique pairs:                {len(archive_ii_pairs)}")
-    print(f"  slug_registry unique pairs:              {len(slug_registry_pairs)}")
-    print(f"  In both (already promoted):              {len(overlap)}")
-    print(f"  archive_ii only (not yet in registry):   {len(only_archive_ii)}")
-    print(f"  slug_registry only (not in archive_ii):  {len(only_registry)}")
-    print("=" * 70)
-    if by_ats:
-        print("  archive_ii-only, by platform:")
-        for ats, n in sorted(by_ats.items(), key=lambda kv: -kv[1]):
-            print(f"    {ats:<20} {n}")
-        print("=" * 70)
+        try:
+            async with session.delete(url, headers=headers, params=params,
+                                       timeout=_DELETE_TIMEOUT) as r:
+                r.raise_for_status()
+        except Exception as e:
+            log.error(f"{table}: stale-role-cleanup DELETE failed: {e}")
+            return {"table": table, "cutoff": cutoff, "stale_count": stale_count, "deleted": False}
+
+    log.info(f"{table}: deleted {stale_count} rows with no role found in the last {stale_days} days.")
+    return {"table": table, "cutoff": cutoff, "stale_count": stale_count, "deleted": True}
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Verify archive_ii/archive_iii rows against live ATS boards/career pages (async). "
+        description="Verify archive_i/archive_ii rows against live ATS boards/career pages (async). "
                      "Report-only by default — pass --execute to actually delete confirmed-dead rows.")
-    parser.add_argument("--table", choices=["archive_ii", "archive_iii", "both"], default="both")
+    parser.add_argument("--table", choices=["archive_i", "archive_ii", "both"], default="both")
     parser.add_argument("--ats", default=None,
-                         help="archive_ii only — restrict to one ATS platform (e.g. greenhouse)")
+                         help="archive_i only — restrict to one ATS platform (e.g. greenhouse)")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--execute", action="store_true",
                          help="Actually delete confirmed-dead rows. Without this, always report-only.")
@@ -947,20 +974,40 @@ def main():
     parser.add_argument("--summarize", default=None,
                          help="Skip verification entirely — just combine every *.json in this directory "
                               "(written by earlier --summary-out runs) into one final report")
-    parser.add_argument("--compare-slug-registry", action="store_true",
-                         help="Skip verification entirely — just compare archive_ii's (ats,slug) pairs "
-                              "against slug_registry's and report overlap/unique-to-each counts")
+    parser.add_argument("--stale-role-cleanup", action="store_true",
+                         help="Skip live dead-board/page verification entirely — instead delete "
+                              "every archive_i/archive_ii row whose last_seen (repurposed 2026-09 "
+                              "to mean 'last time a role was found') is older than --stale-days. "
+                              "Report-only unless --execute is also passed. See run_stale_role_cleanup.")
+    parser.add_argument("--stale-days", type=int, default=183,
+                         help="Cutoff for --stale-role-cleanup (default: 183, ~6 months)")
     args = parser.parse_args()
 
     if args.summarize:
         _summarize_dir(args.summarize)
         return
 
-    if args.compare_slug_registry:
+    if args.stale_role_cleanup:
         if not node.SUPABASE_URL or not node.SUPABASE_KEY:
-            log.error("SUPABASE_URL/SUPABASE_KEY not set — cannot compare.")
+            log.error("SUPABASE_URL/SUPABASE_KEY not set — cannot run stale-role cleanup.")
             sys.exit(1)
-        asyncio.run(compare_slug_registry())
+        dry_run = not args.execute
+
+        async def _run_stale_cleanup():
+            summary = {"dry_run": dry_run, "stale_days": args.stale_days}
+            if args.table in ("archive_i", "both"):
+                summary["archive_i_stale"] = await run_stale_role_cleanup(
+                    node.ARCHIVE_I_TABLE, dry_run, args.stale_days)
+            if args.table in ("archive_ii", "both"):
+                summary["archive_ii_stale"] = await run_stale_role_cleanup(
+                    node.ARCHIVE_II_TABLE, dry_run, args.stale_days)
+            if args.summary_out:
+                os.makedirs(os.path.dirname(args.summary_out) or ".", exist_ok=True)
+                with open(args.summary_out, "w") as f:
+                    json.dump(summary, f)
+                log.info(f"Wrote stale-cleanup summary to {args.summary_out}")
+
+        asyncio.run(_run_stale_cleanup())
         return
 
     if (args.shard_index is None) != (args.shard_count is None):
@@ -974,11 +1021,11 @@ def main():
 
     async def _run_all():
         summary = {"dry_run": dry_run}
+        if args.table in ("archive_i", "both"):
+            summary["archive_i"] = await run_archive_i(
+                args.ats, args.limit, dry_run, args.concurrency, args.shard_index, args.shard_count)
         if args.table in ("archive_ii", "both"):
             summary["archive_ii"] = await run_archive_ii(
-                args.ats, args.limit, dry_run, args.concurrency, args.shard_index, args.shard_count)
-        if args.table in ("archive_iii", "both"):
-            summary["archive_iii"] = await run_archive_iii(
                 args.limit, dry_run, args.concurrency, args.shard_index, args.shard_count)
         if args.summary_out:
             os.makedirs(os.path.dirname(args.summary_out) or ".", exist_ok=True)
