@@ -3007,6 +3007,57 @@ def scrape_trakstar(slug: str) -> list[dict]:
     return jobs
 
 
+def scrape_gem(slug: str) -> list[dict]:
+    """Gem (gem.com) Career Sites — public, unauthenticated JSON API.
+    Confirmed live 2026-09: https://api.gem.com/job_board/v0/{slug}/job_posts/
+    returns a plain JSON array of job posts (no wrapper key), each with
+    title/content/content_plain/location/location_type/departments/
+    offices/employment_type/absolute_url/requisition_id — verified live
+    against real companies (gem, function-health, inception, bluesky)
+    before shipping this, not built from docs alone. Gem is primarily a
+    recruiting CRM, but its "Career Sites" product also powers real
+    candidate-facing public job boards at jobs.gem.com/{slug} backed by
+    this same API — see _url_to_slug_gem in discovery.py.
+    """
+    company_name = slug.replace("-", " ").title()
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(f"https://api.gem.com/job_board/v0/{slug}/job_posts/", headers=headers)
+    if not r:
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
+    # API returns a bare list of job posts, not {"jobs": [...]}
+    items = data if isinstance(data, list) else data.get("job_posts", [])
+
+    jobs = []
+    for item in items:
+        job_url = item.get("absolute_url", "")
+        if not job_url:
+            continue
+        loc = item.get("location") or {}
+        location = loc.get("name", "") if isinstance(loc, dict) else str(loc)
+        departments = item.get("departments") or []
+        department = departments[0].get("name", "") if departments else ""
+        desc = _snippet(item.get("content_plain") or item.get("content", ""))
+        jobs.append({
+            "title": (item.get("title") or "").strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": location,
+            "country": "",
+            "department": department,
+            "workplace_type": "Remote" if item.get("location_type") == "remote" else "",
+            "employment_type": item.get("employment_type", ""),
+            "salary": _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Gem",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -3049,6 +3100,13 @@ SCRAPERS = {
     # the way JobScore/Trakstar did, so nothing was guessed and shipped.
     "jobscore": scrape_jobscore,
     "trakstar": scrape_trakstar,
+    # ── New (2026-09): Gem — re-investigated at the user's request after
+    # an earlier "couldn't verify" answer on this platform specifically.
+    # It does have a public, unauthenticated JSON API (unlike the earlier
+    # bloomberry.com company-list request, which is a genuinely paywalled/
+    # capped third-party data broker with no public export — a different
+    # site from Gem itself). See scrape_gem docstring.
+    "gem": scrape_gem,
     # ── DISABLED (JS-rendered / auth-required / blocked / robots.txt) ──
     # "brassring": scrape_brassring,
     # "successfactors": scrape_successfactors,
