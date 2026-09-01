@@ -84,7 +84,8 @@ jobs:
 
       - name: Download + stream-filter BigPicture companies
         run: |
-          python BigPicture/bigpicture_seed.py \
+          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python BigPicture/bigpicture_seed.py \
             --output bigpicture_companies_filtered.csv \
             --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }}
@@ -162,7 +163,8 @@ jobs:
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
             RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
-          python BigPicture/bigpicture_probe.py \
+          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python BigPicture/bigpicture_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
