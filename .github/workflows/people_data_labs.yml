@@ -90,7 +90,7 @@ jobs:
 
       - name: Download + stream-filter PDL Free Company Dataset
         run: |
-          python "People Data Labs/people_data_labs_seed.py" \
+          exec python "People Data Labs/people_data_labs_seed.py" \
             --output pdl_companies_filtered.csv \
             --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }}
@@ -173,7 +173,14 @@ jobs:
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
             RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
-          python "People Data Labs/people_data_labs_probe.py" \
+          # 2026-09: `exec` replaces this shell (bash) with the python
+          # process itself instead of spawning it as bash's child. Without
+          # it, GitHub's Cancel-workflow signal was only reaching bash —
+          # bash (waiting on its foreground child) doesn't forward it to
+          # python, so the crawl kept running for minutes after Cancel was
+          # clicked, no matter what node.py itself did. exec closes that
+          # gap: there's no separate child left to fail to signal.
+          exec python "People Data Labs/people_data_labs_probe.py" \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '20' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
