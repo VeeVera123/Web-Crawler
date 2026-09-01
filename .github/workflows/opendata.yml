@@ -86,7 +86,8 @@ jobs:
         env:
           OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
         run: |
-          python OpenData/opendata_seed.py \
+          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python OpenData/opendata_seed.py \
             --output opendata_organizations_filtered.csv \
             --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }}
@@ -175,7 +176,8 @@ jobs:
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
             RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
-          python OpenData/opendata_probe.py \
+          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python OpenData/opendata_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
