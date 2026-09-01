@@ -25,7 +25,12 @@ name: Verification Engine — archive_i + archive_ii
 # shard's summary and prints ONE combined report — active/empty/dead/
 # unverified totals across the whole run.
 #
-# 2026-09: also added a SEPARATE stale-role-cleanup job — every ~183
+# 2026-09: the manual `delete_dead_now` input runs this same live
+# dead-board/page check (NOT last_seen-based) on demand, forcing both
+# tables + --execute in one switch. Default 20 shards (was 10), editable
+# via shard_count.
+#
+# Also added a SEPARATE stale-role-cleanup job — every ~183
 # days (~6 months), delete archive_i/archive_ii rows whose last_seen
 # (repurposed by Crawl I/II to mean "last time a role was actually
 # found," see crawl_i.py/crawl_ii.py and supabase_handler.py's
@@ -60,14 +65,19 @@ on:
         required: false
         type: boolean
         default: false
+      delete_dead_now:
+        description: "Delete dead slugs now. 404s/gone only, not empty boards."
+        required: false
+        type: boolean
+        default: false
       ats:
         description: "archive_i only — restrict to one ATS platform. Leave blank for all."
         required: false
         default: ""
       shard_count:
-        description: "Parallel GH Actions shards. Prefer MORE shards over higher concurrency (matches main.py's proven-safe 1-request-at-a-time-per-shard pattern) — 10 x 2 = 20 total in-flight is the safe default. Also mind GitHub's ~20-concurrent-job account cap if daily_scan (9 jobs) might overlap."
+        description: "Parallel GH Actions shards. Prefer MORE shards over higher concurrency (matches main.py's proven-safe 1-request-at-a-time-per-shard pattern) — 20 x 2 = 40 total in-flight is the default. Also mind GitHub's ~20-concurrent-job account cap if daily_scan (9 jobs) might overlap."
         required: false
-        default: "10"
+        default: "20"
       concurrency:
         description: "Concurrent checks in flight PER SHARD (asyncio, unlike main.py's synchronous 1-at-a-time calls) — keep this LOW (1-2) and raise shard_count instead if you want more throughput. shard_count x concurrency must stay well under Supabase's connection headroom (~30 confirmed 2026-08-28)."
         required: false
@@ -94,7 +104,7 @@ jobs:
       - name: Build shard-index matrix from shard_count input
         id: build
         run: |
-          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '20' }}"
           MATRIX_JSON=$(python3 -c "
           import json
           shard_count = int('$SHARD_COUNT')
@@ -123,7 +133,7 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
 
-      - name: "Verify shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '10' }}"
+      - name: "Verify shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '20' }}"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -135,13 +145,17 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: |
           # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          # delete_dead_now forces --table both and --execute, overriding the
+          # separate table/execute inputs — one unambiguous switch for "delete
+          # every dead slug right now" instead of having to correctly combine
+          # two other inputs yourself.
           exec python Verification/verification.py \
-            --table ${{ github.event.inputs.table || 'both' }} \
+            --table ${{ github.event.inputs.delete_dead_now == 'true' && 'both' || (github.event.inputs.table || 'both') }} \
             --concurrency ${{ github.event.inputs.concurrency || '30' }} \
             --shard-index ${{ matrix.shard }} \
-            --shard-count ${{ github.event.inputs.shard_count || '10' }} \
+            --shard-count ${{ github.event.inputs.shard_count || '20' }} \
             --summary-out "summary-${{ matrix.shard }}.json" \
-            ${{ github.event.inputs.execute == 'true' && '--execute' || '' }} \
+            ${{ (github.event.inputs.delete_dead_now == 'true' || github.event.inputs.execute == 'true') && '--execute' || '' }} \
             ${{ github.event.inputs.ats != '' && format('--ats {0}', github.event.inputs.ats) || '' }}
 
       - name: Upload shard summary
