@@ -95,7 +95,7 @@ from classifier import (  # noqa: E402
 )
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
-    get_existing_urls, touch_seen_jobs_raw,
+    get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
 )
 
 logging.basicConfig(
@@ -557,6 +557,16 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         results = await asyncio.gather(
             *(extract_postings_from_page(session, sem, p, stats, parse_pool) for p in batch))
         candidate_jobs = [job for page_jobs in results for job in page_jobs]
+
+        # 2026-09: repurpose archive_ii.last_seen to mean "last time this
+        # page had ANY role at all" (same instruction, same reasoning as
+        # crawl_i.py's touch_archive_i_last_seen — these are the RAW
+        # candidate_jobs, before _push_batch's role/location filtering
+        # funnel, so any posting counts, not just CSM/AM ones).
+        pages_with_roles = {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
+        if pages_with_roles:
+            touch_archive_ii_last_seen(pages_with_roles)
+
         added = _push_batch(candidate_jobs, existing_urls)
         total_added += added
 
@@ -580,21 +590,18 @@ def run_finalize() -> None:
     """Cleanup pass for Crawl II's own rows only (source_pipeline='crawl_ii')
     — call ONCE, after every Crawl II shard has finished.
 
-    Deletion policy (2026-08, my own default — the user left this open:
-    "could also delete old roles, idk?"): mark-inactive at the same
-    30 days as Crawl I, but hard-delete on a LONGER, more conservative
-    45-day window rather than Crawl I's 31. Crawl II is a brand-new
-    heuristic pipeline with no production track record yet; a shorter
-    delete window on unproven extraction logic risks silently discarding
-    real postings if a page's structure trips up the heuristic on a
-    re-crawl (a false negative on re-scrape would then hard-delete a
-    still-genuinely-open role sooner than Crawl I would for the same
-    situation). Revisit once Crawl II's false-positive/false-negative
-    rates are actually known."""
+    Deletion policy (2026-09, at explicit user instruction: both Crawl I
+    and Crawl II must delete jobs past 30 days): mark-inactive at 30 days,
+    hard-delete at 31 — same as Crawl I's window (see crawl_i.py's
+    run_finalize). Previously used a more conservative 45-day hard-delete
+    window (2026-08, my own default at the time, chosen because Crawl II
+    was a brand-new heuristic pipeline with no production track record —
+    see git history for that original reasoning) — superseded by the
+    explicit 30-day instruction rather than left as a standing exception."""
     log.info("=" * 60)
     log.info("CRAWL II — finalize (cleanup stale jobs)")
     log.info("=" * 60)
-    summary = cleanup_stale_jobs(inactive_days=30, delete_days=45, source_pipeline=SOURCE_PIPELINE)
+    summary = cleanup_stale_jobs(inactive_days=30, delete_days=31, source_pipeline=SOURCE_PIPELINE)
     log.info(f"Crawl II finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
