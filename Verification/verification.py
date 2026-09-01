@@ -134,7 +134,14 @@ load_dotenv()
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Crawler/
 sys.path.insert(0, _ROOT)  # for node.py
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for ats_scrapers.py (job-count reporting)
-sys.path.insert(0, os.path.join(_ROOT, "Certificate Transparency"))  # for proven verifiers below
+# 2026-09: this folder is "Certificate Transparency -Retired" on disk (the
+# certificate_transparency_probe/seed WORKFLOWS are retired — see that
+# folder — but certificate_transparency_probe.py itself is still imported
+# below for 8 of the 18 ARCHIVE_I_VERIFIERS) — the path here was missing
+# the " -Retired" suffix, a real ModuleNotFoundError on every run, same
+# stale-reference bug class as the slug_registry/archive_ii-archive_iii
+# ones already fixed this session.
+sys.path.insert(0, os.path.join(_ROOT, "Certificate Transparency -Retired"))  # for proven verifiers below
 import node  # noqa: E402
 from ats_scrapers import scrape_board  # noqa: E402
 # Reused as-is — these 8 already check the exact host/path
