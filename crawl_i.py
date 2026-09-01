@@ -56,6 +56,7 @@ from supabase_handler import (
     add_jobs_batch, start_scan_report, finish_scan_report,
     get_all_slugs, cleanup_stale_jobs,
     get_existing_urls, touch_seen_jobs_raw,
+    touch_archive_i_last_seen,
     SupabaseFetchError,
 )
 
@@ -195,23 +196,38 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
     return pairs
 
 
-def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
+def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set[tuple[str, str]]]:
     """Scrape all boards in parallel, grouped by ATS platform.
-    Returns (jobs, boards_ok, boards_failed)."""
+    Returns (jobs, boards_ok, boards_failed, boards_with_roles).
+
+    `boards_with_roles` (2026-09) is the set of (ats, slug) pairs that
+    returned at least one RAW job posting this run — i.e. straight off
+    scrape_board(), before filter_roles()'s CSM/AM-only filter and before
+    filter_locations()'s Global/Africa filter. This is deliberate, per an
+    explicit user instruction: archive_i's last_seen is repurposed (see
+    supabase_handler.touch_archive_i_last_seen) to mean "this slug had ANY
+    role at all," not "had a CSM/AM role," and specifically must NOT be
+    scoped to customer-success-shaped titles — a CEO opening counts just
+    as much as a CSM one. Computing this set here, from the same raw
+    per-board result scrape_board() already returns, means the signal
+    is correct regardless of what filter_roles()/filter_locations() later
+    decide to keep for the `jobs` table."""
     all_jobs = []
     total_ok = 0
     total_failed = 0
+    boards_with_roles: set[tuple[str, str]] = set()
 
     # Group boards by ATS to apply per-platform concurrency
     by_ats = {}
     for ats, slug in boards:
         by_ats.setdefault(ats, []).append(slug)
 
-    def _scrape_platform(ats: str, slugs: list[str]) -> tuple[int, int, list[dict]]:
+    def _scrape_platform(ats: str, slugs: list[str]) -> tuple[int, int, list[dict], set[tuple[str, str]]]:
         """Scrape one ATS platform with appropriate concurrency."""
         workers = PLATFORM_WORKERS.get(ats, 8)
         platform_jobs = []
         platform_failed = 0
+        platform_boards_with_roles: set[tuple[str, str]] = set()
 
         def _do_scrape(slug):
             return slug, scrape_board(ats, slug)
@@ -223,12 +239,13 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
                     slug, jobs = future.result()
                     if jobs:
                         platform_jobs.extend(jobs)
+                        platform_boards_with_roles.add((ats, slug))
                 except Exception as e:
                     platform_failed += 1
                     if platform_failed <= 3:  # log first 3 errors per platform
                         log.error(f"  {ats} scrape error: {e}")
 
-        return len(slugs) - platform_failed, platform_failed, platform_jobs
+        return len(slugs) - platform_failed, platform_failed, platform_jobs, platform_boards_with_roles
 
     # Run all platforms concurrently — each has its own per-platform worker limit
     with ThreadPoolExecutor(max_workers=len(by_ats)) as platform_pool:
@@ -240,16 +257,18 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int]:
         for future in as_completed(platform_futures):
             ats = platform_futures[future]
             try:
-                ok, bad, jobs = future.result()
+                ok, bad, jobs, with_roles = future.result()
                 all_jobs.extend(jobs)
                 total_ok += ok
                 total_failed += bad
+                boards_with_roles |= with_roles
                 log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
             except Exception as e:
                 log.error(f"  {ats}: platform error: {e}")
 
-    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed)")
-    return all_jobs, total_ok, total_failed
+    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed, "
+             f"{len(boards_with_roles)} boards had >=1 role)")
+    return all_jobs, total_ok, total_failed, boards_with_roles
 
 
 def filter_roles(jobs: list[dict]) -> list[dict]:
@@ -349,11 +368,23 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
     try:
         all_jobs: list[dict] = []
         boards_ok = boards_failed = 0
+        boards_with_roles: set[tuple[str, str]] = set()
 
         if boards:
             log.info(f"\nScraping {len(boards)} boards across "
                      f"{len(set(a for a, _ in boards))} ATS platforms...")
-            all_jobs, boards_ok, boards_failed = scrape_all(boards)
+            all_jobs, boards_ok, boards_failed, boards_with_roles = scrape_all(boards)
+
+        # 2026-09: repurpose archive_i.last_seen to mean "last time this
+        # slug had ANY role at all" (per explicit user instruction) rather
+        # than "last time discovery re-confirmed the ATS page exists" —
+        # touch it here, from the RAW per-board scrape result, regardless
+        # of whether any of these jobs go on to pass CSM/AM or Global/
+        # Africa filtering below (a CEO opening counts the same as a CSM
+        # one). No-op (0 touched) when boards_with_roles is empty, e.g. on
+        # a totally job-less shard.
+        if boards_with_roles:
+            touch_archive_i_last_seen(boards_with_roles)
 
         if not all_jobs:
             log.info("No jobs found across any source.")
