@@ -95,7 +95,8 @@ jobs:
           fi
 
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
-          python "Common Crawl/common_crawl_probe.py" \
+          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python "Common Crawl/common_crawl_probe.py" \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --partitions ${{ github.event.inputs.partitions || '1' }} \
