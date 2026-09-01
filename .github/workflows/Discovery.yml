@@ -78,7 +78,8 @@ jobs:
           THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
-        run: python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
         # THEIRSTACK_API_KEY and GCP_PROJECT_ID/GCP_SA_KEY are optional —
         # discovery.py logs a one-line notice and skips that source cleanly
         # if either isn't set, rather than failing the run. See
