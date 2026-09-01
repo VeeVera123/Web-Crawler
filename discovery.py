@@ -244,13 +244,14 @@ SUPPORTED_ATS = {
     "softgarden",
 }
 
-# Eploy / Folks HR / JobAdder / Jobvite / ADP / Avature (added 2026-08) are
-# NOT in SUPPORTED_ATS yet: none of them appear in the OpenPostings dataset
-# this file enriches from, and JobAdder/ADP additionally need composite
-# slugs (client_id|board, cid|ccId) that a single URL has no way to fully
-# encode. Their slugs currently have to be added to slug_registry by hand
-# (or via discover_slugs.py, if/when Common Crawl query patterns are added
-# for them) — they scrape fine once a slug row exists, this file just
+# Eploy / Folks HR / JobAdder / Jobvite / ADP / Avature (added 2026-08),
+# plus JobScore / Trakstar (added 2026-09), are NOT in SUPPORTED_ATS yet:
+# none of them appear in the OpenPostings dataset this file enriches
+# from, and JobAdder/ADP additionally need composite slugs (client_id|
+# board, cid|ccId) that a single URL has no way to fully encode. Their
+# slugs currently have to be added to slug_registry by hand (or via
+# discover_slugs.py, if/when Common Crawl query patterns are added for
+# them) — they scrape fine once a slug row exists, this file just
 # doesn't discover new ones for them yet.
 
 # BLACKLISTED — scrapers exist but don't work (robots.txt / JS-rendered):
