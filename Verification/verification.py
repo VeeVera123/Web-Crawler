@@ -136,26 +136,123 @@ sys.path.insert(0, _ROOT)  # for node.py
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for ats_scrapers.py (job-count reporting)
 # 2026-09: this folder is "Certificate Transparency -Retired" on disk (the
 # certificate_transparency_probe/seed WORKFLOWS are retired — see that
-# folder — but certificate_transparency_probe.py itself is still imported
-# below for 8 of the 18 ARCHIVE_I_VERIFIERS) — the path here was missing
-# the " -Retired" suffix, a real ModuleNotFoundError on every run, same
-# stale-reference bug class as the slug_registry/archive_ii-archive_iii
-# ones already fixed this session.
-sys.path.insert(0, os.path.join(_ROOT, "Certificate Transparency -Retired"))  # for proven verifiers below
+# folder — and it turns out that folder was never committed to git at
+# all (confirmed via `git status`: untracked, and not present on GitHub
+# under any path tried), so even the corrected path would still 404 in
+# CI. Rather than depend on an external file that isn't in the repo, the
+# 8 verifiers below are now INLINED directly into this file instead of
+# imported — copied verbatim from certificate_transparency_probe.py
+# (2026-08), unchanged. See git history / that file (still on disk
+# locally) for the original module docstring's full "final redirect host
+# must match, else dead" rationale — same safety model this file already
+# uses: any connection failure or unexpected response is inconclusive,
+# never treated as dead.
 import node  # noqa: E402
 from ats_scrapers import scrape_board  # noqa: E402
-# Reused as-is — these 8 already check the exact host/path
-# ats_scrapers.py's real production scraper uses (or, for icims/teamtailor/
-# recruitee/softgarden/zoho/hrmdirect, the tenant's own subdomain root,
-# which is a safe, path-independent existence proxy for a per-tenant-
-# subdomain platform), and already treat any connection failure as
-# inconclusive rather than dead — exactly this file's own safety model,
-# just proven in production first. See that file's own module docstring
-# for the full "final redirect host must match, else dead" rationale.
-from certificate_transparency_probe import (  # noqa: E402
-    _verify_bamboohr, _verify_icims, _verify_teamtailor, _verify_recruitee,
-    _verify_softgarden, _verify_zoho, _verify_hrmdirect, _verify_personio,
-)
+
+
+async def _verify_bamboohr(session: aiohttp.ClientSession, slug: str) -> bool:
+    url = f"https://{slug}.bamboohr.com/careers/list"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"Accept": "application/json", "User-Agent": USER_AGENT}) as r:
+        final_host = urlparse(str(r.url)).hostname or ""
+        if final_host != f"{slug}.bamboohr.com":
+            return False  # bounced to bamboohr.com's own marketing site — the confirmed dead pattern
+        if r.status != 200:
+            return False
+        if "application/json" not in r.headers.get("Content-Type", ""):
+            return False
+        try:
+            data = await r.json(content_type=None)
+        except Exception:
+            return False
+        return isinstance(data, dict) and "result" in data
+
+
+async def _verify_icims(session: aiohttp.ClientSession, slug: str) -> bool:
+    """iCIMS boards are scraped via sitemap.xml (see ats_scrapers.py's
+    scrape_icims) — a live tenant's sitemap returns real XML with >=1
+    <url> entry; a dead/redirected tenant lands on icims.com's own
+    marketing site or an empty/error sitemap."""
+    for host in (f"{slug}.icims.com", f"careers-{slug}.icims.com"):
+        try:
+            async with session.get(f"https://{host}/", timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                                    headers={"User-Agent": USER_AGENT}) as r:
+                final_host = urlparse(str(r.url)).hostname or ""
+                if final_host == host and r.status == 200:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+async def _verify_teamtailor(session: aiohttp.ClientSession, slug: str) -> bool:
+    url = f"https://{slug}.teamtailor.com/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_host = urlparse(str(r.url)).hostname or ""
+        if final_host != f"{slug}.teamtailor.com":
+            return False
+        return r.status == 200
+
+
+async def _verify_recruitee(session: aiohttp.ClientSession, slug: str) -> bool:
+    url = f"https://{slug}.recruitee.com/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_host = urlparse(str(r.url)).hostname or ""
+        if final_host != f"{slug}.recruitee.com":
+            return False
+        return r.status == 200
+
+
+async def _verify_softgarden(session: aiohttp.ClientSession, slug: str) -> bool:
+    url = f"https://{slug}.softgarden.io/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_host = urlparse(str(r.url)).hostname or ""
+        if final_host != f"{slug}.softgarden.io":
+            return False
+        return r.status == 200
+
+
+async def _verify_zoho(session: aiohttp.ClientSession, slug: str) -> bool:
+    url = f"https://{slug}.zohorecruit.com/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_host = urlparse(str(r.url)).hostname or ""
+        if final_host != f"{slug}.zohorecruit.com":
+            return False
+        return r.status == 200
+
+
+async def _verify_hrmdirect(session: aiohttp.ClientSession, slug: str) -> bool:
+    url = f"https://{slug}.hrmdirect.com/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_host = urlparse(str(r.url)).hostname or ""
+        if final_host != f"{slug}.hrmdirect.com":
+            return False
+        return r.status == 200
+
+
+async def _verify_personio(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Personio tenants live under either jobs.personio.de or
+    jobs.personio.com — the extraction step doesn't record which suffix
+    a given slug came from (slug is suffix-stripped, see
+    _url_to_slug_personio), so try both rather than guessing."""
+    for suffix in ("jobs.personio.de", "jobs.personio.com"):
+        host = f"{slug}.{suffix}"
+        url = f"https://{host}/"
+        try:
+            async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                                    headers={"User-Agent": USER_AGENT}) as r:
+                final_host = urlparse(str(r.url)).hostname or ""
+                if final_host == host and r.status == 200:
+                    return True
+        except Exception:
+            continue
+    return False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
