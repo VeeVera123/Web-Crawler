@@ -2916,6 +2916,97 @@ def scrape_avature(slug: str) -> list[dict]:
     return jobs
 
 
+def scrape_jobscore(slug: str) -> list[dict]:
+    """JobScore — public, documented, unauthenticated JSON feed. Confirmed
+    live 2026-09: https://careers.jobscore.com/jobs/{slug}/feed.json
+    returns {"jobs": [...]} with rich per-job fields (title, department,
+    location/city/state/country, apply_url, detail_url, description,
+    job_type, remote, salary fields) — verified against a real company's
+    feed before shipping this, not built from docs alone.
+    """
+    company_name = slug.replace("-", " ").title()
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(f"https://careers.jobscore.com/jobs/{slug}/feed.json", headers=headers)
+    if not r:
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    jobs = []
+    for item in data.get("jobs", []):
+        loc_parts = [p for p in (item.get("city"), item.get("state"), item.get("country")) if p]
+        location = item.get("location") or ", ".join(loc_parts)
+        desc = _snippet(item.get("description", ""))
+        salary = item.get("formatted_public_compensation", "") or _extract_salary(desc)
+        job_url = item.get("detail_url") or item.get("apply_url") or ""
+        if not job_url:
+            continue
+        jobs.append({
+            "title": (item.get("title") or "").strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": location,
+            "country": item.get("country", ""),
+            "department": item.get("department", ""),
+            "workplace_type": "Remote" if item.get("remote") else "",
+            "employment_type": item.get("job_type", ""),
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "JobScore",
+            "slug": slug,
+        })
+    return jobs
+
+
+def scrape_trakstar(slug: str) -> list[dict]:
+    """Trakstar Hire (formerly Recruiterbox) — public JSON openings API.
+    Confirmed live 2026-09: https://jsapi.recruiterbox.com/v1/openings?
+    client_name={slug} — no API key needed, just the tenant slug as a
+    query param (same shape as this platform's own documented "Frontend
+    API"). Verified live against real slugs before shipping — both test
+    companies happened to have 0 open postings at verification time, but
+    the response was well-formed JSON matching the documented
+    meta/objects schema both times, not an error page, which is what a
+    wrong endpoint would produce instead.
+    """
+    company_name = slug.replace("-", " ").title()
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get("https://jsapi.recruiterbox.com/v1/openings",
+             params={"client_name": slug}, headers=headers)
+    if not r:
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
+
+    jobs = []
+    for item in data.get("objects", []):
+        job_url = item.get("hosted_url", "")
+        if not job_url:
+            continue
+        loc = item.get("location") or {}
+        loc_parts = [p for p in (loc.get("city"), loc.get("state"), loc.get("country")) if p]
+        desc = _snippet(item.get("description", ""))
+        jobs.append({
+            "title": (item.get("title") or "").strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": ", ".join(loc_parts),
+            "country": loc.get("country", ""),
+            "department": item.get("team", ""),
+            "workplace_type": "Remote" if item.get("allows_remote") else "",
+            "employment_type": item.get("position_type", ""),
+            "salary": _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Trakstar",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -2946,6 +3037,18 @@ SCRAPERS = {
     "jobvite": scrape_jobvite,
     "adp": scrape_adp,
     "avature": scrape_avature,
+    # ── New (2026-09): JobScore / Trakstar — public JSON APIs, confirmed
+    # live against real companies before being added (see each function's
+    # docstring). Gupy/Eightfold/HRMOS were also candidates from the same
+    # request but are NOT added: Gupy's documented API looks like an
+    # authenticated per-company business API rather than a public
+    # candidate-facing feed, Eightfold's public listings appear to need
+    # JS rendering (same class of problem as Phenom below), and HRMOS's
+    # documented API (core.hrmos.co) looks business-authenticated too —
+    # none of the three had a confirmed public unauthenticated endpoint
+    # the way JobScore/Trakstar did, so nothing was guessed and shipped.
+    "jobscore": scrape_jobscore,
+    "trakstar": scrape_trakstar,
     # ── DISABLED (JS-rendered / auth-required / blocked / robots.txt) ──
     # "brassring": scrape_brassring,
     # "successfactors": scrape_successfactors,
