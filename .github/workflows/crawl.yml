@@ -104,7 +104,8 @@ jobs:
           # fewer shards or Crawl II skipped just under-uses its share,
           # which is harmless.
           AI_RATE_SHARDS: "12"
-        run: python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
 
   # Job boards (RemoteOK, WeWorkRemotely, Jobicy, etc.) hit entirely different
   # hosts than the ATS platforms, so they run as their own job in parallel
@@ -136,7 +137,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
-        run: python crawl_i.py --job-boards-only
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python crawl_i.py --job-boards-only
 
   # Cleanup only runs once ALL Crawl I shards + the job-boards job have
   # finished — running it per-shard would race (see crawl_i.py's
@@ -172,7 +174,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_PROVIDER: cerebras
-        run: python crawl_i.py --finalize
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python crawl_i.py --finalize
 
   # ── Crawl II — in-house/unsupported career pages (archive_ii) ──────────
   # Opt-in only: skipped entirely (both jobs below) unless include_archive_ii
@@ -212,7 +215,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
-        run: python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
 
   # Same reasoning as crawl-i-finalize, scoped to source_pipeline='crawl_ii'
   # only. `if: always()` on TOP of the include_archive_ii check — otherwise
@@ -246,4 +250,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_PROVIDER: cerebras
-        run: python crawl_ii.py --finalize
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python crawl_ii.py --finalize
