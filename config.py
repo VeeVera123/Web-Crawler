@@ -179,23 +179,39 @@ _LOCATION_PROVIDER_DEFS = [
     # free tier, whose daily cap (50/day with no prior spend, 1,000/day
     # only after $10 lifetime credit purchase) is too small here.
     #
-    # base_url + model below ARE live-confirmed 2026-09: fetched the
-    # actual GET /v1/models listing from https://integrate.api.nvidia.com/v1
-    # (NVIDIA's real, current NIM catalog, not a third-party guide) and
-    # nemotron-4-340b-instruct is in it verbatim. Picked over the (also
-    # real) llama-3.1-nemotron-ultra-253b-v1 because Ultra is a REASONING
-    # model — it can emit chain-of-thought before its actual answer, which
-    # risks silently truncating _classify_location_batch's per-job answer
-    # lines under the existing max_tokens budget (sized for a direct
-    # answer, not a reasoning preamble). nemotron-4-340b-instruct is a
-    # plain instruct model, same direct-answer shape Gemini/OpenAI/Cerebras/
-    # Groq already use here, so no other code needed to change for it.
+    # base_url below is live-confirmed 2026-09 (fetched the actual GET
+    # /v1/models listing from https://integrate.api.nvidia.com/v1 — NVIDIA's
+    # real, current NIM catalog, not a third-party guide).
+    #
+    # 2026-09 CORRECTION: this provider originally pointed at
+    # nemotron-4-340b-instruct (present in that catalog, and a plain
+    # instruct model — no reasoning-preamble risk) without checking its
+    # context window. Checked after the fact: it's a 2024-era model with
+    # only a 4,096-token context (confirmed via its own Hugging Face
+    # README and OpenRouter's listing, matching each other) — far too
+    # small for this pipeline's location-classification batches
+    # (max_batch_chars up to 200K chars, ~50K+ tokens, deliberately sized
+    # for full, untruncated job descriptions — see
+    # _classify_location_batch's docstring on why). Every real batch
+    # would have overflowed it and either errored or silently truncated
+    # descriptions server-side.
+    #
+    # Replaced with nemotron-3-super-120b-a12b: also confirmed present in
+    # the same live /v1/models listing, a newer (Nemotron 3, not 4)
+    # non-reasoning instruct-style model (no "-reasoning" suffix, unlike
+    # e.g. nemotron-3-nano-omni-30b-a3b-reasoning in the same catalog —
+    # same direct-answer shape as Gemini/OpenAI here), and a context
+    # window corroborated by two independent sources: NVIDIA's own
+    # research page (research.nvidia.com/labs/nemotron/Nemotron-3-Super,
+    # "up to 1M tokens") and OpenRouter's model listing ("262,144 token
+    # context window" as actually served) — either figure comfortably
+    # covers this pipeline's batches with room to spare.
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
-        "nvidia/nemotron-4-340b-instruct",
+        "nvidia/nemotron-3-super-120b-a12b",
         "https://integrate.api.nvidia.com/v1",
-        max_batch_chars=200_000,     # conservative until real context/TPM behavior is confirmed
+        max_batch_chars=200_000,     # well inside the confirmed 262K-token+ window
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
