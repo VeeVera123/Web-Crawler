@@ -12,6 +12,23 @@ name: Crawl
 # every row is tagged jobs.source_pipeline ('crawl_i' / 'crawl_ii'), and
 # each pipeline's finalize job only cleans up its own tagged rows — see
 # crawl_i.py's and crawl_ii.py's run_finalize() docstrings.
+#
+# 2026-09: removed the crawl-i-job-boards job (ran `crawl_i.py
+# --job-boards-only`) — that flag doesn't exist in crawl_i.py anymore
+# (job board aggregators were disabled and job_board_scrapers.py deleted
+# entirely in an earlier 2026-08 restructure; see crawl_i.py's own module
+# docstring: "--job-boards-only mode is gone"). This workflow never got
+# updated when that happened, so the job was failing every single run
+# with "unrecognized arguments: --job-boards-only" — same stale-reference
+# bug class as the slug_registry/Certificate-Transparency ones already
+# fixed elsewhere this session.
+#
+# Note: crawl-i and crawl-ii do NOT depend on each other — both just list
+# `needs: prepare-matrix`, the one job they share. GitHub's dependency
+# graph draws that as two arrows fanning out from prepare-matrix, which
+# can look like a line connecting Crawl I and Crawl II, but there's no
+# `needs: crawl-i` anywhere on crawl-ii (or vice versa) — they run fully
+# in parallel, as designed.
 
 on:
   schedule:
@@ -99,55 +116,21 @@ jobs:
           LLM_PROVIDER: cerebras
           # Every AI-classifying job in this workflow shares Gemini/Groq's
           # free-tier per-key quota — see config.py. Sized generously (12)
-          # to cover the worst case (10 crawl-i shards + crawl-i-job-boards
-          # + up to 10 crawl-ii shards all running at once); a run with
-          # fewer shards or Crawl II skipped just under-uses its share,
-          # which is harmless.
+          # to cover the worst case (10 crawl-i shards + up to 10 crawl-ii
+          # shards all running at once); a run with fewer shards or Crawl
+          # II skipped just under-uses its share, which is harmless.
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
 
-  # Job boards (RemoteOK, WeWorkRemotely, Jobicy, etc.) hit entirely different
-  # hosts than the ATS platforms, so they run as their own job in parallel
-  # with the crawl-i matrix rather than serialized after it.
-  crawl-i-job-boards:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Crawl I — job boards only
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          LLM_PROVIDER: cerebras
-          AI_RATE_SHARDS: "12"
-      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-        run: exec python crawl_i.py --job-boards-only
-
-  # Cleanup only runs once ALL Crawl I shards + the job-boards job have
-  # finished — running it per-shard would race (see crawl_i.py's
-  # run_finalize() docstring). `if: always()` means finalize still runs
-  # (marking jobs seen by whichever shards DID succeed) even if one shard
-  # timed out or failed, instead of silently skipping cleanup. Scoped to
-  # source_pipeline='crawl_i' only — never touches Crawl II's rows.
+  # Cleanup only runs once ALL Crawl I shards have finished — running it
+  # per-shard would race (see crawl_i.py's run_finalize() docstring).
+  # `if: always()` means finalize still runs (marking jobs seen by
+  # whichever shards DID succeed) even if one shard timed out or failed,
+  # instead of silently skipping cleanup. Scoped to source_pipeline=
+  # 'crawl_i' only — never touches Crawl II's rows.
   crawl-i-finalize:
-    needs: [crawl-i, crawl-i-job-boards]
+    needs: crawl-i
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
