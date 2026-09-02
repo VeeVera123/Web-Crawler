@@ -488,25 +488,82 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     return matched, confidences
 
 
-def _push_batch(candidate_jobs: list[dict], existing_urls: set[str]) -> int:
-    """Runs one micro-batch of raw candidate postings through the same
-    role → location → visa funnel crawl_i.py uses, then upserts survivors,
-    tagged source_pipeline='crawl_ii'. Returns count of new jobs added.
+# ── Shared batch driver ─────────────────────────────────────────────────
 
-    2026-08: dedups against `existing_urls` BEFORE the role/location
-    funnel — a posting whose URL is already in `jobs` was already
-    classified in a prior run (or an earlier micro-batch this same
-    shard), so re-running keyword_classify_role/ai_classify_roles/
-    ai_classify_locations on it is a pure waste of LLM calls. Those
-    skipped postings just get last_seen/is_active refreshed via
-    touch_seen_jobs_raw() instead. `existing_urls` is shared/mutated
-    across every micro-batch in this shard (see crawl_batch_ii) so a
-    posting re-surfacing across batches only ever gets classified once."""
-    if not candidate_jobs:
-        return 0
+async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                          stats: dict, crawl_start: float, time_budget_seconds: float,
+                          time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
+                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
+    """Crawls archive_ii pages, then classifies and writes everything ONCE
+    at the end. Returns (pages_done, jobs_added, time_budget_hit).
 
+    2026-09 restructure, at explicit user instruction: previously this
+    fetched+extracted a sub-batch of pages, immediately ran that
+    sub-batch through role/location classification, and pushed straight
+    to Supabase — repeated per sub-batch, so a shard's log interleaved
+    fetch progress, AI-provider HTTP noise, and "Added N jobs to Supabase"
+    lines from dozens of separate small writes throughout the run, and a
+    crash mid-run left Supabase in a half-written state for that shard.
+    Now: fetch+extract every page first (still in sub-batches internally,
+    purely to keep memory/concurrency bounded — see the loop below), with
+    ONLY plain crawl-progress logging during that stage; THEN one
+    dedup pass, one role-classification pass, one location-classification
+    pass, and ONE Supabase write for the whole shard's survivors — each
+    stage gets its own clearly-labeled log block instead of everything
+    interleaved. Tradeoff worth knowing: a crash or timeout DURING the
+    fetch stage still writes nothing for this shard (nothing to write yet
+    — see the time-budget-hit path below, which still classifies+writes
+    whatever was fetched before stopping); a crash AFTER fetching but
+    during classification loses that shard's writes for this run, where
+    the old per-sub-batch design would have kept whatever had already
+    been pushed. If that tradeoff turns out to bite in practice, the
+    fix is a periodic flush (e.g. every 2000 pages) rather than reverting
+    to per-300-page pushes — ask and it can be added.
+    """
+    all_candidate_jobs: list[dict] = []
+    all_pages_with_roles: set[str] = set()
+    time_budget_hit = False
+    i = 0
+
+    log.info(f"── Crawling entries ({len(pages)} pages) ──")
+    for i in range(0, len(pages), batch_size):
+        if time.monotonic() - crawl_start >= time_budget_seconds:
+            time_budget_hit = True
+            log.warning(f"  time budget ({time_budget_minutes}min) reached at {i}/{len(pages)} "
+                        f"pages — stopping the crawl here; everything fetched so far still "
+                        f"goes through dedup/classification/write below.")
+            break
+        batch = pages[i:i + batch_size]
+        results = await asyncio.gather(
+            *(extract_postings_from_page(session, sem, p, stats, parse_pool) for p in batch))
+        batch_candidates = [job for page_jobs in results for job in page_jobs]
+        all_candidate_jobs.extend(batch_candidates)
+
+        # 2026-09: repurpose archive_ii.last_seen to mean "last time this
+        # page had ANY role at all" — these are the RAW batch_candidates,
+        # before role/location filtering below, so any posting counts,
+        # not just CSM/AM ones.
+        all_pages_with_roles |= {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
+
+        done = min(i + batch_size, len(pages))
+        elapsed = time.monotonic() - crawl_start
+        rate = stats["requests_attempted"] / elapsed if elapsed > 0 else 0
+        log.info(f"  {done}/{len(pages)} pages — {rate:.1f} req/sec — {elapsed:.0f}s elapsed — "
+                 f"{len(batch_candidates)} candidates this batch ({len(all_candidate_jobs)} total)")
+
+    pages_done = min(len(pages), i + batch_size) if pages else 0
+
+    if all_pages_with_roles:
+        touch_archive_ii_last_seen(all_pages_with_roles)
+
+    if not all_candidate_jobs:
+        log.info("No candidate postings found on any page — nothing to classify or write.")
+        return pages_done, 0, time_budget_hit
+
+    log.info("── Deduplication ──")
+    existing_urls = get_existing_urls()
     new_jobs, already_seen = [], []
-    for job in candidate_jobs:
+    for job in all_candidate_jobs:
         url = job.get("url", "")
         if url and url in existing_urls:
             already_seen.append(job)
@@ -514,77 +571,34 @@ def _push_batch(candidate_jobs: list[dict], existing_urls: set[str]) -> int:
             new_jobs.append(job)
     if already_seen:
         touch_seen_jobs_raw(already_seen)
-        for job in already_seen:
-            existing_urls.add(job.get("url", ""))
-    if not new_jobs:
-        return 0
+    log.info(f"  {len(all_candidate_jobs)} candidates → {len(already_seen)} already known "
+             f"(skipped, last_seen refreshed only), {len(new_jobs)} new — only new ones go to AI")
 
+    if not new_jobs:
+        log.info("No new candidates to classify.")
+        return pages_done, 0, time_budget_hit
+
+    log.info("── Role classification ──")
     role_matched = _filter_roles(new_jobs)
+    log.info(f"  {len(new_jobs)} candidates → {len(role_matched)} CSM/AM roles")
     if not role_matched:
-        return 0
+        return pages_done, 0, time_budget_hit
+
+    log.info("── Location classification ──")
     global_jobs, confidences = _filter_locations(role_matched)
+    log.info(f"  {len(role_matched)} roles → {len(global_jobs)} global/Africa-eligible")
     if not global_jobs:
-        return 0
+        return pages_done, 0, time_budget_hit
+
     for job in global_jobs:
         job["visa_sponsorship"] = detect_visa_sponsorship(job)
+
+    log.info("── Writing to Supabase ──")
     added = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE,
                             existing_urls=existing_urls)
-    return added
+    log.info(f"  {added} new jobs written")
 
-
-# ── Shared batch driver ─────────────────────────────────────────────────
-
-async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                          stats: dict, crawl_start: float, time_budget_seconds: float,
-                          time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
-                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
-    """Crawls archive_ii pages in sub-batches: fetch+extract concurrently
-    per page, then run the classification funnel and push once per
-    sub-batch (same shape as node.py's crawl_batch/crawl_i.py's scrape_all
-    — micro-batching keeps memory bounded and gives partial progress if
-    the time budget is hit mid-run). Returns (pages_done, jobs_added,
-    time_budget_hit).
-
-    2026-08: fetches `jobs.job_url` from Supabase ONCE here, up front, and
-    threads that same set through every micro-batch's _push_batch() call
-    — both so already-known postings skip LLM classification (see
-    _push_batch's docstring) and so add_jobs_batch() never re-pulls the
-    whole `jobs` table on every single micro-batch like it used to."""
-    total_added = 0
-    time_budget_hit = False
-    existing_urls = get_existing_urls()
-
-    for i in range(0, len(pages), batch_size):
-        if time.monotonic() - crawl_start >= time_budget_seconds:
-            time_budget_hit = True
-            log.warning(f"  time budget ({time_budget_minutes}min) reached at {i}/{len(pages)} "
-                        f"pages — stopping here, everything found so far is written.")
-            break
-        batch = pages[i:i + batch_size]
-        results = await asyncio.gather(
-            *(extract_postings_from_page(session, sem, p, stats, parse_pool) for p in batch))
-        candidate_jobs = [job for page_jobs in results for job in page_jobs]
-
-        # 2026-09: repurpose archive_ii.last_seen to mean "last time this
-        # page had ANY role at all" (same instruction, same reasoning as
-        # crawl_i.py's touch_archive_i_last_seen — these are the RAW
-        # candidate_jobs, before _push_batch's role/location filtering
-        # funnel, so any posting counts, not just CSM/AM ones).
-        pages_with_roles = {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
-        if pages_with_roles:
-            touch_archive_ii_last_seen(pages_with_roles)
-
-        added = _push_batch(candidate_jobs, existing_urls)
-        total_added += added
-
-        done = min(i + batch_size, len(pages))
-        elapsed = time.monotonic() - crawl_start
-        rate = stats["requests_attempted"] / elapsed if elapsed > 0 else 0
-        log.info(f"  {done}/{len(pages)} pages — {rate:.1f} req/sec — {elapsed:.0f}s elapsed — "
-                 f"{len(candidate_jobs)} candidates this batch, {added} new jobs written "
-                 f"({total_added} total)")
-
-    return min(len(pages), i + batch_size) if pages else 0, total_added, time_budget_hit
+    return pages_done, added, time_budget_hit
 
 
 def new_connector() -> aiohttp.TCPConnector:
@@ -621,11 +635,13 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     log.info(f"CRAWL II — starting (shard {shard}/{total_shards})")
     log.info("=" * 60)
 
+    log.info("── Getting entries ──")
     try:
         pages = load_pages(shard=shard, total_shards=total_shards)
     except SupabaseFetchError as e:
         log.error(f"Failed to load archive_ii pages from Supabase after retries — aborting shard: {e}")
         sys.exit(1)
+    log.info(f"  {len(pages)} archive_ii pages assigned to this shard")
 
     if not pages:
         log.warning(f"Shard {shard}/{total_shards}: no pages assigned, nothing to do.")
@@ -655,8 +671,9 @@ async def _run_shard(shard: int, total_shards: int) -> None:
         parse_pool.shutdown(wait=False)
 
     status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
-    log.info(f"── shard {shard}/{total_shards} {status}: {done}/{len(pages)} pages, "
-             f"{added} new jobs written ──")
+    log.info("── Summary ──")
+    log.info(f"  shard {shard}/{total_shards} {status}: {done}/{len(pages)} pages, "
+             f"{added} new jobs written")
     log.info(f"  JSON-LD: {stats['jsonld_pages']} pages, {stats['jsonld_postings']} postings found")
     log.info(f"  Heuristic: {stats['heuristic_pages']} pages, {stats['heuristic_postings']} "
              f"postings confirmed")
