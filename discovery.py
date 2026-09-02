@@ -1002,51 +1002,20 @@ def _url_to_slug_jobscore(url: str) -> str | None:
     return None
 
 
-def _url_to_slug_eightfold(url: str) -> str | None:
-    """Extract slug from Eightfold AI URLs. Pattern: {tenant}.eightfold.ai/
-    careers — confirmed via a live example (lamresearch.eightfold.ai/
-    careers). app.eightfold.ai / preview.eightfold.ai / employee.eightfold.ai
-    are Eightfold's OWN generic hosts, not a tenant — explicitly excluded."""
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if not host.endswith(".eightfold.ai"):
-        return None
-    slug = host[: -len(".eightfold.ai")].lower()
-    if slug in ("app", "preview", "employee", "www", ""):
-        return None
-    if slug not in SKIP_SLUGS:
-        return slug
-    return None
-
-
-def _url_to_slug_gupy(url: str) -> str | None:
-    """Extract slug from Gupy URLs (Brazil-market ATS). Pattern:
-    {tenant}.gupy.io/... — confirmed via a live example (atento.gupy.io/
-    jobs/...)."""
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if not host.endswith(".gupy.io"):
-        return None
-    slug = host[: -len(".gupy.io")].lower()
-    if slug and slug not in SKIP_SLUGS and slug not in ("www", "developers", "suporte-candidatos"):
-        return slug
-    return None
-
-
-def _url_to_slug_hrmos(url: str) -> str | None:
-    """Extract slug from HRMOS URLs (Japan-market ATS). Pattern:
-    hrmos.co/pages/{tenant}/... — confirmed via a live example
-    (hrmos.co/pages/cornes/jobs/10110)."""
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if host.lower() != "hrmos.co":
-        return None
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) >= 2 and parts[0].lower() == "pages":
-        slug = parts[1].lower()
-        if slug and slug not in SKIP_SLUGS:
-            return slug
-    return None
+# 2026-09: gupy/eightfold/hrmos _url_to_slug_* functions REMOVED — at the
+# time they were added, none of the three had a confirmed public
+# unauthenticated scraping API (documented in ats_scrapers.py's SCRAPERS
+# dict comment: Gupy looked like an authenticated per-company business
+# API, Eightfold needs JS rendering, HRMOS's API looked
+# business-authenticated too), so discovery was finding slugs for
+# platforms crawl_i.py could never actually scrape — 2,237 permanently
+# dead archive_i rows by the time this was caught (logged every shard as
+# "no scraper registered" warnings). Removed at the source rather than
+# leaving crawl_i.py to keep silently skipping them forever. If a public
+# API for any of these three is ever confirmed, re-add both the discovery
+# side (these functions + their CC_PLATFORM_PATTERNS/CC_EXTRACTORS/
+# URL_TO_SLUG entries below) AND an actual scrape_* function in
+# ats_scrapers.py — never just one side again.
 
 
 def _url_to_slug_gem(url: str) -> str | None:
@@ -1108,9 +1077,9 @@ URL_TO_SLUG = {
     # verified vs. deliberately left out from the 36-platform candidate list:
     "trakstar": _url_to_slug_trakstar,
     "jobscore": _url_to_slug_jobscore,
-    "eightfold": _url_to_slug_eightfold,
-    "gupy": _url_to_slug_gupy,
-    "hrmos": _url_to_slug_hrmos,
+    # eightfold/gupy/hrmos REMOVED 2026-09 — no scraper exists for any of
+    # them (see the comment above where their _url_to_slug_* functions used
+    # to be), so discovering slugs for them was pure dead weight.
     # New (2026-09) — Gem, re-investigated at the user's request after an
     # earlier "couldn't verify" answer; it does have a real public
     # candidate-facing job board (jobs.gem.com/{tenant}) backed by a live
@@ -1417,9 +1386,7 @@ CC_PLATFORM_PATTERNS = {
     # function's docstring.
     "trakstar": ["*.hire.trakstar.com/*"],
     "jobscore": ["careers.jobscore.com/careers/*"],
-    "eightfold": ["*.eightfold.ai/*"],
-    "gupy": ["*.gupy.io/*"],
-    "hrmos": ["hrmos.co/pages/*"],
+    # eightfold/gupy/hrmos REMOVED 2026-09 — see URL_TO_SLUG's comment.
     "gem": ["jobs.gem.com/*"],
 }
 
@@ -1465,9 +1432,7 @@ CC_EXTRACTORS = {
     # New (2026-09), kept in sync with CC_PLATFORM_PATTERNS above:
     "trakstar": _url_to_slug_trakstar,
     "jobscore": _url_to_slug_jobscore,
-    "eightfold": _url_to_slug_eightfold,
-    "gupy": _url_to_slug_gupy,
-    "hrmos": _url_to_slug_hrmos,
+    # eightfold/gupy/hrmos REMOVED 2026-09 — see URL_TO_SLUG's comment.
     "gem": _url_to_slug_gem,
 }
 
