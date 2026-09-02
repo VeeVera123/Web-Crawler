@@ -216,7 +216,6 @@ MIN_CAREER_PAGE_TEXT_CHARS = 250
 # elsewhere that two DISTINCT ones are required together before they
 # count (one incidental word shouldn't be enough).
 _STRONG_HIRING_PHRASES = [
-    "apply now", "apply today", "apply here", "apply online",
     "current openings", "current opening", "current vacancies", "current vacancy",
     "open positions", "open position", "open roles", "open role",
     "job openings", "job opening", "we're hiring", "we are hiring", "now hiring",
@@ -240,8 +239,24 @@ _WEAK_HIRING_WORDS = [
     "resume", "cv", "candidate", "candidates", "applicant", "applicants",
     "onboarding", "workforce", "headcount",
 ]
+# "apply now"/"apply today"/"apply here"/"apply online" moved from STRONG to
+# WEAK 2026-09: a real false positive was traced to these — delaware.pro's
+# customer-experience SERVICES page (not a jobs page at all) has a global
+# nav "Apply Now" link pointing at a startup/ventures program, and that one
+# generic phrase alone was enough to get the page captured into archive_ii
+# as a career page. Unlike "current openings"/"we're hiring"/etc., "apply
+# now" is common site-wide boilerplate CTA text with no hiring-specific
+# meaning on its own (loan applications, course enrollment, accelerator
+# programs all use it too) — it shouldn't single-handedly qualify a page.
+# As a weak word it still counts fine: a genuine career page pairs it with
+# other distinct hiring vocabulary ("careers", "position", "job", ...)
+# easily enough to clear the 2-distinct-weak-word bar below.
+_WEAK_HIRING_PHRASES = ["apply now", "apply today", "apply here", "apply online"]
 _STRONG_HIRING_RE = re.compile("|".join(re.escape(p) for p in _STRONG_HIRING_PHRASES), re.I)
-_WEAK_HIRING_RE = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in _WEAK_HIRING_WORDS) + r")\b", re.I)
+_WEAK_HIRING_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _WEAK_HIRING_WORDS + _WEAK_HIRING_PHRASES) + r")\b",
+    re.I,
+)
 
 
 def _has_hiring_vocabulary(text: str) -> bool:
