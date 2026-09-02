@@ -1237,6 +1237,10 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 
 
 # ── BrassRing (IBM/Infinite) ─────────────────────────────
+# Restored 2026-09 — mistakenly removed alongside a UKG/Phenom cleanup
+# under the wrong assumption it was JS-rendered like those two. It's a
+# real, working HTTP API scraper (sjobs.brassring.com/.../MatchedJobs) —
+# no JS rendering involved. See BLACKLISTED_ATS.md for the correction.
 
 def scrape_brassring(slug: str) -> list[dict]:
     """BrassRing search API scraper. Slug format: 'partner_id|site_id'."""
@@ -1465,6 +1469,10 @@ def scrape_teamtailor(slug: str) -> list[dict]:
 
 
 # ── SAP SuccessFactors ─────────────────────────────────
+# Restored 2026-09 — mistakenly removed alongside a UKG/Phenom cleanup
+# under the wrong assumption it was JS-rendered like those two. It's a
+# real, working HTTP JSON API scraper — no JS rendering involved. See
+# BLACKLISTED_ATS.md for the correction.
 
 def scrape_successfactors(slug: str) -> list[dict]:
     """SAP SuccessFactors career site scraper.
@@ -3209,20 +3217,15 @@ SCRAPERS = {
     # was and wasn't verified live (sandbox couldn't fetch raw HTML from
     # this domain, so this matches job URLs by pattern, not CSS selector).
     "ycombinator": scrape_ycombinator,
-    # ── DISABLED (JS-rendered / auth-required / blocked / robots.txt) ──
-    # "brassring": scrape_brassring,
-    # "successfactors": scrape_successfactors,
-    # "ukg": — robots.txt disallow on recruiting.ultipro.com; every real
-    #          URL we could verify also served an "unsupported browser"
-    #          fallback page instead of real content. Excluded.
-    # "phenom": — confirmed client-side-JS-only rendering for both listings
-    #             and full descriptions. No plain-HTTP path exists, and
-    #             adding a headless browser conflicts with this project's
-    #             established architecture. Excluded.
-    # YCombinator (Work at a Startup) moved to job_board_scrapers.py —
-    # it's a multi-company job AGGREGATOR (like RemoteOK/Jobicy), not a
-    # single-company ATS, so it belongs in the job-boards pipeline, not
-    # keyed by per-company slug here. See scrape_ycombinator() there.
+    # ── Restored 2026-09: BrassRing/SuccessFactors were wrongly removed
+    # under the assumption they were JS-rendered — they're real, working
+    # HTTP API scrapers. See BLACKLISTED_ATS.md for the correction.
+    "brassring": scrape_brassring,
+    "successfactors": scrape_successfactors,
+    # ── DISABLED / never implemented — see BLACKLISTED_ATS.md at the repo
+    # root for the full list and reasons (ukg, phenom, gupy, eightfold,
+    # hrmos, and any future rejects). That file is the source of truth
+    # now — check it before re-adding any of these.
 }
 
 
