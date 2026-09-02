@@ -1,715 +1,1482 @@
 """
-CRAWL II — heuristic generic job-listing scraper for archive_ii (in-house/
-unsupported career pages; archive_ii was archive_iii before the 2026-08
-Crawl I/Crawl II restructure — see node.py's and crawl_i.py's module
-docstrings for the full renaming history).
+Two-stage classifier — multi-provider architecture.
 
-Crawl I (crawl_i.py) only knows how to read the ~20 recognized ATS
-platforms in ats_scrapers.py's SCRAPERS dict. Every career page node.py's
-crawl_batch() found that did NOT match one of those platforms — an
-in-house careers CMS, a small/unrecognized ATS, a WordPress job-listing
-plugin, etc. — lands in archive_ii instead, unscraped. Crawl II is what
-finally reads those.
+Role classification:  Cerebras + Groq (free tiers, concurrent)
+Location classification: Gemini + OpenAI GPT-4.1 nano (concurrent)
 
-Two independent extraction methods, tried in order, per archive_ii page:
+Falls back to single-provider mode if only LLM_PROVIDER is set.
 
-  1. JSON-LD JobPosting structured data (schema.org). The highest-
-     confidence source when present — many career-page builders emit this
-     for SEO even with no ATS-recognizable URL pattern at all. If a page
-     has ANY valid, non-expired JobPosting objects, they are trusted and
-     the heuristic pass below is skipped entirely for that page (avoids
-     double-counting the same postings two different ways).
+  Stage 1 — keyword filter for CSM/AM role titles (fast, no API)
+  Stage 2 — AI for ambiguous titles (batched, multi-provider concurrent)
 
-  2. Heuristic candidate-link detection, for pages with no JSON-LD:
-     (a) anchors whose href path itself looks like an individual job
-         posting (/job/, /careers/, /position/, /vacancy/, etc.), and
-     (b) groups of ≥3 sibling anchors sharing the same (parent tag,
-         parent class) fingerprint — a real job-listing grid/table
-         renders every card through the same template, which is a much
-         stronger and more general signal than any fixed CSS class name
-         could be, and a nav menu or footer never has this shape.
-     Anchor text is run through a nav-word blocklist and a word-count
-     sanity check before anything counts as a candidate. Every surviving
-     candidate is then INDIVIDUALLY FETCHED and must clear a real-job-page
-     confirmation gate (minimum text length + at least one strong
-     job-page phrase like "job description"/"responsibilities"/"apply
-     now") before it becomes a posting — a candidate link alone is never
-     trusted. This confirmation fetch is the single biggest lever against
-     letting junk in, and is deliberately not skipped to save requests.
-
-Every surviving posting — from either method — still goes through the
-EXACT SAME role/location/visa classification funnel Crawl I uses
-(classifier.py: keyword_classify_role → ai_classify_roles,
-_keyword_classify_location_detail → ai_classify_locations,
-detect_visa_sponsorship) before being written. Nothing here bypasses that
-filter; a JobPosting hit or a confirmed heuristic hit is a CANDIDATE for
-the jobs table, never an automatic write. This is what "as perfect as
-possible... does not let junk in" means in practice: three independent
-gates (structural/confirmation, role, location) all have to agree.
-
-Every row this writes to `jobs` is tagged source_pipeline='crawl_ii' (via
-supabase_handler.add_jobs_batch's source_pipeline param) so it can be
-bulk-identified and deleted independently of Crawl I's rows if the
-heuristic scraper turns out to have quality problems on some class of
-site, without touching a single Crawl I row.
-
-CLI modes (mirrors crawl_i.py; see .github/workflows/crawl.yml):
-  python crawl_ii.py --shard 0 --total-shards 10   This shard's 1/10 slice of archive_ii.
-  python crawl_ii.py --finalize                     Cleanup only (mark/delete stale
-                                                      crawl_ii jobs) — run once, after every
-                                                      shard has finished (gate with `needs:`).
+Then a separate location filter:
+  Stage 3 — keyword check for Africa/Global locations
+  Stage 4 — AI for ambiguous locations (Gemini + OpenAI, concurrent)
 """
 
-import argparse
-import asyncio
-import concurrent.futures
-import hashlib
-import json
-import logging
-import os
 import re
-import sys
 import time
-from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
+import geo
 
-import aiohttp
-from dotenv import load_dotenv
-from selectolax.lexbor import LexborHTMLParser
+log = logging.getLogger(__name__)
 
-load_dotenv()
-_MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_MAIN_DIR)  # repo root — node.py lives here
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, _MAIN_DIR)
+# 2026-09: mute the openai SDK's own httpx/httpcore client logging — every
+# _ai_call() below already logs a clean per-batch summary ("Role
+# classification: N titles → M batches...", "AI classified X/Y locations
+# ..."), so the SDK's own "HTTP Request: POST .../chat/completions HTTP/1.1
+# 200 OK" line per call is pure duplication once you have that, not
+# additional signal. Set here (not just in each entrypoint's basicConfig)
+# so it's muted no matter which script imports this module.
+for _noisy in ("httpx", "httpcore", "openai"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_parse_pool
-# (2026-08: this file used to do all its HTML parsing inline on the event
-# loop with no pool at all — see extract_postings_from_page's docstring —
-# it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
-from classifier import (  # noqa: E402
-    keyword_classify_role, ai_classify_roles,
-    _keyword_classify_location_detail, ai_classify_locations,
-    detect_visa_sponsorship,
-    PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
-)
-from supabase_handler import (  # noqa: E402
-    add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
-    get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
-)
+# ── Provider-specific AI client setup ─────────────────────
+MAX_RETRIES = 4
+RETRY_BASE_DELAY = 5  # seconds
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("crawl_ii")
+# ── Per-run provider health tracking ──────────────────────
+# 2026-09: a provider that's exhausted its quota (daily or otherwise) for
+# THIS run gets marked here and skipped for the rest of the process —
+# instead of every subsequent batch still being round-robin-assigned to it,
+# burning MAX_RETRIES retries and RETRY_BASE_DELAY backoff on a call that's
+# doomed before it starts (see the real Gemini "RESOURCE_EXHAUSTED ...
+# FreeTier" 429 in this project's own logs — a genuine daily-quota
+# exhaustion, not a transient burst, so retrying it is pure waste). Reset
+# per-process (i.e. per GitHub Actions shard) — there's no cross-process
+# state here, same as _last_call_times below.
+_dead_providers: set[str] = set()
 
-SOURCE_PIPELINE = "crawl_ii"
-DEFAULT_ATS_LABEL = "in_house"  # jobs.ats value for every Crawl II row — free-text column, no CHECK
-
-CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "60"))
-TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_II_TIME_BUDGET_MINUTES", "300"))
-BATCH_SIZE = int(os.environ.get("CRAWL_II_BATCH_SIZE", "300"))  # pages per micro-batch before pushing
-MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches for one company
-
-
-# ── Sharding (same deterministic hash approach as crawl_i.py's _shard_of) ──
-
-def _shard_of(website_url: str, total_shards: int) -> int:
-    h = hashlib.md5(website_url.encode()).hexdigest()
-    return int(h, 16) % total_shards
+# 2026-09: a provider whose calls keep coming back with null content (not
+# a rate-limit/quota error — the request succeeds, the model just returns
+# nothing) was never being marked dead at all, only retried MAX_RETRIES
+# times per batch and then silently given up on for THAT batch — the next
+# batch would round-robin straight back to it and repeat the same losing
+# cycle, which is exactly the real, live behavior reported: "cerebras
+# returned null content (attempt 3/4)" followed immediately by "rerouting
+# ... to: cerebras, groq, nvidia" — rerouting TO the very provider that
+# just failed. Tracked as strikes (one per batch that exhausts retries on
+# null content alone, not per individual attempt) since a single null
+# response can be a one-off model hiccup; 2 separate batches doing it is a
+# real pattern worth cutting off for the rest of the run.
+_NULL_CONTENT_STRIKE_LIMIT = 2
+_null_content_strikes: dict[str, int] = {}
 
 
-def load_pages(shard: int = 0, total_shards: int = 1) -> list[dict]:
-    """Load {career_page_url, website_url} pairs from archive_ii, sharded
-    the same way crawl_i.py shards archive_i — a stable hash rather than a
-    running index so every shard gets an even, source-agnostic slice."""
-    pages = get_archive_ii_pages()
-    if not pages:
-        log.warning("No pages found in Supabase archive_ii!")
-        return []
-
-    if total_shards > 1:
-        pages = [p for p in pages if _shard_of(p["website_url"], total_shards) == shard]
-        log.info(f"Shard {shard}/{total_shards}: {len(pages)} career pages assigned")
-
-    return pages
+def _mark_provider_dead(name: str, reason: str) -> None:
+    """Mark a provider unavailable for the rest of THIS run. Idempotent —
+    only logs once per provider even if multiple concurrent batches hit
+    the same exhausted quota around the same time."""
+    if name in _dead_providers:
+        return
+    _dead_providers.add(name)
+    log.warning(f"{name}: unavailable for the rest of this run ({reason}) — "
+                f"remaining work assigned to it will be rerouted to whichever "
+                f"other provider(s) are still live.")
 
 
-# ── JSON-LD extraction ──────────────────────────────────────────────────
-
-_JSONLD_SCRIPT_RE = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.I | re.S)
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _strip_html(text: str, max_len: int = 4000) -> str:
-    if not text:
-        return ""
-    text = _TAG_RE.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:max_len]
-
-
-def _iter_jsonld_objects(html: str):
-    """Yields every dict-shaped JSON-LD object on the page, flattening
-    both top-level arrays and @graph wrappers — real-world JSON-LD shows
-    up in all three shapes depending on the CMS/plugin that emitted it."""
-    for m in _JSONLD_SCRIPT_RE.finditer(html):
-        raw = m.group(1).strip()
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError, RecursionError):
-            continue
-        items = data if isinstance(data, list) else [data]
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            graph = item.get("@graph")
-            if isinstance(graph, list):
-                for g in graph:
-                    if isinstance(g, dict):
-                        yield g
-            else:
-                yield item
+def _record_null_content_strike(name: str) -> None:
+    """Called once per batch that exhausted every retry with only null
+    content back (never a real error, never a real answer). After
+    _NULL_CONTENT_STRIKE_LIMIT such batches, treat the provider as dead —
+    same remaining-work reroute behavior as a quota/rate-limit death."""
+    _null_content_strikes[name] = _null_content_strikes.get(name, 0) + 1
+    if _null_content_strikes[name] >= _NULL_CONTENT_STRIKE_LIMIT:
+        _mark_provider_dead(
+            name,
+            f"{_null_content_strikes[name]} batches in a row returned only "
+            f"null content after every retry — treating as broken for this run",
+        )
 
 
-def _is_jobposting(item: dict) -> bool:
-    t = item.get("@type")
-    types = t if isinstance(t, list) else [t]
-    return any(isinstance(x, str) and x.lower() == "jobposting" for x in types)
+def _make_client(provider: dict):
+    """Create an OpenAI-compatible client for a provider config dict."""
+    from openai import OpenAI
+    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"])
 
 
-def _is_expired(valid_through) -> bool:
-    """A JobPosting still present on the page but past its own
-    validThrough date is a stale listing the site just hasn't taken down
-    yet — real evidence it shouldn't be trusted as a currently-open role."""
-    if not valid_through or not isinstance(valid_through, str):
-        return False
+# Pre-create clients for all configured providers
+_role_clients = {}
+for _p in ROLE_PROVIDERS:
     try:
-        d = datetime.fromisoformat(valid_through.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    now = datetime.now(d.tzinfo) if d.tzinfo else datetime.now()
-    return d < now
+        _role_clients[_p["name"]] = _make_client(_p)
+    except Exception as e:
+        log.warning(f"Failed to create client for {_p['name']}: {e}")
 
-
-def _jsonld_location(item: dict) -> str:
-    loc = item.get("jobLocation")
-    if isinstance(loc, list):
-        loc = loc[0] if loc else None
-    if isinstance(loc, dict):
-        addr = loc.get("address")
-        if isinstance(addr, dict):
-            parts = [addr.get(k) for k in ("addressLocality", "addressRegion", "addressCountry")]
-            parts = [p for p in parts if p and isinstance(p, str)]
-            if parts:
-                return ", ".join(parts)
-    # Remote-style postings often carry this instead of (or alongside) jobLocation
-    if item.get("jobLocationType") == "TELECOMMUTE":
-        req = item.get("applicantLocationRequirements")
-        names = []
-        if isinstance(req, dict):
-            names = [req.get("name")] if req.get("name") else []
-        elif isinstance(req, list):
-            names = [r.get("name") for r in req if isinstance(r, dict) and r.get("name")]
-        return f"Remote ({', '.join(names)})" if names else "Remote"
-    return ""
-
-
-def _extract_jsonld_jobs(html: str, page_url: str, company: str) -> list[dict]:
-    postings = []
-    seen_urls = set()
-    for item in _iter_jsonld_objects(html):
-        if not _is_jobposting(item):
-            continue
-        title = str(item.get("title") or "").strip()
-        if not title or _is_expired(item.get("validThrough")):
-            continue
-        url = item.get("url") or item.get("directApply") or page_url
-        if isinstance(url, dict):
-            url = url.get("url", page_url)
-        try:
-            url = urljoin(page_url, str(url))
-        except ValueError:
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        org = item.get("hiringOrganization")
-        org_name = org.get("name") if isinstance(org, dict) else None
-        postings.append({
-            "title": title[:500],
-            "url": url,
-            "location": _jsonld_location(item),
-            "description": _strip_html(item.get("description", "")),
-            "company": org_name or company,
-            "source_ats": DEFAULT_ATS_LABEL,
-            "clearance": "",
-        })
-    return postings
-
-
-# ── Heuristic repeated-card extraction (used only when JSON-LD found nothing) ──
-
-_JOB_HREF_RE = re.compile(
-    r"/(?:job|jobs|career|careers|position|positions|opening|openings|"
-    r"vacanc(?:y|ies)|opportunit(?:y|ies)|role|roles)/[\w\-./%]+", re.I)
-
-_NAV_TEXT_BLOCKLIST_RE = re.compile(
-    r"^(home|about( us)?|contact( us)?|blog|news|press|privacy( policy)?|terms"
-    r"( (of|and) (service|conditions|use))?|cookies?( policy)?|"
-    r"sign[\s-]?in|log[\s-]?in|sign[\s-]?up|register|faq|help|support|our team|"
-    r"careers?|open positions?|current openings?|view all( jobs)?|see all|"
-    r"learn more|read more|apply( now)?|search|filter|next|previous|"
-    r"load more|back to (search|jobs|careers)|share this job)$", re.I)
-
-
-def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
+_location_clients = {}
+for _p in LOCATION_PROVIDERS:
     try:
-        tree = LexborHTMLParser(html)
-    except Exception:
-        return []
+        _location_clients[_p["name"]] = _make_client(_p)
+    except Exception as e:
+        log.warning(f"Failed to create location client ({_p['name']}): {e}")
 
-    candidates: dict[str, dict] = {}
-    fingerprint_groups: dict[tuple, list] = {}
+# Per-provider rate limiting (thread-safe via dict — each provider has its own timestamp)
+_last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
+for _p in LOCATION_PROVIDERS:
+    _last_call_times[_p["name"]] = 0.0
 
-    for a in tree.css("a[href]"):
-        href = a.attributes.get("href") or ""
-        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
-            continue
-        text = a.text(deep=True, separator=" ").strip()
-        text = re.sub(r"\s+", " ", text)
-        word_count = len(text.split())
-        # A real job title reads like a short phrase, not a single nav word
-        # and not a whole sentence/paragraph — 2-12 words in practice.
-        if not text or word_count < 2 or word_count > 12:
-            continue
-        if _NAV_TEXT_BLOCKLIST_RE.match(text.strip()):
-            continue
+# 2026-09: log exactly which providers this process actually configured,
+# once, at import time — the "is NVIDIA even wired up right now" question
+# kept coming up because the only way to tell before this was inferring it
+# from a provider showing up (or not) inside a "N jobs → M batches across
+# K providers (...)" summary line buried mid-run. This is unconditional
+# and always the first classifier.py log line any run produces, so a
+# provider that's silently missing (unset secret, unpushed code, typo'd
+# env var name) is obvious in the first few lines of the log instead of
+# requiring a scroll-and-guess.
+log.info(f"Role classification providers: {[p['name'] for p in ROLE_PROVIDERS] or '(none — legacy single-provider fallback)'}")
+log.info(f"Location classification providers: {[p['name'] for p in LOCATION_PROVIDERS] or '(none — legacy single-provider fallback)'}")
 
-        # 2026-09: a real crash killed a whole crawl_ii.py shard —
-        # urljoin/urlparse can raise ValueError on a malformed href (seen
-        # live: an href attribute value of 'sjm code="11" ', almost
-        # certainly a parser mis-grab from broken/non-HTML markup on some
-        # page, not a real URL at all). One bad <a> tag on one page must
-        # not take down the whole batch — skip just that link.
+
+def _short_error(e: Exception) -> str:
+    """Compact, human-readable reason instead of dumping the SDK's full
+    raw exception. 2026-09: a real Gemini quota error logged as a single
+    line was several hundred characters of nested quota-metric/links/
+    violations JSON — the OpenAI-compatible SDK embeds the ENTIRE raw
+    error body in str(e). Pulls out just an HTTP status code (if present),
+    the first sentence of the actual message, and a retry-delay hint."""
+    s = str(e)
+    code_match = re.search(r"error code:\s*(\d+)", s, re.I)
+    code = code_match.group(1) if code_match else None
+    msg_match = (
+        re.search(r"'message':\s*'([^']*)", s)
+        or re.search(r'"message":\s*"([^"]*)', s)
+    )
+    message = msg_match.group(1) if msg_match else s
+    # These SDK messages often ramble on with URLs/follow-up instructions
+    # after the actual reason — keep just the first sentence.
+    message = message.split(r"\n")[0].split(". ")[0].strip().rstrip(".")
+    if len(message) > 160:
+        message = message[:160].rstrip() + "…"
+    retry_match = re.search(r"retry\s*(in|delay)?['\"]?\s*[:=]?\s*['\"]?(\d+(?:\.\d+)?)\s*s", s, re.I)
+    retry = f", retry in {int(float(retry_match.group(2)))}s" if retry_match else ""
+    prefix = f"HTTP {code}: " if code else ""
+    return f"{prefix}{message}{retry}"
+
+
+def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
+    """Call an OpenAI-compatible provider with retry on rate limit.
+    Returns response text or None on failure."""
+    name = provider["name"]
+    interval = provider.get("min_call_interval", 0.0)
+
+    if interval > 0:
+        elapsed = time.time() - _last_call_times.get(name, 0.0)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+    _last_call_times[name] = time.time()
+
+    for attempt in range(MAX_RETRIES):
         try:
-            full_url = urljoin(page_url, href)
-            parsed = urlparse(full_url)
-        except ValueError:
-            continue
-        if parsed.scheme not in ("http", "https"):
-            continue
+            resp = client.chat.completions.create(
+                model=provider["model"],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0,
+                max_tokens=max_tokens,
+            )
+            content = resp.choices[0].message.content
+            if content is None:
+                log.warning(f"{name} returned null content (attempt {attempt + 1})")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BASE_DELAY)
+                    continue
+                _record_null_content_strike(name)
+                return None
+            return content.strip()
+        except Exception as e:
+            error_str = str(e)
+            error_lower = error_str.lower()
+            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_lower
+            # 2026-09: broadened to match what Gemini's free tier actually
+            # sends on a real daily-quota exhaustion — "RESOURCE_EXHAUSTED"
+            # / "quota exceeded" / "PerDay...FreeTier" (see this project's
+            # own logged error) — the original "tokens per day"/"daily"
+            # substring check missed that real message entirely (its exact
+            # text is "...RequestsPerDay...", which doesn't contain the
+            # substring "daily"), so every quota-exhausted call was wasting
+            # a full MAX_RETRIES round of backoff (5s+10s+15s) retrying a
+            # request that was doomed from its very first response.
+            is_daily_limit = (
+                "tokens per day" in error_lower
+                or "daily" in error_lower
+                or "resource_exhausted" in error_lower
+                or "quota exceeded" in error_lower
+                or "perday" in error_lower.replace(" ", "").replace("_", "")
+            )
 
-        if _JOB_HREF_RE.search(href):
-            candidates.setdefault(full_url, {"title": text[:300], "url": full_url})
-            continue
-
-        parent = a.parent
-        if parent is None:
-            continue
-        fp = (parent.tag, parent.attributes.get("class") or "")
-        fingerprint_groups.setdefault(fp, []).append((full_url, text))
-
-    for (tag, cls), items in fingerprint_groups.items():
-        # A shared class is a strong repetition signal (3+ siblings); with
-        # no class to key on at all, require a bigger group (5+) since
-        # tag-only repetition (e.g. every <li> on the page) is much weaker.
-        min_group = 3 if cls else 5
-        seen_in_group = set()
-        unique_items = []
-        for url, text in items:
-            if url in seen_in_group:
+            if is_daily_limit:
+                log.error(f"{name} quota exhausted — skipping remaining AI calls for this run "
+                          f"({_short_error(e)})")
+                _mark_provider_dead(name, "quota exhausted")
+                return None
+            if is_rate_limit and attempt < MAX_RETRIES - 1:
+                delay = RETRY_BASE_DELAY * (attempt + 1)
+                log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
+                time.sleep(delay)
                 continue
-            seen_in_group.add(url)
-            unique_items.append((url, text))
-        if len(unique_items) < min_group:
-            continue
-        for url, text in unique_items:
-            candidates.setdefault(url, {"title": text[:300], "url": url})
-
-    return list(candidates.values())
-
-
-_STRONG_JOB_PAGE_PHRASES = [
-    "apply now", "apply today", "apply for this", "apply for this job",
-    "apply for this position", "job description", "responsibilities",
-    "qualifications", "requirements", "what you'll do", "what you will do",
-    "about the role", "about this role", "employment type", "job type",
-    "submit your application", "submit an application", "job summary",
-    "key responsibilities", "who you are", "what we're looking for",
-]
-_MIN_JOB_DETAIL_TEXT_CHARS = 200
-
-
-def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) -> dict | None:
-    """A candidate link alone is never trusted — this is the gate that
-    keeps a heuristic hit from becoming a written job. Requires BOTH a
-    real amount of body text (rules out a soft-404/stub/redirect-to-
-    homepage-in-disguise, same failure mode node.py's career-page quality
-    gate exists for) AND at least one phrase that specifically reads like
-    a job posting, not just any content page of similar length."""
-    text = _strip_html(detail_html, max_len=20000)
-    if len(text) < _MIN_JOB_DETAIL_TEXT_CHARS:
-        return None
-    text_lower = text.lower()
-    if not any(p in text_lower for p in _STRONG_JOB_PAGE_PHRASES):
-        return None
-    return {
-        "title": candidate["title"],
-        "url": candidate["url"],
-        # No reliable structured location signal from a heuristic hit —
-        # left blank deliberately so classifier.py's own "blank → unsure,
-        # let the AI stage look at it" path handles it, exactly like an
-        # ATS board with a blank location field would.
-        "location": "",
-        "description": text[:4000],
-        "company": company,
-        "source_ats": DEFAULT_ATS_LABEL,
-        "clearance": "",
-    }
-
-
-def _company_name_from_domain(website_url: str) -> str:
-    host = urlparse(website_url).netloc or website_url
-    host = re.sub(r"^www\.", "", host)
-    return host.split(":")[0] or website_url
-
-
-# ── Per-page extraction ─────────────────────────────────────────────────
-
-async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                                      page: dict, stats: dict,
-                                      parse_pool: concurrent.futures.Executor) -> list[dict]:
-    """page: {"career_page_url","website_url"}. Returns candidate job dicts
-    — NOT yet role/location filtered, see _run_pipeline_ii for that.
-
-    2026-08 — two real bottlenecks fixed here:
-
-    1. Every CPU-bound parse call (_extract_jsonld_jobs, LexborHTMLParser-
-       based _find_heuristic_candidates, _confirm_and_build_posting) used
-       to run INLINE on the event loop — worse than node.py's old
-       ProcessPoolExecutor(1 worker) bug, since it wasn't even offloaded
-       to a second worker: it blocked the entire event loop, including
-       every other page's in-flight fetch, for the full duration of each
-       parse. Now offloaded via loop.run_in_executor(parse_pool, ...),
-       same ThreadPoolExecutor pattern as node.py's crawl_one/PARSE_WORKERS.
-
-    2. The up-to-MAX_HEURISTIC_CANDIDATES_PER_PAGE (25) detail-page
-       fetches were a sequential `for cand in candidates: await ...` loop
-       — one at a time, not concurrent, on a page that could have up to
-       25 candidates. Now fetched concurrently via asyncio.gather (same
-       per-fetch semaphore gating as before, just no longer serialized)."""
-    loop = asyncio.get_running_loop()
-    async with sem:
-        fetched = await node._fetch_page(session, page["career_page_url"], stats)
-    if not fetched:
-        stats["page_unreachable"] += 1
-        return []
-    final_url, html = fetched
-    company = _company_name_from_domain(page["website_url"])
-
-    jsonld_jobs = await loop.run_in_executor(parse_pool, _extract_jsonld_jobs, html, final_url, company)
-    if jsonld_jobs:
-        stats["jsonld_pages"] += 1
-        stats["jsonld_postings"] += len(jsonld_jobs)
-        return jsonld_jobs
-
-    candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, final_url)
-    if not candidates:
-        stats["no_postings_found"] += 1
-        return []
-    stats["heuristic_pages"] += 1
-    candidates = candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
-
-    async def _fetch_and_confirm(cand: dict) -> dict | None:
-        async with sem:
-            detail = await node._fetch_page(session, cand["url"], stats)
-        if not detail:
+            log.error(f"{name} API error (attempt {attempt + 1}): {_short_error(e)}")
+            if is_rate_limit:
+                # Retries exhausted and the LAST failure was still
+                # rate-limit-flavored (not a one-off timeout/500/etc.) —
+                # treat this as sustained exhaustion, not a fluke.
+                _mark_provider_dead(name, f"repeated rate-limit failures after {MAX_RETRIES} attempts")
             return None
-        _, detail_html = detail
-        return await loop.run_in_executor(parse_pool, _confirm_and_build_posting, detail_html, cand, company)
-
-    results = await asyncio.gather(*(_fetch_and_confirm(c) for c in candidates))
-    confirmed = [r for r in results if r]
-    stats["heuristic_postings"] += len(confirmed)
-    return confirmed
+    return None
 
 
-# ── Classification + push (mirrors crawl_i.py's role/location/visa funnel) ──
+# ═══════════════════════════════════════════════════════
+# STAGE 1 & 2: ROLE CLASSIFICATION
+# ═══════════════════════════════════════════════════════
 
-def _filter_roles(jobs: list[dict]) -> list[dict]:
-    included, unsure = [], []
-    for job in jobs:
-        result = keyword_classify_role(job["title"])
-        if result == "include":
-            included.append(job)
-        elif result == "unsure":
-            unsure.append(job)
-    if unsure:
-        ai_results = ai_classify_roles([j["title"] for j in unsure])
-        for job in unsure:
-            if ai_results.get(job["title"], False):
-                included.append(job)
-    return included
+INCLUDE_KEYWORDS = [
+    # Customer/Client Success
+    r"customer\s*success", r"client\s*success", r"partner\s*success",
+    r"merchant\s*success", r"\bcsm\b", r"success\s*manager",
+    r"success\s*lead", r"success\s*specialist", r"success\s*director",
+    r"success\s*associate", r"success\s*consultant", r"success\s*advisor",
+    r"success\s*architect", r"success\s*coach", r"success\s*executive",
+    r"head\s*of\s*.*success",
+
+    # Customer/Client Support/Service (manager-level, not agents)
+    r"customer\s*support\s*(manager|lead|director|head)",
+    r"client\s*support\s*(manager|lead|director|head)",
+    r"customer\s*service\s*(manager|lead|director|head|representative|rep\b)",
+    r"client\s*service\s*(manager|lead|director|head)",
+
+    # Customer/Client Experience
+    r"customer\s*experience", r"client\s*experience",
+    r"\bcx\s*(manager|lead|specialist|director|strategist)",
+
+    # Customer/Client Relationship
+    r"customer\s*relationship", r"client\s*relationship",
+    r"relationship\s*manager",
+
+    # Customer/Client Engagement
+    r"customer\s*engagement", r"client\s*engagement",
+
+    # Customer/Client Care
+    r"customer\s*care", r"client\s*care",
+
+    # Customer/Client Advocate
+    r"customer\s*advocate", r"client\s*advocate",
+
+    # Account Management
+    r"account\s*manager", r"account\s*management",
+    r"client\s*account\s*manag", r"customer\s*account\s*manag",
+    r"key\s*account\s*manag", r"strategic\s*account\s*manag",
+    r"enterprise\s*account\s*manag", r"technical\s*account\s*manag",
+    r"\btam\b", r"named\s*account\s*manag",
+    r"regional\s*account\s*manag", r"national\s*account\s*manag",
+    r"global\s*account\s*manag", r"account\s*lead", r"account\s*director",
+    r"senior\s*account\s*manag", r"junior\s*account\s*manag",
+    r"account\s*executive\s*.*(?:success|retention|renewal)",
+
+    # Retention / Renewal
+    r"customer\s*retention", r"client\s*retention",
+    r"retention\s*(manager|lead|specialist|director)",
+    r"renewal\s*(manager|lead|specialist|director)",
+
+    # Onboarding / Implementation (customer-facing)
+    r"customer\s*onboarding", r"client\s*onboarding",
+    r"onboarding\s*(manager|lead|specialist)",
+    r"implementation\s*(manager|lead|specialist|consultant)",
+]
+
+EXCLUDE_KEYWORDS = [
+    # Engineering / technical build roles
+    r"\bengineer\b", r"\bengineering\b", r"\bdeveloper\b", r"\bdev\b",
+    r"\bsoftware\b", r"\bsre\b", r"\bdevops\b", r"\bbackend\b",
+    r"\bfrontend\b", r"\bfull[\s-]?stack\b", r"\bdata\s*engineer\b",
+    r"\bplatform\b(?!.*success)(?!.*account)",
+    r"\binfrastructure\b", r"\barchitect\b(?!.*success)(?!.*account)",
+
+    # Sales (hunting roles, not AM)
+    r"\bsdr\b", r"\bbdr\b", r"business\s*development\s*rep",
+    r"demand\s*gen", r"sales\s*rep\b(?!.*account)",
+    r"inside\s*sales(?!.*account)", r"outside\s*sales(?!.*account)",
+
+    # IT Support (desktop/hardware, not customer success)
+    r"(it|desktop|hardware|network|systems?)\s*support",
+    r"support\s*(developer|programmer)\b(?!.*customer)(?!.*client)",
+
+    # Marketing / Product / Design / HR / Finance / Legal
+    r"\bmarketing\b", r"content\s*(manager|writer|strategist)",
+    r"product\s*(manager|designer|owner|lead|director)",
+    r"\bux\b|\bui\b", r"\bhr\b|human\s*resources",
+    r"\bfinance\b|\baccounting\b", r"\blegal\b|\bcompliance\b",
+    r"recruiter|recruiting|talent\s*acquisition",
+]
+
+INCLUDE_RE = [re.compile(kw, re.I) for kw in INCLUDE_KEYWORDS]
+EXCLUDE_RE = [re.compile(kw, re.I) for kw in EXCLUDE_KEYWORDS]
 
 
-def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
-    matched, confidences, unsure_jobs = [], [], []
-    for job in jobs:
-        result, priority = _keyword_classify_location_detail(job)
-        if result == "match":
-            job["clearance"] = "regex"
-            job["location_priority"] = priority
-            matched.append(job)
-            confidences.append("match")
-        elif result == "unsure":
-            unsure_jobs.append(job)
+def keyword_classify_role(title: str) -> str:
+    """Returns 'include', 'exclude', or 'unsure'."""
+    has_exclude = any(rx.search(title) for rx in EXCLUDE_RE)
+    has_include = any(rx.search(title) for rx in INCLUDE_RE)
 
-    if unsure_jobs:
-        ai_results = ai_classify_locations(unsure_jobs)
-        for job, (label, provider_name) in zip(unsure_jobs, ai_results):
-            # 2026-09: use the ACTUAL provider that classified this job
-            # (now returned directly by ai_classify_locations — see its
-            # docstring) instead of the literal string "ai", which is what
-            # this used to hardcode regardless of whether keyword/regex,
-            # Gemini, or OpenAI (or now NVIDIA) made the call. Matches
-            # crawl_i.py's filter_locations, which already did this right.
-            clearance = provider_name or "ai"
-            if label == "match_global":
-                job["clearance"] = clearance
-                job["location_priority"] = PRIORITY_GLOBAL
-                matched.append(job)
-                confidences.append("match")
-            elif label == "match_africa":
-                job["clearance"] = clearance
-                job["location_priority"] = PRIORITY_AFRICA
-                matched.append(job)
-                confidences.append("match")
-            elif label == "uncertain":
-                job["clearance"] = clearance
-                job["location_priority"] = PRIORITY_UNSURE
-                matched.append(job)
-                confidences.append("uncertain")
-            # "no_match" → drop
-
-    return matched, confidences
+    if has_exclude and not has_include:
+        return "exclude"
+    if has_include and not has_exclude:
+        return "include"
+    if has_include and has_exclude:
+        return "unsure"
+    return "exclude"
 
 
-# ── Shared batch driver ─────────────────────────────────────────────────
+ROLE_SYSTEM_PROMPT = """\
+You are a job title classifier. Decide if each title is a Customer Success \
+or Account Management role.
 
-async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                          stats: dict, crawl_start: float, time_budget_seconds: float,
-                          time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
-                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
-    """Crawls archive_ii pages, then classifies and writes everything ONCE
-    at the end. Returns (pages_done, jobs_added, time_budget_hit).
+YES if the role is any variation of:
+- Customer Success Manager/Lead/Specialist/Director/Associate/Consultant
+- Account Manager (key/strategic/enterprise/technical/named/regional/global)
+- Customer/Client Support Manager or Representative
+- Customer/Client Service Manager or Representative
+- Customer/Client Experience (CX) Manager
+- Customer/Client Relationship Manager
+- Customer/Client Engagement Manager
+- Customer/Client Care Manager
+- Retention/Renewal Manager
+- Onboarding/Implementation Manager (customer-facing)
 
-    2026-09 restructure, at explicit user instruction: previously this
-    fetched+extracted a sub-batch of pages, immediately ran that
-    sub-batch through role/location classification, and pushed straight
-    to Supabase — repeated per sub-batch, so a shard's log interleaved
-    fetch progress, AI-provider HTTP noise, and "Added N jobs to Supabase"
-    lines from dozens of separate small writes throughout the run, and a
-    crash mid-run left Supabase in a half-written state for that shard.
-    Now: fetch+extract every page first (still in sub-batches internally,
-    purely to keep memory/concurrency bounded — see the loop below), with
-    ONLY plain crawl-progress logging during that stage; THEN one
-    dedup pass, one role-classification pass, one location-classification
-    pass, and ONE Supabase write for the whole shard's survivors — each
-    stage gets its own clearly-labeled log block instead of everything
-    interleaved. Tradeoff worth knowing: a crash or timeout DURING the
-    fetch stage still writes nothing for this shard (nothing to write yet
-    — see the time-budget-hit path below, which still classifies+writes
-    whatever was fetched before stopping); a crash AFTER fetching but
-    during classification loses that shard's writes for this run, where
-    the old per-sub-batch design would have kept whatever had already
-    been pushed. If that tradeoff turns out to bite in practice, the
-    fix is a periodic flush (e.g. every 2000 pages) rather than reverting
-    to per-300-page pushes — ask and it can be added.
+NO if the role is:
+- Any kind of Engineer or Developer
+- Sales (SDR, BDR, Account Executive, demand gen)
+- IT/Desktop/Hardware Support
+- Marketing, Product, Design, HR, Finance, Legal
+
+Respond ONLY with lines like:
+1 YES
+2 NO"""
+
+
+def _classify_role_batch(batch: list[str], provider: dict, client) -> tuple[dict[str, bool], bool]:
+    """Classify a single batch of titles using a specific provider.
+
+    Returns (results, call_failed). 2026-09: call_failed distinguishes "the
+    AI genuinely said NO" from "the call itself never produced an answer" —
+    the caller (ai_classify_roles) needs that distinction to reroute a
+    failed batch to a different provider instead of just defaulting every
+    title in it to exclude. On call_failed=True, `results` is empty; the
+    caller owns deciding what happens to `batch` next."""
+    numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
+    user_msg = f"Titles:\n{numbered}"
+    max_tokens = max(500, len(batch) * 4)
+    text = _ai_call(provider, client, ROLE_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
+
+    if text is None:
+        return {}, True
+
+    results = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            try:
+                idx = int(parts[0]) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(batch):
+                results[batch[idx]] = parts[1].upper().startswith("YES")
+
+    for t in batch:
+        if t not in results:
+            results[t] = False
+    return results, False
+
+
+def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[list[str]]:
+    """Build role classification batches based on character limits.
+
+    No fixed role cap — batches are purely character-budget driven.
+    Each title is counted as its length + overhead for numbering/formatting.
     """
-    all_candidate_jobs: list[dict] = []
-    all_pages_with_roles: set[str] = set()
-    time_budget_hit = False
-    i = 0
+    OVERHEAD_PER_TITLE = 20   # "NNN. " + newline + buffer
+    batches = []
+    current_batch = []
+    current_chars = 0
 
-    log.info(f"── Crawling entries ({len(pages)} pages) ──")
-    for i in range(0, len(pages), batch_size):
-        if time.monotonic() - crawl_start >= time_budget_seconds:
-            time_budget_hit = True
-            log.warning(f"  time budget ({time_budget_minutes}min) reached at {i}/{len(pages)} "
-                        f"pages — stopping the crawl here; everything fetched so far still "
-                        f"goes through dedup/classification/write below.")
-            break
-        batch = pages[i:i + batch_size]
-        results = await asyncio.gather(
-            *(extract_postings_from_page(session, sem, p, stats, parse_pool) for p in batch))
-        batch_candidates = [job for page_jobs in results for job in page_jobs]
-        all_candidate_jobs.extend(batch_candidates)
+    for title in titles:
+        title_chars = len(title) + OVERHEAD_PER_TITLE
+        if current_batch and current_chars + title_chars > max_chars:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+        current_batch.append(title)
+        current_chars += title_chars
 
-        # 2026-09: repurpose archive_ii.last_seen to mean "last time this
-        # page had ANY role at all" — these are the RAW batch_candidates,
-        # before role/location filtering below, so any posting counts,
-        # not just CSM/AM ones.
-        all_pages_with_roles |= {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
+    if current_batch:
+        batches.append(current_batch)
 
-        done = min(i + batch_size, len(pages))
-        elapsed = time.monotonic() - crawl_start
-        rate = stats["requests_attempted"] / elapsed if elapsed > 0 else 0
-        log.info(f"  {done}/{len(pages)} pages — {rate:.1f} req/sec — {elapsed:.0f}s elapsed — "
-                 f"{len(batch_candidates)} candidates this batch ({len(all_candidate_jobs)} total)")
-
-    pages_done = min(len(pages), i + batch_size) if pages else 0
-
-    if all_pages_with_roles:
-        touch_archive_ii_last_seen(all_pages_with_roles)
-
-    if not all_candidate_jobs:
-        log.info("No candidate postings found on any page — nothing to classify or write.")
-        return pages_done, 0, time_budget_hit
-
-    log.info("── Deduplication ──")
-    existing_urls = get_existing_urls()
-    new_jobs, already_seen = [], []
-    for job in all_candidate_jobs:
-        url = job.get("url", "")
-        if url and url in existing_urls:
-            already_seen.append(job)
-        else:
-            new_jobs.append(job)
-    if already_seen:
-        touch_seen_jobs_raw(already_seen)
-    log.info(f"  {len(all_candidate_jobs)} candidates → {len(already_seen)} already known "
-             f"(skipped, last_seen refreshed only), {len(new_jobs)} new — only new ones go to AI")
-
-    if not new_jobs:
-        log.info("No new candidates to classify.")
-        return pages_done, 0, time_budget_hit
-
-    log.info("── Role classification ──")
-    role_matched = _filter_roles(new_jobs)
-    log.info(f"  {len(new_jobs)} candidates → {len(role_matched)} CSM/AM roles")
-    if not role_matched:
-        return pages_done, 0, time_budget_hit
-
-    log.info("── Location classification ──")
-    global_jobs, confidences = _filter_locations(role_matched)
-    log.info(f"  {len(role_matched)} roles → {len(global_jobs)} global/Africa-eligible")
-    if not global_jobs:
-        return pages_done, 0, time_budget_hit
-
-    for job in global_jobs:
-        job["visa_sponsorship"] = detect_visa_sponsorship(job)
-
-    log.info("── Writing to Supabase ──")
-    added = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE,
-                            existing_urls=existing_urls)
-    log.info(f"  {added} new jobs written")
-
-    return pages_done, added, time_budget_hit
+    return batches
 
 
-def new_connector() -> aiohttp.TCPConnector:
-    return node.new_connector()
+def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
+    """Send ambiguous titles to AI for role classification.
+
+    Multi-provider mode: splits titles across Cerebras/Groq,
+    batches per provider's context window, runs all concurrently.
+
+    Single-provider fallback: uses whichever provider is configured.
+
+    Returns {title: is_relevant}. On failure: defaults to False (exclude).
+    """
+    if not titles:
+        return {}
+
+    all_providers = ROLE_PROVIDERS
+    if not all_providers:
+        # Legacy single-provider fallback
+        from config import LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
+        all_providers = [{
+            "name": LLM_PROVIDER,
+            "api_key": LLM_API_KEY,
+            "model": LLM_MODEL,
+            "base_url": LLM_BASE_URL,
+            "max_batch_chars": 6_000 if LLM_PROVIDER == "cerebras" else 400_000,
+            "min_call_interval": 12.5 if LLM_PROVIDER == "cerebras" else 0.0,
+        }]
+
+    # 2026-09: a provider marked dead by an EARLIER call to this function
+    # within the same run (e.g. an earlier batch of titles) was previously
+    # still handed a fresh share of work on every new call — only the
+    # reroute pass below checked _dead_providers, so a provider that died
+    # on batch 1 kept getting round-robined new work on batch 2, 3, 4...
+    # for the rest of the run, guaranteeing it would fail again every
+    # time. Filter it out of the INITIAL dispatch too.
+    live_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+    if not live_providers and all_providers:
+        log.error("Role classification: every configured provider is dead for this "
+                  "run — all remaining titles will default to exclude.")
+    all_providers = live_providers or all_providers
+
+    results, failed_titles = _dispatch_role_work(titles, all_providers)
+
+    # 2026-09: a batch that failed outright (provider exhausted/erroring,
+    # not "AI said NO") gets ONE reroute attempt across whichever
+    # providers are still live, instead of silently defaulting to exclude
+    # — see _mark_provider_dead's docstring for why a provider can go dead
+    # mid-run. Capped at one reroute pass (no unbounded retry loop): if
+    # every remaining provider is also dead/failing, that's a real "all
+    # providers unavailable" condition worth a clear log line, not more
+    # retrying.
+    if failed_titles:
+        retry_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+        if retry_providers:
+            log.warning(f"Role classification: rerouting {len(failed_titles)} titles that "
+                        f"failed on their original provider to: "
+                        f"{', '.join(p['name'] for p in retry_providers)}")
+            rerouted, still_failed = _dispatch_role_work(failed_titles, retry_providers)
+            results.update(rerouted)
+            failed_titles = still_failed
+        if failed_titles:
+            log.error(f"Role classification: {len(failed_titles)} titles could not be "
+                      f"classified by ANY provider — defaulting to exclude")
+            for t in failed_titles:
+                results[t] = False
+
+    return results
 
 
-# ── Finalize ─────────────────────────────────────────────────────────────
+def _dispatch_role_work(titles: list[str], providers: list[dict]) -> tuple[dict[str, bool], list[str]]:
+    """Round-robin `titles` across `providers`, batch per provider's context
+    limit, run all batches concurrently. Returns (results, failed_titles) —
+    failed_titles is every title whose batch's call never produced an
+    answer (see _classify_role_batch), left for the caller to reroute or
+    default rather than silently marked exclude here."""
+    if not providers:
+        # 2026-09: this used to return silently — the caller's "N titles
+        # could not be classified by ANY provider" error would then show
+        # up with no explanation of WHY (no "N titles → M batches across
+        # K providers (...)" summary line ever got logged, since that line
+        # is below this check). Log plainly instead of leaving a gap.
+        log.warning(f"Role classification: 0 providers available for {len(titles)} titles "
+                    f"(all configured providers are dead for this run) — nothing to assign.")
+        return {}, list(titles)
 
-def run_finalize() -> None:
-    """Cleanup pass for Crawl II's own rows only (source_pipeline='crawl_ii')
-    — call ONCE, after every Crawl II shard has finished.
+    provider_titles = {p["name"]: [] for p in providers}
+    for i, title in enumerate(titles):
+        p = providers[i % len(providers)]
+        provider_titles[p["name"]].append(title)
 
-    Deletion policy (2026-09, at explicit user instruction: both Crawl I
-    and Crawl II must delete jobs past 30 days): mark-inactive at 30 days,
-    hard-delete at 31 — same as Crawl I's window (see crawl_i.py's
-    run_finalize). Previously used a more conservative 45-day hard-delete
-    window (2026-08, my own default at the time, chosen because Crawl II
-    was a brand-new heuristic pipeline with no production track record —
-    see git history for that original reasoning) — superseded by the
-    explicit 30-day instruction rather than left as a standing exception."""
-    log.info("=" * 60)
-    log.info("CRAWL II — finalize (cleanup stale jobs)")
-    log.info("=" * 60)
-    summary = cleanup_stale_jobs(inactive_days=30, delete_days=31, source_pipeline=SOURCE_PIPELINE)
-    log.info(f"Crawl II finalize summary: inactive cutoff {summary['inactive_cutoff']} "
-             f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
-             f"(ok={summary['delete_ok']})")
+    all_work = []  # list of (provider, client, batch)
+    for p in providers:
+        p_titles = provider_titles[p["name"]]
+        if not p_titles:
+            continue
+        client = _role_clients.get(p["name"])
+        if not client:
+            try:
+                client = _make_client(p)
+                _role_clients[p["name"]] = client
+            except Exception as e:
+                log.error(f"Cannot create client for {p['name']}: {e}")
+                continue
+        batches = _build_role_batches(p_titles, max_chars=p["max_batch_chars"])
+        for batch in batches:
+            all_work.append((p, client, batch))
 
+    provider_summary = ", ".join(
+        f"{p['name']}:{len(provider_titles[p['name']])}" for p in providers
+    )
+    log.info(f"Role classification: {len(titles)} titles → {len(all_work)} batches "
+             f"across {len(providers)} providers ({provider_summary})")
 
-# ── CLI ──────────────────────────────────────────────────────────────────
+    results: dict[str, bool] = {}
+    failed_titles: list[str] = []
 
-async def _run_shard(shard: int, total_shards: int) -> None:
-    log.info("=" * 60)
-    log.info(f"CRAWL II — starting (shard {shard}/{total_shards})")
-    log.info("=" * 60)
+    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+        future_map = {}
+        for provider, client, batch in all_work:
+            f = pool.submit(_classify_role_batch, batch, provider, client)
+            future_map[f] = (provider["name"], batch)
 
-    log.info("── Getting entries ──")
-    try:
-        pages = load_pages(shard=shard, total_shards=total_shards)
-    except SupabaseFetchError as e:
-        log.error(f"Failed to load archive_ii pages from Supabase after retries — aborting shard: {e}")
-        sys.exit(1)
-    log.info(f"  {len(pages)} archive_ii pages assigned to this shard")
+        for future in as_completed(future_map):
+            pname, batch = future_map[future]
+            try:
+                batch_results, failed = future.result()
+                if failed:
+                    failed_titles.extend(batch)
+                else:
+                    results.update(batch_results)
+            except Exception as e:
+                log.error(f"Role classification error ({pname}): {e}")
+                failed_titles.extend(batch)
 
-    if not pages:
-        log.warning(f"Shard {shard}/{total_shards}: no pages assigned, nothing to do.")
-        return
-
-    stats = {
-        "requests_attempted": 0, "fetched_ok": 0, "http_error": 0, "status_404": 0,
-        "non_html": 0, "timeout": 0, "unreachable": 0,
-        "page_unreachable": 0, "jsonld_pages": 0, "jsonld_postings": 0,
-        "heuristic_pages": 0, "heuristic_postings": 0, "no_postings_found": 0,
-    }
-    sem = asyncio.Semaphore(CRAWL_CONCURRENCY)
-    connector = new_connector()
-    crawl_start = time.monotonic()
-    time_budget_seconds = TIME_BUDGET_MINUTES * 60
-    # Shared ThreadPoolExecutor for every CPU-bound parse call this shard
-    # makes (see extract_postings_from_page's docstring) — same
-    # new_parse_pool() node.py's own crawl engine uses.
-    parse_pool = node.new_parse_pool()
-
-    try:
-        async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
-            done, added, time_budget_hit = await crawl_batch_ii(
-                pages, session, sem, stats, crawl_start, time_budget_seconds,
-                TIME_BUDGET_MINUTES, parse_pool)
-    finally:
-        parse_pool.shutdown(wait=False)
-
-    status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
-    log.info("── Summary ──")
-    log.info(f"  shard {shard}/{total_shards} {status}: {done}/{len(pages)} pages, "
-             f"{added} new jobs written")
-    log.info(f"  JSON-LD: {stats['jsonld_pages']} pages, {stats['jsonld_postings']} postings found")
-    log.info(f"  Heuristic: {stats['heuristic_pages']} pages, {stats['heuristic_postings']} "
-             f"postings confirmed")
-    log.info(f"  Unreachable/no-signal: {stats['page_unreachable']} pages unreachable, "
-             f"{stats['no_postings_found']} pages with no postings found")
+    return results, failed_titles
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Crawl II — heuristic archive_ii scraper")
-    parser.add_argument("--shard", type=int, default=0,
-                         help="This shard's index (0-based), for GitHub Actions matrix parallelism")
-    parser.add_argument("--total-shards", type=int, default=1,
-                         help="Total number of shards; each processes ~1/N of archive_ii")
-    parser.add_argument("--finalize", action="store_true",
-                         help="Only run cleanup (mark/delete stale crawl_ii jobs) — call once "
-                              "after all shards finish")
-    args = parser.parse_args()
+# ═══════════════════════════════════════════════════════
+# STAGE 3 & 4: LOCATION FILTER (Global hiring only)
+# ═══════════════════════════════════════════════════════
 
-    if args.finalize:
-        run_finalize()
-        return
+# ── Immediate MATCH keywords (global/worldwide hiring signals only) ──
 
-    asyncio.run(_run_shard(args.shard, args.total_shards))
+GLOBAL_KEYWORDS = [
+    # Remote + global qualifier (separator OPTIONAL — catches "Remote Global",
+    # "Remote - Global", "Remote/Worldwide", "Remote (Anywhere)", etc.)
+    r"\bremote\s*[\-–—/,()]?\s*global\b",
+    r"\bremote\s*[\-–—/,()]?\s*worldwide\b",
+    r"\bremote\s*[\-–—/,()]?\s*anywhere\b",
+    r"\bremote\s*[\-–—/,()]?\s*international\b",
+    r"\bremote\s*[\-–—/,()]?\s*wfa\b",
+    r"\bremote\s*[\-–—/,()]?\s*everywhere\b",
+    r"\bremote\s*[\-–—/,()]?\s*distributed\b",
+    r"\bremote\s*[\-–—/,()]?\s*(all|any)\s*location\b",
+    r"\bremote\s*[\-–—/,()]?\s*(all|any)\s*countr\w*\b",
+    # Qualifier + remote (handles "Global (Remote)", "Worldwide - Remote", etc.)
+    r"\bglobal\s*[\-–—/,()]?\s*remote\b",
+    r"\bworldwide\s*[\-–—/,()]?\s*remote\b",
+    r"\binternational\s*[\-–—/,()]?\s*remote\b",
+    r"\banywhere\s*[\-–—/,()]?\s*remote\b",
+    r"\bdistributed\s*[\-–—/,()]?\s*remote\b",
+    # Bare "global"/"worldwide"/etc. qualifiers (not necessarily paired
+    # with "remote" in the string — e.g. "100% Global", "Fully Global")
+    r"\b(100%|fully|truly|genuinely)\s*global\b",
+    r"\b(100%|fully|truly|genuinely)\s*worldwide\b",
+    r"\bglobal(?:ly)?\s*[\-–—/,()]?\s*hiring\b",
+    r"\bhiring\s*global(?:ly)?\b",
+    r"\bglobal\s*hire\b",
+    r"\bglobal\s*hires\b",
+    r"\bworld\s*[\-\s]*wide\b",
+    r"\bearth\b",
+    r"\bplanet\s*earth\b",
+    r"\bglobal\s*citizens?\b",
+    r"\bglobal\s*workforce\b",
+    r"\bglobal\s*operations?\b",
+    r"\bglobal\s*presence\b",
+    r"\bglobal\s*network\b",
+    r"\bglobal\s*reach\b",
+    r"\bglobal\s*coverage\b",
+    r"\bglobal\s*scale\b",
+    r"\bpan[\-\s]*global\b",
+    r"\ball\s*regions?\b",
+    r"\bany\s*region\b",
+    r"\bmulti[\-\s]*continent\b",
+    r"\bcross[\-\s]*continental\b",
+    r"\bcross[\-\s]*border\b",
+    r"\bmulti[\-\s]*national\b",
+    r"\btransnational\b",
+    r"\ball\s*over\s*the\s*world\b",
+    r"\banywhere\s*(in|on)\s*(the\s*)?(world|earth|globe)\b",
+    r"\baround\s*the\s*(world|globe)\b",
+    # Explicit phrases
+    r"\bwork\s*from\s*anywhere\b",
+    r"\bwfa\b",
+    r"\bhire\s*(globally|worldwide|anywhere)\b",
+    r"\bhiring\s*(globally|worldwide|anywhere)\b",
+    r"\bopen\s*to\s*(all|any)\s*location",
+    r"\bopen\s*to\s*(all|any)\s*countr",
+    r"\blocation\s*[\-–—:]?\s*anywhere\b",
+    r"\blocation\s*[\-–—:]?\s*flexible\b",
+    r"\blocation\s*[\-\s]*free\b",
+    r"\blocation\s*agnostic\b",
+    r"\blocation\s*independent\b",
+    r"\bgeo[\-\s]*flexible\b",
+    r"\bgeo[\-\s]*agnostic\b",
+    r"\bborderless\b",
+    r"\bunrestricted\s*location\b",
+    r"\bno\s*location\s*restriction\b",
+    r"\b(fully\s*)?distributed\b",
+    r"\bdistributed\s*team\b",
+    r"\bdistributed\s*workforce\b",
+    r"\b(global|international)\s*team\b",
+    r"\ball\s*geograph",
+    r"\bany\s*country\b",
+    r"\ball\s*countries\b",
+    r"\bany\s*location\b",
+    r"\ball\s*locations?\b",
+    r"\bno\s*location\s*(requirement|restriction|preference)\b",
+    r"\bno\s*geographic\s*restriction\b",
+    r"\bno\s*country\s*restriction\b",
+    # Time-zone framed global signals — "any time zone" / "regardless of
+    # time zone" is a strong proxy for "we don't restrict by geography"
+    r"\btime[\-\s]*zone\s*agnostic\b",
+    r"\bany\s*time\s*zone\b",
+    r"\bany\s*timezone\b",
+    # Explicit "we don't care where you are" phrasings
+    r"\bregardless\s*of\s*(location|country|time\s*zone|timezone)\b",
+    r"\birrespective\s*of\s*(location|country)\b",
+    r"\bcountry[\-\s]*agnostic\b",
+    r"\bwork\s*from\s*any\s*(country|location)\b",
+    # "hire/candidates/applicants ... worldwide/globally/anywhere" phrasings
+    # not already covered by the hire/hiring-globally patterns above
+    r"\bhire\s*talent\s*(globally|worldwide|from\s*anywhere)\b",
+    r"\bglobal\s*talent\b",
+    r"\bglobal\s*talent\s*pool\b",
+    r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
+    # 2026-09 expansion — additional real-world phrasings not covered above
+    r"\b100%\s*remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international)\b",
+    r"\bfully\s*remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international)\b",
+    r"\bremote[\s\-]*first\b.{0,30}\b(global|worldwide|anywhere)\b",
+    r"\bglobal(?:ly)?\s*distributed\s*(team|company|workforce)\b",
+    r"\bwe\s*(are\s*)?a?\s*globally\s*distributed\b",
+    r"\bemployees?\s*(work|based|located)\s*(in|across)\s*\d+\+?\s*countries\b",
+    r"\bteam\s*(members?\s*)?(in|across|spanning)\s*\d+\+?\s*countries\b",
+    r"\bhire\s*(people|talent|employees|staff)\s*in\s*(almost\s*)?any\s*country\b",
+    r"\bopen\s*to\s*remote\s*work\s*(globally|worldwide|from\s*anywhere)\b",
+    r"\bglobally\s*remote\b",
+    r"\bremote\s*globally\b",
+    r"\bunrestricted\s*by\s*(location|geography|country)\b",
+    r"\bno\s*restrictions?\s*on\s*(location|geography|country|where\s*you)\b",
+    r"\bwe\s*hire\s*(globally|worldwide|internationally|anywhere)\b",
+    r"\bwe\s*welcome\s*applicants?\s*(from|in)\s*(any|all)\s*(countr|location)\b",
+    r"\bopen\s*to\s*international\s*(candidates|applicants|hires)\b",
+    r"\bglobal\s*(remote\s*)?workforce\b",
+    r"\bfully\s*distributed\s*(team|company|organization|workforce)\b",
+    r"\bremote\s*[\-–—/,()]?\s*(no\s*)?(location|geographic)\s*(restriction|limit)s?\b",
+    r"\bcan\s*be\s*based\s*anywhere\b",
+    r"\blive\s*and\s*work\s*from\s*anywhere\b",
+    r"\bglobal\s*company\s*with\s*(a\s*)?remote[\-\s]*first\b",
+]
+
+GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
+
+STANDALONE_GLOBAL_RE = re.compile(
+    r"^\s*(global|worldwide|world\s*wide|anywhere|international|wfa|earth|planet\s*earth|"
+    r"distributed|borderless|everywhere|"
+    r"remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international|wfa|distributed|everywhere))\s*$", re.I
+)
+
+# ── Non-geographic words in location fields ──────────
+NON_GEO_WORDS_RE = re.compile(
+    r"\b("
+    r"remote|fully|completely|"                             # remote modifiers
+    r"full[\-\s]*time|part[\-\s]*time|"                     # employment types
+    r"contract(?:or|ual)?|permanent|temporary|temp|"
+    r"freelance|intern(?:ship)?|hourly|salaried|"
+    r"direct[\-\s]*hire|regular|casual|seasonal|"
+    r"fte|pte|"                                             # abbreviations
+    r"worker|job|position|role|opening|opportunity|"        # job words
+    r"n/?a|not\s*specified|unspecified|tbd|"                # placeholders
+    r"flexible|open|based|home|general|"                    # generic qualifiers
+    r"monday|tuesday|wednesday|thursday|friday|"            # schedule words
+    r"saturday|sunday|weekday|weekend|"
+    r"shift|schedule|day|night|evening|morning|"
+    r"hours|hrs|am|pm|to|and|or|the|a|an|at|for|of|"       # connectors/articles
+    r"immediate|urgent|asap|new|multiple|"                  # posting qualifiers
+    r"available|hiring|now|apply"                            # action words
+    r")\b",
+    re.I,
+)
+
+# Words to strip ONLY in global-keyword residue check
+# Connector/filler vocabulary used across GLOBAL_KEYWORDS phrase templates
+# ("open to candidates worldwide", "work from any country", "any time
+# zone", ...). The residue check strips out the exact substring that
+# matched a keyword pattern, but when TWO patterns overlap the same text
+# (e.g. the narrow "\bany\s*country\b" firing inside the longer "open to
+# applicants in any country"), only one match wins and the other pattern's
+# leftover connector words ("open", "to", "applicants", "work", "from")
+# would otherwise sit there as fake "residue" and wrongly downgrade a
+# genuine global match to no_match. This list is deliberately just
+# connector/filler words from OUR OWN phrase templates — never real
+# country/city names — so the "is there an actual place name left over"
+# protection those phrases exist for stays intact.
+GLOBAL_FILLER_RE = re.compile(
+    r"\b("
+    r"location|locations|agnostic|independent|geo|flexible|team|"
+    r"multiple|countries|country|regions|region|restriction|requirement|preference|"
+    r"geographic|any|all|no|talent|pool|candidates|applicants|open|hire|hiring|"
+    r"globally|time|zone|timezone|regardless|irrespective|of|welcome|eligible|"
+    r"in|work|from"
+    r")\b",
+    re.I,
+)
+
+# Placeholder values that mean "no location given"
+PLACEHOLDER_LOC_RE = re.compile(
+    r"^\s*(not\s*specified|n/?a|tbd|to\s*be\s*determined|"
+    r"unspecified|see\s*description|see\s*below|"
+    r"multiple\s*locations?|various\s*locations?|"
+    r"[—\-–\.]+)\s*$",
+    re.I,
+)
 
 
-if __name__ == "__main__":
-    main()
+# ── Title-based location enrichment ───────────────────
+# Country/region codes AND global-hiring words, recognized only when
+# structurally delimited in a title (trailing "- US", leading "EMEA:",
+# parenthesised "(APAC)", "- Global", etc.) — never as a bare word floating
+# anywhere in the title. That distinction matters: "Global"/"International"
+# frequently describe SENIORITY OR SCOPE OF ACCOUNTS, not hiring
+# eligibility ("Global Head of Customer Success", "International Account
+# Manager" both routinely mean "manages global/international accounts from
+# one specific office", not "we'll hire you from anywhere"). Requiring a
+# delimiter (dash/pipe/colon/parens) at the START or END of the title is
+# what distinguishes an actual "Title - Region" suffix/prefix convention
+# from an ordinary descriptive word inside the title text.
+#
+# Region acronyms (EMEA/APAC/LATAM/ANZ/NAM/MENA) are NOT all "global"
+# signals — APAC/LATAM/ANZ/NAM/MENA are single-region RESTRICTIONS, same as
+# "US" or "UK". Everything this regex extracts is handed to the same
+# strict-allowlist pipeline that already knows EMEA/Africa/Global are
+# acceptable and everything else isn't — no separate "is this global"
+# judgment is made here.
+_TITLE_CODES = (
+    r"US|USA|UK|EU|EMEA|APAC|LATAM|ANZ|NAM|MENA|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|"
+    r"PL|CZ|RO|BG|HU|IE|ES|IT|PT|SE|NO|DK|FI|CH|AT|BE|NZ"
+)
+# Global/Africa-hiring words allowed in the same delimiter-anchored
+# positions as the codes above (e.g. "CSM - Global", "Account Manager -
+# Worldwide", "Distributed - Support Engineer").
+_TITLE_GLOBAL_WORDS = r"Global|Worldwide|International|Africa|Distributed|Anywhere|Borderless"
+_TITLE_CODES_OR_GLOBAL = _TITLE_CODES + r"|" + _TITLE_GLOBAL_WORDS
+
+_TITLE_LOCATION_RE = re.compile(
+    r"(?:"
+    # code immediately followed by a remote/based/only qualifier, anywhere
+    r"\b(" + _TITLE_CODES + r")\s*[\-–—/]?\s*(?:remote|based|only)\b"
+    r"|"
+    r"(?:remote)\s*[\-–—/,()]*\s*"
+    r"(US|USA|UK|EU|EMEA|APAC|LATAM|India|United\s+States|United\s+Kingdom|Canada|Australia|Germany|France|Netherlands)"
+    r"|"
+    # parenthesised code/global-word anywhere in the title, e.g. "CSM (US)",
+    # "AM (EMEA) - Enterprise", "Support Engineer (Global)"
+    r"\(\s*(" + _TITLE_CODES_OR_GLOBAL + r"|India|Canada|Australia|Nigeria|Kenya|South\s+Africa)\s*\)"
+    r"|"
+    # bare code/global-word at the very END of the title after a delimiter —
+    # the "CSM - US" / "CSM - Global" pattern that plain remote/based/only-
+    # suffix matching above misses entirely, since there's no qualifier
+    # word at all, just the code or global-hiring word itself
+    r"[\-–—|:,]\s*(" + _TITLE_CODES_OR_GLOBAL + r")\s*(?:Only|Based|Remote)?\s*$"
+    r"|"
+    # bare code/global-word at the very START of the title before a
+    # delimiter, e.g. "US - Customer Success Manager", "EMEA: Account
+    # Manager", "Global: Customer Success Manager"
+    r"^\s*(" + _TITLE_CODES_OR_GLOBAL + r")\s*[\-–—|:]"
+    r"|"
+    r"\b(New\s+York|San\s+Francisco|Los\s+Angeles|Chicago|Boston|Seattle|Austin|Denver|Atlanta|Dallas|Miami|"
+    r"London|Berlin|Paris|Amsterdam|Toronto|Sydney|Singapore|Dubai|Mumbai|Bangalore|"
+    r"California|Texas|Florida|Virginia|Pennsylvania|Illinois|Ohio|Georgia|"
+    r"North\s+Carolina|New\s+Jersey|Massachusetts|Maryland|Colorado|Washington|Oregon|Arizona|Michigan|Minnesota)"
+    r"\b"
+    r")",
+    re.I,
+)
+
+
+def _enrich_location_from_title(loc: str, title: str) -> str:
+    """If location is bare 'Remote' or empty, extract geographic hints from
+    title — e.g. a title like "CSM - US" or "Account Manager (EMEA)" often
+    carries the actual hiring-eligibility signal an ATS never put in the
+    structured location field at all. Deliberately gated to the BARE-location
+    case only (not applied when location already has real content): the main
+    classification pipeline's EMEA/Global residue checks are sensitive to any
+    extra text sitting in `loc`, so blending title text into an
+    already-populated, already-qualified location risks a false-negative
+    (e.g. downgrading a genuine EMEA match because of unrelated leftover
+    title text). When location is bare/blank, there's nothing to blend with —
+    the title is the ONLY signal available, so it's used outright."""
+    if not title:
+        return loc
+
+    loc_stripped = loc.strip().lower()
+    is_bare = (
+        not loc_stripped
+        or loc_stripped in ("remote", "remote worker", "remote job", "fully remote")
+        or PLACEHOLDER_LOC_RE.match(loc)
+    )
+    if not is_bare:
+        return loc
+
+    match = _TITLE_LOCATION_RE.search(title)
+    if match:
+        geo = next((g for g in match.groups() if g), None)
+        if geo:
+            geo = geo.strip()
+            if loc_stripped and "remote" in loc_stripped:
+                return f"Remote, {geo}"
+            return geo
+
+    return loc
+
+
+# ── Location priority tiers (for sort order on upsert) ────
+# Lower number = higher priority. Populates jobs.location_priority (the
+# column already existed in the schema, unused, before this).
+PRIORITY_GLOBAL = 1   # explicit worldwide/anywhere/global-hiring signal
+PRIORITY_AFRICA = 2   # Africa (continent) or bare EMEA match
+PRIORITY_UNSURE = 3   # kept as a plausible match, but geographic scope
+                       # wasn't confirmed by keyword OR AI evidence
+
+
+# ── Africa-continent detection ────────────────────────────
+# Deliberately a NARROW, standalone check — just "does a real African
+# country's full name appear as a whole word" — rather than routing
+# through geo.extract_countries()'s full multi-country machinery (state
+# codes, ISO2 prefixes, trailing-country-code rules, etc.). None of that
+# apparatus is needed here: no African country name in this project's
+# gazetteer collides with a US state/Canadian province name the way
+# "Mexico"/"Wales"/"Ontario" did, so a bare word-boundary match is safe.
+_AFRICAN_COUNTRY_RE = re.compile(
+    r"\b(" + "|".join(re.escape(c) for c in sorted(geo.AFRICAN_COUNTRIES, key=len, reverse=True)) + r")\b",
+    re.I,
+)
+
+
+def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
+    """
+    Returns (result, priority) where result is 'match', 'no_match', or
+    'unsure', and priority (PRIORITY_GLOBAL / PRIORITY_AFRICA / None) is
+    only meaningful when result == 'match'.
+
+    STRICT ALLOWLIST, rewritten 2026-08. The only ways a job can survive
+    this filter:
+      1. An explicit GLOBAL_KEYWORDS phrase (global/worldwide/
+         international/distributed/anywhere/... — ~80 variants).
+      2. Africa as a continent — the literal word "Africa", or 2+
+         DIFFERENT African countries named together (proof of
+         continent-wide reach, not just "based in one African country").
+      3. EMEA alone, with no city/country qualifier attached.
+    Everything else is rejected immediately — including a location that
+    lists several real places, no matter how many, if none of the above
+    three signals is present. The previous version tried to infer "global"
+    from counting distinct countries in the text (2+ countries = Global);
+    that inference kept getting fooled by real-world place-name collisions
+    (US towns sharing a name with a country, state/province codes that are
+    also ISO2 country codes, etc.) and was letting single-country US/CA/AU
+    postings through. This version doesn't try to infer anything — it
+    only trusts an explicit keyword, or genuine multi-country Africa
+    evidence, or explicit EMEA text. A location with NO qualifying
+    keyword is rejected outright, UNLESS it's blank/placeholder or a bare
+    "Remote" with nothing else attached — those two cases alone go to
+    'unsure' so the AI stage gets a look at genuinely ambiguous listings,
+    rather than every non-matching job being silently AI-reviewed.
+    """
+    # 2026-09: `job.get("location", "")` only falls back to "" when the KEY
+    # is missing — some ATS scrapers set "location": None explicitly (a
+    # board that has the field but leaves it genuinely empty), which .get
+    # passes straight through as None and used to blow up two lines below
+    # with "can only concatenate str (not NoneType) to str" — a real,
+    # live crash that took down whole crawl_i.py shards. `or ""` catches
+    # both the missing-key AND explicit-None cases.
+    raw_loc = job.get("location") or ""
+    raw_country = job.get("country") or ""
+    if isinstance(raw_loc, list):
+        raw_loc = ", ".join(str(x) for x in raw_loc)
+    if isinstance(raw_country, list):
+        raw_country = ", ".join(str(x) for x in raw_country)
+    loc = (raw_loc + " " + raw_country).strip()
+
+    title = job.get("title", "")
+    loc = _enrich_location_from_title(loc, title)
+    loc_lower = loc.lower()
+
+    # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
+    if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
+        return "unsure", None
+
+    has_remote = bool(re.search(r"\bremote\b", loc_lower))
+
+    # ── 2. Africa as a continent ──────────────────────────
+    # Literal "Africa" anywhere → match. Otherwise, 2+ DIFFERENT African
+    # countries named together is real evidence of continent-wide
+    # African hiring — a single African country alone ("Nigeria",
+    # "South Africa") is REJECTED, because that's "based in one African
+    # country," not "hiring across Africa."
+    #
+    # BUG FIXED 2026-08: "South Africa" is itself a single African
+    # country whose official name CONTAINS the word "Africa" as its own
+    # token — \bafrica\b matched inside it and let a single-country
+    # "South Africa" / "Cape Town, South Africa" posting through as a
+    # continent-wide match, exactly the failure mode this function's own
+    # docstring says must be rejected. Fix: strip every "South Africa"
+    # occurrence out of the text before testing for a bare "Africa"
+    # continent mention, so only a genuine standalone "Africa" (or a
+    # regional phrase like "West Africa", "Sub-Saharan Africa", "Africa
+    # (Remote)") still counts as the continent signal. "South Africa" the
+    # country still gets its fair shot at matching below via the 2+
+    # distinct-countries rule, same as any other single African country.
+    africa_continent_check = re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_lower)
+    if re.search(r"\bafrica\b", africa_continent_check):
+        return "match", PRIORITY_AFRICA
+
+    african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
+    if len(african_hits) >= 2:
+        return "match", PRIORITY_AFRICA
+
+    # ── 3. EMEA → match ONLY if no country/city qualifier ─
+    if re.search(r"\bemea\b", loc_lower):
+        check = re.sub(r"\bemea\b", "", loc_lower)
+        check = NON_GEO_WORDS_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
+        if not check:
+            # EMEA (Europe/Middle East/Africa) includes Africa but is
+            # broader than "global" — bucketed with Africa, not Global.
+            return "match", PRIORITY_AFRICA
+        return "no_match", None
+
+    # ── 4. Explicit Global/Worldwide/International/Distributed/
+    # Anywhere/... keyword (see GLOBAL_KEYWORDS, ~80 variants) ──
+    # Residue check: strip out the EXACT substring(s) that matched a
+    # keyword, then confirm nothing else (a real city/country name) is
+    # left over — "Global (Remote, US Only)" should NOT match just
+    # because "Global" appears; the leftover "us only" gives it away.
+    if STANDALONE_GLOBAL_RE.search(loc.strip()):
+        return "match", PRIORITY_GLOBAL
+
+    check = loc_lower
+    matched_any = False
+    for rx in GLOBAL_RE:
+        if rx.search(check):
+            matched_any = True
+            check = rx.sub(" ", check)
+    if matched_any:
+        check = NON_GEO_WORDS_RE.sub("", check)
+        check = GLOBAL_FILLER_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
+        if not check:
+            return "match", PRIORITY_GLOBAL
+        return "no_match", None
+
+    # ── 5. Bare "Remote" with nothing else qualifying it → UNSURE
+    # (send to AI). Any OTHER text attached to "remote" (a city, a
+    # country, "hybrid", "US only", etc.) is a real qualifier and gets
+    # rejected outright, per the strict-allowlist policy above. ──
+    if has_remote:
+        stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
+        stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
+        if not stripped:
+            return "unsure", None
+        return "no_match", None
+
+    # ── 6. REJECT everything else outright ────────────────
+    # No Global/EMEA/Africa keyword, not blank, not bare "Remote" — this
+    # is a job tied to a specific place (or places) with no explicit
+    # broad-hiring signal, so it's rejected without going to the AI.
+    return "no_match", None
+
+
+def keyword_classify_location(job: dict) -> str:
+    """
+    Returns 'match', 'no_match', or 'unsure'.
+
+    MATCH = truly global hiring signals (anywhere, worldwide,
+    international, WFA, EMEA alone, Africa as continent).
+
+    Thin wrapper over _keyword_classify_location_detail() for callers that
+    only need the verdict, not the priority tier (e.g. ats_scrapers.py's
+    application-question enrichment, which only checks for "unsure").
+    """
+    result, _ = _keyword_classify_location_detail(job)
+    return result
+
+
+LOCATION_SYSTEM_PROMPT = """\
+You decide whether a job posting should be included in a list of roles \
+open to candidates working remotely from ANYWHERE in the world, from \
+across the EMEA region (Europe/Middle East/Africa), or from anywhere on \
+the African continent. Everything else — including roles genuinely open \
+to remote candidates but restricted to a single country or a narrower \
+region (APAC, LATAM, one specific country, etc.) — must be excluded.
+
+Every job you're shown here already has an ambiguous LOCATION field \
+(bare "Remote", blank, or a placeholder like "N/A") — the location field \
+gave no usable signal, which is exactly why it's being sent to you. Your \
+only source of truth is the JOB TITLE and the full DESCRIPTION text \
+below, which is provided IN FULL (not truncated) specifically so you can \
+find the real eligibility language wherever it appears in the posting — \
+including in application-question text that may be appended at the end \
+of the description (e.g. "Application Question: Are you authorized to \
+work in the US?" is itself evidence of a country restriction, not just \
+a form field). A short or jargon-heavy description is not by itself a \
+reason to say MATCH_GLOBAL or MATCH_AFRICA — read for real content, and \
+if there genuinely isn't any after reading everything provided, say \
+UNCERTAIN rather than guessing.
+
+Respond with exactly one of these four labels per job:
+
+MATCH_GLOBAL — positive evidence of genuinely worldwide hiring:
+- Description or title explicitly says "global", "worldwide", "anywhere \
+  in the world", "international", "work from anywhere", "distributed \
+  team", "location-agnostic", "hire in any country", or a clear \
+  equivalent
+- Hiring across many countries spanning multiple continents (not just \
+  "a few offices" — genuine "we hire wherever you are" language)
+- No geographic restrictions AND the role/company context clearly \
+  supports global openness (e.g. "our fully remote team spans 30+ \
+  countries across 6 continents")
+
+MATCH_AFRICA — positive evidence of hiring across the African continent \
+(as a continent, not a single African country) or across the EMEA region:
+- Description or title explicitly says "Africa" (as a hiring region, \
+  not just "we have a Cape Town office") or names 2+ different African \
+  countries as places the company hires from
+- Description or title says "EMEA" with no further single-country/city \
+  qualifier narrowing it back down to one place
+- A single African country alone (e.g. "based in Nigeria", "Kenya \
+  office only") is NOT enough — that's one country, not the continent
+
+NO_MATCH — evidence of a country- or narrow-region-specific restriction:
+- "must be authorized/eligible to work in [country]"
+- "US/UK/EU work authorization required"
+- "W-2 employment", "W2 only", "must have SSN"
+- "no visa sponsorship", "cannot sponsor", "will not sponsor"
+- "must reside in [state/country]", "must be located in [place]"
+- "this role is based in [country]" without a global/EMEA/Africa-wide \
+  remote option
+- Restricted to APAC, LATAM, ANZ, NAM, DACH, or any other single region \
+  narrower than "worldwide" or "EMEA/Africa"
+- Country-specific benefits as requirements (401k, PAYE, tax residency)
+- Time zone requirements that exclude most of the world \
+  (e.g. "PST/EST hours required", "US business hours only")
+- Says "remote" but then lists specific countries you must be located in
+- An application question about work authorization/visa sponsorship for \
+  one specific country, with no global/EMEA/Africa language elsewhere
+- Description context makes it obvious the role is for one country \
+  (e.g. references to US-specific regulations, UK employment law)
+
+UNCERTAIN — cannot determine either way after reading everything given:
+- No description available, or description genuinely says nothing about \
+  location/eligibility
+- Ambiguous or conflicting signals that don't clearly resolve to one of \
+  the above
+
+IMPORTANT: When there is no description or no clear signal, say \
+UNCERTAIN. Do NOT default to MATCH_GLOBAL or MATCH_AFRICA — only use \
+those when you see real positive evidence, per the definitions above. \
+When in doubt, UNCERTAIN.
+
+Respond ONLY with lines like:
+1 MATCH_GLOBAL
+2 MATCH_AFRICA
+3 NO_MATCH
+4 UNCERTAIN"""
+
+
+# ── Deterministic restriction override ────────────────────
+# 2026-09: real, live misclassification caught by the user — a Lever
+# posting (Voltus) whose description explicitly said "we do not sponsor
+# visas or transfers for new hires. Voltus teammates need to be
+# authorized to work from their home location (in the US or Canada...)"
+# still got labeled MATCH_GLOBAL by the AI stage. That's not a borderline
+# call the prompt's wording could plausibly excuse — it's a job that
+# flatly rules out anyone who isn't already authorized to work in one of
+# two specific countries, which is the textbook NO_MATCH case the prompt
+# already describes. Trusting the model alone for this class of mistake
+# isn't good enough, so this is a deterministic backstop: ANY of these
+# hard-restriction phrases anywhere in the job's title/location/
+# description overrides an AI verdict of MATCH_GLOBAL or MATCH_AFRICA
+# back down to NO_MATCH, regardless of which provider produced it or how
+# confident it sounded. A genuinely global/Africa-wide employer that also
+# happens to mention visa/authorization requirements for a SPECIFIC
+# country is, definitionally, not hiring from anywhere — real global
+# postings don't gate on one or two named countries' work authorization.
+# 2026-09: "must be authorized to work in ___" is deliberately NOT an
+# unconditional trigger below — that exact phrase is genuinely ambiguous
+# on its own ("must be authorized to work in your country of residence"
+# is actually GLOBAL-friendly language, not a restriction). It only
+# counts as a hard restriction when a concrete single-country/region
+# token (or "home location"/"home country" — Voltus's actual phrasing)
+# shows up within a short window after it — narrow enough to still catch
+# real restrictions, without flagging genuinely global "wherever you
+# already are" language as if it named one specific place.
+_SPECIFIC_LOCATION_TOKEN = (
+    r"(us|usa|u\.s\.|united\s*states|uk|u\.k\.|united\s*kingdom|canada|"
+    r"australia|germany|france|india|ireland|netherlands|singapore|"
+    r"nigeria|kenya|south\s*africa|home\s*(location|country)|"
+    r"a\s*specific\s*countr)"
+)
+
+_HARD_RESTRICTION_RE = re.compile(
+    r"(do\s*not|don\'t|does\s*not|doesn\'t|won\'t|will\s*not|unable\s*to|"
+    r"cannot|can\'t)\s*(currently\s*)?(provide\s*|offer\s*)?sponsor\s*"
+    r"(visas?|work\s*permits?|transfers?|immigration)"
+    r"|no\s*visa\s*sponsorship"
+    r"|not\s*(able\s*to\s*|currently\s*)?sponsor.{0,20}visa"
+    r"|visa\s*sponsorship\s*(is\s*)?(not|un)available"
+    r"|(must|need[s]?|required)\s*(to\s*)?be\s*authorized\s*to\s*work\s*(in|from)"
+    r"\s*(the\s*)?.{0,25}?" + _SPECIFIC_LOCATION_TOKEN + r"\b"
+    r"|(must|need[s]?)\s*(to\s*)?reside\s*in\s*(the\s*)?(us|usa|uk|canada|"
+    r"united\s*states|united\s*kingdom)",
+    re.I,
+)
+
+
+def _apply_restriction_override(batch_jobs: list[dict], batch_results: list[str]) -> int:
+    """Downgrade any MATCH_GLOBAL/MATCH_AFRICA verdict to NO_MATCH when a
+    hard country/region-restriction or no-sponsorship phrase is present in
+    the job text. Returns how many labels were overridden (for logging)."""
+    overridden = 0
+    for i, job in enumerate(batch_jobs):
+        if batch_results[i] not in ("match_global", "match_africa"):
+            continue
+        text = (
+            (job.get("title") or "") + " " +
+            (job.get("location") or "") + " " +
+            (job.get("description_snippet") or "")
+        )
+        if _HARD_RESTRICTION_RE.search(text):
+            batch_results[i] = "no_match"
+            overridden += 1
+    return overridden
+
+
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
+    """Classify a single batch of jobs by location using a specific provider.
+
+    Returns (labels, call_failed). 2026-09: call_failed distinguishes "the
+    call never produced an answer" from "the AI genuinely said uncertain" —
+    ai_classify_locations needs that to reroute a dead batch to a
+    different provider instead of defaulting it to uncertain right here.
+
+    Descriptions are sent IN FULL (only bounded by MAX_DESC_CHARS, applied
+    once already in _build_dynamic_batches) — no further per-batch slicing.
+    Previously this re-truncated every job's description to an EVEN SPLIT of
+    max_user_chars across the whole batch (e.g. a full-size batch could cut
+    each job down to ~4K chars regardless of how short the batch's other
+    descriptions were), which silently chopped real JDs mid-sentence even
+    when the batch as a whole was nowhere near max_user_chars — exactly the
+    kind of truncation that can hide the eligibility language the AI is
+    being asked to find. _build_dynamic_batches already guarantees the
+    batch's TOTAL character count stays under the provider's real budget
+    (max_batch_chars), so no additional re-slicing is needed here.
+    """
+    numbered_lines = []
+    for j, job in enumerate(batch_jobs):
+        desc = job.get("description_snippet", "")
+        desc_note = desc if desc else "[No description available]"
+        numbered_lines.append(
+            f"{j+1}. Title: {job['title']} | Company: {job.get('company', 'Unknown')} | "
+            f"Location: {job.get('location', 'Remote')} | "
+            f"Description: {desc_note}"
+        )
+    user_msg = f"Classify these {len(batch_jobs)} jobs:\n{chr(10).join(numbered_lines)}"
+
+    # Output tokens must scale with batch size — one response line per job
+    # (e.g. "47 NO_MATCH"). A fixed cap here silently truncates the response
+    # once a batch has more jobs than the cap can cover, and every job past
+    # the cutoff keeps its default "uncertain" label. ~8 tokens/line + buffer.
+    max_tokens = max(1500, len(batch_jobs) * 8 + 200)
+    text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
+
+    if text is None:
+        return ["uncertain"] * len(batch_jobs), True
+
+    batch_results = ["uncertain"] * len(batch_jobs)
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) >= 1:
+            try:
+                idx = int(parts[0].rstrip(".")) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(batch_jobs):
+                label = parts[1].upper() if len(parts) > 1 else ""
+                # Check longest/most-specific prefixes first — "NO_MATCH" and
+                # "MATCH_AFRICA" both start with characters "MATCH" is also a
+                # prefix of, so order matters here.
+                if label.startswith("NO_MATCH"):
+                    batch_results[idx] = "no_match"
+                elif label.startswith("MATCH_AFRICA"):
+                    batch_results[idx] = "match_africa"
+                elif label.startswith("MATCH_GLOBAL"):
+                    batch_results[idx] = "match_global"
+                elif label.startswith("MATCH"):
+                    # Model didn't use a category suffix — treat as Global,
+                    # matching this prompt's pre-2026-08 behavior.
+                    batch_results[idx] = "match_global"
+                elif label.startswith("UNCERTAIN"):
+                    batch_results[idx] = "uncertain"
+
+    overridden = _apply_restriction_override(batch_jobs, batch_results)
+    if overridden:
+        log.warning(f"{provider['name']}: overrode {overridden} MATCH_GLOBAL/MATCH_AFRICA "
+                    f"verdict(s) to NO_MATCH — hard visa/country-restriction language found "
+                    f"in the job text that the AI missed.")
+
+    return batch_results, False
+
+
+def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
+    """Build batches dynamically based on description length.
+
+    Char-budget driven, BUT also capped by job count. Many jobs have no
+    description ("[No description available]" is only ~30 chars), so a
+    pure char-budget batch can silently balloon to hundreds/thousands of
+    jobs. The model's response is one line per job, and output tokens are
+    scaled to job count (see _classify_location_batch) — so job count,
+    not character count, is what actually bounds a safely-sized response.
+    """
+    OVERHEAD_PER_JOB = 120
+    # Matches ats_scrapers._snippet's default cap — descriptions are already
+    # bounded there, so this is just a defensive re-assertion, not the
+    # primary truncation point. 30,000 chars is large enough that no real
+    # job description is ever actually cut off by it.
+    MAX_DESC_CHARS = 30_000
+    MAX_JOBS_PER_BATCH = 120  # keeps AI response comfortably within token limits
+
+    batches = []
+    current_batch = []
+    current_chars = 0
+    start_idx = 0
+
+    for i, job in enumerate(jobs):
+        desc = job.get("description_snippet") or ""
+        if len(desc) > MAX_DESC_CHARS:
+            job["description_snippet"] = desc[:MAX_DESC_CHARS]
+            desc = job["description_snippet"]
+        desc_len = len(desc)
+        job_chars = desc_len + OVERHEAD_PER_JOB
+
+        if current_batch and (
+            current_chars + job_chars > max_batch_chars
+            or len(current_batch) >= MAX_JOBS_PER_BATCH
+        ):
+            batches.append((start_idx, current_batch))
+            start_idx = i
+            current_batch = []
+            current_chars = 0
+
+        current_batch.append(job)
+        current_chars += job_chars
+
+    if current_batch:
+        batches.append((start_idx, current_batch))
+
+    return batches
+
+
+def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
+    """
+    Send ambiguous jobs (bare "Remote") to AI for location classification.
+    Uses LOCATION_PROVIDERS (Gemini + OpenAI + whatever else is configured)
+    concurrently.
+
+    Jobs are round-robin split across providers, batched per provider's
+    context window, and all batches run concurrently.
+
+    Returns a list of (label, provider_name) tuples in the same order as
+    `jobs`, where label is 'match_global', 'match_africa', 'no_match', or
+    'uncertain', and provider_name is whichever provider ('gemini',
+    'openai', ...) actually classified that job — None for a job that
+    never got assigned to a live provider (e.g. every configured provider
+    failed to build a client).
+
+    2026-09: previously returned bare labels, and callers re-derived
+    "which provider did this" themselves via `i % len(LOCATION_PROVIDERS)`
+    — a second, independent copy of the exact round-robin math this
+    function already does internally, which silently drifts out of sync
+    the moment a provider here fails to build a client (that provider's
+    assigned jobs default to 'uncertain' with NO batch ever submitted for
+    them, but the caller's separately-recomputed modulo would still credit
+    the dead provider's name to them). Returning the real provider per job
+    removes that duplicate logic and the drift risk entirely — this is
+    also the fix for jobs.clearance showing the literal string "ai"
+    instead of the actual provider name that classified them, one of the
+    two callers (crawl_ii.py) was never mapping `i % len(LOCATION_PROVIDERS)`
+    at all and just hardcoded "ai".
+
+    On rate limit/failure: defaults to ('uncertain', <provider that tried
+    and failed>) — the provider name is still meaningful there, since a
+    provider whose call failed is still the one that "handled" the job.
+    """
+    if not jobs:
+        return []
+
+    all_providers = LOCATION_PROVIDERS
+    # 2026-09: same dead-provider filter as ai_classify_roles — see that
+    # function's comment. Without this, a provider that died on an earlier
+    # batch this run kept getting fresh work every subsequent call.
+    live_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+    if not live_providers and all_providers:
+        log.error("Location classification: every configured provider is dead for this "
+                  "run — all remaining jobs will stay uncertain.")
+    all_providers = live_providers or all_providers
+
+    results, failed_jobs = _dispatch_location_work(jobs, all_providers)
+
+    # 2026-09: same reroute-once-then-give-up pattern as ai_classify_roles
+    # — see _mark_provider_dead's docstring. A job whose batch failed
+    # outright (its provider exhausted/erroring, not "AI said uncertain")
+    # gets ONE shot at whichever provider(s) are still alive before it's
+    # left as ('uncertain', None).
+    if failed_jobs:
+        retry_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+        if retry_providers:
+            log.warning(f"Location classification: rerouting {len(failed_jobs)} jobs that "
+                        f"failed on their original provider to: "
+                        f"{', '.join(p['name'] for p in retry_providers)}")
+            # rerouted is aligned to failed_jobs (that's what was passed in
+            # as the `jobs` arg to this second dispatch call) — merge each
+            # result back into `results` at that job's ORIGINAL position in
+            # the outer `jobs` list, by identity (dicts, not values, so a
+            # value-equality index() lookup could pick the wrong one if two
+            # jobs happen to look alike).
+            rerouted, still_failed = _dispatch_location_work(failed_jobs, retry_providers)
+            still_failed_ids = {id(j) for j in still_failed}
+            job_id_to_orig_idx = {id(j): i for i, j in enumerate(jobs)}
+            for job, res in zip(failed_jobs, rerouted):
+                if id(job) not in still_failed_ids:
+                    results[job_id_to_orig_idx[id(job)]] = res
+            failed_jobs = still_failed
+        if failed_jobs:
+            log.error(f"Location classification: {len(failed_jobs)} jobs could not be "
+                      f"classified by ANY provider — keeping as uncertain")
+
+    labels = [r[0] for r in results]
+    classified = sum(1 for l in labels if l != "uncertain")
+    log.info(f"AI classified {classified}/{len(jobs)} locations "
+             f"({labels.count('match_global')} match_global, "
+             f"{labels.count('match_africa')} match_africa, "
+             f"{labels.count('no_match')} no_match, "
+             f"{labels.count('uncertain')} uncertain/unclassified)")
+
+    return results
+
+
+def _dispatch_location_work(
+    jobs: list[dict], providers: list[dict]
+) -> tuple[list[tuple[str, str | None]], list[dict]]:
+    """Round-robin `jobs` across `providers`, batch per provider's context
+    window, run all batches concurrently. Returns (results, failed_jobs) —
+    results is a full-length list aligned to `jobs` (('uncertain', None)
+    for any job whose batch failed), and failed_jobs is the actual job
+    dicts whose batch never produced an answer, for the caller to reroute."""
+    results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
+    if not providers:
+        # 2026-09: same "why did nothing get assigned" logging gap fix as
+        # _dispatch_role_work — see that function's comment.
+        log.warning(f"Location classification: 0 providers available for {len(jobs)} jobs "
+                    f"(all configured providers are dead for this run) — nothing to assign.")
+        return results, list(jobs)
+
+    provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
+    for i, job in enumerate(jobs):
+        p = providers[i % len(providers)]
+        provider_assignments[p["name"]].append((i, job))
+
+    all_work = []  # (provider, client, [(orig_idx, job)...])
+    for p in providers:
+        assigned = provider_assignments[p["name"]]
+        if not assigned:
+            continue
+        client = _location_clients.get(p["name"])
+        if not client:
+            try:
+                client = _make_client(p)
+                _location_clients[p["name"]] = client
+            except Exception as e:
+                log.error(f"Cannot create location client for {p['name']}: {e}")
+                continue
+        assigned_jobs = [job for _, job in assigned]
+        assigned_indices = [idx for idx, _ in assigned]
+        batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"])
+        for start_idx, batch in batches:
+            batch_orig_indices = assigned_indices[start_idx:start_idx + len(batch)]
+            all_work.append((p, client, batch, batch_orig_indices))
+
+    provider_summary = ", ".join(
+        f"{p['name']}:{len(provider_assignments[p['name']])}" for p in providers
+    )
+    log.info(f"Location classification: {len(jobs)} jobs → {len(all_work)} batches "
+             f"across {len(providers)} providers ({provider_summary})")
+
+    failed_jobs: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+        future_map = {}
+        for provider, client, batch, orig_indices in all_work:
+            f = pool.submit(_classify_location_batch, batch, provider, client)
+            future_map[f] = (provider["name"], batch, orig_indices)
+
+        for future in as_completed(future_map):
+            pname, batch, orig_indices = future_map[future]
+            try:
+                batch_results, failed = future.result()
+                if failed:
+                    failed_jobs.extend(batch)
+                else:
+                    for j, label in enumerate(batch_results):
+                        results[orig_indices[j]] = (label, pname)
+            except Exception as e:
+                log.error(f"Location classification error ({pname}): {e}")
+                failed_jobs.extend(batch)
+
+    return results, failed_jobs
+
+
+# ── Visa Sponsorship Detection ──────────────────────────
+
+_VISA_YES_RE = re.compile(
+    r"visa\s*sponsor|sponsor.*visa|relocation\s*(support|assist|package)"
+    r"|work\s*permit\s*(support|assist|provid)"
+    r"|immigration\s*(support|assist)"
+    r"|we\s*sponsor"
+    r"|sponsorship\s*(available|offered|provided)",
+    re.I,
+)
+
+_VISA_NO_RE = re.compile(
+    r"(no|not|unable|cannot|can\'t|won\'t|will\s*not)\s*(provide\s*)?(visa\s*sponsor|sponsor.*visa|work\s*permit|immigration\s*sponsor)"
+    r"|must\s*(be\s*)?(authorized|eligible)\s*to\s*work"
+    r"|without\s*(visa\s*)?sponsor"
+    r"|visa\s*sponsorship\s*(is\s*)?(not|un)available"
+    r"|not\s*offer.*sponsorship",
+    re.I,
+)
+
+
+def detect_visa_sponsorship(job: dict) -> str:
+    """Scan description + title for visa sponsorship signals.
+    Returns 'yes', 'no', or 'unknown'."""
+    text = (
+        (job.get("description_snippet") or "")
+        + " " + (job.get("title") or "")
+        + " " + (job.get("location") or "")
+    )
+    if not text.strip():
+        return "unknown"
+
+    if _VISA_NO_RE.search(text):
+        return "no"
+    if _VISA_YES_RE.search(text):
+        return "yes"
+    return "unknown"
