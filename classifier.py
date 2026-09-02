@@ -130,6 +130,32 @@ log.info(f"Role classification providers: {[p['name'] for p in ROLE_PROVIDERS] o
 log.info(f"Location classification providers: {[p['name'] for p in LOCATION_PROVIDERS] or '(none — legacy single-provider fallback)'}")
 
 
+def _short_error(e: Exception) -> str:
+    """Compact, human-readable reason instead of dumping the SDK's full
+    raw exception. 2026-09: a real Gemini quota error logged as a single
+    line was several hundred characters of nested quota-metric/links/
+    violations JSON — the OpenAI-compatible SDK embeds the ENTIRE raw
+    error body in str(e). Pulls out just an HTTP status code (if present),
+    the first sentence of the actual message, and a retry-delay hint."""
+    s = str(e)
+    code_match = re.search(r"error code:\s*(\d+)", s, re.I)
+    code = code_match.group(1) if code_match else None
+    msg_match = (
+        re.search(r"'message':\s*'([^']*)", s)
+        or re.search(r'"message":\s*"([^"]*)', s)
+    )
+    message = msg_match.group(1) if msg_match else s
+    # These SDK messages often ramble on with URLs/follow-up instructions
+    # after the actual reason — keep just the first sentence.
+    message = message.split(r"\n")[0].split(". ")[0].strip().rstrip(".")
+    if len(message) > 160:
+        message = message[:160].rstrip() + "…"
+    retry_match = re.search(r"retry\s*(in|delay)?['\"]?\s*[:=]?\s*['\"]?(\d+(?:\.\d+)?)\s*s", s, re.I)
+    retry = f", retry in {int(float(retry_match.group(2)))}s" if retry_match else ""
+    prefix = f"HTTP {code}: " if code else ""
+    return f"{prefix}{message}{retry}"
+
+
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
     Returns response text or None on failure."""
@@ -184,7 +210,8 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
             )
 
             if is_daily_limit:
-                log.error(f"{name} quota exhausted — skipping remaining AI calls for this run: {e}")
+                log.error(f"{name} quota exhausted — skipping remaining AI calls for this run "
+                          f"({_short_error(e)})")
                 _mark_provider_dead(name, "quota exhausted")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
@@ -192,7 +219,7 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
                 time.sleep(delay)
                 continue
-            log.error(f"{name} API error (attempt {attempt + 1}): {e}")
+            log.error(f"{name} API error (attempt {attempt + 1}): {_short_error(e)}")
             if is_rate_limit:
                 # Retries exhausted and the LAST failure was still
                 # rate-limit-flavored (not a one-off timeout/500/etc.) —
@@ -464,6 +491,13 @@ def _dispatch_role_work(titles: list[str], providers: list[dict]) -> tuple[dict[
     answer (see _classify_role_batch), left for the caller to reroute or
     default rather than silently marked exclude here."""
     if not providers:
+        # 2026-09: this used to return silently — the caller's "N titles
+        # could not be classified by ANY provider" error would then show
+        # up with no explanation of WHY (no "N titles → M batches across
+        # K providers (...)" summary line ever got logged, since that line
+        # is below this check). Log plainly instead of leaving a gap.
+        log.warning(f"Role classification: 0 providers available for {len(titles)} titles "
+                    f"(all configured providers are dead for this run) — nothing to assign.")
         return {}, list(titles)
 
     provider_titles = {p["name"]: [] for p in providers}
@@ -617,6 +651,29 @@ GLOBAL_KEYWORDS = [
     r"\bglobal\s*talent\b",
     r"\bglobal\s*talent\s*pool\b",
     r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
+    # 2026-09 expansion — additional real-world phrasings not covered above
+    r"\b100%\s*remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international)\b",
+    r"\bfully\s*remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international)\b",
+    r"\bremote[\s\-]*first\b.{0,30}\b(global|worldwide|anywhere)\b",
+    r"\bglobal(?:ly)?\s*distributed\s*(team|company|workforce)\b",
+    r"\bwe\s*(are\s*)?a?\s*globally\s*distributed\b",
+    r"\bemployees?\s*(work|based|located)\s*(in|across)\s*\d+\+?\s*countries\b",
+    r"\bteam\s*(members?\s*)?(in|across|spanning)\s*\d+\+?\s*countries\b",
+    r"\bhire\s*(people|talent|employees|staff)\s*in\s*(almost\s*)?any\s*country\b",
+    r"\bopen\s*to\s*remote\s*work\s*(globally|worldwide|from\s*anywhere)\b",
+    r"\bglobally\s*remote\b",
+    r"\bremote\s*globally\b",
+    r"\bunrestricted\s*by\s*(location|geography|country)\b",
+    r"\bno\s*restrictions?\s*on\s*(location|geography|country|where\s*you)\b",
+    r"\bwe\s*hire\s*(globally|worldwide|internationally|anywhere)\b",
+    r"\bwe\s*welcome\s*applicants?\s*(from|in)\s*(any|all)\s*(countr|location)\b",
+    r"\bopen\s*to\s*international\s*(candidates|applicants|hires)\b",
+    r"\bglobal\s*(remote\s*)?workforce\b",
+    r"\bfully\s*distributed\s*(team|company|organization|workforce)\b",
+    r"\bremote\s*[\-–—/,()]?\s*(no\s*)?(location|geographic)\s*(restriction|limit)s?\b",
+    r"\bcan\s*be\s*based\s*anywhere\b",
+    r"\blive\s*and\s*work\s*from\s*anywhere\b",
+    r"\bglobal\s*company\s*with\s*(a\s*)?remote[\-\s]*first\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -1034,6 +1091,74 @@ Respond ONLY with lines like:
 4 UNCERTAIN"""
 
 
+# ── Deterministic restriction override ────────────────────
+# 2026-09: real, live misclassification caught by the user — a Lever
+# posting (Voltus) whose description explicitly said "we do not sponsor
+# visas or transfers for new hires. Voltus teammates need to be
+# authorized to work from their home location (in the US or Canada...)"
+# still got labeled MATCH_GLOBAL by the AI stage. That's not a borderline
+# call the prompt's wording could plausibly excuse — it's a job that
+# flatly rules out anyone who isn't already authorized to work in one of
+# two specific countries, which is the textbook NO_MATCH case the prompt
+# already describes. Trusting the model alone for this class of mistake
+# isn't good enough, so this is a deterministic backstop: ANY of these
+# hard-restriction phrases anywhere in the job's title/location/
+# description overrides an AI verdict of MATCH_GLOBAL or MATCH_AFRICA
+# back down to NO_MATCH, regardless of which provider produced it or how
+# confident it sounded. A genuinely global/Africa-wide employer that also
+# happens to mention visa/authorization requirements for a SPECIFIC
+# country is, definitionally, not hiring from anywhere — real global
+# postings don't gate on one or two named countries' work authorization.
+# 2026-09: "must be authorized to work in ___" is deliberately NOT an
+# unconditional trigger below — that exact phrase is genuinely ambiguous
+# on its own ("must be authorized to work in your country of residence"
+# is actually GLOBAL-friendly language, not a restriction). It only
+# counts as a hard restriction when a concrete single-country/region
+# token (or "home location"/"home country" — Voltus's actual phrasing)
+# shows up within a short window after it — narrow enough to still catch
+# real restrictions, without flagging genuinely global "wherever you
+# already are" language as if it named one specific place.
+_SPECIFIC_LOCATION_TOKEN = (
+    r"(us|usa|u\.s\.|united\s*states|uk|u\.k\.|united\s*kingdom|canada|"
+    r"australia|germany|france|india|ireland|netherlands|singapore|"
+    r"nigeria|kenya|south\s*africa|home\s*(location|country)|"
+    r"a\s*specific\s*countr)"
+)
+
+_HARD_RESTRICTION_RE = re.compile(
+    r"(do\s*not|don\'t|does\s*not|doesn\'t|won\'t|will\s*not|unable\s*to|"
+    r"cannot|can\'t)\s*(currently\s*)?(provide\s*|offer\s*)?sponsor\s*"
+    r"(visas?|work\s*permits?|transfers?|immigration)"
+    r"|no\s*visa\s*sponsorship"
+    r"|not\s*(able\s*to\s*|currently\s*)?sponsor.{0,20}visa"
+    r"|visa\s*sponsorship\s*(is\s*)?(not|un)available"
+    r"|(must|need[s]?|required)\s*(to\s*)?be\s*authorized\s*to\s*work\s*(in|from)"
+    r"\s*(the\s*)?.{0,25}?" + _SPECIFIC_LOCATION_TOKEN + r"\b"
+    r"|(must|need[s]?)\s*(to\s*)?reside\s*in\s*(the\s*)?(us|usa|uk|canada|"
+    r"united\s*states|united\s*kingdom)",
+    re.I,
+)
+
+
+def _apply_restriction_override(batch_jobs: list[dict], batch_results: list[str]) -> int:
+    """Downgrade any MATCH_GLOBAL/MATCH_AFRICA verdict to NO_MATCH when a
+    hard country/region-restriction or no-sponsorship phrase is present in
+    the job text. Returns how many labels were overridden (for logging)."""
+    overridden = 0
+    for i, job in enumerate(batch_jobs):
+        if batch_results[i] not in ("match_global", "match_africa"):
+            continue
+        text = (
+            (job.get("title") or "") + " " +
+            (job.get("location") or "") + " " +
+            (job.get("description_snippet") or "")
+        )
+        if _HARD_RESTRICTION_RE.search(text):
+            batch_results[i] = "no_match"
+            overridden += 1
+    return overridden
+
+
 def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
     """Classify a single batch of jobs by location using a specific provider.
 
@@ -1100,6 +1225,12 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
                     batch_results[idx] = "match_global"
                 elif label.startswith("UNCERTAIN"):
                     batch_results[idx] = "uncertain"
+
+    overridden = _apply_restriction_override(batch_jobs, batch_results)
+    if overridden:
+        log.warning(f"{provider['name']}: overrode {overridden} MATCH_GLOBAL/MATCH_AFRICA "
+                    f"verdict(s) to NO_MATCH — hard visa/country-restriction language found "
+                    f"in the job text that the AI missed.")
 
     return batch_results, False
 
@@ -1251,6 +1382,10 @@ def _dispatch_location_work(
     dicts whose batch never produced an answer, for the caller to reroute."""
     results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
     if not providers:
+        # 2026-09: same "why did nothing get assigned" logging gap fix as
+        # _dispatch_role_work — see that function's comment.
+        log.warning(f"Location classification: 0 providers available for {len(jobs)} jobs "
+                    f"(all configured providers are dead for this run) — nothing to assign.")
         return results, list(jobs)
 
     provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
