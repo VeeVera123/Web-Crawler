@@ -37,6 +37,30 @@ for _noisy in ("httpx", "httpcore", "openai"):
 MAX_RETRIES = 4
 RETRY_BASE_DELAY = 5  # seconds
 
+# ── Per-run provider health tracking ──────────────────────
+# 2026-09: a provider that's exhausted its quota (daily or otherwise) for
+# THIS run gets marked here and skipped for the rest of the process —
+# instead of every subsequent batch still being round-robin-assigned to it,
+# burning MAX_RETRIES retries and RETRY_BASE_DELAY backoff on a call that's
+# doomed before it starts (see the real Gemini "RESOURCE_EXHAUSTED ...
+# FreeTier" 429 in this project's own logs — a genuine daily-quota
+# exhaustion, not a transient burst, so retrying it is pure waste). Reset
+# per-process (i.e. per GitHub Actions shard) — there's no cross-process
+# state here, same as _last_call_times below.
+_dead_providers: set[str] = set()
+
+
+def _mark_provider_dead(name: str, reason: str) -> None:
+    """Mark a provider unavailable for the rest of THIS run. Idempotent —
+    only logs once per provider even if multiple concurrent batches hit
+    the same exhausted quota around the same time."""
+    if name in _dead_providers:
+        return
+    _dead_providers.add(name)
+    log.warning(f"{name}: unavailable for the rest of this run ({reason}) — "
+                f"remaining work assigned to it will be rerouted to whichever "
+                f"other provider(s) are still live.")
+
 
 def _make_client(provider: dict):
     """Create an OpenAI-compatible client for a provider config dict."""
@@ -98,11 +122,28 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
             return content.strip()
         except Exception as e:
             error_str = str(e)
-            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_str.lower()
-            is_daily_limit = "tokens per day" in error_str.lower() or "daily" in error_str.lower()
+            error_lower = error_str.lower()
+            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_lower
+            # 2026-09: broadened to match what Gemini's free tier actually
+            # sends on a real daily-quota exhaustion — "RESOURCE_EXHAUSTED"
+            # / "quota exceeded" / "PerDay...FreeTier" (see this project's
+            # own logged error) — the original "tokens per day"/"daily"
+            # substring check missed that real message entirely (its exact
+            # text is "...RequestsPerDay...", which doesn't contain the
+            # substring "daily"), so every quota-exhausted call was wasting
+            # a full MAX_RETRIES round of backoff (5s+10s+15s) retrying a
+            # request that was doomed from its very first response.
+            is_daily_limit = (
+                "tokens per day" in error_lower
+                or "daily" in error_lower
+                or "resource_exhausted" in error_lower
+                or "quota exceeded" in error_lower
+                or "perday" in error_lower.replace(" ", "").replace("_", "")
+            )
 
             if is_daily_limit:
-                log.error(f"{name} daily token limit reached — skipping remaining AI calls")
+                log.error(f"{name} quota exhausted — skipping remaining AI calls for this run: {e}")
+                _mark_provider_dead(name, "quota exhausted")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
@@ -110,6 +151,11 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 time.sleep(delay)
                 continue
             log.error(f"{name} API error (attempt {attempt + 1}): {e}")
+            if is_rate_limit:
+                # Retries exhausted and the LAST failure was still
+                # rate-limit-flavored (not a one-off timeout/500/etc.) —
+                # treat this as sustained exhaustion, not a fluke.
+                _mark_provider_dead(name, f"repeated rate-limit failures after {MAX_RETRIES} attempts")
             return None
     return None
 
@@ -242,20 +288,24 @@ Respond ONLY with lines like:
 2 NO"""
 
 
-def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, bool]:
-    """Classify a single batch of titles using a specific provider."""
+def _classify_role_batch(batch: list[str], provider: dict, client) -> tuple[dict[str, bool], bool]:
+    """Classify a single batch of titles using a specific provider.
+
+    Returns (results, call_failed). 2026-09: call_failed distinguishes "the
+    AI genuinely said NO" from "the call itself never produced an answer" —
+    the caller (ai_classify_roles) needs that distinction to reroute a
+    failed batch to a different provider instead of just defaulting every
+    title in it to exclude. On call_failed=True, `results` is empty; the
+    caller owns deciding what happens to `batch` next."""
     numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
     user_msg = f"Titles:\n{numbered}"
     max_tokens = max(500, len(batch) * 4)
     text = _ai_call(provider, client, ROLE_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
-    results = {}
     if text is None:
-        log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, defaulting to exclude")
-        for t in batch:
-            results[t] = False
-        return results
+        return {}, True
 
+    results = {}
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2:
@@ -269,7 +319,7 @@ def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, 
     for t in batch:
         if t not in results:
             results[t] = False
-    return results
+    return results, False
 
 
 def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[list[str]]:
@@ -311,11 +361,11 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     if not titles:
         return {}
 
-    providers = ROLE_PROVIDERS
-    if not providers:
+    all_providers = ROLE_PROVIDERS
+    if not all_providers:
         # Legacy single-provider fallback
         from config import LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
-        providers = [{
+        all_providers = [{
             "name": LLM_PROVIDER,
             "api_key": LLM_API_KEY,
             "model": LLM_MODEL,
@@ -324,13 +374,48 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             "min_call_interval": 12.5 if LLM_PROVIDER == "cerebras" else 0.0,
         }]
 
-    # ── Split titles round-robin across providers ──
+    results, failed_titles = _dispatch_role_work(titles, all_providers)
+
+    # 2026-09: a batch that failed outright (provider exhausted/erroring,
+    # not "AI said NO") gets ONE reroute attempt across whichever
+    # providers are still live, instead of silently defaulting to exclude
+    # — see _mark_provider_dead's docstring for why a provider can go dead
+    # mid-run. Capped at one reroute pass (no unbounded retry loop): if
+    # every remaining provider is also dead/failing, that's a real "all
+    # providers unavailable" condition worth a clear log line, not more
+    # retrying.
+    if failed_titles:
+        retry_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+        if retry_providers:
+            log.warning(f"Role classification: rerouting {len(failed_titles)} titles that "
+                        f"failed on their original provider to: "
+                        f"{', '.join(p['name'] for p in retry_providers)}")
+            rerouted, still_failed = _dispatch_role_work(failed_titles, retry_providers)
+            results.update(rerouted)
+            failed_titles = still_failed
+        if failed_titles:
+            log.error(f"Role classification: {len(failed_titles)} titles could not be "
+                      f"classified by ANY provider — defaulting to exclude")
+            for t in failed_titles:
+                results[t] = False
+
+    return results
+
+
+def _dispatch_role_work(titles: list[str], providers: list[dict]) -> tuple[dict[str, bool], list[str]]:
+    """Round-robin `titles` across `providers`, batch per provider's context
+    limit, run all batches concurrently. Returns (results, failed_titles) —
+    failed_titles is every title whose batch's call never produced an
+    answer (see _classify_role_batch), left for the caller to reroute or
+    default rather than silently marked exclude here."""
+    if not providers:
+        return {}, list(titles)
+
     provider_titles = {p["name"]: [] for p in providers}
     for i, title in enumerate(titles):
         p = providers[i % len(providers)]
         provider_titles[p["name"]].append(title)
 
-    # ── Build batches per provider (respecting each provider's context limits) ──
     all_work = []  # list of (provider, client, batch)
     for p in providers:
         p_titles = provider_titles[p["name"]]
@@ -354,10 +439,10 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     log.info(f"Role classification: {len(titles)} titles → {len(all_work)} batches "
              f"across {len(providers)} providers ({provider_summary})")
 
-    results = {}
+    results: dict[str, bool] = {}
+    failed_titles: list[str] = []
 
-    # Run ALL batches concurrently (each provider's batches interleave)
-    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
         future_map = {}
         for provider, client, batch in all_work:
             f = pool.submit(_classify_role_batch, batch, provider, client)
@@ -366,14 +451,16 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
         for future in as_completed(future_map):
             pname, batch = future_map[future]
             try:
-                batch_results = future.result()
-                results.update(batch_results)
+                batch_results, failed = future.result()
+                if failed:
+                    failed_titles.extend(batch)
+                else:
+                    results.update(batch_results)
             except Exception as e:
                 log.error(f"Role classification error ({pname}): {e}")
-                for t in batch:
-                    results[t] = False
+                failed_titles.extend(batch)
 
-    return results
+    return results, failed_titles
 
 
 # ═══════════════════════════════════════════════════════
@@ -885,8 +972,13 @@ Respond ONLY with lines like:
 4 UNCERTAIN"""
 
 
-def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> list[str]:
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
     """Classify a single batch of jobs by location using a specific provider.
+
+    Returns (labels, call_failed). 2026-09: call_failed distinguishes "the
+    call never produced an answer" from "the AI genuinely said uncertain" —
+    ai_classify_locations needs that to reroute a dead batch to a
+    different provider instead of defaulting it to uncertain right here.
 
     Descriptions are sent IN FULL (only bounded by MAX_DESC_CHARS, applied
     once already in _build_dynamic_batches) — no further per-batch slicing.
@@ -918,12 +1010,10 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     max_tokens = max(1500, len(batch_jobs) * 8 + 200)
     text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
-    batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
-        log.warning(f"AI location classification failed ({provider['name']}) "
-                     f"for batch of {len(batch_jobs)}, keeping as uncertain")
-        return batch_results
+        return ["uncertain"] * len(batch_jobs), True
 
+    batch_results = ["uncertain"] * len(batch_jobs)
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) >= 1:
@@ -949,7 +1039,7 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
                 elif label.startswith("UNCERTAIN"):
                     batch_results[idx] = "uncertain"
 
-    return batch_results
+    return batch_results, False
 
 
 def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
@@ -1038,15 +1128,65 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     if not jobs:
         return []
 
-    providers = LOCATION_PROVIDERS
+    all_providers = LOCATION_PROVIDERS
+    results, failed_jobs = _dispatch_location_work(jobs, all_providers)
 
-    # ── Round-robin assign jobs to providers (tracking original indices) ──
+    # 2026-09: same reroute-once-then-give-up pattern as ai_classify_roles
+    # — see _mark_provider_dead's docstring. A job whose batch failed
+    # outright (its provider exhausted/erroring, not "AI said uncertain")
+    # gets ONE shot at whichever provider(s) are still alive before it's
+    # left as ('uncertain', None).
+    if failed_jobs:
+        retry_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+        if retry_providers:
+            log.warning(f"Location classification: rerouting {len(failed_jobs)} jobs that "
+                        f"failed on their original provider to: "
+                        f"{', '.join(p['name'] for p in retry_providers)}")
+            # rerouted is aligned to failed_jobs (that's what was passed in
+            # as the `jobs` arg to this second dispatch call) — merge each
+            # result back into `results` at that job's ORIGINAL position in
+            # the outer `jobs` list, by identity (dicts, not values, so a
+            # value-equality index() lookup could pick the wrong one if two
+            # jobs happen to look alike).
+            rerouted, still_failed = _dispatch_location_work(failed_jobs, retry_providers)
+            still_failed_ids = {id(j) for j in still_failed}
+            job_id_to_orig_idx = {id(j): i for i, j in enumerate(jobs)}
+            for job, res in zip(failed_jobs, rerouted):
+                if id(job) not in still_failed_ids:
+                    results[job_id_to_orig_idx[id(job)]] = res
+            failed_jobs = still_failed
+        if failed_jobs:
+            log.error(f"Location classification: {len(failed_jobs)} jobs could not be "
+                      f"classified by ANY provider — keeping as uncertain")
+
+    labels = [r[0] for r in results]
+    classified = sum(1 for l in labels if l != "uncertain")
+    log.info(f"AI classified {classified}/{len(jobs)} locations "
+             f"({labels.count('match_global')} match_global, "
+             f"{labels.count('match_africa')} match_africa, "
+             f"{labels.count('no_match')} no_match, "
+             f"{labels.count('uncertain')} uncertain/unclassified)")
+
+    return results
+
+
+def _dispatch_location_work(
+    jobs: list[dict], providers: list[dict]
+) -> tuple[list[tuple[str, str | None]], list[dict]]:
+    """Round-robin `jobs` across `providers`, batch per provider's context
+    window, run all batches concurrently. Returns (results, failed_jobs) —
+    results is a full-length list aligned to `jobs` (('uncertain', None)
+    for any job whose batch failed), and failed_jobs is the actual job
+    dicts whose batch never produced an answer, for the caller to reroute."""
+    results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
+    if not providers:
+        return results, list(jobs)
+
     provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
     for i, job in enumerate(jobs):
         p = providers[i % len(providers)]
         provider_assignments[p["name"]].append((i, job))
 
-    # ── Build batches per provider ──
     all_work = []  # (provider, client, [(orig_idx, job)...])
     for p in providers:
         assigned = provider_assignments[p["name"]]
@@ -1060,12 +1200,10 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
             except Exception as e:
                 log.error(f"Cannot create location client for {p['name']}: {e}")
                 continue
-        # Build batches from assigned jobs
         assigned_jobs = [job for _, job in assigned]
         assigned_indices = [idx for idx, _ in assigned]
         batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"])
         for start_idx, batch in batches:
-            # Map batch start_idx back to original indices
             batch_orig_indices = assigned_indices[start_idx:start_idx + len(batch)]
             all_work.append((p, client, batch, batch_orig_indices))
 
@@ -1075,10 +1213,9 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     log.info(f"Location classification: {len(jobs)} jobs → {len(all_work)} batches "
              f"across {len(providers)} providers ({provider_summary})")
 
-    results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
+    failed_jobs: list[dict] = []
 
-    # Run all batches concurrently
-    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
         future_map = {}
         for provider, client, batch, orig_indices in all_work:
             f = pool.submit(_classify_location_batch, batch, provider, client)
@@ -1087,25 +1224,17 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         for future in as_completed(future_map):
             pname, batch, orig_indices = future_map[future]
             try:
-                batch_results = future.result()
-                for j, label in enumerate(batch_results):
-                    results[orig_indices[j]] = (label, pname)
+                batch_results, failed = future.result()
+                if failed:
+                    failed_jobs.extend(batch)
+                else:
+                    for j, label in enumerate(batch_results):
+                        results[orig_indices[j]] = (label, pname)
             except Exception as e:
                 log.error(f"Location classification error ({pname}): {e}")
-                # This batch's jobs stay ("uncertain", None) — the provider
-                # that was assigned to them never actually produced a
-                # result, so crediting pname here would be as misleading
-                # as the stale i%len() derivation this replaced.
+                failed_jobs.extend(batch)
 
-    labels = [r[0] for r in results]
-    classified = sum(1 for l in labels if l != "uncertain")
-    log.info(f"AI classified {classified}/{len(jobs)} locations "
-             f"({labels.count('match_global')} match_global, "
-             f"{labels.count('match_africa')} match_africa, "
-             f"{labels.count('no_match')} no_match, "
-             f"{labels.count('uncertain')} uncertain/unclassified)")
-
-    return results
+    return results, failed_jobs
 
 
 # ── Visa Sponsorship Detection ──────────────────────────
