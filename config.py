@@ -168,26 +168,32 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=300_000,     # 400K - 100K breathing space
         min_call_interval=5.0,       # Tier 1: ~12 req/min
     ),
-    # NVIDIA NIM (build.nvidia.com): free, no credit card, no published
-    # daily cap, ~40 RPM community-confirmed baseline (NVIDIA's own dev
-    # forum — "I have reached the default rate limit of 40 Requests Per
-    # Minute" — no official SLA doc found, treat as a working baseline not
-    # a guarantee). Chosen over OpenRouter's free tier, whose daily cap
-    # (50/day with no prior spend, 1,000/day only after $10 lifetime
-    # credit purchase) is too small for this project's volume.
+    # NVIDIA NIM (build.nvidia.com): free, no credit card, explicitly
+    # "unlimited API requests without daily limits" per NVIDIA's own free-
+    # tier page (phone verification exists specifically to gate that
+    # against abuse, not to cap real usage) — confirmed by the user
+    # directly quoting that page. RPM still applies: ~40 RPM is the
+    # community-confirmed baseline from NVIDIA's own dev forum ("I have
+    # reached the default rate limit of 40 Requests Per Minute") — no
+    # published SLA, treat as a working baseline. Chosen over OpenRouter's
+    # free tier, whose daily cap (50/day with no prior spend, 1,000/day
+    # only after $10 lifetime credit purchase) is too small here.
     #
-    # base_url/model below were NOT independently confirmed against
-    # NVIDIA's own API reference pages this session (their docs pages
-    # render via JS and didn't return code samples to this session's
-    # fetch tool) — cross-checked against two third-party integration
-    # guides that agreed, but you should sanity-check both against your
-    # own build.nvidia.com dashboard once you generate a key, and swap
-    # NVIDIA_MODEL below if the catalog shows a different current ID for
-    # this model.
+    # base_url + model below ARE live-confirmed 2026-09: fetched the
+    # actual GET /v1/models listing from https://integrate.api.nvidia.com/v1
+    # (NVIDIA's real, current NIM catalog, not a third-party guide) and
+    # nemotron-4-340b-instruct is in it verbatim. Picked over the (also
+    # real) llama-3.1-nemotron-ultra-253b-v1 because Ultra is a REASONING
+    # model — it can emit chain-of-thought before its actual answer, which
+    # risks silently truncating _classify_location_batch's per-job answer
+    # lines under the existing max_tokens budget (sized for a direct
+    # answer, not a reasoning preamble). nemotron-4-340b-instruct is a
+    # plain instruct model, same direct-answer shape Gemini/OpenAI/Cerebras/
+    # Groq already use here, so no other code needed to change for it.
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
-        "nvidia/llama-3.1-nemotron-70b-instruct",
+        "nvidia/nemotron-4-340b-instruct",
         "https://integrate.api.nvidia.com/v1",
         max_batch_chars=200_000,     # conservative until real context/TPM behavior is confirmed
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
