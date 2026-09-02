@@ -1,101 +1,62 @@
 """
-CRAWL II — heuristic generic job-listing scraper for archive_ii (in-house/
-unsupported career pages; archive_ii was archive_iii before the 2026-08
-Crawl I/Crawl II restructure — see node.py's and crawl_i.py's module
-docstrings for the full renaming history).
+CRAWL I — the trusted, actually-scraped-daily ATS scanner (formerly
+main.py). Renamed 2026-08 as part of the Crawl I / Crawl II restructure —
+"Crawl I" is this file, scraping known ATS boards from archive_i (formerly
+slug_registry); "Crawl II" (crawl_ii.py) is the newer, separate heuristic
+scraper for archive_ii's in-house/unsupported career pages. Both are
+launched by the single unified crawl.yml workflow (formerly daily_scan.yml).
+=======================================
+Scans 87,000+ company boards across 20+ ATS platforms (ApplyToJob retired
+2026-08 — see ats_scrapers.py's SCRAPERS dict for the current live list).
 
-Crawl I (crawl_i.py) only knows how to read the ~20 recognized ATS
-platforms in ats_scrapers.py's SCRAPERS dict. Every career page node.py's
-crawl_batch() found that did NOT match one of those platforms — an
-in-house careers CMS, a small/unrecognized ATS, a WordPress job-listing
-plugin, etc. — lands in archive_ii instead, unscraped. Crawl II is what
-finally reads those.
+2026-08: job board aggregators (RemoteOK, Remotive, Himalayas, Arbeitnow,
+Jobicy, WeWorkRemotely, Working Nomads, FreeHire) were disabled and
+job_board_scrapers.py removed entirely — ATS boards are now the only
+source. --job-boards-only mode is gone; discovery of new slugs from
+aggregator job URLs (populate_slug_registry(source="job_board_discovery"))
+is gone with it.
 
-Two independent extraction methods, tried in order, per archive_ii page:
+Reads slugs from Supabase archive_i (formerly slug_registry — single
+source of truth, populated by node.py's crawl_batch() writing ATS-pattern
+hits directly, no intermediate staging/verify step; see node.py's module
+docstring). Filters for CSM/Account Management roles hiring globally or
+in Africa. Pushes matches to Supabase (PostgreSQL), tagged
+source_pipeline='crawl_i' (the jobs table column's default).
 
-  1. JSON-LD JobPosting structured data (schema.org). The highest-
-     confidence source when present — many career-page builders emit this
-     for SEO even with no ATS-recognizable URL pattern at all. If a page
-     has ANY valid, non-expired JobPosting objects, they are trusted and
-     the heuristic pass below is skipped entirely for that page (avoids
-     double-counting the same postings two different ways).
+LLM provider is set via LLM_PROVIDER env var (see SWITCHING_GUIDE.md).
 
-  2. Heuristic candidate-link detection, for pages with no JSON-LD:
-     (a) anchors whose href path itself looks like an individual job
-         posting (/job/, /careers/, /position/, /vacancy/, etc.), and
-     (b) groups of ≥3 sibling anchors sharing the same (parent tag,
-         parent class) fingerprint — a real job-listing grid/table
-         renders every card through the same template, which is a much
-         stronger and more general signal than any fixed CSS class name
-         could be, and a nav menu or footer never has this shape.
-     Anchor text is run through a nav-word blocklist and a word-count
-     sanity check before anything counts as a candidate. Every surviving
-     candidate is then INDIVIDUALLY FETCHED and must clear a real-job-page
-     confirmation gate (minimum text length + at least one strong
-     job-page phrase like "job description"/"responsibilities"/"apply
-     now") before it becomes a posting — a candidate link alone is never
-     trusted. This confirmation fetch is the single biggest lever against
-     letting junk in, and is deliberately not skipped to save requests.
-
-Every surviving posting — from either method — still goes through the
-EXACT SAME role/location/visa classification funnel Crawl I uses
-(classifier.py: keyword_classify_role → ai_classify_roles,
-_keyword_classify_location_detail → ai_classify_locations,
-detect_visa_sponsorship) before being written. Nothing here bypasses that
-filter; a JobPosting hit or a confirmed heuristic hit is a CANDIDATE for
-the jobs table, never an automatic write. This is what "as perfect as
-possible... does not let junk in" means in practice: three independent
-gates (structural/confirmation, role, location) all have to agree.
-
-Every row this writes to `jobs` is tagged source_pipeline='crawl_ii' (via
-supabase_handler.add_jobs_batch's source_pipeline param) so it can be
-bulk-identified and deleted independently of Crawl I's rows if the
-heuristic scraper turns out to have quality problems on some class of
-site, without touching a single Crawl I row.
-
-CLI modes (mirrors crawl_i.py; see .github/workflows/crawl.yml):
-  python crawl_ii.py --shard 0 --total-shards 10   This shard's 1/10 slice of archive_ii.
-  python crawl_ii.py --finalize                     Cleanup only (mark/delete stale
-                                                      crawl_ii jobs) — run once, after every
-                                                      shard has finished (gate with `needs:`).
+CLI modes (see .github/workflows/crawl.yml for how these compose):
+  python crawl_i.py                                   Full run: all ATS boards + cleanup,
+                                                        in one process. Default for manual/
+                                                        local use — unchanged behavior.
+  python crawl_i.py --shard 0 --total-shards 8         ATS boards only, this shard's 1/8 slice.
+                                                        No cleanup (see run_finalize()).
+  python crawl_i.py --finalize                         Cleanup only (mark/delete stale jobs, 31-day
+                                                        hard-delete threshold — was 60). Run ONCE,
+                                                        after every shard has finished (gate with
+                                                        `needs:` in CI).
 """
 
 import argparse
-import asyncio
-import concurrent.futures
 import hashlib
-import json
-import logging
-import os
-import re
 import sys
-import time
-from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import aiohttp
-from dotenv import load_dotenv
-from selectolax.lexbor import LexborHTMLParser
-
-load_dotenv()
-_MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_MAIN_DIR)  # repo root — node.py lives here
-sys.path.insert(0, _ROOT)
-sys.path.insert(0, _MAIN_DIR)
-
-import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_parse_pool
-# (2026-08: this file used to do all its HTML parsing inline on the event
-# loop with no pool at all — see extract_postings_from_page's docstring —
-# it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
-from classifier import (  # noqa: E402
+from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions, SCRAPERS
+from classifier import (
     keyword_classify_role, ai_classify_roles,
-    _keyword_classify_location_detail, ai_classify_locations,
+    keyword_classify_location, ai_classify_locations,
     detect_visa_sponsorship,
+    _keyword_classify_location_detail,
     PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
-from supabase_handler import (  # noqa: E402
-    add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
-    get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
+from supabase_handler import (
+    add_jobs_batch, start_scan_report, finish_scan_report,
+    get_all_slugs, cleanup_stale_jobs,
+    get_existing_urls, touch_seen_jobs_raw,
+    touch_archive_i_last_seen,
+    SupabaseFetchError,
 )
 
 logging.basicConfig(
@@ -103,576 +64,519 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("crawl_ii")
+log = logging.getLogger(__name__)
 
-SOURCE_PIPELINE = "crawl_ii"
-DEFAULT_ATS_LABEL = "in_house"  # jobs.ats value for every Crawl II row — free-text column, no CHECK
+# ── Per-platform concurrency limits ──────────────────────
+# Two categories, tuned differently:
+#
+#  - SINGLE SHARED API DOMAIN platforms (every company's requests land on
+#    the same origin, e.g. api.smartrecruiters.com): the risk is US
+#    self-inflicting a rate limit by concentrating load on one endpoint.
+#    Kept bounded.
+#
+#  - PER-COMPANY SUBDOMAIN platforms (e.g. {company}.bamboohr.com): each
+#    worker's requests spread across different origins, so higher
+#    concurrency is generally safer — but NOT maxed out. Many of these are
+#    still multi-tenant SaaS behind a SHARED WAF/CDN (Cloudflare or the
+#    vendor's own) that can fingerprint by source IP across an entire zone
+#    regardless of subdomain, and a single IP requesting hundreds of
+#    DIFFERENT companies' career pages back-to-back is itself a bot
+#    signal — no real human does that. Values already proven safe in
+#    production (Greenhouse/Lever/iCIMS at 30) are left unchanged; every
+#    other value below is a first-time, moderate increase — watch actual
+#    429/403 rates in the logs after deploying and raise further only
+#    once a batch has run clean.
+#
+# Paylocity is intentionally in the bounded group despite superficially
+# looking subdomain-like: it actually serves every company from a single
+# shared domain (recruiting.paylocity.com), differentiated by URL path,
+# not by subdomain.
+PLATFORM_WORKERS = {
+    # ── Single shared API domain: keep bounded ──
+    "greenhouse": 30,         # proven in production, unchanged
+    "lever": 30,               # proven in production, unchanged
+    "ashby": 5,                 # already conservative; Ashby is known stricter
+    "rippling": 8,
+    "workable": 10,
+    "smartrecruiters": 10,
+    "joincom": 6,               # pageSize max 5, needs slug→ID resolution
+    "paylocity": 15,            # shared domain — do not raise further
 
-CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "60"))
-TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_II_TIME_BUDGET_MINUTES", "300"))
-BATCH_SIZE = int(os.environ.get("CRAWL_II_BATCH_SIZE", "300"))  # pages per micro-batch before pushing
-MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches for one company
+    # ── Per-company subdomain: moderate first-time increase ──
+    "bamboohr": 18,
+    "icims": 30,                # proven in production, unchanged
+    "workday": 20,
+    "recruitee": 18,
+    "teamtailor": 18,
+    "breezyhr": 18,
+    # "applytojob": 18,  # REMOVED 2026-08 — ATS retired, see ats_scrapers.py
+    "personio": 18,
+    "taleo": 16,                 # legacy platform, slightly more cautious
+    "oracle_cloud_hcm": 16,
+    "hrmdirect": 18,
+    "zoho": 8,                   # raised from 5, but still capped low —
+                                  # 1.7MB pages per request is a runner
+                                  # memory/bandwidth constraint, not a
+                                  # ban-risk one; concurrency here trades
+                                  # against the runner's own resources.
+    "softgarden": 18,            # per-company subdomain
+
+    # ── New (2026-08) ──
+    "eploy": 12,                  # per-company subdomain, unproven at scale — conservative
+    "folkshr": 15,                # shared jobs.folksats.app domain, lightweight pages
+    "jobadder": 10,                # shared clientapps.jobadder.com domain — be cautious
+    "jobvite": 15,                 # shared jobs.jobvite.com domain
+    "adp": 10,                     # shared workforcenow.adp.com domain, real JSON API
+                                    # but unauthenticated public endpoint — stay modest
+    "avature": 8,                  # per-customer subdomain, but templates vary wildly
+                                    # and reliability is lower — keep it conservative
+}
 
 
-# ── Sharding (same deterministic hash approach as crawl_i.py's _shard_of) ──
-
-def _shard_of(website_url: str, total_shards: int) -> int:
-    h = hashlib.md5(website_url.encode()).hexdigest()
+def _shard_of(ats: str, slug: str, total_shards: int) -> int:
+    """Deterministic hash-based shard assignment. Using a stable hash
+    (rather than a running index % N) means every platform gets spread
+    evenly across all shards regardless of how archive_i rows happen
+    to be ordered/clustered by source — so no shard accidentally ends up
+    as "all Workday" with a different completion profile than its peers."""
+    h = hashlib.md5(f"{ats}|{slug}".encode()).hexdigest()
     return int(h, 16) % total_shards
 
 
-def load_pages(shard: int = 0, total_shards: int = 1) -> list[dict]:
-    """Load {career_page_url, website_url} pairs from archive_ii, sharded
-    the same way crawl_i.py shards archive_i — a stable hash rather than a
-    running index so every shard gets an even, source-agnostic slice."""
-    pages = get_archive_ii_pages()
-    if not pages:
-        log.warning("No pages found in Supabase archive_ii!")
+def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
+    """
+    Load (ats, slug) pairs from Supabase archive_i (formerly slug_registry).
+    Populated directly by node.py's crawl_batch() (ATS-pattern hits) — no
+    intermediate staging/verify table anymore; Verification/verification.py
+    is the only thing that ever removes a row, and only once confirmed dead.
+
+    When total_shards > 1, returns only this shard's slice (for GitHub
+    Actions matrix parallelism — see module docstring).
+    """
+    pairs = get_all_slugs()
+
+    if not pairs:
+        log.warning("No slugs found in Supabase archive_i!")
+        log.warning("Run node.py (via a seed source) first to populate it.")
         return []
+
+    # Drop rows for ATSs with no registered scraper BEFORE sharding/dispatch,
+    # not one-by-one inside scrape_board() — a retired ATS (e.g. applytojob,
+    # removed 2026-08) can leave thousands of stale rows in archive_i
+    # from before its discovery.py sources were also updated, and dispatching
+    # each one individually just to log "Unknown ATS" per row is wasted
+    # per-row overhead across a whole scan, not just log noise. One summary
+    # line here instead of one warning per stale row.
+    supported = [(a, s) for a, s in pairs if a.lower() in SCRAPERS]
+    unsupported_counts: dict[str, int] = {}
+    for ats, _ in pairs:
+        if ats.lower() not in SCRAPERS:
+            unsupported_counts[ats] = unsupported_counts.get(ats, 0) + 1
+    if unsupported_counts:
+        for ats, count in sorted(unsupported_counts.items(), key=lambda kv: -kv[1]):
+            log.warning(f"Skipping {count} archive_i rows for unsupported "
+                        f"ATS '{ats}' (no scraper registered — stale rows from "
+                        f"a retired/renamed ATS? consider deleting them from "
+                        f"Supabase directly).")
+    pairs = supported
 
     if total_shards > 1:
-        pages = [p for p in pages if _shard_of(p["website_url"], total_shards) == shard]
-        log.info(f"Shard {shard}/{total_shards}: {len(pages)} career pages assigned")
+        pairs = [(a, s) for a, s in pairs if _shard_of(a, s, total_shards) == shard]
+        log.info(f"Shard {shard}/{total_shards}: {len(pairs)} boards assigned")
 
-    return pages
+    ats_counts: dict[str, int] = {}
+    for ats, _ in pairs:
+        ats_counts[ats] = ats_counts.get(ats, 0) + 1
 
+    for ats in sorted(ats_counts, key=lambda a: -ats_counts[a]):
+        log.info(f"  {ats}: {ats_counts[ats]} companies")
+    log.info(f"Total: {len(pairs)} boards across {len(ats_counts)} ATS platforms")
 
-# ── JSON-LD extraction ──────────────────────────────────────────────────
-
-_JSONLD_SCRIPT_RE = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.I | re.S)
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _strip_html(text: str, max_len: int = 4000) -> str:
-    if not text:
-        return ""
-    text = _TAG_RE.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:max_len]
+    return pairs
 
 
-def _iter_jsonld_objects(html: str):
-    """Yields every dict-shaped JSON-LD object on the page, flattening
-    both top-level arrays and @graph wrappers — real-world JSON-LD shows
-    up in all three shapes depending on the CMS/plugin that emitted it."""
-    for m in _JSONLD_SCRIPT_RE.finditer(html):
-        raw = m.group(1).strip()
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError, RecursionError):
-            continue
-        items = data if isinstance(data, list) else [data]
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            graph = item.get("@graph")
-            if isinstance(graph, list):
-                for g in graph:
-                    if isinstance(g, dict):
-                        yield g
-            else:
-                yield item
+def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set[tuple[str, str]]]:
+    """Scrape all boards in parallel, grouped by ATS platform.
+    Returns (jobs, boards_ok, boards_failed, boards_with_roles).
+
+    `boards_with_roles` (2026-09) is the set of (ats, slug) pairs that
+    returned at least one RAW job posting this run — i.e. straight off
+    scrape_board(), before filter_roles()'s CSM/AM-only filter and before
+    filter_locations()'s Global/Africa filter. This is deliberate, per an
+    explicit user instruction: archive_i's last_seen is repurposed (see
+    supabase_handler.touch_archive_i_last_seen) to mean "this slug had ANY
+    role at all," not "had a CSM/AM role," and specifically must NOT be
+    scoped to customer-success-shaped titles — a CEO opening counts just
+    as much as a CSM one. Computing this set here, from the same raw
+    per-board result scrape_board() already returns, means the signal
+    is correct regardless of what filter_roles()/filter_locations() later
+    decide to keep for the `jobs` table."""
+    all_jobs = []
+    total_ok = 0
+    total_failed = 0
+    boards_with_roles: set[tuple[str, str]] = set()
+
+    # Group boards by ATS to apply per-platform concurrency
+    by_ats = {}
+    for ats, slug in boards:
+        by_ats.setdefault(ats, []).append(slug)
+
+    def _scrape_platform(ats: str, slugs: list[str]) -> tuple[int, int, list[dict], set[tuple[str, str]]]:
+        """Scrape one ATS platform with appropriate concurrency."""
+        workers = PLATFORM_WORKERS.get(ats, 8)
+        platform_jobs = []
+        platform_failed = 0
+        platform_boards_with_roles: set[tuple[str, str]] = set()
+
+        def _do_scrape(slug):
+            return slug, scrape_board(ats, slug)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_do_scrape, s): s for s in slugs}
+            for future in as_completed(futures):
+                try:
+                    slug, jobs = future.result()
+                    if jobs:
+                        platform_jobs.extend(jobs)
+                        platform_boards_with_roles.add((ats, slug))
+                except Exception as e:
+                    platform_failed += 1
+                    if platform_failed <= 3:  # log first 3 errors per platform
+                        log.error(f"  {ats} scrape error: {e}")
+
+        return len(slugs) - platform_failed, platform_failed, platform_jobs, platform_boards_with_roles
+
+    # Run all platforms concurrently — each has its own per-platform worker limit
+    with ThreadPoolExecutor(max_workers=len(by_ats)) as platform_pool:
+        platform_futures = {}
+        for ats, slugs in by_ats.items():
+            f = platform_pool.submit(_scrape_platform, ats, slugs)
+            platform_futures[f] = ats
+
+        for future in as_completed(platform_futures):
+            ats = platform_futures[future]
+            try:
+                ok, bad, jobs, with_roles = future.result()
+                all_jobs.extend(jobs)
+                total_ok += ok
+                total_failed += bad
+                boards_with_roles |= with_roles
+                log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
+            except Exception as e:
+                log.error(f"  {ats}: platform error: {e}")
+
+    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed, "
+             f"{len(boards_with_roles)} boards had >=1 role)")
+    return all_jobs, total_ok, total_failed, boards_with_roles
 
 
-def _is_jobposting(item: dict) -> bool:
-    t = item.get("@type")
-    types = t if isinstance(t, list) else [t]
-    return any(isinstance(x, str) and x.lower() == "jobposting" for x in types)
+def filter_roles(jobs: list[dict]) -> list[dict]:
+    """Stage 1+2: Keep only CSM/AM roles."""
+    included = []
+    unsure = []
 
-
-def _is_expired(valid_through) -> bool:
-    """A JobPosting still present on the page but past its own
-    validThrough date is a stale listing the site just hasn't taken down
-    yet — real evidence it shouldn't be trusted as a currently-open role."""
-    if not valid_through or not isinstance(valid_through, str):
-        return False
-    try:
-        d = datetime.fromisoformat(valid_through.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    now = datetime.now(d.tzinfo) if d.tzinfo else datetime.now()
-    return d < now
-
-
-def _jsonld_location(item: dict) -> str:
-    loc = item.get("jobLocation")
-    if isinstance(loc, list):
-        loc = loc[0] if loc else None
-    if isinstance(loc, dict):
-        addr = loc.get("address")
-        if isinstance(addr, dict):
-            parts = [addr.get(k) for k in ("addressLocality", "addressRegion", "addressCountry")]
-            parts = [p for p in parts if p and isinstance(p, str)]
-            if parts:
-                return ", ".join(parts)
-    # Remote-style postings often carry this instead of (or alongside) jobLocation
-    if item.get("jobLocationType") == "TELECOMMUTE":
-        req = item.get("applicantLocationRequirements")
-        names = []
-        if isinstance(req, dict):
-            names = [req.get("name")] if req.get("name") else []
-        elif isinstance(req, list):
-            names = [r.get("name") for r in req if isinstance(r, dict) and r.get("name")]
-        return f"Remote ({', '.join(names)})" if names else "Remote"
-    return ""
-
-
-def _extract_jsonld_jobs(html: str, page_url: str, company: str) -> list[dict]:
-    postings = []
-    seen_urls = set()
-    for item in _iter_jsonld_objects(html):
-        if not _is_jobposting(item):
-            continue
-        title = str(item.get("title") or "").strip()
-        if not title or _is_expired(item.get("validThrough")):
-            continue
-        url = item.get("url") or item.get("directApply") or page_url
-        if isinstance(url, dict):
-            url = url.get("url", page_url)
-        url = urljoin(page_url, str(url))
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        org = item.get("hiringOrganization")
-        org_name = org.get("name") if isinstance(org, dict) else None
-        postings.append({
-            "title": title[:500],
-            "url": url,
-            "location": _jsonld_location(item),
-            "description": _strip_html(item.get("description", "")),
-            "company": org_name or company,
-            "source_ats": DEFAULT_ATS_LABEL,
-            "clearance": "",
-        })
-    return postings
-
-
-# ── Heuristic repeated-card extraction (used only when JSON-LD found nothing) ──
-
-_JOB_HREF_RE = re.compile(
-    r"/(?:job|jobs|career|careers|position|positions|opening|openings|"
-    r"vacanc(?:y|ies)|opportunit(?:y|ies)|role|roles)/[\w\-./%]+", re.I)
-
-_NAV_TEXT_BLOCKLIST_RE = re.compile(
-    r"^(home|about( us)?|contact( us)?|blog|news|press|privacy( policy)?|terms"
-    r"( (of|and) (service|conditions|use))?|cookies?( policy)?|"
-    r"sign[\s-]?in|log[\s-]?in|sign[\s-]?up|register|faq|help|support|our team|"
-    r"careers?|open positions?|current openings?|view all( jobs)?|see all|"
-    r"learn more|read more|apply( now)?|search|filter|next|previous|"
-    r"load more|back to (search|jobs|careers)|share this job)$", re.I)
-
-
-def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
-    try:
-        tree = LexborHTMLParser(html)
-    except Exception:
-        return []
-
-    candidates: dict[str, dict] = {}
-    fingerprint_groups: dict[tuple, list] = {}
-
-    for a in tree.css("a[href]"):
-        href = a.attributes.get("href") or ""
-        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
-            continue
-        text = a.text(deep=True, separator=" ").strip()
-        text = re.sub(r"\s+", " ", text)
-        word_count = len(text.split())
-        # A real job title reads like a short phrase, not a single nav word
-        # and not a whole sentence/paragraph — 2-12 words in practice.
-        if not text or word_count < 2 or word_count > 12:
-            continue
-        if _NAV_TEXT_BLOCKLIST_RE.match(text.strip()):
-            continue
-
-        full_url = urljoin(page_url, href)
-        parsed = urlparse(full_url)
-        if parsed.scheme not in ("http", "https"):
-            continue
-
-        if _JOB_HREF_RE.search(href):
-            candidates.setdefault(full_url, {"title": text[:300], "url": full_url})
-            continue
-
-        parent = a.parent
-        if parent is None:
-            continue
-        fp = (parent.tag, parent.attributes.get("class") or "")
-        fingerprint_groups.setdefault(fp, []).append((full_url, text))
-
-    for (tag, cls), items in fingerprint_groups.items():
-        # A shared class is a strong repetition signal (3+ siblings); with
-        # no class to key on at all, require a bigger group (5+) since
-        # tag-only repetition (e.g. every <li> on the page) is much weaker.
-        min_group = 3 if cls else 5
-        seen_in_group = set()
-        unique_items = []
-        for url, text in items:
-            if url in seen_in_group:
-                continue
-            seen_in_group.add(url)
-            unique_items.append((url, text))
-        if len(unique_items) < min_group:
-            continue
-        for url, text in unique_items:
-            candidates.setdefault(url, {"title": text[:300], "url": url})
-
-    return list(candidates.values())
-
-
-_STRONG_JOB_PAGE_PHRASES = [
-    "apply now", "apply today", "apply for this", "apply for this job",
-    "apply for this position", "job description", "responsibilities",
-    "qualifications", "requirements", "what you'll do", "what you will do",
-    "about the role", "about this role", "employment type", "job type",
-    "submit your application", "submit an application", "job summary",
-    "key responsibilities", "who you are", "what we're looking for",
-]
-_MIN_JOB_DETAIL_TEXT_CHARS = 200
-
-
-def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) -> dict | None:
-    """A candidate link alone is never trusted — this is the gate that
-    keeps a heuristic hit from becoming a written job. Requires BOTH a
-    real amount of body text (rules out a soft-404/stub/redirect-to-
-    homepage-in-disguise, same failure mode node.py's career-page quality
-    gate exists for) AND at least one phrase that specifically reads like
-    a job posting, not just any content page of similar length."""
-    text = _strip_html(detail_html, max_len=20000)
-    if len(text) < _MIN_JOB_DETAIL_TEXT_CHARS:
-        return None
-    text_lower = text.lower()
-    if not any(p in text_lower for p in _STRONG_JOB_PAGE_PHRASES):
-        return None
-    return {
-        "title": candidate["title"],
-        "url": candidate["url"],
-        # No reliable structured location signal from a heuristic hit —
-        # left blank deliberately so classifier.py's own "blank → unsure,
-        # let the AI stage look at it" path handles it, exactly like an
-        # ATS board with a blank location field would.
-        "location": "",
-        "description": text[:4000],
-        "company": company,
-        "source_ats": DEFAULT_ATS_LABEL,
-        "clearance": "",
-    }
-
-
-def _company_name_from_domain(website_url: str) -> str:
-    host = urlparse(website_url).netloc or website_url
-    host = re.sub(r"^www\.", "", host)
-    return host.split(":")[0] or website_url
-
-
-# ── Per-page extraction ─────────────────────────────────────────────────
-
-async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                                      page: dict, stats: dict,
-                                      parse_pool: concurrent.futures.Executor) -> list[dict]:
-    """page: {"career_page_url","website_url"}. Returns candidate job dicts
-    — NOT yet role/location filtered, see _run_pipeline_ii for that.
-
-    2026-08 — two real bottlenecks fixed here:
-
-    1. Every CPU-bound parse call (_extract_jsonld_jobs, LexborHTMLParser-
-       based _find_heuristic_candidates, _confirm_and_build_posting) used
-       to run INLINE on the event loop — worse than node.py's old
-       ProcessPoolExecutor(1 worker) bug, since it wasn't even offloaded
-       to a second worker: it blocked the entire event loop, including
-       every other page's in-flight fetch, for the full duration of each
-       parse. Now offloaded via loop.run_in_executor(parse_pool, ...),
-       same ThreadPoolExecutor pattern as node.py's crawl_one/PARSE_WORKERS.
-
-    2. The up-to-MAX_HEURISTIC_CANDIDATES_PER_PAGE (25) detail-page
-       fetches were a sequential `for cand in candidates: await ...` loop
-       — one at a time, not concurrent, on a page that could have up to
-       25 candidates. Now fetched concurrently via asyncio.gather (same
-       per-fetch semaphore gating as before, just no longer serialized)."""
-    loop = asyncio.get_running_loop()
-    async with sem:
-        fetched = await node._fetch_page(session, page["career_page_url"], stats)
-    if not fetched:
-        stats["page_unreachable"] += 1
-        return []
-    final_url, html = fetched
-    company = _company_name_from_domain(page["website_url"])
-
-    jsonld_jobs = await loop.run_in_executor(parse_pool, _extract_jsonld_jobs, html, final_url, company)
-    if jsonld_jobs:
-        stats["jsonld_pages"] += 1
-        stats["jsonld_postings"] += len(jsonld_jobs)
-        return jsonld_jobs
-
-    candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, final_url)
-    if not candidates:
-        stats["no_postings_found"] += 1
-        return []
-    stats["heuristic_pages"] += 1
-    candidates = candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
-
-    async def _fetch_and_confirm(cand: dict) -> dict | None:
-        async with sem:
-            detail = await node._fetch_page(session, cand["url"], stats)
-        if not detail:
-            return None
-        _, detail_html = detail
-        return await loop.run_in_executor(parse_pool, _confirm_and_build_posting, detail_html, cand, company)
-
-    results = await asyncio.gather(*(_fetch_and_confirm(c) for c in candidates))
-    confirmed = [r for r in results if r]
-    stats["heuristic_postings"] += len(confirmed)
-    return confirmed
-
-
-# ── Classification + push (mirrors crawl_i.py's role/location/visa funnel) ──
-
-def _filter_roles(jobs: list[dict]) -> list[dict]:
-    included, unsure = [], []
     for job in jobs:
         result = keyword_classify_role(job["title"])
         if result == "include":
             included.append(job)
         elif result == "unsure":
             unsure.append(job)
+
+    log.info(f"Role filter: {len(included)} keyword match, {len(unsure)} unsure → sending to AI")
+
     if unsure:
-        ai_results = ai_classify_roles([j["title"] for j in unsure])
+        unsure_titles = [j["title"] for j in unsure]
+        ai_results = ai_classify_roles(unsure_titles)
         for job in unsure:
             if ai_results.get(job["title"], False):
                 included.append(job)
+
+    log.info(f"After role filter: {len(included)} CSM/AM jobs")
     return included
 
 
-def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
-    matched, confidences, unsure_jobs = [], [], []
+def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
+    """
+    Stage 3+4: Keep only global/Africa-eligible jobs.
+
+    Also tags each matched job with job["location_priority"]:
+      1 = Global   (explicit worldwide/anywhere/global-hiring signal)
+      2 = Africa   (Africa continent, or bare EMEA)
+      3 = Unsure   (kept as a plausible remote match, but AI/keyword
+                    evidence didn't confirm which of the above it is)
+    This is what jobs.location_priority (already in the schema) sorts on,
+    so Global rows surface before Africa rows before "maybe" rows.
+    """
+    matched = []
+    matched_confidences = []
+    unsure_jobs = []
+
     for job in jobs:
         result, priority = _keyword_classify_location_detail(job)
         if result == "match":
             job["clearance"] = "regex"
-            job["location_priority"] = priority
+            job["location_priority"] = priority  # PRIORITY_GLOBAL or PRIORITY_AFRICA
             matched.append(job)
-            confidences.append("match")
+            matched_confidences.append("match")
         elif result == "unsure":
             unsure_jobs.append(job)
 
+    log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
+
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
-        for job, label in zip(unsure_jobs, ai_results):
+        for job, (label, provider_name) in zip(unsure_jobs, ai_results):
+            # provider_name is whichever of LOCATION_PROVIDERS actually
+            # classified this job — returned directly by ai_classify_locations
+            # (2026-09: was re-derived here via a separate i%len(LOCATION_PROVIDERS)
+            # round-robin that could silently drift out of sync with the one
+            # ai_classify_locations does internally; see that function's docstring).
             if label == "match_global":
-                job["clearance"] = "ai"
+                # AI found genuinely worldwide-hiring evidence in the title/
+                # description that the location field itself never stated.
+                job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_GLOBAL
                 matched.append(job)
-                confidences.append("match")
+                matched_confidences.append("match")
             elif label == "match_africa":
-                job["clearance"] = "ai"
+                # AI found Africa-continent or bare-EMEA evidence in the
+                # title/description — same tier as a keyword-level Africa
+                # match, just discovered via the AI stage instead.
+                job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
-                confidences.append("match")
+                matched_confidences.append("match")
             elif label == "uncertain":
-                job["clearance"] = "ai"
+                job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
-                confidences.append("uncertain")
-            # "no_match" → drop
+                matched_confidences.append("uncertain")
+            # "no_match" → drop; AI failure defaults to "uncertain" (included)
 
-    return matched, confidences
-
-
-def _push_batch(candidate_jobs: list[dict], existing_urls: set[str]) -> int:
-    """Runs one micro-batch of raw candidate postings through the same
-    role → location → visa funnel crawl_i.py uses, then upserts survivors,
-    tagged source_pipeline='crawl_ii'. Returns count of new jobs added.
-
-    2026-08: dedups against `existing_urls` BEFORE the role/location
-    funnel — a posting whose URL is already in `jobs` was already
-    classified in a prior run (or an earlier micro-batch this same
-    shard), so re-running keyword_classify_role/ai_classify_roles/
-    ai_classify_locations on it is a pure waste of LLM calls. Those
-    skipped postings just get last_seen/is_active refreshed via
-    touch_seen_jobs_raw() instead. `existing_urls` is shared/mutated
-    across every micro-batch in this shard (see crawl_batch_ii) so a
-    posting re-surfacing across batches only ever gets classified once."""
-    if not candidate_jobs:
-        return 0
-
-    new_jobs, already_seen = [], []
-    for job in candidate_jobs:
-        url = job.get("url", "")
-        if url and url in existing_urls:
-            already_seen.append(job)
-        else:
-            new_jobs.append(job)
-    if already_seen:
-        touch_seen_jobs_raw(already_seen)
-        for job in already_seen:
-            existing_urls.add(job.get("url", ""))
-    if not new_jobs:
-        return 0
-
-    role_matched = _filter_roles(new_jobs)
-    if not role_matched:
-        return 0
-    global_jobs, confidences = _filter_locations(role_matched)
-    if not global_jobs:
-        return 0
-    for job in global_jobs:
-        job["visa_sponsorship"] = detect_visa_sponsorship(job)
-    added = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE,
-                            existing_urls=existing_urls)
-    return added
+    log.info(f"After location filter: {len(matched)} global/Africa jobs")
+    return matched, matched_confidences
 
 
-# ── Shared batch driver ─────────────────────────────────────────────────
+def _run_pipeline(boards: list[tuple[str, str]]) -> None:
+    """Shared core: scrape → filter → enrich → push, with its own
+    scan_report row. Does NOT run cleanup_stale_jobs() — see
+    run_finalize() for why that's split out.
 
-async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                          stats: dict, crawl_start: float, time_budget_seconds: float,
-                          time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
-                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
-    """Crawls archive_ii pages in sub-batches: fetch+extract concurrently
-    per page, then run the classification funnel and push once per
-    sub-batch (same shape as node.py's crawl_batch/crawl_i.py's scrape_all
-    — micro-batching keeps memory bounded and gives partial progress if
-    the time budget is hit mid-run). Returns (pages_done, jobs_added,
-    time_budget_hit).
+    2026-08: job board aggregators (RemoteOK, Remotive, etc. — see
+    job_board_scrapers.py) were disabled and the file removed entirely —
+    ATS boards are now the only source Crawl I scrapes."""
+    report_id = start_scan_report()
 
-    2026-08: fetches `jobs.job_url` from Supabase ONCE here, up front, and
-    threads that same set through every micro-batch's _push_batch() call
-    — both so already-known postings skip LLM classification (see
-    _push_batch's docstring) and so add_jobs_batch() never re-pulls the
-    whole `jobs` table on every single micro-batch like it used to."""
-    total_added = 0
-    time_budget_hit = False
-    existing_urls = get_existing_urls()
+    try:
+        all_jobs: list[dict] = []
+        boards_ok = boards_failed = 0
+        boards_with_roles: set[tuple[str, str]] = set()
 
-    for i in range(0, len(pages), batch_size):
-        if time.monotonic() - crawl_start >= time_budget_seconds:
-            time_budget_hit = True
-            log.warning(f"  time budget ({time_budget_minutes}min) reached at {i}/{len(pages)} "
-                        f"pages — stopping here, everything found so far is written.")
-            break
-        batch = pages[i:i + batch_size]
-        results = await asyncio.gather(
-            *(extract_postings_from_page(session, sem, p, stats, parse_pool) for p in batch))
-        candidate_jobs = [job for page_jobs in results for job in page_jobs]
+        if boards:
+            log.info(f"\nScraping {len(boards)} boards across "
+                     f"{len(set(a for a, _ in boards))} ATS platforms...")
+            all_jobs, boards_ok, boards_failed, boards_with_roles = scrape_all(boards)
 
-        # 2026-09: repurpose archive_ii.last_seen to mean "last time this
-        # page had ANY role at all" (same instruction, same reasoning as
-        # crawl_i.py's touch_archive_i_last_seen — these are the RAW
-        # candidate_jobs, before _push_batch's role/location filtering
-        # funnel, so any posting counts, not just CSM/AM ones).
-        pages_with_roles = {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
-        if pages_with_roles:
-            touch_archive_ii_last_seen(pages_with_roles)
+        # 2026-09: repurpose archive_i.last_seen to mean "last time this
+        # slug had ANY role at all" (per explicit user instruction) rather
+        # than "last time discovery re-confirmed the ATS page exists" —
+        # touch it here, from the RAW per-board scrape result, regardless
+        # of whether any of these jobs go on to pass CSM/AM or Global/
+        # Africa filtering below (a CEO opening counts the same as a CSM
+        # one). No-op (0 touched) when boards_with_roles is empty, e.g. on
+        # a totally job-less shard.
+        if boards_with_roles:
+            touch_archive_i_last_seen(boards_with_roles)
 
-        added = _push_batch(candidate_jobs, existing_urls)
-        total_added += added
+        if not all_jobs:
+            log.info("No jobs found across any source.")
+            if report_id:
+                finish_scan_report(report_id, boards_scanned=boards_ok, boards_failed=boards_failed)
+            return
 
-        done = min(i + batch_size, len(pages))
-        elapsed = time.monotonic() - crawl_start
-        rate = stats["requests_attempted"] / elapsed if elapsed > 0 else 0
-        log.info(f"  {done}/{len(pages)} pages — {rate:.1f} req/sec — {elapsed:.0f}s elapsed — "
-                 f"{len(candidate_jobs)} candidates this batch, {added} new jobs written "
-                 f"({total_added} total)")
+        raw_scraped_count = len(all_jobs)
 
-    return min(len(pages), i + batch_size) if pages else 0, total_added, time_budget_hit
+        # 2026-08: dedup against Supabase BEFORE classification — a job
+        # whose URL is already in `jobs` is one we've already classified
+        # in a prior run; sending it through keyword_classify_role/
+        # ai_classify_roles/ai_classify_locations again just burns LLM
+        # calls (and time) to re-derive an answer we already have. Only
+        # genuinely new URLs go on to filter_roles() below; already-known
+        # ones just get last_seen/is_active refreshed directly.
+        log.info(f"\nChecking Supabase for already-known jobs (skip re-classification)...")
+        existing_urls = get_existing_urls()
+        new_jobs, already_seen = [], []
+        for job in all_jobs:
+            url = job.get("url", "")
+            if url and url in existing_urls:
+                already_seen.append(job)
+            else:
+                new_jobs.append(job)
+        if already_seen:
+            log.info(f"  {len(already_seen)}/{raw_scraped_count} jobs already known — "
+                     f"skipping LLM classification, just refreshing last_seen")
+            touch_seen_jobs_raw(already_seen)
+        if not new_jobs:
+            log.info("No new (previously unseen) jobs to classify.")
+            if report_id:
+                finish_scan_report(
+                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
+                    total_jobs_raw=raw_scraped_count, duplicates=len(already_seen),
+                )
+            return
+        all_jobs = new_jobs
 
+        # Filter for CSM/AM roles
+        log.info(f"\nFiltering for CSM/AM roles...")
+        csm_jobs = filter_roles(all_jobs)
+        if not csm_jobs:
+            log.info("No CSM/AM roles found.")
+            if report_id:
+                finish_scan_report(
+                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
+                    total_jobs_raw=raw_scraped_count,
+                )
+            return
 
-def new_connector() -> aiohttp.TCPConnector:
-    return node.new_connector()
+        # Enrich descriptions for platforms that lack them
+        log.info(f"\nFetching descriptions for jobs missing them...")
+        csm_jobs = enrich_descriptions(csm_jobs)
 
+        # Fetch application questions for location-"unsure" jobs, across
+        # all 20 ATS platforms (multi-tier fallback — see ats_scrapers.py).
+        # Work authorization questions help the AI detect country-restricted roles
+        log.info(f"\nEnriching application questions across all ATS platforms...")
+        csm_jobs = enrich_application_questions(csm_jobs)
 
-# ── Finalize ─────────────────────────────────────────────────────────────
+        # Filter for Africa/Global locations
+        log.info(f"\nFiltering for Africa/Global eligibility...")
+        global_jobs, confidences = filter_locations(csm_jobs)
+        if not global_jobs:
+            log.info("No global/Africa-eligible CSM/AM roles found.")
+            if report_id:
+                finish_scan_report(
+                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
+                    total_jobs_raw=raw_scraped_count, csm_roles=len(csm_jobs),
+                )
+            return
+
+        # Detect visa sponsorship from descriptions (before discarding them)
+        for job in global_jobs:
+            job["visa_sponsorship"] = detect_visa_sponsorship(job)
+
+        # Push to Supabase — pass the already-fetched existing_urls through
+        # so add_jobs_batch doesn't re-pull the whole `jobs` table again.
+        log.info(f"\nPushing {len(global_jobs)} jobs to Supabase...")
+        added = add_jobs_batch(global_jobs, confidences, existing_urls=existing_urls)
+
+        # Finalize this run's report. `duplicates` now counts BOTH kinds:
+        # pre-classification skips (already_seen) and any post-classification
+        # re-matches (global_jobs that still weren't a true first-insert —
+        # should be rare now, but not impossible with in-run URL reuse).
+        duplicates = len(already_seen) + (len(global_jobs) - added)
+        if report_id:
+            finish_scan_report(
+                report_id,
+                boards_scanned=boards_ok,
+                boards_failed=boards_failed,
+                total_jobs_raw=raw_scraped_count,
+                csm_roles=len(csm_jobs),
+                global_jobs=len(global_jobs),
+                new_jobs_added=added,
+                duplicates=duplicates,
+            )
+
+        log.info(f"\nDone! {added} new jobs added to Supabase.")
+        log.info(f"   Pipeline: {raw_scraped_count} scraped ({len(already_seen)} already known, "
+                 f"skipped) -> {len(all_jobs)} new -> {len(csm_jobs)} CSM/AM -> "
+                 f"{len(global_jobs)} global -> {added} new")
+
+    except Exception as e:
+        log.error(f"Scanner failed: {e}")
+        if report_id:
+            finish_scan_report(report_id, status="failed")
+        raise
+
 
 def run_finalize() -> None:
-    """Cleanup pass for Crawl II's own rows only (source_pipeline='crawl_ii')
-    — call ONCE, after every Crawl II shard has finished.
+    """Cleanup pass — call this ONCE, after every scraping shard has
+    finished (gate with `needs:` in CI so this doesn't start until
+    they're done).
 
-    Deletion policy (2026-09, at explicit user instruction: both Crawl I
-    and Crawl II must delete jobs past 30 days): mark-inactive at 30 days,
-    hard-delete at 31 — same as Crawl I's window (see crawl_i.py's
-    run_finalize). Previously used a more conservative 45-day hard-delete
-    window (2026-08, my own default at the time, chosen because Crawl II
-    was a brand-new heuristic pipeline with no production track record —
-    see git history for that original reasoning) — superseded by the
-    explicit 30-day instruction rather than left as a standing exception."""
+    This is deliberately a separate step rather than the last line of each
+    shard's own run. cleanup_stale_jobs() marks/deletes jobs across the
+    WHOLE table based on how long ago they were last "seen" — if it ran
+    inside an individual shard, whichever shard happened to finish first
+    would run a global cleanup pass while slower shards were still
+    mid-scan, and could hard-delete a job belonging to a slow shard's
+    company moments before that shard was about to re-scrape and refresh
+    its last_seen date. Splitting this out into its own `needs`-gated job
+    removes that race entirely.
+
+    2026-08: delete_days dropped from 60 to 31 (per user instruction), and
+    scoped to source_pipeline='crawl_i' only — Crawl II runs its own
+    separate finalize (crawl_ii.py) with its own policy, and neither
+    pipeline's cleanup should be able to touch the other's rows."""
     log.info("=" * 60)
-    log.info("CRAWL II — finalize (cleanup stale jobs)")
+    log.info("CRAWL I — finalize (cleanup stale jobs)")
     log.info("=" * 60)
-    summary = cleanup_stale_jobs(inactive_days=30, delete_days=31, source_pipeline=SOURCE_PIPELINE)
-    log.info(f"Crawl II finalize summary: inactive cutoff {summary['inactive_cutoff']} "
+    summary = cleanup_stale_jobs(inactive_days=30, delete_days=31, source_pipeline="crawl_i")
+    log.info(f"Crawl I finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────
-
-async def _run_shard(shard: int, total_shards: int) -> None:
-    log.info("=" * 60)
-    log.info(f"CRAWL II — starting (shard {shard}/{total_shards})")
-    log.info("=" * 60)
-
-    try:
-        pages = load_pages(shard=shard, total_shards=total_shards)
-    except SupabaseFetchError as e:
-        log.error(f"Failed to load archive_ii pages from Supabase after retries — aborting shard: {e}")
-        sys.exit(1)
-
-    if not pages:
-        log.warning(f"Shard {shard}/{total_shards}: no pages assigned, nothing to do.")
-        return
-
-    stats = {
-        "requests_attempted": 0, "fetched_ok": 0, "http_error": 0, "status_404": 0,
-        "non_html": 0, "timeout": 0, "unreachable": 0,
-        "page_unreachable": 0, "jsonld_pages": 0, "jsonld_postings": 0,
-        "heuristic_pages": 0, "heuristic_postings": 0, "no_postings_found": 0,
-    }
-    sem = asyncio.Semaphore(CRAWL_CONCURRENCY)
-    connector = new_connector()
-    crawl_start = time.monotonic()
-    time_budget_seconds = TIME_BUDGET_MINUTES * 60
-    # Shared ThreadPoolExecutor for every CPU-bound parse call this shard
-    # makes (see extract_postings_from_page's docstring) — same
-    # new_parse_pool() node.py's own crawl engine uses.
-    parse_pool = node.new_parse_pool()
-
-    try:
-        async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
-            done, added, time_budget_hit = await crawl_batch_ii(
-                pages, session, sem, stats, crawl_start, time_budget_seconds,
-                TIME_BUDGET_MINUTES, parse_pool)
-    finally:
-        parse_pool.shutdown(wait=False)
-
-    status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
-    log.info(f"── shard {shard}/{total_shards} {status}: {done}/{len(pages)} pages, "
-             f"{added} new jobs written ──")
-    log.info(f"  JSON-LD: {stats['jsonld_pages']} pages, {stats['jsonld_postings']} postings found")
-    log.info(f"  Heuristic: {stats['heuristic_pages']} pages, {stats['heuristic_postings']} "
-             f"postings confirmed")
-    log.info(f"  Unreachable/no-signal: {stats['page_unreachable']} pages unreachable, "
-             f"{stats['no_postings_found']} pages with no postings found")
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Crawl II — heuristic archive_ii scraper")
+    parser = argparse.ArgumentParser(description="Crawl I — ATS Global Scanner")
     parser.add_argument("--shard", type=int, default=0,
                          help="This shard's index (0-based), for GitHub Actions matrix parallelism")
     parser.add_argument("--total-shards", type=int, default=1,
-                         help="Total number of shards; each processes ~1/N of archive_ii")
+                         help="Total number of shards; each processes ~1/N of the ATS boards")
     parser.add_argument("--finalize", action="store_true",
-                         help="Only run cleanup (mark/delete stale crawl_ii jobs) — call once "
-                              "after all shards finish")
+                         help="Only run cleanup (mark/delete stale jobs) — call once after all shards finish")
     args = parser.parse_args()
+
+    mode_note = ""
+    if args.total_shards > 1:
+        mode_note = f" (shard {args.shard}/{args.total_shards})"
+    elif args.finalize:
+        mode_note = " (finalize)"
+
+    log.info("=" * 60)
+    log.info(f"CRAWL I — starting{mode_note}")
+    log.info("=" * 60)
 
     if args.finalize:
         run_finalize()
         return
 
-    asyncio.run(_run_shard(args.shard, args.total_shards))
+    log.info("Loading company slugs from Supabase...")
+    try:
+        boards = load_slugs(shard=args.shard, total_shards=args.total_shards)
+    except SupabaseFetchError as e:
+        # A real fetch failure (e.g. the one-off 401 that made shard 2/8
+        # silently scrape nothing) is NOT the same as "this shard
+        # legitimately has zero boards" below — it must fail loudly
+        # (non-zero exit) so the GitHub Actions job shows red instead of
+        # a quiet, misleading "completed" with 0 jobs found.
+        log.error(f"Failed to load slugs from Supabase after retries — aborting shard: {e}")
+        sys.exit(1)
+    if not boards:
+        if args.total_shards == 1:
+            log.error("No boards to scrape.")
+            return
+        # A single shard legitimately CAN come back empty (e.g. more
+        # shards than boards on some platform) — not an error, just
+        # nothing for this shard to do.
+        log.warning(f"Shard {args.shard}/{args.total_shards}: no boards assigned, skipping ATS scrape.")
+
+    _run_pipeline(boards)
+
+    # Only the unsharded, manual/local full run does cleanup inline.
+    # Sharded CI runs call `--finalize` as their own separate, `needs`-gated
+    # step instead (see run_finalize() docstring for why that matters).
+    if args.total_shards == 1:
+        run_finalize()
 
 
 if __name__ == "__main__":
