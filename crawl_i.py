@@ -43,7 +43,6 @@ import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config import LLM_PROVIDER, LOCATION_PROVIDERS
 from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions, SCRAPERS
 from classifier import (
     keyword_classify_role, ai_classify_roles,
@@ -326,13 +325,16 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
-        for i, (job, label) in enumerate(zip(unsure_jobs, ai_results)):
-            # Determine which provider classified this job (round-robin assignment)
-            provider_name = LOCATION_PROVIDERS[i % len(LOCATION_PROVIDERS)]["name"]
+        for job, (label, provider_name) in zip(unsure_jobs, ai_results):
+            # provider_name is whichever of LOCATION_PROVIDERS actually
+            # classified this job — returned directly by ai_classify_locations
+            # (2026-09: was re-derived here via a separate i%len(LOCATION_PROVIDERS)
+            # round-robin that could silently drift out of sync with the one
+            # ai_classify_locations does internally; see that function's docstring).
             if label == "match_global":
                 # AI found genuinely worldwide-hiring evidence in the title/
                 # description that the location field itself never stated.
-                job["clearance"] = provider_name
+                job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_GLOBAL
                 matched.append(job)
                 matched_confidences.append("match")
@@ -340,12 +342,12 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # AI found Africa-continent or bare-EMEA evidence in the
                 # title/description — same tier as a keyword-level Africa
                 # match, just discovered via the AI stage instead.
-                job["clearance"] = provider_name
+                job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 matched_confidences.append("match")
             elif label == "uncertain":
-                job["clearance"] = provider_name
+                job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
                 matched_confidences.append("uncertain")
