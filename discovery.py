@@ -237,10 +237,8 @@ SUPPORTED_ATS = {
 # them) — they scrape fine once a slug row exists, this file just
 # doesn't discover new ones for them yet.
 
-# BLACKLISTED — scrapers exist but don't work (robots.txt / JS-rendered):
-# brassring, successfactors
-# ycombinator is no longer per-company here — it moved to
-# job_board_scrapers.py as a multi-company aggregator (see there).
+# BLACKLISTED ATS platforms (no discovery, no scraper) — see
+# BLACKLISTED_ATS.md at the repo root for the full list and reasons.
 
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
@@ -281,9 +279,8 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "zoho recruit": "zoho",
     "zohorecruit": "zoho",
     "softgarden": "softgarden",
-    # Disabled platforms (kept for reference):
-    # "brassring", "successfactors"
-    # ycombinator moved to job_board_scrapers.py — no longer mapped here.
+    "brassring": "brassring",
+    "successfactors": "successfactors",
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -555,6 +552,8 @@ def _url_to_slug_oracle_cloud(url: str) -> str | None:
     return host_prefix
 
 
+# Restored 2026-09 — mistakenly removed under the wrong assumption
+# BrassRing was JS-rendered. It's a real, working HTTP API scraper.
 def _url_to_slug_brassring(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -593,6 +592,8 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
     return None
 
 
+# Restored 2026-09 — mistakenly removed under the wrong assumption
+# SuccessFactors was JS-rendered. It's a real, working HTTP JSON API scraper.
 def _url_to_slug_successfactors(url: str) -> str | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
