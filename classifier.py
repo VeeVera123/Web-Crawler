@@ -49,6 +49,21 @@ RETRY_BASE_DELAY = 5  # seconds
 # state here, same as _last_call_times below.
 _dead_providers: set[str] = set()
 
+# 2026-09: a provider whose calls keep coming back with null content (not
+# a rate-limit/quota error — the request succeeds, the model just returns
+# nothing) was never being marked dead at all, only retried MAX_RETRIES
+# times per batch and then silently given up on for THAT batch — the next
+# batch would round-robin straight back to it and repeat the same losing
+# cycle, which is exactly the real, live behavior reported: "cerebras
+# returned null content (attempt 3/4)" followed immediately by "rerouting
+# ... to: cerebras, groq, nvidia" — rerouting TO the very provider that
+# just failed. Tracked as strikes (one per batch that exhausts retries on
+# null content alone, not per individual attempt) since a single null
+# response can be a one-off model hiccup; 2 separate batches doing it is a
+# real pattern worth cutting off for the rest of the run.
+_NULL_CONTENT_STRIKE_LIMIT = 2
+_null_content_strikes: dict[str, int] = {}
+
 
 def _mark_provider_dead(name: str, reason: str) -> None:
     """Mark a provider unavailable for the rest of THIS run. Idempotent —
@@ -60,6 +75,20 @@ def _mark_provider_dead(name: str, reason: str) -> None:
     log.warning(f"{name}: unavailable for the rest of this run ({reason}) — "
                 f"remaining work assigned to it will be rerouted to whichever "
                 f"other provider(s) are still live.")
+
+
+def _record_null_content_strike(name: str) -> None:
+    """Called once per batch that exhausted every retry with only null
+    content back (never a real error, never a real answer). After
+    _NULL_CONTENT_STRIKE_LIMIT such batches, treat the provider as dead —
+    same remaining-work reroute behavior as a quota/rate-limit death."""
+    _null_content_strikes[name] = _null_content_strikes.get(name, 0) + 1
+    if _null_content_strikes[name] >= _NULL_CONTENT_STRIKE_LIMIT:
+        _mark_provider_dead(
+            name,
+            f"{_null_content_strikes[name]} batches in a row returned only "
+            f"null content after every retry — treating as broken for this run",
+        )
 
 
 def _make_client(provider: dict):
@@ -130,6 +159,7 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_BASE_DELAY)
                     continue
+                _record_null_content_strike(name)
                 return None
             return content.strip()
         except Exception as e:
@@ -385,6 +415,19 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             "max_batch_chars": 6_000 if LLM_PROVIDER == "cerebras" else 400_000,
             "min_call_interval": 12.5 if LLM_PROVIDER == "cerebras" else 0.0,
         }]
+
+    # 2026-09: a provider marked dead by an EARLIER call to this function
+    # within the same run (e.g. an earlier batch of titles) was previously
+    # still handed a fresh share of work on every new call — only the
+    # reroute pass below checked _dead_providers, so a provider that died
+    # on batch 1 kept getting round-robined new work on batch 2, 3, 4...
+    # for the rest of the run, guaranteeing it would fail again every
+    # time. Filter it out of the INITIAL dispatch too.
+    live_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+    if not live_providers and all_providers:
+        log.error("Role classification: every configured provider is dead for this "
+                  "run — all remaining titles will default to exclude.")
+    all_providers = live_providers or all_providers
 
     results, failed_titles = _dispatch_role_work(titles, all_providers)
 
@@ -1148,6 +1191,15 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         return []
 
     all_providers = LOCATION_PROVIDERS
+    # 2026-09: same dead-provider filter as ai_classify_roles — see that
+    # function's comment. Without this, a provider that died on an earlier
+    # batch this run kept getting fresh work every subsequent call.
+    live_providers = [p for p in all_providers if p["name"] not in _dead_providers]
+    if not live_providers and all_providers:
+        log.error("Location classification: every configured provider is dead for this "
+                  "run — all remaining jobs will stay uncertain.")
+    all_providers = live_providers or all_providers
+
     results, failed_jobs = _dispatch_location_work(jobs, all_providers)
 
     # 2026-09: same reroute-once-then-give-up pattern as ai_classify_roles
