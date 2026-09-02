@@ -1001,17 +1001,39 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     return batches
 
 
-def ai_classify_locations(jobs: list[dict]) -> list[str]:
+def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     """
     Send ambiguous jobs (bare "Remote") to AI for location classification.
-    Uses LOCATION_PROVIDERS (Gemini + OpenAI) concurrently.
+    Uses LOCATION_PROVIDERS (Gemini + OpenAI + whatever else is configured)
+    concurrently.
 
     Jobs are round-robin split across providers, batched per provider's
     context window, and all batches run concurrently.
 
-    Returns list of 'match_global', 'match_africa', 'no_match', or
-    'uncertain' in same order. On rate limit/failure: defaults to
-    'uncertain' (include with flag).
+    Returns a list of (label, provider_name) tuples in the same order as
+    `jobs`, where label is 'match_global', 'match_africa', 'no_match', or
+    'uncertain', and provider_name is whichever provider ('gemini',
+    'openai', ...) actually classified that job — None for a job that
+    never got assigned to a live provider (e.g. every configured provider
+    failed to build a client).
+
+    2026-09: previously returned bare labels, and callers re-derived
+    "which provider did this" themselves via `i % len(LOCATION_PROVIDERS)`
+    — a second, independent copy of the exact round-robin math this
+    function already does internally, which silently drifts out of sync
+    the moment a provider here fails to build a client (that provider's
+    assigned jobs default to 'uncertain' with NO batch ever submitted for
+    them, but the caller's separately-recomputed modulo would still credit
+    the dead provider's name to them). Returning the real provider per job
+    removes that duplicate logic and the drift risk entirely — this is
+    also the fix for jobs.clearance showing the literal string "ai"
+    instead of the actual provider name that classified them, one of the
+    two callers (crawl_ii.py) was never mapping `i % len(LOCATION_PROVIDERS)`
+    at all and just hardcoded "ai".
+
+    On rate limit/failure: defaults to ('uncertain', <provider that tried
+    and failed>) — the provider name is still meaningful there, since a
+    provider whose call failed is still the one that "handled" the job.
     """
     if not jobs:
         return []
@@ -1053,7 +1075,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     log.info(f"Location classification: {len(jobs)} jobs → {len(all_work)} batches "
              f"across {len(providers)} providers ({provider_summary})")
 
-    results = ["uncertain"] * len(jobs)
+    results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
 
     # Run all batches concurrently
     with ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -1067,16 +1089,21 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
             try:
                 batch_results = future.result()
                 for j, label in enumerate(batch_results):
-                    results[orig_indices[j]] = label
+                    results[orig_indices[j]] = (label, pname)
             except Exception as e:
                 log.error(f"Location classification error ({pname}): {e}")
+                # This batch's jobs stay ("uncertain", None) — the provider
+                # that was assigned to them never actually produced a
+                # result, so crediting pname here would be as misleading
+                # as the stale i%len() derivation this replaced.
 
-    classified = sum(1 for r in results if r != "uncertain")
+    labels = [r[0] for r in results]
+    classified = sum(1 for l in labels if l != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
-             f"({results.count('match_global')} match_global, "
-             f"{results.count('match_africa')} match_africa, "
-             f"{results.count('no_match')} no_match, "
-             f"{results.count('uncertain')} uncertain/unclassified)")
+             f"({labels.count('match_global')} match_global, "
+             f"{labels.count('match_africa')} match_africa, "
+             f"{labels.count('no_match')} no_match, "
+             f"{labels.count('uncertain')} uncertain/unclassified)")
 
     return results
 
