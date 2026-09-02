@@ -43,7 +43,7 @@ passes empirically tested real vs fake slugs against every SCRAPERS-
 registered platform's actual endpoint (WebFetch against live real and
 obviously-fake slugs, cross-checked against each platform's own docs).
 18 platforms have a confirmed-safe, structurally distinct "does not
-exist" signal. 8 do not (see _UNVERIFIABLE_ATS below) — either the
+exist" signal. 10 do not (see _UNVERIFIABLE_ATS below) — either the
 platform returns an identical-looking response for "doesn't exist" and
 "real board, 0 jobs" (oracle_cloud_hcm, confirmed empirically: a real
 empty tenant returns the exact same 200+empty-array shape a nonexistent
@@ -52,12 +52,10 @@ probe can safely replicate (workday, smartrecruiters, taleo), or no
 live example could be found/reached to confirm a rule at all (breezyhr,
 jobadder — jobadder's "Nothing here I'm afraid..." page was found to be
 plausibly the SAME message a real empty board shows, an explicitly
-UNSAFE signal — folkshr, adp). Rows on unverifiable platforms, plus
-brassring/successfactors (JS-rendered, no scraper at all — see
-ats_scrapers.py's SCRAPERS dict) and ycombinator (a job-board aggregator,
-not a per-company ATS — see discovery.py's URL_TO_SLUG comment), are
-left completely untouched by this engine and only counted (as
-"unverified") and logged.
+UNSAFE signal — folkshr, adp, brassring, successfactors), or the scraper
+exists but no dead-link verifier has been written for it yet
+(ycombinator). Rows on unverifiable platforms are left completely
+untouched by this engine and only counted (as "unverified") and logged.
 
 SAFETY MODEL (a wrong delete here is real, silent, permanent data loss):
   - report-only is the DEFAULT — run this with no flags and it only logs
@@ -332,9 +330,13 @@ _UNVERIFIABLE_ATS = {
                           # message a real, empty board shows — no way to distinguish
     "folkshr",            # no live customer example could be found/reached to confirm any rule
     "adp",                 # no live customer example could be found/reached to confirm any rule
-    "brassring",          # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
-    "successfactors",     # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
-    "ycombinator",        # job-board aggregator, not a per-company ATS slug (see discovery.py)
+    "ycombinator",        # scraper exists (rebuilt 2026-09, ats_scrapers.py) but no dead-link
+                           # verifier has been written for it yet — left unverified for now,
+                           # not because it's unscrapable.
+    "brassring",          # no live customer example could be found/reached to confirm a
+                           # "does not exist" signal — restored 2026-09 after being wrongly
+                           # blacklisted; still just unverified, not unscrapable.
+    "successfactors",     # same as brassring — restored 2026-09, unverified not unscrapable.
 }
 
 
