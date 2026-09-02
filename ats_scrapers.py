@@ -522,12 +522,25 @@ def scrape_bamboohr(slug: str) -> list[dict]:
     return jobs
 
 
-# ── iCIMS ──────────────────────────────────────────────
+# ── Generic sitemap.xml scraping/fallback ─────────────────
+# 2026-09: iCIMS has always been sitemap-only (there's no JSON API to fall
+# back TO), but that same technique — parse sitemap.xml, filter to URLs
+# that look like job postings, extract a readable title from the URL path
+# — is useful as a FALLBACK for other platforms too, when their real
+# primary method (a JSON API call, an HTML table scrape) returns nothing.
+# A career site's sitemap.xml is often still correct even when the page
+# structure or API response shape has quietly changed underneath a
+# regex/JSON scraper, so trying it before giving up on a company entirely
+# is a cheap, real improvement. Generalized here so every eligible
+# platform shares one implementation instead of copy-pasting iCIMS's.
 
-def scrape_icims(slug: str) -> list[dict]:
-    """iCIMS sitemap scraper — parses sitemap.xml for job URLs.
-    Title is extracted from URL path. No description/location from sitemap."""
-    sitemap_url = f"https://{slug}.icims.com/sitemap.xml"
+def _fetch_sitemap_locs(sitemap_url: str, _depth: int = 0, _max_sub: int = 15) -> list[str]:
+    """Fetch a sitemap.xml URL and return every <loc> text found. Handles
+    both a direct <urlset> (a real sitemap of pages) and a <sitemapindex>
+    (a sitemap OF sitemaps, common on larger career sites) — recurses one
+    level into the index, capped at _max_sub sub-sitemaps so a site with
+    hundreds of them can't turn one fallback attempt into hundreds of
+    requests."""
     headers = {
         "Accept": "application/xml",
         "User-Agent": random.choice(USER_AGENTS),
@@ -541,13 +554,128 @@ def scrape_icims(slug: str) -> list[dict]:
         return []
 
     ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    jobs = []
+    tag = root.tag.rsplit("}", 1)[-1]  # strip namespace, e.g. "{...}sitemapindex" -> "sitemapindex"
 
-    for url_el in root.findall(".//s:url", ns):
-        loc_el = url_el.find("s:loc", ns)
-        if loc_el is None:
+    if tag == "sitemapindex" and _depth == 0:
+        locs = []
+        sub_sitemaps = root.findall(".//s:sitemap/s:loc", ns)[:_max_sub]
+        for loc_el in sub_sitemaps:
+            sub_url = (loc_el.text or "").strip()
+            if sub_url:
+                locs.extend(_fetch_sitemap_locs(sub_url, _depth=_depth + 1))
+        return locs
+
+    return [
+        (loc_el.text or "").strip()
+        for loc_el in root.findall(".//s:url/s:loc", ns)
+        if loc_el.text
+    ]
+
+
+def _title_from_sitemap_url(job_url: str, marker: str) -> str | None:
+    """Extract a readable title from a job URL's path, e.g.
+    '.../jobs/12345/senior-account-executive' -> 'Senior Account Executive'.
+    Returns None if the URL doesn't look like a real job-detail page (just
+    the marker with nothing meaningful after it)."""
+    path = job_url.split(marker, 1)[-1].strip("/")
+    if not path:
+        return None
+    parts = [p for p in path.split("/") if p]
+    # Prefer the LAST segment with letters in it (skips pure-numeric IDs,
+    # e.g. ".../jobs/12345/senior-account-executive" -> the title segment,
+    # not the numeric one before it).
+    for part in reversed(parts):
+        if re.search(r"[a-zA-Z]", part):
+            title = unquote(part).replace("-", " ").replace("_", " ").strip().title()
+            return title if title else None
+    return None
+
+
+# Platforms with a single, predictable per-company subdomain AND a job
+# URL that embeds a readable title slug (not just a numeric ID — a bare
+# ID gives no usable title, so those platforms aren't listed here even
+# if they do publish a sitemap). (domain_template, url_marker,
+# display_name) — domain_template takes the company slug via {slug}.
+SITEMAP_FALLBACK_PLATFORMS = {
+    "teamtailor": ("https://{slug}.teamtailor.com/sitemap.xml", "/jobs/", "Teamtailor"),
+    "breezyhr": ("https://{slug}.breezy.hr/sitemap.xml", "/p/", "BreezyHR"),
+    # NOTE: HRMDirect's real job-detail path format under /employment/ was
+    # not independently confirmed live (only the base "/employment/{path}"
+    # pattern is confirmed, from scrape_hrmdirect's own URL construction)
+    # — the marker is deliberately broad, and _title_from_sitemap_url plus
+    # the openings.php exclusion below filter out the listing/search page
+    # itself so only real per-job paths survive.
+    "hrmdirect": ("https://{slug}.hrmdirect.com/sitemap.xml", "/employment/", "HRMDirect"),
+}
+
+
+def _scrape_via_sitemap_fallback(ats: str, slug: str) -> list[dict]:
+    """Last-resort fallback when a platform's real scraper returned
+    nothing: try that company's sitemap.xml directly. No location/
+    description/department — sitemap.xml carries none of that — so jobs
+    from here are deliberately minimal (title + URL only) and flow through
+    the same downstream role/location AI classification as everything
+    else. `source_ats` is suffixed "(sitemap fallback)" so these are
+    identifiable in the jobs table if their lower fidelity ever needs
+    investigating."""
+    entry = SITEMAP_FALLBACK_PLATFORMS.get(ats)
+    if not entry:
+        return []
+    domain_template, marker, display_name = entry
+    sitemap_url = domain_template.format(slug=slug)
+
+    locs = _fetch_sitemap_locs(sitemap_url)
+    if not locs:
+        return []
+
+    jobs = []
+    seen_urls = set()
+    for job_url in locs:
+        if marker not in job_url or job_url in seen_urls:
             continue
-        job_url = (loc_el.text or "").strip()
+        # Skip the listing/search page itself and other non-job utility
+        # pages that share the same URL prefix as real job-detail pages
+        # (relevant for platforms like HRMDirect whose marker is broad —
+        # see SITEMAP_FALLBACK_PLATFORMS' comment on that one).
+        if re.search(r"openings\.php|/apply(/|$)|\.(php|aspx)(\?|$)", job_url, re.I):
+            continue
+        title = _title_from_sitemap_url(job_url, marker)
+        if not title:
+            continue
+        seen_urls.add(job_url)
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": slug.replace("-", " ").title(),
+            "location": "",
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": f"{display_name} (sitemap fallback)",
+            "slug": slug,
+        })
+
+    if jobs:
+        log.info(f"{ats}/{slug}: primary scrape returned nothing, sitemap "
+                 f"fallback found {len(jobs)} job(s)")
+    return jobs
+
+
+# ── iCIMS ──────────────────────────────────────────────
+
+def scrape_icims(slug: str) -> list[dict]:
+    """iCIMS sitemap scraper — parses sitemap.xml for job URLs (iCIMS has
+    no JSON API to use as a primary method; sitemap.xml IS the primary
+    method here, not a fallback). Title is extracted from URL path. No
+    description/location from sitemap."""
+    sitemap_url = f"https://{slug}.icims.com/sitemap.xml"
+    locs = _fetch_sitemap_locs(sitemap_url)
+
+    jobs = []
+    for job_url in locs:
         if not job_url or "/jobs/" not in job_url or job_url.endswith("/jobs/intro"):
             continue
 
@@ -3230,16 +3358,30 @@ SCRAPERS = {
 
 
 def scrape_board(ats: str, slug: str) -> list[dict]:
-    """Dispatch to the correct scraper."""
-    fn = SCRAPERS.get(ats.lower())
+    """Dispatch to the correct scraper. 2026-09: if the primary scraper
+    returns nothing (empty result OR raised an exception) and this
+    platform has a sitemap fallback registered (SITEMAP_FALLBACK_PLATFORMS),
+    try that before giving up — a company's sitemap.xml is often still
+    correct even when the primary JSON/HTML scraper has quietly broken
+    underneath it (site redesign, API shape change, temporary error)."""
+    ats_lower = ats.lower()
+    fn = SCRAPERS.get(ats_lower)
     if not fn:
         log.warning(f"Unknown ATS: {ats}")
         return []
     try:
-        return fn(slug)
+        jobs = fn(slug)
     except Exception as e:
         log.error(f"Error scraping {ats}/{slug}: {e}")
-        return []
+        jobs = []
+
+    if not jobs and ats_lower in SITEMAP_FALLBACK_PLATFORMS:
+        try:
+            jobs = _scrape_via_sitemap_fallback(ats_lower, slug)
+        except Exception as e:
+            log.error(f"Sitemap fallback also failed for {ats}/{slug}: {e}")
+
+    return jobs
 
 
 # ── Second-pass: fetch individual job descriptions ─────
