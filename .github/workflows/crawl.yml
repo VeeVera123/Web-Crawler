@@ -2,13 +2,23 @@ name: Crawl
 
 # Unified daily crawl workflow (formerly daily_scan.yml, ATS Global Scanner).
 # 2026-08 restructure: runs Crawl I (crawl_i.py, formerly main.py — the
-# known-ATS scanner reading archive_i, formerly slug_registry) every time,
-# and optionally Crawl II (crawl_ii.py — the heuristic in-house/
-# unsupported career-page scraper reading archive_ii, formerly archive_iii)
-# when explicitly opted into via the include_archive_ii input. The
-# scheduled/cron trigger NEVER sets that input, so the daily automatic run
-# always skips Crawl II — same behavior as leaving the checkbox unchecked
-# on a manual run. Crawl I and Crawl II write to the SAME `jobs` table but
+# known-ATS scanner reading archive_i, formerly slug_registry) and/or
+# Crawl II (crawl_ii.py — the heuristic in-house/unsupported career-page
+# scraper reading archive_ii, formerly archive_iii), selected via the
+# `scope` dropdown (both / archive_i / archive_ii).
+#
+# 2026-09: replaced the old `include_archive_ii` checkbox with this
+# dropdown — the checkbox could only ever ADD Crawl II on top of Crawl I
+# (which always ran unconditionally), so there was no way to run Crawl II
+# by itself. `scope` picks exactly which crawl(s) run: default "both"
+# (matches the old default-unchecked... plus the checkbox's own default
+# of Crawl-I-only was actually the OPPOSITE of "both" — see the two `if:`
+# conditions below for the exact logic), or either archive alone. The
+# scheduled/cron trigger never sets `scope` at all (github.event.inputs.scope
+# is blank on that trigger), and both `if:` conditions treat a blank scope
+# the same as the old cron default: Crawl I only, Crawl II always skipped
+# — the daily automatic run's behavior is unchanged by this rename. Crawl I
+# and Crawl II write to the SAME `jobs` table but
 # every row is tagged jobs.source_pipeline ('crawl_i' / 'crawl_ii'), and
 # each pipeline's finalize job only cleans up its own tagged rows — see
 # crawl_i.py's and crawl_ii.py's run_finalize() docstrings.
@@ -40,20 +50,24 @@ name: Crawl
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 6:00 UTC = 7:00 AM WAT — Crawl I only, Crawl II always skipped here
+    - cron: "0 6 * * *"   # 6:00 UTC = 7:00 AM WAT — Crawl I only, Crawl II always skipped here (blank `scope` on this trigger)
   workflow_dispatch:
     inputs:
-      include_archive_ii:
-        description: "Also run Crawl II (archive_ii — in-house/unsupported career pages)? Unchecked = Crawl I only, same as the daily cron."
+      scope:
+        description: "Which crawl(s) to run this time"
         required: false
-        type: boolean
-        default: false
+        type: choice
+        options:
+          - both
+          - archive_i
+          - archive_ii
+        default: both
       archive_i_shard_count:
-        description: "Crawl I: parallel shards over archive_i (known ATS boards)"
+        description: "Crawl I: parallel shards over archive_i (known ATS boards) — only used if scope includes archive_i"
         required: false
         default: "10"
       archive_ii_shard_count:
-        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if include_archive_ii is checked"
+        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if scope includes archive_ii"
         required: false
         default: "10"
 
@@ -90,10 +104,14 @@ jobs:
           " >> "$GITHUB_OUTPUT"
           echo "archive_i shards: $ARCHIVE_I_SHARDS, archive_ii shards: $ARCHIVE_II_SHARDS"
 
-  # ── Crawl I — known ATS boards (archive_i) — always runs ────────────────
+  # ── Crawl I — known ATS boards (archive_i) ───────────────────────────────
+  # Runs unless `scope` was explicitly set to archive_ii-only. Covers the
+  # scheduled cron trigger (blank scope), workflow_dispatch with scope=both,
+  # and workflow_dispatch with scope=archive_i.
 
   crawl-i:
     needs: prepare-matrix
+    if: ${{ github.event.inputs.scope != 'archive_ii' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -140,7 +158,7 @@ jobs:
   # 'crawl_i' only — never touches Crawl II's rows.
   crawl-i-finalize:
     needs: crawl-i
-    if: always()
+    if: ${{ always() && github.event.inputs.scope != 'archive_ii' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -170,14 +188,15 @@ jobs:
         run: exec python crawl_i.py --finalize
 
   # ── Crawl II — in-house/unsupported career pages (archive_ii) ──────────
-  # Opt-in only: skipped entirely (both jobs below) unless include_archive_ii
-  # was explicitly checked on a manual run. The scheduled cron trigger has
-  # no `github.event.inputs` at all, so this condition is always false for
-  # the automatic daily run — Crawl II never runs unattended.
+  # Opt-in only: skipped entirely (both jobs below) unless `scope` is
+  # explicitly "both" or "archive_ii" on a manual run. The scheduled cron
+  # trigger has no `github.event.inputs` at all (blank scope), so this
+  # condition is always false for the automatic daily run — Crawl II never
+  # runs unattended, same as before this was a dropdown.
 
   crawl-ii:
     needs: prepare-matrix
-    if: ${{ github.event.inputs.include_archive_ii == 'true' }}
+    if: ${{ github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -212,12 +231,12 @@ jobs:
         run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
 
   # Same reasoning as crawl-i-finalize, scoped to source_pipeline='crawl_ii'
-  # only. `if: always()` on TOP of the include_archive_ii check — otherwise
-  # a skipped crawl-ii (needs: satisfied by "skipped", not "failed") would
-  # still let this job through under an unconditional always().
+  # only. `if: always()` on TOP of the scope check — otherwise a skipped
+  # crawl-ii (needs: satisfied by "skipped", not "failed") would still let
+  # this job through under an unconditional always().
   crawl-ii-finalize:
     needs: crawl-ii
-    if: ${{ always() && github.event.inputs.include_archive_ii == 'true' }}
+    if: ${{ always() && (github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
