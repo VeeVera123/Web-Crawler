@@ -1,9 +1,14 @@
 """
 Configuration — multi-provider architecture.
 
-Role classification:  Cerebras + Groq running concurrently (both free tiers)
+Role classification:  Cerebras + Groq + NVIDIA NIM running concurrently
+  (all three free tiers — NVIDIA added 2026-09)
 Location classification: Gemini + OpenAI + NVIDIA NIM running concurrently
   (Gemini free, OpenAI paid, NVIDIA NIM free — added 2026-09)
+
+NVIDIA NIM is the one provider used for BOTH stages — see its comment in
+_ROLE_PROVIDER_DEFS below for why that's safe (one shared per-name
+throttle clock, not two independent 40 RPM budgets against one account).
 
 Changed 2026-08: role classification moved off Gemini (was Gemini + Groq)
 onto Cerebras + Groq. Gemini was previously doing double duty — every
@@ -107,9 +112,20 @@ _GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 cal
                                   # throughput while keeping a real safety margin)
 _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verify your
                                   # own account at aistudio.google.com/rate-limit)
+_NVIDIA_BASE_INTERVAL = 1.5   # ~40 RPM free tier (community-confirmed on
+                              # NVIDIA's own dev forum, not a published SLA —
+                              # see the location-provider comment below for
+                              # the full sourcing note). Defined here (not
+                              # down by the location providers) because
+                              # 2026-09 added NVIDIA to BOTH role and
+                              # location classification, sharing ONE
+                              # NVIDIA_API_KEY/account quota across both
+                              # stages — see the role-provider entry below
+                              # for how that sharing is actually enforced.
 
 # ── Role classification providers (free tiers, concurrent) ──
 # Cerebras + Groq — moved off Gemini 2026-08, see module docstring for why.
+# NVIDIA NIM added 2026-09 (also serves location classification below).
 _ROLE_PROVIDER_DEFS = [
     # Cerebras: gpt-oss-120b, confirmed live/non-deprecated (2026-08). Free
     # tier is 5 RPM ORG-WIDE — the tightest budget of any provider here —
@@ -132,18 +148,39 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
+    # NVIDIA NIM, added 2026-09 at explicit user request: role titles are
+    # short, so this doesn't need the huge-context model — reuses the same
+    # nemotron-3-super-120b-a12b as location classification below (one
+    # already-verified model instead of introducing a second unverified
+    # one). IMPORTANT: this is the SAME provider name ("nvidia") as the
+    # location-classification entry further down, and classifier.py's
+    # _last_call_times throttle is keyed by provider NAME, not by which
+    # classification stage called it — so a role-classification nvidia
+    # call and a location-classification nvidia call in the same process
+    # share ONE clock and naturally respect a combined ~40 RPM budget
+    # across both stages, rather than each stage getting its own 40 RPM
+    # and doubling real usage against the one account/key. No extra code
+    # needed for that — it falls out of _ai_call's existing per-name
+    # throttle dict.
+    _make_provider(
+        "nvidia",
+        "NVIDIA_API_KEY",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "https://integrate.api.nvidia.com/v1",
+        max_batch_chars=100_000,     # titles are short — no need for the full 200K used for locations
+        min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
 ]
 
 ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
 
 # ── Location classification providers (concurrent) ──
 # Location needs the smartest models — Gemini (1M context, free) + OpenAI (paid)
-# + NVIDIA NIM (free, added 2026-09). Gemini serves ONLY this stage (role
-# classification moved off it above), roughly halving its total call volume
-# across a full run.
-_NVIDIA_BASE_INTERVAL = 1.5   # ~40 RPM free tier (community-confirmed on
-                              # NVIDIA's own dev forum, not a published SLA —
-                              # see note below)
+# + NVIDIA NIM (free, added 2026-09 — also serves role classification above,
+# see that entry's comment on why one shared _NVIDIA_BASE_INTERVAL clock is
+# correct for both). Gemini serves ONLY this stage (role classification
+# moved off it in 2026-08), roughly halving its total call volume across a
+# full run.
 _LOCATION_PROVIDER_DEFS = [
     # Gemini: 1M context, ~15 RPM free tier (see note above on why this
     # isn't a hard-confirmed current number)
