@@ -232,7 +232,10 @@ def _extract_jsonld_jobs(html: str, page_url: str, company: str) -> list[dict]:
         url = item.get("url") or item.get("directApply") or page_url
         if isinstance(url, dict):
             url = url.get("url", page_url)
-        url = urljoin(page_url, str(url))
+        try:
+            url = urljoin(page_url, str(url))
+        except ValueError:
+            continue
         if url in seen_urls:
             continue
         seen_urls.add(url)
@@ -288,8 +291,17 @@ def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
         if _NAV_TEXT_BLOCKLIST_RE.match(text.strip()):
             continue
 
-        full_url = urljoin(page_url, href)
-        parsed = urlparse(full_url)
+        # 2026-09: a real crash killed a whole crawl_ii.py shard —
+        # urljoin/urlparse can raise ValueError on a malformed href (seen
+        # live: an href attribute value of 'sjm code="11" ', almost
+        # certainly a parser mis-grab from broken/non-HTML markup on some
+        # page, not a real URL at all). One bad <a> tag on one page must
+        # not take down the whole batch — skip just that link.
+        try:
+            full_url = urljoin(page_url, href)
+            parsed = urlparse(full_url)
+        except ValueError:
+            continue
         if parsed.scheme not in ("http", "https"):
             continue
 
