@@ -373,8 +373,8 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         boards_with_roles: set[tuple[str, str]] = set()
 
         if boards:
-            log.info(f"\nScraping {len(boards)} boards across "
-                     f"{len(set(a for a, _ in boards))} ATS platforms...")
+            log.info(f"── Crawling entries ({len(boards)} boards across "
+                     f"{len(set(a for a, _ in boards))} ATS platforms) ──")
             all_jobs, boards_ok, boards_failed, boards_with_roles = scrape_all(boards)
 
         # 2026-09: repurpose archive_i.last_seen to mean "last time this
@@ -403,7 +403,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         # calls (and time) to re-derive an answer we already have. Only
         # genuinely new URLs go on to filter_roles() below; already-known
         # ones just get last_seen/is_active refreshed directly.
-        log.info(f"\nChecking Supabase for already-known jobs (skip re-classification)...")
+        log.info("── Deduplication ──")
         existing_urls = get_existing_urls()
         new_jobs, already_seen = [], []
         for job in all_jobs:
@@ -427,7 +427,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         all_jobs = new_jobs
 
         # Filter for CSM/AM roles
-        log.info(f"\nFiltering for CSM/AM roles...")
+        log.info("── Role classification ──")
         csm_jobs = filter_roles(all_jobs)
         if not csm_jobs:
             log.info("No CSM/AM roles found.")
@@ -438,18 +438,17 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
                 )
             return
 
+        log.info("── Location classification ──")
         # Enrich descriptions for platforms that lack them
-        log.info(f"\nFetching descriptions for jobs missing them...")
+        log.info("  fetching descriptions for jobs missing them...")
         csm_jobs = enrich_descriptions(csm_jobs)
 
         # Fetch application questions for location-"unsure" jobs, across
         # all 20 ATS platforms (multi-tier fallback — see ats_scrapers.py).
         # Work authorization questions help the AI detect country-restricted roles
-        log.info(f"\nEnriching application questions across all ATS platforms...")
+        log.info("  enriching application questions across all ATS platforms...")
         csm_jobs = enrich_application_questions(csm_jobs)
 
-        # Filter for Africa/Global locations
-        log.info(f"\nFiltering for Africa/Global eligibility...")
         global_jobs, confidences = filter_locations(csm_jobs)
         if not global_jobs:
             log.info("No global/Africa-eligible CSM/AM roles found.")
@@ -466,8 +465,12 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
 
         # Push to Supabase — pass the already-fetched existing_urls through
         # so add_jobs_batch doesn't re-pull the whole `jobs` table again.
-        log.info(f"\nPushing {len(global_jobs)} jobs to Supabase...")
+        # Single write for the whole shard, same as it's always been here —
+        # crawl_ii.py's 2026-09 restructure (see its crawl_batch_ii
+        # docstring) brought IT in line with this, not the other way round.
+        log.info("── Writing to Supabase ──")
         added = add_jobs_batch(global_jobs, confidences, existing_urls=existing_urls)
+        log.info(f"  {added} new jobs written")
 
         # Finalize this run's report. `duplicates` now counts BOTH kinds:
         # pre-classification skips (already_seen) and any post-classification
@@ -486,8 +489,9 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
                 duplicates=duplicates,
             )
 
-        log.info(f"\nDone! {added} new jobs added to Supabase.")
-        log.info(f"   Pipeline: {raw_scraped_count} scraped ({len(already_seen)} already known, "
+        log.info("── Summary ──")
+        log.info(f"  {added} new jobs added to Supabase.")
+        log.info(f"  Pipeline: {raw_scraped_count} scraped ({len(already_seen)} already known, "
                  f"skipped) -> {len(all_jobs)} new -> {len(csm_jobs)} CSM/AM -> "
                  f"{len(global_jobs)} global -> {added} new")
 
@@ -550,7 +554,7 @@ def main():
         run_finalize()
         return
 
-    log.info("Loading company slugs from Supabase...")
+    log.info("── Getting entries ──")
     try:
         boards = load_slugs(shard=args.shard, total_shards=args.total_shards)
     except SupabaseFetchError as e:
@@ -561,6 +565,7 @@ def main():
         # a quiet, misleading "completed" with 0 jobs found.
         log.error(f"Failed to load slugs from Supabase after retries — aborting shard: {e}")
         sys.exit(1)
+    log.info(f"  {len(boards)} boards assigned to this shard")
     if not boards:
         if args.total_shards == 1:
             log.error("No boards to scrape.")
