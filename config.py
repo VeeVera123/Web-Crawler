@@ -2,7 +2,8 @@
 Configuration — multi-provider architecture.
 
 Role classification:  Cerebras + Groq running concurrently (both free tiers)
-Location classification: Gemini + OpenAI running concurrently (Gemini free, OpenAI paid)
+Location classification: Gemini + OpenAI + NVIDIA NIM running concurrently
+  (Gemini free, OpenAI paid, NVIDIA NIM free — added 2026-09)
 
 Changed 2026-08: role classification moved off Gemini (was Gemini + Groq)
 onto Cerebras + Groq. Gemini was previously doing double duty — every
@@ -136,9 +137,13 @@ _ROLE_PROVIDER_DEFS = [
 ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
 
 # ── Location classification providers (concurrent) ──
-# Location needs the smartest models — Gemini (1M context, free) + OpenAI (paid).
-# Gemini now serves ONLY this stage (role classification moved off it above),
-# roughly halving its total call volume across a full run.
+# Location needs the smartest models — Gemini (1M context, free) + OpenAI (paid)
+# + NVIDIA NIM (free, added 2026-09). Gemini serves ONLY this stage (role
+# classification moved off it above), roughly halving its total call volume
+# across a full run.
+_NVIDIA_BASE_INTERVAL = 1.5   # ~40 RPM free tier (community-confirmed on
+                              # NVIDIA's own dev forum, not a published SLA —
+                              # see note below)
 _LOCATION_PROVIDER_DEFS = [
     # Gemini: 1M context, ~15 RPM free tier (see note above on why this
     # isn't a hard-confirmed current number)
@@ -162,6 +167,30 @@ _LOCATION_PROVIDER_DEFS = [
         "https://api.openai.com/v1",
         max_batch_chars=300_000,     # 400K - 100K breathing space
         min_call_interval=5.0,       # Tier 1: ~12 req/min
+    ),
+    # NVIDIA NIM (build.nvidia.com): free, no credit card, no published
+    # daily cap, ~40 RPM community-confirmed baseline (NVIDIA's own dev
+    # forum — "I have reached the default rate limit of 40 Requests Per
+    # Minute" — no official SLA doc found, treat as a working baseline not
+    # a guarantee). Chosen over OpenRouter's free tier, whose daily cap
+    # (50/day with no prior spend, 1,000/day only after $10 lifetime
+    # credit purchase) is too small for this project's volume.
+    #
+    # base_url/model below were NOT independently confirmed against
+    # NVIDIA's own API reference pages this session (their docs pages
+    # render via JS and didn't return code samples to this session's
+    # fetch tool) — cross-checked against two third-party integration
+    # guides that agreed, but you should sanity-check both against your
+    # own build.nvidia.com dashboard once you generate a key, and swap
+    # NVIDIA_MODEL below if the catalog shows a different current ID for
+    # this model.
+    _make_provider(
+        "nvidia",
+        "NVIDIA_API_KEY",
+        "nvidia/llama-3.1-nemotron-70b-instruct",
+        "https://integrate.api.nvidia.com/v1",
+        max_batch_chars=200_000,     # conservative until real context/TPM behavior is confirmed
+        min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
 
