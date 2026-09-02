@@ -88,6 +88,18 @@ _last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
 for _p in LOCATION_PROVIDERS:
     _last_call_times[_p["name"]] = 0.0
 
+# 2026-09: log exactly which providers this process actually configured,
+# once, at import time — the "is NVIDIA even wired up right now" question
+# kept coming up because the only way to tell before this was inferring it
+# from a provider showing up (or not) inside a "N jobs → M batches across
+# K providers (...)" summary line buried mid-run. This is unconditional
+# and always the first classifier.py log line any run produces, so a
+# provider that's silently missing (unset secret, unpushed code, typo'd
+# env var name) is obvious in the first few lines of the log instead of
+# requiring a scroll-and-guess.
+log.info(f"Role classification providers: {[p['name'] for p in ROLE_PROVIDERS] or '(none — legacy single-provider fallback)'}")
+log.info(f"Location classification providers: {[p['name'] for p in LOCATION_PROVIDERS] or '(none — legacy single-provider fallback)'}")
+
 
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
@@ -778,8 +790,15 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     'unsure' so the AI stage gets a look at genuinely ambiguous listings,
     rather than every non-matching job being silently AI-reviewed.
     """
-    raw_loc = job.get("location", "")
-    raw_country = job.get("country", "")
+    # 2026-09: `job.get("location", "")` only falls back to "" when the KEY
+    # is missing — some ATS scrapers set "location": None explicitly (a
+    # board that has the field but leaves it genuinely empty), which .get
+    # passes straight through as None and used to blow up two lines below
+    # with "can only concatenate str (not NoneType) to str" — a real,
+    # live crash that took down whole crawl_i.py shards. `or ""` catches
+    # both the missing-key AND explicit-None cases.
+    raw_loc = job.get("location") or ""
+    raw_country = job.get("country") or ""
     if isinstance(raw_loc, list):
         raw_loc = ", ".join(str(x) for x in raw_loc)
     if isinstance(raw_country, list):
