@@ -3058,6 +3058,102 @@ def scrape_gem(slug: str) -> list[dict]:
     return jobs
 
 
+def scrape_ycombinator(slug: str) -> list[dict]:
+    """Work at a Startup (YC company job boards) — REBUILT 2026-09 after
+    its old implementation was deleted with job_board_scrapers.py in the
+    2026-08 restructure (see archive_i's own "no scraper registered"
+    warnings, which is what surfaced this gap).
+
+    HONEST LIMITATION, stated plainly rather than glossed over: this
+    implementation is NOT verified against ycombinator.com's real HTML the
+    way Gem/JobScore/Trakstar above were. This session's sandbox could not
+    reach ycombinator.com via a direct HTTP fetch (network egress policy
+    blocked it outright), and the only other tool available (a
+    URL-fetch-and-summarize tool) converts pages to markdown before
+    returning them — it could confirm the page is real, server-rendered
+    HTML with visible job titles/locations/salaries, but could NOT show
+    actual `<div>`/class-name markup to build a real CSS-selector parser
+    against, the way every other scraper in this file was built.
+
+    What WAS confirmed live, repeatedly, and is what this function
+    actually relies on: ycombinator.com/companies/{slug}/jobs is a real
+    page, and every job listing on it links to its own detail page at
+    EXACTLY the pattern /companies/{slug}/jobs/{job_id}-{title-slug} —
+    verified against a real company (swiftsku ->
+    .../jobs/FYRif1G-senior-account-executive-smb). This function extracts
+    postings by matching THAT URL pattern directly in the raw HTML via
+    BeautifulSoup's href matching (a much more stable contract than a
+    styling class name, and the one part of the real page actually seen),
+    not by any div/class structure this session never saw. It does not
+    fetch each individual job page for a full description — the listing
+    page didn't expose one either, so description_snippet is left blank
+    here and picked up by enrich_descriptions() same as any other platform
+    without a registered description fetcher.
+
+    workatastartup.com/companies/{slug} (the URL discovery.py's
+    _url_to_slug_ycombinator still watches for) 302-redirects to
+    ycombinator.com/companies/{slug} now — confirmed live — so this
+    scrapes the ycombinator.com host directly rather than following a
+    redirect on every call.
+
+    If this comes back empty or wrong against real production slugs,
+    that's this docstring's caveat playing out, not a mystery — the fix
+    is pasting real saved HTML from
+    https://www.ycombinator.com/companies/<a-real-slug>/jobs (fetched from
+    somewhere that isn't sandboxed) so an exact parser can replace this
+    heuristic one.
+    """
+    company_name = slug.replace("-", " ").title()
+    url = f"https://www.ycombinator.com/companies/{slug}/jobs"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return []
+
+    job_link_re = re.compile(
+        r"^/companies/" + re.escape(slug) + r"/jobs/([A-Za-z0-9_]+)-([a-z0-9-]+)/?$"
+    )
+    jobs = []
+    seen_urls = set()
+    for a in soup.find_all("a", href=job_link_re):
+        href = a.get("href", "")
+        if href in seen_urls:
+            continue  # the same job link can legitimately appear more than
+            # once on the page (e.g. a title link and a separate "Apply"
+            # link both pointing at the same posting)
+        seen_urls.add(href)
+
+        match = job_link_re.match(href)
+        title_slug = match.group(2) if match else ""
+        # Anchor text is the primary title source; the URL's own
+        # title-slug (hyphenated, e.g. "senior-account-executive-smb") is
+        # the fallback for the (rare) case an anchor wraps an icon/image
+        # instead of visible text.
+        title = a.get_text(strip=True) or title_slug.replace("-", " ").title()
+        if not title:
+            continue
+
+        jobs.append({
+            "title": title,
+            "url": f"https://www.ycombinator.com{href}",
+            "company": company_name,
+            "location": "",
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "YCombinator",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -3107,6 +3203,12 @@ SCRAPERS = {
     # capped third-party data broker with no public export — a different
     # site from Gem itself). See scrape_gem docstring.
     "gem": scrape_gem,
+    # ── Rebuilt (2026-09): YCombinator / Work at a Startup — the old
+    # scraper was lost in an earlier file restructure, orphaning ~1,442
+    # archive_i rows. See scrape_ycombinator's docstring for exactly what
+    # was and wasn't verified live (sandbox couldn't fetch raw HTML from
+    # this domain, so this matches job URLs by pattern, not CSS selector).
+    "ycombinator": scrape_ycombinator,
     # ── DISABLED (JS-rendered / auth-required / blocked / robots.txt) ──
     # "brassring": scrape_brassring,
     # "successfactors": scrape_successfactors,
