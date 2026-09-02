@@ -1125,16 +1125,62 @@ _SPECIFIC_LOCATION_TOKEN = (
     r"a\s*specific\s*countr)"
 )
 
-_HARD_RESTRICTION_RE = re.compile(
+# 2026-09 BUG FIX: this whole block used to end in "(not|un)available" —
+# which as a regex means the literal contiguous string "notavailable" or
+# "unavailable", NOT the two-word phrase "not available". A real job
+# (BigPanda, via Gem) said "visa sponsorship is not available for this
+# position" and the space between "not" and "available" meant this never
+# matched — so the deterministic override missed a textbook case, AND
+# (worse) detect_visa_sponsorship's identical bug meant _VISA_YES_RE's
+# broad "visa\s*sponsor" then fired on the leftover "visa sponsorship"
+# substring, actively marking the job as SPONSORING when it explicitly
+# said the opposite. See NO_SPONSORSHIP_RE below, shared by both this
+# regex and _VISA_NO_RE now (single definition, not two copies that can
+# drift out of sync with each other again).
+NO_SPONSORSHIP_RE = re.compile(
+    # Negated VERB + visa/permit/transfer/immigration noun ("do not sponsor
+    # visas", "unable to sponsor work permits")
     r"(do\s*not|don\'t|does\s*not|doesn\'t|won\'t|will\s*not|unable\s*to|"
-    r"cannot|can\'t)\s*(currently\s*)?(provide\s*|offer\s*)?sponsor\s*"
-    r"(visas?|work\s*permits?|transfers?|immigration)"
+    r"cannot|can\'t|no\s*longer)\s*(currently\s*)?(provide\s*|offer\s*)?"
+    r"sponsor\s*(visas?|work\s*permits?|transfers?|immigration)"
+    # Negated VERB + "sponsorship" as its own noun, any of provide/offer/
+    # include/give as the verb — catches "does not offer visa sponsorship",
+    # "does not provide work permit sponsorship", "does not include
+    # immigration sponsorship" (real gaps: the verb-form pattern above only
+    # matches "sponsor" itself as the verb, not "offer/provide/include ...
+    # sponsorship" as a separate noun phrase)
+    r"|(do\s*not|don\'t|does\s*not|doesn\'t|won\'t|will\s*not|unable\s*to|"
+    r"cannot|can\'t|no\s*longer)\s*(currently\s*)?(provide|offer|include|give)"
+    r"\s*(visa\s*|work\s*permit\s*|immigration\s*)?sponsorship"
     r"|no\s*visa\s*sponsorship"
     r"|not\s*(able\s*to\s*|currently\s*)?sponsor.{0,20}visa"
-    r"|visa\s*sponsorship\s*(is\s*)?(not|un)available"
-    r"|(must|need[s]?|required)\s*(to\s*)?be\s*authorized\s*to\s*work\s*(in|from)"
+    r"|visa\s*sponsorship\s*(is\s*)?(not\s*available|unavailable)"
+    r"|sponsorship\s*(is\s*)?(not\s*available|unavailable|not\s*offered|"
+    r"not\s*provided)"
+    r"|not\s*eligible\s*for\s*(visa\s*)?sponsorship"
+    r"|no\s*sponsorship\s*(available|offered|provided)",
+    re.I,
+)
+
+# Shared by both _HARD_RESTRICTION_RE and _VISA_NO_RE — "must be authorized
+# to work in/from ___" only counts as a real restriction when a concrete
+# single-country/region token follows within a short window (see
+# _SPECIFIC_LOCATION_TOKEN's comment above). 2026-09: _VISA_NO_RE used to
+# have its OWN unconditional "must be authorized/eligible to work" with no
+# such window — meaning the visa_sponsorship column would show "no" for a
+# genuinely global-friendly job like "must be authorized to work in your
+# country of residence", the exact false-positive class already fixed for
+# location classification but left unfixed here. Single shared fragment now
+# so the two can't drift apart again.
+_MUST_BE_AUTHORIZED_RESTRICTED_RE = (
+    r"(must|need[s]?|required)\s*(to\s*)?be\s*authorized\s*to\s*work\s*(in|from)"
     r"\s*(the\s*)?.{0,25}?" + _SPECIFIC_LOCATION_TOKEN + r"\b"
-    r"|(must|need[s]?)\s*(to\s*)?reside\s*in\s*(the\s*)?(us|usa|uk|canada|"
+)
+
+_HARD_RESTRICTION_RE = re.compile(
+    NO_SPONSORSHIP_RE.pattern
+    + r"|" + _MUST_BE_AUTHORIZED_RESTRICTED_RE
+    + r"|(must|need[s]?)\s*(to\s*)?reside\s*in\s*(the\s*)?(us|usa|uk|canada|"
     r"united\s*states|united\s*kingdom)",
     re.I,
 )
@@ -1454,12 +1500,25 @@ _VISA_YES_RE = re.compile(
     re.I,
 )
 
+# 2026-09: rebuilt on top of the shared NO_SPONSORSHIP_RE (see that
+# regex's own comment for the real, live bug this fixes — a job whose JD
+# literally said "visa sponsorship is not available" was being reported
+# as SPONSORING, the exact opposite of what it said, because the old
+# "(not|un)available" fragment here required "not" and "available" to be
+# one unbroken word with no space). The old unconditional "must be
+# authorized/eligible to work" (no country window at all) is REMOVED —
+# it was flagging genuinely global-friendly phrasing like "must be
+# authorized to work in your country of residence" as visa_sponsorship
+# = "no", the same false-positive class already fixed for location
+# classification but left unfixed here until now. Uses the same shared,
+# windowed _MUST_BE_AUTHORIZED_RESTRICTED_RE fragment as
+# _HARD_RESTRICTION_RE so the two can't drift apart again.
 _VISA_NO_RE = re.compile(
-    r"(no|not|unable|cannot|can\'t|won\'t|will\s*not)\s*(provide\s*)?(visa\s*sponsor|sponsor.*visa|work\s*permit|immigration\s*sponsor)"
-    r"|must\s*(be\s*)?(authorized|eligible)\s*to\s*work"
-    r"|without\s*(visa\s*)?sponsor"
-    r"|visa\s*sponsorship\s*(is\s*)?(not|un)available"
-    r"|not\s*offer.*sponsorship",
+    NO_SPONSORSHIP_RE.pattern
+    + r"|(no|not|unable|cannot|can\'t|won\'t|will\s*not)\s*(provide\s*)?"
+    r"(visa\s*sponsor|sponsor.*visa|work\s*permit|immigration\s*sponsor)"
+    r"|" + _MUST_BE_AUTHORIZED_RESTRICTED_RE
+    + r"|without\s*(visa\s*)?sponsor",
     re.I,
 )
 
