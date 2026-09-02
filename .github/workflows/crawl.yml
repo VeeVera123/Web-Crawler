@@ -29,6 +29,14 @@ name: Crawl
 # can look like a line connecting Crawl I and Crawl II, but there's no
 # `needs: crawl-i` anywhere on crawl-ii (or vice versa) — they run fully
 # in parallel, as designed.
+#
+# 2026-09: added NVIDIA_API_KEY (free NIM tier — see config.py's
+# _LOCATION_PROVIDER_DEFS) as a third location-classification provider
+# alongside Gemini/OpenAI, on the crawl-i and crawl-ii shard steps only
+# (finalize steps don't classify anything, so they don't need it). Add an
+# NVIDIA_API_KEY repo secret before relying on it — until then config.py
+# just skips that provider and runs Gemini+OpenAI as before, same as any
+# other missing provider key.
 
 on:
   schedule:
@@ -113,6 +121,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           LLM_PROVIDER: cerebras
           # Every AI-classifying job in this workflow shares Gemini/Groq's
           # free-tier per-key quota — see config.py. Sized generously (12)
@@ -196,6 +205,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
