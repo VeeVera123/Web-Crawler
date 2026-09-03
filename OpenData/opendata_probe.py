@@ -209,7 +209,7 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                 time_budget_minutes, batch_size=3000, unit_label="companies",
-                capture_inhouse=False,
+                capture_inhouse=True,
                 shard_index=shard_index, shard_count=shard_count, start_at=start_at)
     finally:
         parse_pool.shutdown(wait=True)
