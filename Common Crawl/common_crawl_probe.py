@@ -1,40 +1,52 @@
 """
 COMMON CRAWL PROBE (renamed from host_crawl_v2.py, 2026-08) — a thin,
 disposable probe source on top of node.py (the permanent engine). This
-file's only job: stream candidate hostnames out of Common Crawl's Host
-Index (via DuckDB, one Parquet file at a time — see STREAMING below) and
-hand them to node.crawl_batch(). All fetch/parse/detect/write logic lives
-in node.py. No separate common_crawl_seed.py: seeding and crawling are
-interleaved on purpose (see STREAMING below) — a separate seed step would
-mean writing the ENTIRE host list to disk first, reintroducing the exact
-memory problem this design avoids.
+file's only job: stream candidate hostnames out of Common Crawl's OWN
+official columnar index ("CC-Index Table", via DuckDB, one Parquet file
+at a time — see STREAMING below) and hand them to node.crawl_batch(). All
+fetch/parse/detect/write logic lives in node.py. No separate
+common_crawl_seed.py: seeding and crawling are interleaved on purpose (see
+STREAMING below) — a separate seed step would mean writing the ENTIRE host
+list to disk first, reintroducing the exact memory problem this design
+avoids.
+
+DATA SOURCE (2026-09 change): this used to go through a third-party
+Hugging Face mirror (commoncrawl/host-index-testing-v2) that pre-aggregated
+per-host fetch stats but lagged Common Crawl's real monthly releases by
+over a year (stuck at CC-MAIN-2025-18 while CC-MAIN-2026-34 was already
+out). Switched to querying Common Crawl's own official CC-Index Table
+directly — published by Common Crawl themselves, in lockstep with every
+monthly crawl release, no third party, no auth, no token:
+  - partition list:  https://index.commoncrawl.org/collinfo.json  (always
+    current — this IS Common Crawl's own release list, not a mirror)
+  - parquet files:    https://data.commoncrawl.org/cc-index/table/cc-main/
+    warc/crawl={crawl}/subset=warc/*.parquet
+This index is per-URL, not pre-aggregated per-host like the old HF
+dataset, so the host-liveness check is now done with a GROUP BY in the SQL
+query itself (has_2xx / has_4xx_5xx per url_host_name) instead of reading
+precomputed fetch_200/fetch_4xx/... columns — same "keep the host if any
+2xx ever showed up, drop it only if Common Crawl's own attempts were only
+4xx/5xx" logic as before, just computed live from always-current data.
 
 STREAMING, ONE FILE AT A TIME: a real incident — an earlier version
 accumulated 126M hostnames into one Python list and got OOM-killed by
 GitHub Actions' runner. Fixed by (1) sharding pushed into the SQL query
-itself (hash(surt_host_name) % shard_count = shard_index), and (2)
+itself (hash(url_host_name) % shard_count = shard_index), and (2)
 seeding+crawling interleaved per Parquet file — each file's hosts are
 crawled and dropped before the next file is even queried, so memory never
 scales with partition count or host count. TIME_BUDGET_MINUTES is the
 only thing bounding a run's length.
 
-"LATEST" PARTITION CAVEAT: this dataset (commoncrawl/host-index-testing-v2
-on Hugging Face) has its own, much slower update cadence than Common
-Crawl's raw monthly crawl archives — confirmed live, it hasn't been
-refreshed since Nov 2025 (stuck at CC-MAIN-2025-18). Not a bug here; there
-is simply nothing newer in THIS dataset yet. --crawl/no-argument always
-queries the live listing fresh, so it'll pick up a refresh automatically
-if/when one happens.
-
 Usage:
     python common_crawl_probe.py                                        # 1 partition, unsharded (dev only)
-    python common_crawl_probe.py --crawl CC-MAIN-2025-18 --partitions 3  # 3 contiguous partitions
-    python common_crawl_probe.py --crawl-list CC-MAIN-2025-18,CC-MAIN-2024-42
+    python common_crawl_probe.py --crawl CC-MAIN-2026-34 --partitions 3  # 3 contiguous partitions
+    python common_crawl_probe.py --crawl-list CC-MAIN-2026-34,CC-MAIN-2025-18
     python common_crawl_probe.py --shard-index 0 --shard-count 10        # production shape
 """
 import argparse
 import asyncio
 import concurrent.futures
+import gzip
 import logging
 import os
 import sys
@@ -42,6 +54,7 @@ import time
 from collections import Counter
 
 import aiohttp
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -50,11 +63,12 @@ import node  # noqa: E402
 
 log = logging.getLogger("common_crawl_probe")
 
-# Optional — HF gives a higher rate-limit tier for anonymous CI traffic;
-# not required, the dataset is fully public.
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-HF_DATASET = "commoncrawl/host-index-testing-v2"
-HF_BASE = f"hf://datasets/{HF_DATASET}/data"
+CC_DATA_BASE = "https://data.commoncrawl.org"
+CC_COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
+# Absolute last resort only — hit if BOTH collinfo.json and a pinned
+# --crawl are unavailable. collinfo.json is Common Crawl's own current
+# release list, so this should essentially never actually get used; it's
+# not a "may be stale" caveat like the old HF fallback was.
 _FALLBACK_CRAWL = "CC-MAIN-2025-18"
 
 # Candidate pre-filter (never the real country decision — see node.detect_country).
@@ -65,6 +79,7 @@ TARGET_TLDS = {
 TARGET_SUFFIXES_EXTRA = {"co.uk", "com.au"}
 
 _DUCKDB_CALL_TIMEOUT_SECONDS = 180
+_HTTP_TIMEOUT_SECONDS = 30
 
 
 def _run_with_timeout(fn, *args, timeout=_DUCKDB_CALL_TIMEOUT_SECONDS, **kwargs):
@@ -78,12 +93,10 @@ def _build_tld_filter() -> str:
     return ",".join(parts)
 
 
-def _looks_dead(fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone) -> bool:
+def _looks_dead(has_2xx, has_4xx_5xx) -> bool:
     """Only treated as dead if Common Crawl's own attempts NEVER got a
     single 2xx — biased toward keeping a host if in doubt."""
-    if fetch_200 and fetch_200 > 0:
-        return False
-    return (fetch_4xx or 0) + (fetch_5xx or 0) + (fetch_gone or 0) + (nutch_gone or 0) > 0
+    return not has_2xx and bool(has_4xx_5xx)
 
 
 def _get_duckdb_connection():
@@ -98,50 +111,38 @@ def _get_duckdb_connection():
     except Exception as e:
         log.error(f"Failed to load DuckDB's httpfs extension: {e}")
         return None
-    if not HF_TOKEN:
-        log.warning("HF_TOKEN not set — anonymous access can silently stall. Recommend setting it "
-                     "(free — huggingface.co/settings/tokens, 'read' scope).")
-    else:
-        try:
-            con.execute(f"CREATE SECRET hf_token (TYPE huggingface, TOKEN '{HF_TOKEN}');")
-        except Exception as e:
-            log.warning(f"Failed to configure HF_TOKEN (continuing anonymously): {e}")
     try:
         con.execute("SET http_timeout = 30000;")
         con.execute("SET http_retries = 3;")
         con.execute("SET http_retry_wait_ms = 2000;")
         con.execute("SET http_retry_backoff = 2;")
-        con.execute("SET memory_limit = '3GB';")  # one partition is ~7GB per CC's own blog post
+        con.execute("SET memory_limit = '3GB';")
         con.execute("PRAGMA threads=2;")
     except Exception as e:
         log.warning(f"Could not set DuckDB options (continuing with defaults): {e}")
     return con
 
 
-def _list_all_crawl_names(con) -> list[str]:
-    """Live-lists every partition Hugging Face has, most recent first.
-    Empty list if the listing itself fails — callers fall back to a
-    single hardcoded partition in that case."""
+def _list_all_crawl_names() -> list[str]:
+    """Fetches Common Crawl's own current release list directly — no
+    lag, no third party. Empty list if the fetch itself fails — callers
+    fall back to a single hardcoded partition in that case."""
     try:
-        rows = _run_with_timeout(
-            lambda: con.execute(
-                f"SELECT DISTINCT regexp_extract(file, 'crawl=([^/]+)', 1) AS crawl "
-                f"FROM glob('{HF_BASE}/crawl=*/') ORDER BY crawl DESC"
-            ).fetchall(), timeout=60,
-        )
-        return [r[0] for r in rows if r[0]]
-    except concurrent.futures.TimeoutError:
-        log.warning("Listing crawl partitions timed out after 60s.")
+        resp = requests.get(CC_COLLINFO_URL, timeout=_HTTP_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        data = resp.json()
+        # collinfo.json is already newest-first.
+        return [row["id"] for row in data if row.get("id", "").startswith("CC-MAIN-")]
     except Exception as e:
-        log.warning(f"Could not list crawl partitions live: {e}")
-    return []
+        log.warning(f"Could not fetch {CC_COLLINFO_URL}: {e}")
+        return []
 
 
-def _resolve_crawl_names(con, pinned: str | None, count: int) -> list[str]:
+def _resolve_crawl_names(pinned: str | None, count: int) -> list[str]:
     """Resolves `count` partitions, most-recent-first, starting at
     `pinned` (or the true latest) and walking backward. Falls back to a
     single partition if the live listing fails."""
-    names = _list_all_crawl_names(con)
+    names = _list_all_crawl_names()
     if names:
         log.info(f"Available crawl partitions (most recent 5 of {len(names)}): {names[:5]}")
         start = names.index(pinned) if pinned in names else 0
@@ -151,17 +152,16 @@ def _resolve_crawl_names(con, pinned: str | None, count: int) -> list[str]:
                         f"start point.")
         return selected
     single = pinned or _FALLBACK_CRAWL
-    log.warning(f"Falling back to a single hardcoded partition {single!r} (may be stale) — live "
-                f"listing failed.")
+    log.warning(f"Falling back to a single hardcoded partition {single!r} — live listing failed.")
     return [single]
 
 
-def _resolve_explicit_crawl_names(con, requested: list[str]) -> list[str]:
+def _resolve_explicit_crawl_names(requested: list[str]) -> list[str]:
     """--crawl-list: a specific, possibly non-contiguous set of partitions
     named directly (e.g. spread across years to sample a more diverse
     company population than a contiguous walk gives). Validates against
     the live listing when available; trusts the list as-is otherwise."""
-    names = _list_all_crawl_names(con)
+    names = _list_all_crawl_names()
     if not names:
         log.warning("Live partition listing failed — trusting --crawl-list as given, unvalidated.")
         return requested
@@ -171,22 +171,23 @@ def _resolve_explicit_crawl_names(con, requested: list[str]) -> list[str]:
     return [n for n in requested if n in names]
 
 
-def _list_partition_files(con, crawl_name: str) -> list[str]:
+def _list_partition_files(crawl_name: str) -> list[str]:
+    """Common Crawl publishes the exact parquet file list for a crawl as
+    a gzipped paths file — plain HTTPS directory listing/wildcards aren't
+    supported against data.commoncrawl.org, so this is the documented way
+    to enumerate a partition's CC-Index Table files."""
+    paths_url = f"{CC_DATA_BASE}/crawl-data/{crawl_name}/cc-index-table.paths.gz"
     try:
-        files = _run_with_timeout(
-            lambda: con.execute(
-                f"SELECT file FROM glob('{HF_BASE}/crawl={crawl_name}/*.parquet')"
-            ).fetchall(), timeout=60,
-        )
-        files = [r[0] for r in files]
-    except concurrent.futures.TimeoutError:
-        log.warning(f"Listing files in crawl={crawl_name} timed out after 60s.")
-        files = []
+        resp = requests.get(paths_url, timeout=_HTTP_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        lines = gzip.decompress(resp.content).decode("utf-8").splitlines()
+        files = [f"{CC_DATA_BASE}/{line.strip()}" for line in lines
+                 if line.strip().endswith(".parquet")]
     except Exception as e:
-        log.warning(f"Could not list files in crawl={crawl_name}: {e}")
+        log.warning(f"Could not fetch/parse {paths_url}: {e}")
         files = []
     if not files:
-        files = [f"{HF_BASE}/crawl={crawl_name}/*.parquet"]
+        log.warning(f"No parquet files resolved for crawl={crawl_name} — nothing to scan.")
     return files
 
 
@@ -206,12 +207,12 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
                     "at once. Use --shard-index/--shard-count for production runs.")
 
     tld_filter = _build_tld_filter()
-    shard_clause = f"AND (hash(surt_host_name) % {shard_count}) = {shard_index}" if sharded else ""
+    shard_clause = f"AND (hash(url_host_name) % {shard_count}) = {shard_index}" if sharded else ""
     query_timeout = 300
 
     for partition_num, crawl_name in enumerate(partitions, start=1):
         log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} ──")
-        files = _list_partition_files(con, crawl_name)
+        files = _list_partition_files(crawl_name)
         if partition_num == 1 and start_file_index:
             skipped = files[:start_file_index]
             files = files[start_file_index:]
@@ -221,11 +222,17 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
         total_dead_skipped = 0
         total_hosts = 0
         for file_num, fpath in enumerate(files, start=1):
+            # Per-URL rows aggregated to per-host liveness right here in
+            # SQL (has_2xx / has_4xx_5xx) — CC's own index has no
+            # precomputed per-host columns like the old HF mirror did.
             query = f"""
-                SELECT surt_host_name, fetch_200, fetch_4xx, fetch_5xx, fetch_gone, nutch_gone
+                SELECT url_host_name,
+                       MAX(CASE WHEN fetch_status BETWEEN 200 AND 299 THEN 1 ELSE 0 END) AS has_2xx,
+                       MAX(CASE WHEN fetch_status >= 400 THEN 1 ELSE 0 END) AS has_4xx_5xx
                 FROM read_parquet('{fpath}')
                 WHERE url_host_tld IN ({tld_filter})
                 {shard_clause}
+                GROUP BY url_host_name
             """
             try:
                 rows = _run_with_timeout(lambda q=query: con.execute(q).fetchall(), timeout=query_timeout)
@@ -244,17 +251,16 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
             file_hosts: list[str] = []
             seen_this_file: set[str] = set()
             dead_skipped = 0
-            for surt_host, f200, f4xx, f5xx, fgone, ngone in rows:
-                if not surt_host:
+            for host, has_2xx, has_4xx_5xx in rows:
+                if not host:
                     continue
-                if _looks_dead(f200, f4xx, f5xx, fgone, ngone):
+                if _looks_dead(has_2xx, has_4xx_5xx):
                     dead_skipped += 1
                     continue
-                domain = ".".join(reversed(surt_host.split(",")))
-                if domain in seen_this_file:
+                if host in seen_this_file:
                     continue
-                seen_this_file.add(domain)
-                file_hosts.append(domain)
+                seen_this_file.add(host)
+                file_hosts.append(host)
             total_dead_skipped += dead_skipped
             total_hosts += len(file_hosts)
             log.info(f"  file {file_num}/{len(files)}: {len(file_hosts)} live hosts (of {len(rows)} "
@@ -271,14 +277,11 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     log.info(f"  concurrency={concurrency}  parse_workers={node.PARSE_WORKERS}  "
              f"time_budget={time_budget_minutes}min (shared across all requested partitions)")
 
-    con = _get_duckdb_connection()
-    if con is None:
-        return
     if crawl_list:
         log.info(f"  explicit --crawl-list given ({len(crawl_list)} requested) — ignoring --crawl/--partitions")
-        partitions = _resolve_explicit_crawl_names(con, crawl_list)
+        partitions = _resolve_explicit_crawl_names(crawl_list)
     else:
-        partitions = _resolve_crawl_names(con, crawl, partitions_count)
+        partitions = _resolve_crawl_names(crawl, partitions_count)
     if not partitions:
         log.error("No partition(s) resolved — nothing to crawl.")
         return
@@ -365,7 +368,8 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Host Crawl v2 — follow-links ATS discovery across Common Crawl partitions.")
+        description="Host Crawl v2 — follow-links ATS discovery across Common Crawl partitions "
+                    "(queried directly from Common Crawl's own CC-Index Table).")
     parser.add_argument("--crawl", type=str, default=None,
                          help="Pin the starting partition. Blank = auto-detect latest EVERY run. "
                               "Ignored if --crawl-list is given.")
@@ -374,7 +378,7 @@ def main():
                               "Ignored if --crawl-list is given.")
     parser.add_argument("--crawl-list", type=str, default=None,
                          help="Comma-separated exact partition names, e.g. "
-                              "'CC-MAIN-2025-18,CC-MAIN-2024-42'. Overrides --crawl/--partitions.")
+                              "'CC-MAIN-2026-34,CC-MAIN-2025-18'. Overrides --crawl/--partitions.")
     parser.add_argument("--start-file-index", type=int, default=0,
                          help="Skip this many files in the FIRST partition before starting.")
     parser.add_argument("--shard-index", type=int, default=None)
