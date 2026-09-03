@@ -1016,24 +1016,50 @@ async def _run_with_deadline(coros, deadline: float) -> tuple[list, bool]:
     and waits for that cancellation to actually land (crawl_one's awaits —
     aiohttp requests, executor calls — all raise CancelledError and unwind
     cleanly) before returning, so nothing is left running in the
-    background once this returns."""
+    background once this returns.
+
+    2026-09 bug fix: a single crawl_one() task raising an unhandled
+    exception used to blow up THIS function immediately (t.result() just
+    re-raises it) — skipping the `if pending: cancel...` cleanup below
+    entirely. Every other still-in-flight task in this sub-batch was left
+    running, orphaned, with nothing left to await it ("Task exception was
+    never retrieved"). Those orphans kept running detached from the crawl
+    that spawned them, and if one of them was mid-await on
+    loop.run_in_executor(parse_pool, ...) when the caller later ran
+    parse_pool.shutdown() (once the whole crawl had already moved on,
+    thinking everything was cleanly stopped), it would crash trying to
+    submit new work to an already-shut-down executor — the actual crash
+    reported 2026-09 (RuntimeError: cannot schedule new futures after
+    shutdown). Fixed by catching each task's exception individually so one
+    bad domain can never skip cleanup of the others."""
     tasks = [asyncio.ensure_future(c) for c in coros]
     pending = set(tasks)
     results = []
     hit_deadline = False
-    while pending:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            hit_deadline = True
-            break
-        done, pending = await asyncio.wait(pending, timeout=min(remaining, POLL_INTERVAL),
-                                            return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            results.append(t.result())
-    if pending:
-        for t in pending:
-            t.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+    try:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                hit_deadline = True
+                break
+            done, pending = await asyncio.wait(pending, timeout=min(remaining, POLL_INTERVAL),
+                                                return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                try:
+                    results.append(t.result())
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning(f"  crawl_one task failed unexpectedly (skipping this one domain, "
+                                f"continuing the rest of the batch): {e}")
+    finally:
+        # Runs even if the loop above raised (e.g. CancelledError bubbling
+        # from THIS coroutine being cancelled by an outer caller) — nothing
+        # from this sub-batch is ever left orphaned.
+        if pending:
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     return results, hit_deadline
 
 
