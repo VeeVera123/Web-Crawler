@@ -35,7 +35,21 @@ itself (hash(url_host_name) % shard_count = shard_index), and (2)
 seeding+crawling interleaved per Parquet file — each file's hosts are
 crawled and dropped before the next file is even queried, so memory never
 scales with partition count or host count. TIME_BUDGET_MINUTES is the
-only thing bounding a run's length.
+only thing bounding a run's length. The NEXT file's query is kicked off
+in the background as soon as the current file's rows land, so DuckDB
+querying and crawling overlap instead of the crawl stalling on every
+file's query in serial — see _FilePrefetcher below.
+
+RESUME (2026-09): each (shard_index, shard_count) checkpoints which file
+number it last fully finished to the SAME Supabase checkpoint table
+opendata_probe.py/people_data_labs_probe.py use (node.save_crawl_checkpoint,
+keyed by source="common_crawl_probe") — a re-run of the same shard picks
+up right after the last completed file automatically, no manual
+--start-file-index bookkeeping from the logs required. --start-file-index
+still works as an explicit override when given (0 forces a full restart
+and clears the checkpoint; a positive value manually skips ahead without
+touching the stored checkpoint) — same three-way convention
+opendata_probe.py's --restart-index uses.
 
 Usage:
     python common_crawl_probe.py                                        # 1 partition, unsharded (dev only)
@@ -191,12 +205,35 @@ def _list_partition_files(crawl_name: str) -> list[str]:
     return files
 
 
+def _query_file_rows(con, fpath: str, tld_filter: str, shard_clause: str) -> list[tuple]:
+    """One file's per-host liveness rows. Per-URL rows aggregated to
+    per-host liveness right here in SQL (has_2xx / has_4xx_5xx) — CC's own
+    index has no precomputed per-host columns like the old HF mirror did."""
+    query = f"""
+        SELECT url_host_name,
+               MAX(CASE WHEN fetch_status BETWEEN 200 AND 299 THEN 1 ELSE 0 END) AS has_2xx,
+               MAX(CASE WHEN fetch_status >= 400 THEN 1 ELSE 0 END) AS has_4xx_5xx
+        FROM read_parquet('{fpath}')
+        WHERE url_host_tld IN ({tld_filter})
+        {shard_clause}
+        GROUP BY url_host_name
+    """
+    return con.execute(query).fetchall()
+
+
 def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shard_count: int | None,
                              start_file_index: int = 0):
     """Streams hostnames across one or more partitions, ONE FILE AT A
     TIME — yields (crawl_name, partition_num, total_partitions, file_num,
     total_files, hosts). Sharding happens IN THE SQL query (hash() %
-    shard_count), not by slicing a Python list — see module docstring."""
+    shard_count), not by slicing a Python list — see module docstring.
+
+    SPEED (2026-09): the next file's DuckDB query is submitted to a
+    background thread as soon as the current file's rows are in hand —
+    the query for file N+1 runs WHILE the caller is off crawling file N's
+    hosts (real network I/O, seconds), instead of the two happening one
+    after the other. `.result()` on an already-finished future returns
+    instantly, so this only ever helps and never adds latency."""
     con = _get_duckdb_connection()
     if con is None:
         return
@@ -210,70 +247,70 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
     shard_clause = f"AND (hash(url_host_name) % {shard_count}) = {shard_index}" if sharded else ""
     query_timeout = 300
 
-    for partition_num, crawl_name in enumerate(partitions, start=1):
-        log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} ──")
-        files = _list_partition_files(crawl_name)
-        if partition_num == 1 and start_file_index:
-            skipped = files[:start_file_index]
-            files = files[start_file_index:]
-            log.info(f"  --start-file-index {start_file_index}: skipping {len(skipped)} file(s)")
-        log.info(f"  {len(files)} file(s) to scan" + (f" — shard {shard_index}/{shard_count}" if sharded else ""))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch_pool:
+        for partition_num, crawl_name in enumerate(partitions, start=1):
+            log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} ──")
+            files = _list_partition_files(crawl_name)
+            if partition_num == 1 and start_file_index:
+                skipped = files[:start_file_index]
+                files = files[start_file_index:]
+                log.info(f"  starting at file {start_file_index}: skipping {len(skipped)} already-done file(s)")
+            log.info(f"  {len(files)} file(s) to scan" + (f" — shard {shard_index}/{shard_count}" if sharded else ""))
 
-        total_dead_skipped = 0
-        total_hosts = 0
-        for file_num, fpath in enumerate(files, start=1):
-            # Per-URL rows aggregated to per-host liveness right here in
-            # SQL (has_2xx / has_4xx_5xx) — CC's own index has no
-            # precomputed per-host columns like the old HF mirror did.
-            query = f"""
-                SELECT url_host_name,
-                       MAX(CASE WHEN fetch_status BETWEEN 200 AND 299 THEN 1 ELSE 0 END) AS has_2xx,
-                       MAX(CASE WHEN fetch_status >= 400 THEN 1 ELSE 0 END) AS has_4xx_5xx
-                FROM read_parquet('{fpath}')
-                WHERE url_host_tld IN ({tld_filter})
-                {shard_clause}
-                GROUP BY url_host_name
-            """
-            try:
-                rows = _run_with_timeout(lambda q=query: con.execute(q).fetchall(), timeout=query_timeout)
-            except concurrent.futures.TimeoutError:
-                log.warning(f"  file {file_num}/{len(files)}: query timed out — skipping.")
-                continue
-            except Exception as e:
-                log.warning(f"  file {file_num}/{len(files)}: query failed — skipping: {e}")
-                continue
+            total_dead_skipped = 0
+            total_hosts = 0
+            next_future = prefetch_pool.submit(_query_file_rows, con, files[0], tld_filter, shard_clause) if files else None
+            for file_num, fpath in enumerate(files, start=1):
+                try:
+                    rows = next_future.result(timeout=query_timeout)
+                except concurrent.futures.TimeoutError:
+                    log.warning(f"  file {file_num}/{len(files)}: query timed out — skipping.")
+                    rows = []
+                except Exception as e:
+                    log.warning(f"  file {file_num}/{len(files)}: query failed — skipping: {e}")
+                    rows = []
+                # Kick the NEXT file's query off immediately — it runs in
+                # the background while this file's hosts get crawled below.
+                next_future = (prefetch_pool.submit(_query_file_rows, con, files[file_num], tld_filter, shard_clause)
+                               if file_num < len(files) else None)
 
-            # Dedup is PER-FILE only, not cross-run — a persistent `seen`
-            # set would regrow to the same OOM-risk size the streaming fix
-            # eliminated. A host appearing in >1 file just gets crawled
-            # twice (harmless — (ats,slug) dedup at the write path still
-            # prevents any duplicate row).
-            file_hosts: list[str] = []
-            seen_this_file: set[str] = set()
-            dead_skipped = 0
-            for host, has_2xx, has_4xx_5xx in rows:
-                if not host:
-                    continue
-                if _looks_dead(has_2xx, has_4xx_5xx):
-                    dead_skipped += 1
-                    continue
-                if host in seen_this_file:
-                    continue
-                seen_this_file.add(host)
-                file_hosts.append(host)
-            total_dead_skipped += dead_skipped
-            total_hosts += len(file_hosts)
-            log.info(f"  file {file_num}/{len(files)}: {len(file_hosts)} live hosts (of {len(rows)} "
-                     f"candidates, {dead_skipped} dead-skipped) — {total_hosts} seeded so far")
-            yield crawl_name, partition_num, len(partitions), file_num, len(files), file_hosts
+                # Dedup is PER-FILE only, not cross-run — a persistent `seen`
+                # set would regrow to the same OOM-risk size the streaming fix
+                # eliminated. A host appearing in >1 file just gets crawled
+                # twice (harmless — (ats,slug) dedup at the write path still
+                # prevents any duplicate row).
+                file_hosts: list[str] = []
+                seen_this_file: set[str] = set()
+                dead_skipped = 0
+                for host, has_2xx, has_4xx_5xx in rows:
+                    if not host:
+                        continue
+                    if _looks_dead(has_2xx, has_4xx_5xx):
+                        dead_skipped += 1
+                        continue
+                    if host in seen_this_file:
+                        continue
+                    seen_this_file.add(host)
+                    file_hosts.append(host)
+                total_dead_skipped += dead_skipped
+                total_hosts += len(file_hosts)
+                log.info(f"  file {file_num}/{len(files)}: {len(file_hosts)} live hosts (of {len(rows)} "
+                         f"candidates, {dead_skipped} dead-skipped) — {total_hosts} seeded so far")
+                yield crawl_name, partition_num, len(partitions), file_num, len(files), file_hosts
+
+
+SOURCE_LABEL = "common_crawl_probe"
+_BANNER = "=" * 60
 
 
 async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: int | None,
                           shard_count: int | None, concurrency: int,
                           time_budget_minutes: int, crawl_list: list[str] | None = None,
-                          start_file_index: int = 0) -> None:
+                          start_file_index: int | None = None) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-    log.info(f"── Host Crawl v2{label} ──")
+    log.info(_BANNER)
+    log.info(f"COMMON CRAWL — starting{label}")
+    log.info(_BANNER)
     log.info(f"  concurrency={concurrency}  parse_workers={node.PARSE_WORKERS}  "
              f"time_budget={time_budget_minutes}min (shared across all requested partitions)")
 
@@ -299,11 +336,33 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     total_hosts_seen = 0
     partitions_completed = 0
     last_partition_name = partitions[0]
+    files_done_before = 0
+    resumable = shard_index is not None and shard_count is not None
 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+            # RESUME: same checkpoint table opendata_probe.py/
+            # people_data_labs_probe.py use, keyed by (source, shard_index,
+            # shard_count) — see module docstring's RESUME section. Only
+            # tracks position within the FIRST requested partition, same
+            # limitation --start-file-index always had.
+            if resumable:
+                if start_file_index == 0:
+                    log.info("  --start-file-index 0 — forcing a full restart of this shard, clearing any checkpoint")
+                    await node.clear_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count)
+                elif start_file_index:
+                    files_done_before = start_file_index
+                    log.info(f"  --start-file-index {files_done_before} (manual override) — skipping ahead")
+                else:
+                    files_done_before = await node.load_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count)
+                    if files_done_before:
+                        log.info(f"  resuming from checkpoint: {files_done_before} file(s) already completed "
+                                 f"in this shard on a prior run — skipping straight past them")
+            elif start_file_index:
+                files_done_before = start_file_index
+
             for partition_name, partition_num, total_partitions, file_num, total_files, file_hosts \
-                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count, start_file_index):
+                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count, files_done_before):
                 last_partition_name = partition_name
                 if time.monotonic() - crawl_start >= time_budget_seconds:
                     time_budget_hit = True
@@ -319,14 +378,21 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 # identical comment. archive_i still gets every ATS hit.
                 _, elapsed, rate, file_time_hit = await node.crawl_batch(
                     file_hosts, session, sem, stats, parse_pool, node.ACCEPT_ANY_COUNTRY,
-                    "common_crawl_probe", found_rows, crawl_start, time_budget_seconds,
+                    SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                     time_budget_minutes, batch_size=2000, unit_label="hosts",
                     capture_inhouse=False)
                 if file_time_hit:
                     time_budget_hit = True
                     break
+                if partition_num == 1 and resumable:
+                    await node.save_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count,
+                                                      files_done_before + file_num)
                 if file_num == total_files:
                     partitions_completed = partition_num
+            if not time_budget_hit and resumable:
+                # Ran clean to the end — clear the checkpoint so a later,
+                # differently-shaped run doesn't wrongly skip ahead.
+                await node.clear_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count)
     finally:
         parse_pool.shutdown(wait=True)
 
@@ -334,7 +400,9 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     hosts_n = max(stats["companies_attempted"], 1)
 
     log.info("")
-    log.info(f"── Host Crawl v2{label} summary ──")
+    log.info(_BANNER)
+    log.info(f"COMMON CRAWL — summary{label}")
+    log.info(_BANNER)
     log.info(f"  status:      {'STOPPED EARLY — time budget reached mid-' + last_partition_name if time_budget_hit else 'complete — all requested partitions covered'}")
     log.info(f"  partitions:  {partitions_completed}/{len(partitions)} fully covered ({partitions})")
     log.info(f"  hosts:       {stats['companies_attempted']} attempted, {total_hosts_seen} seeded")
@@ -379,8 +447,11 @@ def main():
     parser.add_argument("--crawl-list", type=str, default=None,
                          help="Comma-separated exact partition names, e.g. "
                               "'CC-MAIN-2026-34,CC-MAIN-2025-18'. Overrides --crawl/--partitions.")
-    parser.add_argument("--start-file-index", type=int, default=0,
-                         help="Skip this many files in the FIRST partition before starting.")
+    parser.add_argument("--start-file-index", type=int, default=None,
+                         help="Per-shard resume, FIRST partition only. Omit (default) to auto-resume "
+                              "from this shard's own Supabase checkpoint. 0 forces a full restart, "
+                              "clearing any checkpoint. A positive value manually skips ahead this many "
+                              "files without touching the stored checkpoint.")
     parser.add_argument("--shard-index", type=int, default=None)
     parser.add_argument("--shard-count", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=node.CRAWL_CONCURRENCY)
