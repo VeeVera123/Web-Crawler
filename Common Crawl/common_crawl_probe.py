@@ -380,7 +380,7 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                     file_hosts, session, sem, stats, parse_pool, node.ACCEPT_ANY_COUNTRY,
                     SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                     time_budget_minutes, batch_size=2000, unit_label="hosts",
-                    capture_inhouse=False)
+                    capture_inhouse=True)
                 if file_time_hit:
                     time_budget_hit = True
                     break
