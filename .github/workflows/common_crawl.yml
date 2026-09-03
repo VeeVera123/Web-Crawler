@@ -1,14 +1,15 @@
 name: Common Crawl
 
-# One combined seed+crawl+detect pass over Common Crawl's Host Index — no
-# queue tables, no separate seed step. Country is detected when found but
-# never filters (most rows have no country). Streams one Parquet file at
-# a time so memory stays bounded regardless of how many partitions run.
+# One combined seed+crawl+detect pass over Common Crawl's own CC-Index
+# Table (queried directly — no third-party mirror) — no queue tables, no
+# separate seed step. Country is detected when found but never filters
+# (most rows have no country). Streams one Parquet file at a time so
+# memory stays bounded regardless of how many partitions run.
 on:
   workflow_dispatch:
     inputs:
       crawl_partition:
-        description: "Starting partition (e.g. CC-MAIN-2025-18). Blank = auto-detect the latest. Ignored if crawl_list is set."
+        description: "Starting partition (e.g. CC-MAIN-2026-34). Blank = auto-detect the latest. Ignored if crawl_list is set."
         required: false
         default: ""
       partitions:
@@ -16,7 +17,7 @@ on:
         required: false
         default: "1"
       crawl_list:
-        description: "Comma-separated exact partitions instead, e.g. CC-MAIN-2025-18,CC-MAIN-2024-42. Overrides crawl_partition/partitions."
+        description: "Comma-separated exact partitions instead, e.g. CC-MAIN-2026-34,CC-MAIN-2025-18. Overrides crawl_partition/partitions."
         required: false
         default: ""
       start_file_index:
@@ -62,9 +63,7 @@ jobs:
     needs: prepare-matrix
     runs-on: ubuntu-latest
     # 350 keeps headroom under GitHub's 360min hard ceiling. Each shard
-    # also pays the DuckDB seed-query cost up front, not just crawl time —
-    # a stalled Hugging Face connection can eat into this margin; setting
-    # the HF_TOKEN secret is the real fix for that, not a bigger number.
+    # also pays the DuckDB seed-query cost up front, not just crawl time.
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -85,7 +84,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           CRAWL_ARGS=()
           if [ -n "${{ github.event.inputs.crawl_list }}" ]; then
