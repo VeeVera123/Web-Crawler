@@ -331,7 +331,7 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     parse_pool = node.new_parse_pool()
     time_budget_seconds = time_budget_minutes * 60
     crawl_start = time.monotonic()
-    elapsed, rate = 0.0, 0.0
+    , rate = 0.0, 0.0
     time_budget_hit = False
     total_hosts_seen = 0
     partitions_completed = 0
@@ -380,7 +380,7 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                     file_hosts, session, sem, stats, parse_pool, node.ACCEPT_ANY_COUNTRY,
                     SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                     time_budget_minutes, batch_size=2000, unit_label="hosts",
-                    capture_inhouse=True)
+                    capture_inhouse=False)
                 if file_time_hit:
                     time_budget_hit = True
                     break
