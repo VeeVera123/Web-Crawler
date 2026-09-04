@@ -95,7 +95,7 @@ SKIP_SLUGS = {
 }
 
 # ══════════════════════════════════════════════════════════
-# URL → SLUG CONVERTERS (TOP 10 EXHAUSTIVELY RESEARCHED)
+# URL → SLUG CONVERTERS
 # ══════════════════════════════════════════════════════════
 
 def _url_to_slug_greenhouse(url: str) -> str | None:
@@ -147,7 +147,6 @@ def _url_to_slug_bamboohr(url: str) -> str | None:
 def _url_to_slug_icims(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    # Captured standard, EU, and UK domains.
     for suffix in (".icims.com", ".icims.eu", ".icims.co.uk"):
         if host.endswith(suffix):
             slug = host.replace(suffix, "").lower()
@@ -166,7 +165,6 @@ def _url_to_slug_workday(url: str) -> str | None:
         company = parts[0]
         wd = parts[1] if len(parts) > 1 else ""
         path_parts = [p for p in parsed.path.strip("/").split("/") if p]
-        # Skip regional locales like en-GB, de-DE to grab the pure site ID
         if path_parts and _WORKDAY_LOCALE_SEGMENT_RE.match(path_parts[0]):
             path_parts = path_parts[1:]
         site_id = path_parts[0] if path_parts else ""
@@ -237,7 +235,6 @@ def _url_to_slug_successfactors(url: str) -> str | None:
 def _url_to_slug_zoho(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    # Restricted exclusively to the approved 18 regions. .in and .jp omitted entirely.
     for suffix in (".zohorecruit.com", ".zohorecruit.eu", ".zohorecruit.com.au"):
         if host.endswith(suffix):
             slug = host[: -len(suffix)].lower()
@@ -245,26 +242,106 @@ def _url_to_slug_zoho(url: str) -> str | None:
                 return slug
     return None
 
-# Remaining secondary extractors collapsed for conciseness but functionally retained
 def _url_to_slug_recruitee(url: str) -> str | None:
     host = urlparse(url).hostname or ""
     if host.endswith(".recruitee.com"):
         slug = host.replace(".recruitee.com", "").lower()
-        return slug if slug not in SKIP_SLUGS else None
+        return slug if slug not in SKIP_SLUGS and slug != "www" else None
     return None
 
 def _url_to_slug_rippling(url: str) -> str | None:
-    host = urlparse(url).hostname or ""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
     if host.endswith(".rippling.com"):
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) >= 1 and (host == "www.rippling.com" or host == "rippling.com") and parts[0] in ["careers", "jobs", "about"]:
+            return None
         slug = host.replace(".rippling.com", "").lower()
-        return slug if slug not in SKIP_SLUGS else None
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
     return None
 
 def _url_to_slug_teamtailor(url: str) -> str | None:
     host = urlparse(url).hostname or ""
     if host.endswith(".teamtailor.com"):
         slug = host.replace(".teamtailor.com", "").lower()
-        return slug if slug not in SKIP_SLUGS else None
+        return slug if slug not in SKIP_SLUGS and slug != "www" else None
+    return None
+
+def _url_to_slug_breezyhr(url: str) -> str | None:
+    host = urlparse(url).hostname or ""
+    if host.endswith(".breezy.hr"):
+        slug = host.replace(".breezy.hr", "").lower()
+        return slug if slug not in SKIP_SLUGS and slug != "www" else None
+    return None
+
+def _url_to_slug_personio(url: str) -> str | None:
+    host = urlparse(url).hostname or ""
+    for suffix in [".jobs.personio.de", ".jobs.personio.com", ".jobs.personio.ie", ".jobs.personio.co.uk"]:
+        if host.endswith(suffix):
+            slug = host.replace(suffix, "").lower()
+            return slug if slug not in SKIP_SLUGS and slug != "www" else None
+    return None
+
+def _url_to_slug_joincom(url: str) -> str | None:
+    parsed = urlparse(url)
+    if (parsed.hostname or "") in ("join.com", "www.join.com"):
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "companies":
+            slug = path_parts[1].lower()
+            return slug if slug not in SKIP_SLUGS else None
+    return None
+
+def _url_to_slug_oracle_cloud_hcm(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "oraclecloud.com" in host:
+        return host.split(".")[0].lower()
+    return None
+
+def _url_to_slug_paylocity(url: str) -> str | None:
+    parsed = urlparse(url)
+    if (parsed.hostname or "") == "recruiting.paylocity.com":
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 3 and path_parts[0] == "recruiting" and path_parts[1] == "jobs":
+            # the structure is often /recruiting/jobs/Details/1234/company-name
+            # or /recruiting/jobs/All/1234/company-name
+            pass 
+    return None 
+
+def _url_to_slug_hrmdirect(url: str) -> str | None:
+    host = urlparse(url).hostname or ""
+    if host.endswith(".hrmdirect.com"):
+        slug = host.replace(".hrmdirect.com", "").lower()
+        return slug if slug not in SKIP_SLUGS and slug != "www" else None
+    return None
+
+def _url_to_slug_softgarden(url: str) -> str | None:
+    host = urlparse(url).hostname or ""
+    if host.endswith(".softgarden.io"):
+        slug = host.replace(".softgarden.io", "").lower()
+        return slug if slug not in SKIP_SLUGS and slug != "www" else None
+    if host.endswith(".career.softgarden.de"):
+        slug = host.replace(".career.softgarden.de", "").lower()
+        return slug if slug not in SKIP_SLUGS and slug != "www" else None
+    return None
+
+def _url_to_slug_brassring(url: str) -> str | None:
+    host = urlparse(url).hostname or ""
+    if "brassring.com" in host:
+        path_match = re.search(r"/(?:TGnewUI/Search/Home/HomeWithPreLoad|TGWebHost/searchopenings\.aspx).*?partnerid=(\d+)&siteid=(\d+)", url, re.IGNORECASE)
+        if path_match:
+            return f"{path_match.group(1)}|{path_match.group(2)}"
+    return None
+
+def _url_to_slug_ycombinator(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host in ("www.workatastartup.com", "workatastartup.com", "www.ycombinator.com", "ycombinator.com"):
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "companies":
+            slug = path_parts[1].lower()
+            return slug if slug not in SKIP_SLUGS else None
     return None
 
 URL_TO_SLUG = {
@@ -282,6 +359,15 @@ URL_TO_SLUG = {
     "recruitee": _url_to_slug_recruitee,
     "rippling": _url_to_slug_rippling,
     "teamtailor": _url_to_slug_teamtailor,
+    "breezyhr": _url_to_slug_breezyhr,
+    "personio": _url_to_slug_personio,
+    "joincom": _url_to_slug_joincom,
+    "oracle_cloud_hcm": _url_to_slug_oracle_cloud_hcm,
+    "paylocity": _url_to_slug_paylocity,
+    "hrmdirect": _url_to_slug_hrmdirect,
+    "softgarden": _url_to_slug_softgarden,
+    "brassring": _url_to_slug_brassring,
+    "ycombinator": _url_to_slug_ycombinator,
 }
 
 _VALID_SLUG_CHARS_RE = re.compile(r"^[A-Za-z0-9._\-|]+$")
@@ -294,11 +380,88 @@ def _is_valid_slug(slug: str) -> bool:
     return True
 
 # ══════════════════════════════════════════════════════════
-# COMMON CRAWL DISCOVERY PATTERNS (EXPANDED FOR 18 REGIONS)
+# GITHUB SOURCE DATA FETCHERS (FEASHLIAA & KALIL & OPENPOSTINGS)
+# ══════════════════════════════════════════════════════════
+
+def fetch_feashliaa_slugs() -> dict[str, set[str]]:
+    slugs_by_ats: dict[str, set[str]] = {ats: set() for ats in SUPPORTED_ATS}
+    for ats, url in FEASHLIAA_SOURCES.items():
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                for item in data:
+                    slug = item.get("id") or item.get("company_id") or item.get("company_slug")
+                    if slug and _is_valid_slug(slug):
+                        slugs_by_ats[ats].add(slug)
+                log.info(f"Feashliaa: Fetched {len(slugs_by_ats[ats])} for {ats}")
+            else:
+                log.warning(f"Feashliaa: Failed {ats}, status {r.status_code}")
+        except Exception as e:
+            log.error(f"Feashliaa: Error fetching {ats}: {e}")
+    return slugs_by_ats
+
+def fetch_kalil_slugs() -> dict[str, set[str]]:
+    slugs_by_ats: dict[str, set[str]] = {ats: set() for ats in SUPPORTED_ATS}
+    for ats, url in KALIL_SOURCES.items():
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                lines = r.text.splitlines()
+                for line in lines[1:]: 
+                    parts = line.split(",")
+                    if parts:
+                        slug = parts[0].strip(' "')
+                        if slug and _is_valid_slug(slug):
+                            slugs_by_ats[ats].add(slug)
+                log.info(f"Kalil: Fetched {len(slugs_by_ats[ats])} for {ats}")
+            else:
+                log.warning(f"Kalil: Failed {ats}, status {r.status_code}")
+        except Exception as e:
+            log.error(f"Kalil: Error fetching {ats}: {e}")
+    return slugs_by_ats
+
+def fetch_openpostings_slugs() -> dict[str, set[str]]:
+    slugs_by_ats: dict[str, set[str]] = {ats: set() for ats in SUPPORTED_ATS}
+    try:
+        r = requests.get(OPENPOSTINGS_DB_URL, timeout=30)
+        if r.status_code != 200:
+            log.warning(f"OpenPostings DB fetch failed: {r.status_code}")
+            return slugs_by_ats
+        
+        fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        with os.fdopen(fd, 'wb') as f:
+            f.write(r.content)
+            
+        conn = sqlite3.connect(tmp_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name, ats FROM boards")
+        rows = cur.fetchall()
+        conn.close()
+        os.remove(tmp_path)
+        
+        for board_name, ats_raw in rows:
+            mapped_ats = _map_ats_name(ats_raw)
+            if mapped_ats and mapped_ats in SUPPORTED_ATS:
+                extractor = URL_TO_SLUG.get(mapped_ats)
+                if extractor:
+                    pass 
+                
+                if board_name and _is_valid_slug(board_name):
+                    slugs_by_ats[mapped_ats].add(board_name)
+                    
+        for ats, s in slugs_by_ats.items():
+            if s: log.info(f"OpenPostings: Fetched {len(s)} for {ats}")
+    except Exception as e:
+        log.error(f"OpenPostings: Error: {e}")
+    return slugs_by_ats
+
+# ══════════════════════════════════════════════════════════
+# COMMON CRAWL DISCOVERY PATTERNS 
 # ══════════════════════════════════════════════════════════
 
 CC_PLATFORM_PATTERNS = {
-    # Top 10 Expanded Wildcards
+    # Top 10 Expanded Wildcards (EU/UK/APAC compliance applied)
     "greenhouse": ["boards.greenhouse.io/*", "job-boards.greenhouse.io/*", "boards.eu.greenhouse.io/*"],
     "lever": ["jobs.lever.co/*", "jobs.eu.lever.co/*"],
     "ashby": ["jobs.ashbyhq.com/*"],
@@ -396,19 +559,33 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None, cc_t
     return slugs_by_ats
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=str, choices=["commoncrawl"], default="commoncrawl")
+    parser = argparse.ArgumentParser(description="Run Discovery pipeline")
+    parser.add_argument("--source", type=str, choices=["feashliaa", "kalil", "openpostings", "commoncrawl", "all"], default="all")
+    parser.add_argument("--cc-shard", type=int, default=0)
+    parser.add_argument("--cc-total-shards", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     all_slugs: dict[str, set[str]] = {ats: set() for ats in SUPPORTED_ATS}
     
-    if args.source == "commoncrawl":
-        cc_slugs = fetch_commoncrawl_slugs(n_crawls=1)
-        for ats, slugs in cc_slugs.items():
-            if ats in all_slugs: all_slugs[ats].update(slugs)
-            
-    log.info(f"Discovery complete. Total unique slugs identified: {sum(len(s) for s in all_slugs.values())}")
+    if args.source in ("all", "feashliaa"):
+        f_slugs = fetch_feashliaa_slugs()
+        for ats, slugs in f_slugs.items(): all_slugs[ats].update(slugs)
+        
+    if args.source in ("all", "kalil"):
+        k_slugs = fetch_kalil_slugs()
+        for ats, slugs in k_slugs.items(): all_slugs[ats].update(slugs)
+
+    if args.source in ("all", "openpostings"):
+        o_slugs = fetch_openpostings_slugs()
+        for ats, slugs in o_slugs.items(): all_slugs[ats].update(slugs)
+
+    if args.source in ("all", "commoncrawl"):
+        cc_slugs = fetch_commoncrawl_slugs(n_crawls=1, cc_shard=args.cc_shard, cc_total_shards=args.cc_total_shards)
+        for ats, slugs in cc_slugs.items(): all_slugs[ats].update(slugs)
+
+    total_slugs = sum(len(s) for s in all_slugs.values())
+    log.info(f"Discovery complete. Total unique slugs identified: {total_slugs}")
 
 if __name__ == "__main__":
     main()
