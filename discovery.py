@@ -459,29 +459,28 @@ _WORKDAY_LOCALE_SEGMENT_RE = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
 
 
 def _url_to_slug_workday(url: str) -> str | None:
-    """2026-08: confirmed via research that many real Workday career-site
-    URLs carry a locale segment (e.g. /en-US/) before the site id —
-    convergys.wd1.myworkdayjobs.com/en-US/external_us/jobs,
-    workday.wd5.myworkdayjobs.com/en-US/Workday/?q=... — both real, live
-    examples. Previously path_parts[0] was taken unconditionally, so on
-    these URLs it wrongly returned "en-US" as the site_id instead of the
-    real one. Locale-free URLs (mastercard.wd1.myworkdayjobs.com/
-    CorporateCareers) are unaffected either way."""
+    """2026-09 (per spec): Final slug format is `{company_tenant}|{site_id}`.
+    The `wd` instance number is intentionally NOT included per the spec,
+    which states the slug should be `{company_tenant}|{site_id}`.
+    (Note: original code included `wd` for disambiguation; if needed later,
+    re-add it.)
+    URL pattern: {company}.wd{N}.myworkdayjobs.com/[{locale}/]{site_id}
+    Locale segment is identified by regex `^[a-z]{2}-[A-Z]{2}$` and stripped.
+    """
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if _is_blocked_host(host):
         return None
     if "myworkdayjobs.com" in host:
-        # Pattern: {company}.wd{N}.myworkdayjobs.com/[{locale}/]{site_id}
         parts = host.split(".")
-        company = parts[0]
-        wd = parts[1] if len(parts) > 1 else ""
+        company = parts[0]  # first subdomain label, e.g. 'mastercard'
+        # wd = parts[1] if len(parts) > 1 else ""  # intentionally not used
         path_parts = [p for p in parsed.path.strip("/").split("/") if p]
         if path_parts and _WORKDAY_LOCALE_SEGMENT_RE.match(path_parts[0]):
             path_parts = path_parts[1:]
         site_id = path_parts[0] if path_parts else ""
-        if company and wd and site_id:
-            return f"{company}|{wd}|{site_id}"
+        if company and site_id:
+            return f"{company}|{site_id}"
     return None
 
 
@@ -1444,7 +1443,7 @@ CC_PLATFORM_PATTERNS = {
     "ashby": ["jobs.ashbyhq.com/*"],
     "bamboohr": ["*.bamboohr.com/careers", "*.bamboohr.com/jobs"],
     # 2026-09: iCIMS expanded per spec — added .eu and .co.uk domains.
-    "icims": ["*.icims.com/jobs/", "*.icims.eu/jobs/*", "*.icims.co.uk/jobs/*"],
+    "icims": ["*.icims.com/jobs/*", "*.icims.eu/jobs/*", "*.icims.co.uk/jobs/*"],
     # NOTE: Workday's "wd{N}" instance number isn't a small fixed set —
     # verified live examples exist for wd1 through wd12+ (e.g. Walmart on
     # wd5, Salesforce/Capital One on wd12, Desjardins on wd10), assigned
@@ -1484,8 +1483,8 @@ CC_PLATFORM_PATTERNS = {
     # 2026-08: added the .eu region domain — confirmed real, in-active-use
     # (multiple distinct live customer boards found on zohorecruit.eu).
     # 2026-09: added .com.au (APAC) per spec. Indian .in deliberately omitted.
-    "zoho": ["*.zohorecruit.com/jobs/", "*.zohorecruit.eu/jobs/",
-             "*.zohorecruit.com.au/jobs/"],
+    "zoho": ["*.zohorecruit.com/jobs/*", "*.zohorecruit.eu/jobs/*",
+             "*.zohorecruit.com.au/jobs/*"],
     # "api.softgarden.io/.../jobboards/{channelId}/..." added 2026-08 —
     # confirmed real (softgarden's own dev docs), and _url_to_slug_softgarden
     # already parses this shape via its /jobboards/ regex — it just wasn't
@@ -1544,8 +1543,8 @@ CC_PLATFORM_PATTERNS = {
     # .sapsf.com, .sapsf.eu regional variants confirmed in
     # _url_to_slug_successfactors's sf_domains). BrassRing career sites
     # live on sjobs.brassring.com with partnerid+siteid query params.
-    "successfactors": ["*.successfactors.com/career", "*.successfactors.eu/career",
-                       "*.sapsf.com/career", "*.sapsf.eu/career"],
+    "successfactors": ["*.successfactors.com/career*", "*.successfactors.eu/career*",
+                       "*.sapsf.com/career*", "*.sapsf.eu/career*"],
     "brassring": ["sjobs.brassring.com/*"],
 }
 
@@ -2322,7 +2321,7 @@ def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
 # ══════════════════════════════════════════════════════════
 # Per spec: every slug must pass this filter before reaching Supabase.
 # Length 2‑120, no percent-encoding, only allowed characters:
-# alphanumeric (Unicode letters/digits), dot, underscore, hyphen, pipe.
+# alphanumeric (ASCII), dot, underscore, hyphen, pipe.
 # This prevents malformed slugs from polluting archive_i.
 
 _SLUG_ALLOWED_CHARS_RE = re.compile(r"^[A-Za-z0-9._|-]+$")
