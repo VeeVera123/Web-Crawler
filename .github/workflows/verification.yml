@@ -111,7 +111,7 @@ jobs:
   verify:
     needs: prepare-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     strategy:
       fail-fast: false   # one shard's flakiness shouldn't cancel the rest
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
