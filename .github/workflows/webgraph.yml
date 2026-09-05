@@ -1,0 +1,70 @@
+name: WebGraph
+
+# Seed-only pipeline (no crawl stage — this doesn't crawl any domains
+# itself). Downloads + reduces Common Crawl's own domain-level WebGraph
+# release (harmonic centrality + PageRank) into a small (domain,tier) CSV
+# and publishes it to a GitHub Release under a STABLE tag/filename —
+# common_crawl.yml and opendata.yml's crawl jobs both point their
+# WEBGRAPH_TIERS_URL env var at that same fixed URL, so re-running this
+# workflow to pick up a new Common Crawl release never requires touching
+# those other two workflows. Manual/occasional — Common Crawl republishes
+# this dataset roughly every 2-3 months, not on any tighter schedule.
+#
+# ALWAYS run with dry_run checked first against a new --release value and
+# read the logged sample (domain, tier) rows before unchecking it — see
+# webgraph_seed.py's module docstring for exactly why (the ranks-file
+# column format couldn't be independently verified before this was built).
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Common Crawl webgraph release name, e.g. cc-main-2025-mar-apr-may — check https://commoncrawl.org/blog for the current one"
+        required: true
+      release_tag:
+        description: "GitHub Release tag to publish the reduced CSV to"
+        required: false
+        default: "webgraph-domain-tiers"
+      dry_run:
+        description: "Parse + log a sample only, don't publish. Always run this first against a new release."
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: webgraph-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # hard ceiling — this step can't be sharded, the vertices file is loaded whole
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Download + reduce WebGraph release
+        run: |
+          ARGS=(--release "${{ github.event.inputs.release }}" --output webgraph_domain_tiers.csv.gz)
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          python WebGraph/webgraph_seed.py "${ARGS[@]}"
+
+      - name: Publish to Release (replacing the existing asset on this tag)
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'webgraph-domain-tiers' }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "WebGraph domain tiers" \
+            --notes "Reduced Common Crawl WebGraph domain-authority tiers — see WebGraph/webgraph_seed.py. Source release: ${{ github.event.inputs.release }}. Regenerated $(date -u +%Y-%m-%d)."
+          gh release upload "$TAG" webgraph_domain_tiers.csv.gz --clobber
