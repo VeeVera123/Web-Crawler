@@ -17,6 +17,7 @@ never a gate on whether a hit gets written.
 """
 import asyncio
 import concurrent.futures
+import gzip
 import json
 import logging
 import os
@@ -569,6 +570,307 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
     return best
 
 
+# ── Company maturity heuristics (2026-09) ───────────────────────────────
+# archive_ii (in-house/unrecognized-ATS career pages) was accumulating a
+# lot of noise from single-person sites, hobbyist projects, and tiny shops
+# that happen to have a "Careers" or "Join us" page with no real hiring
+# activity behind it. These signals score how much a company's homepage
+# looks like an established, multi-person organization — reusing HTML
+# crawl_one has ALREADY fetched, with zero extra requests per domain, PLUS
+# one DNS MX lookup (2026-09, see below — added AFTER the signals below were
+# first shipped without it).
+#
+# Still deliberately excludes: WHOIS domain-registration age (registries
+# rate-limit/block bulk WHOIS at this pipeline's scale, and response formats
+# aren't consistently parseable across registrars/TLDs) and TLS certificate
+# issuer (needs a real per-domain TLS handshake, not just the HTTP fetch
+# already done, and free Let's Encrypt certs are ubiquitous across company
+# sizes — a weak signal for real added cost).
+#
+# DNS MX-record provider (2026-09, ADDED): unlike WHOIS/TLS, this needed no
+# new dependency and no workflow.yml edits — aiodns is already a project
+# dependency (see new_connector() above) and already installed in every
+# workflow that runs node.py. A lightweight, cheap async DNS query, fired
+# only for domains that actually reach the archive_ii quality-gate decision
+# (not every domain crawled), so it never adds latency to the far more
+# common known-ATS path.
+#
+# Common Crawl WebGraph (2026-09, ADDED): the domain-level ranks file
+# (harmonic centrality + PageRank, computed by Common Crawl from real
+# observed inbound links across their whole crawl) turned out to be a
+# ~2.7 GiB compressed one-time-per-release download, not the multi-
+# terabyte dataset this was originally assumed to be. It's built and
+# refreshed by a separate batch job (see WebGraph/webgraph_seed.py) into a
+# small `webgraph_domains` Supabase table (domain -> authority tier); this
+# module only ever does a single cheap read against that table per
+# quality-gate candidate — see _webgraph_score() below.
+#
+# SIGNAL RELIABILITY, and why the weights below aren't all equal: a link-
+# authority measure computed externally from the real web graph (WebGraph)
+# is the hardest of all these signals to fake — it requires other real,
+# independent sites to actually link to you. Structured org data that names
+# a checkable external authority (a real Wikipedia/SEC/Crunchbase page) and
+# a dedicated, procured enterprise mail-security gateway are next hardest —
+# still self-reported/self-installed, but not something a two-person shop
+# does by accident. Enterprise martech/observability tags and corporate
+# footer links are real but easy for anyone to add. Compliance banners
+# (OneTrust etc.), a bare legal-entity suffix, and mainstream hosted email
+# (Workspace/M365) are the weakest — all three are now just as common on a
+# one-person LLC as on a large company, so they're weighted low: useful for
+# breaking ties, not for carrying the score alone.
+#
+# This is a soft heuristic score, not a hard proof of company size — it
+# exists to cut obvious noise before it reaches archive_ii, not to
+# perfectly classify company scale. MIN_QUALITY_SCORE is deliberately
+# tunable (not a magic constant scattered across the file) since the
+# right cutoff will need calibrating against real archive_ii output.
+_ORG_SCHEMA_TYPE_RE = re.compile(r'"@type"\s*:\s*"(?:Organization|Corporation)"', re.I)
+_ORG_EMPLOYEE_COUNT_RE = re.compile(r'"numberOfEmployees"', re.I)
+# Weighted 2026-09 up from +5 to +10 as part of the reliability rebalance
+# above — a fabricated Organization schema is cheap, but linking it to a
+# real, checkable Wikipedia/SEC/Crunchbase/Bloomberg page is a much harder
+# thing for a tiny operation to fake convincingly.
+_ORG_AUTHORITY_SAMEAS_RE = re.compile(
+    r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:wikipedia\.org|crunchbase\.com|sec\.gov|bloomberg\.com|linkedin\.com/company)',
+    re.I)
+_CORP_FOOTER_LINKS_RE = re.compile(
+    r'\b(?:investor relations|investors?|newsroom|press releases?|board of directors|'
+    r'esg\b|sustainability report)\b', re.I)
+# Legal entity suffixes near a copyright line — expanded 2026-09 beyond the
+# original US/UK/DE/FR-heavy set to cover the major suffixes for the rest of
+# the countries this project actually targets for "global jobs" (AU, NL, IT,
+# JP, wider-Asia "Co., Ltd.", Nordics, Switzerland/Austria's "AG").
+# Weighted 2026-09 down to +5 (from +10) in the reliability rebalance —
+# virtually any registered business, including a one-person LLC, has a
+# legal-entity suffix; it's real evidence of "not a pure hobby site", not
+# evidence of scale.
+_LEGAL_ENTITY_SUFFIX_RE = re.compile(
+    r'(?:©|copyright)[^\n<]{0,80}\b(?:inc\.?|llc|l\.l\.c\.|corp(?:oration)?\.?|gmbh|plc|s\.a\.|ltd\.?|'
+    r'pty\.?\s*ltd\.?|pte\.?\s*ltd\.?|b\.?v\.?|s\.?p\.?a\.?|s\.?r\.?l\.?|s\.?a\.?s\.?|a\.?g\.?|a\.?b\.?|'
+    r'a/s|k\.?k\.?|co\.,?\s*ltd\.?|oy|ug)\b',
+    re.I)
+# Weighted 2026-09 down from +10 to +5 as part of the reliability
+# rebalance above — GDPR/CCPA compliance tooling is now routine for any
+# registered business regardless of size, not just larger ones.
+_COMPLIANCE_BANNER_RE = re.compile(r'(?:onetrust\.com|cookielaw\.org|trustarc\.com|cookiebot\.com)', re.I)
+# Enterprise martech — expanded 2026-09 with more ABM/enterprise-marketing
+# platforms in the same tier as the original 6sense/Demandbase/Marketo/
+# Pardot set (all effectively only bought by companies with a real B2B
+# marketing/sales-ops function, not something a two-person shop installs).
+_ENTERPRISE_MARTECH_RE = re.compile(
+    r'(?:6sense\.com|demandbase\.com|marketo\.net|pardot\.com|omtrdc\.net|2o7\.net|'
+    r'exacttarget\.com|salesforceliveagent\.com|eloqua\.com|terminus\.com|rollworks\.com|'
+    r'zoominfo\.com|bombora\.com)', re.I)
+# Observability/APM — expanded 2026-09 with more enterprise-tier platforms
+# (AppDynamics, Instana, Splunk Cloud) alongside the original Datadog/
+# Dynatrace/New Relic/Sentry set. Weighted down from +10 to +5 in the same
+# 2026-09 rebalance — free/cheap tiers of these same tools are common
+# among small startups too, so this is a weaker size signal than it looks.
+_OBSERVABILITY_RE = re.compile(
+    r'(?:datadoghq\.com|dynatrace\.com|newrelic\.com|nr-data\.net|sentry\.io|js\.sentry-cdn\.com|'
+    r'appdynamics\.com|instana\.io|splunkcloud\.com)', re.I)
+
+MIN_QUALITY_SCORE = 20
+
+# ── DNS MX-record provider (2026-09) ────────────────────────────────────
+# Two tiers, scored differently because they mean different things:
+#  - A dedicated enterprise email-security gateway (Mimecast, Proofpoint,
+#    Cisco Secure Email Cloud/IronPort, Barracuda, Forcepoint) is a real
+#    company-size signal — these are procured/IT-managed products, not
+#    something a tiny shop buys. Scored the same as the other strong
+#    signals above.
+#  - Mainstream hosted business email (Google Workspace, Microsoft 365) is
+#    used by companies of every size, including solo founders — it only
+#    confirms "this domain has real, working email infrastructure" (i.e.
+#    rules out a dead/parked domain), so it's scored much lower.
+#  - No MX record, or the lookup times out/fails: no score change either
+#    way — DNS lookups fail for benign, unrelated reasons often enough
+#    that penalizing on a miss would be its own source of noise.
+_MX_ENTERPRISE_GATEWAY_RE = re.compile(
+    r'(?:mimecast\.com|pphosted\.com|ppe-hosted\.com|iphmx\.com|barracudanetworks\.com|'
+    r'forcepoint\.com|mailcontrol\.com|messagelabs\.com)', re.I)
+# Weighted 2026-09 down to +3 (from +5) in the reliability rebalance —
+# Workspace/M365 is used by companies of every size, including solo
+# founders; it only rules out a dead/parked domain, nothing more.
+_MX_MAINSTREAM_HOSTED_RE = re.compile(
+    r'(?:google\.com|googlemail\.com|aspmx\.l\.google\.com|outlook\.com|protection\.outlook\.com)', re.I)
+MX_LOOKUP_TIMEOUT = 3.0  # seconds — DNS should be fast; never worth blocking the crawl over
+
+_mx_resolver = None  # lazy singleton, reused across every crawl_one call
+
+
+def _get_mx_resolver():
+    """Returns a shared aiodns.DNSResolver, or None if aiodns isn't
+    installed (same graceful-degradation pattern as new_connector() above
+    — MX scoring is a bonus signal, never a hard requirement)."""
+    global _mx_resolver
+    if _mx_resolver is None:
+        try:
+            import aiodns
+            _mx_resolver = aiodns.DNSResolver()
+        except ImportError:
+            _mx_resolver = False  # sentinel: "checked, not available"
+    return _mx_resolver or None
+
+
+async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
+    """One async MX query for `domain`. Returns (score, signal_name) — never
+    raises; any DNS error, timeout, or missing aiodns just means no signal
+    (0, None), not a penalty."""
+    resolver = _get_mx_resolver()
+    if resolver is None:
+        return 0, None
+    try:
+        records = await asyncio.wait_for(resolver.query(domain, "MX"), timeout=MX_LOOKUP_TIMEOUT)
+    except Exception:
+        return 0, None
+    hosts = " ".join(getattr(r, "host", "") or "" for r in (records or []))
+    if not hosts:
+        return 0, None
+    if _MX_ENTERPRISE_GATEWAY_RE.search(hosts):
+        return 15, "enterprise_mail_security"
+    if _MX_MAINSTREAM_HOSTED_RE.search(hosts):
+        return 3, "hosted_business_email"
+    return 0, None
+
+
+# ── Common Crawl WebGraph authority tier (2026-09) ──────────────────────
+# The strongest signal in this whole scoring system — see the reliability
+# note in this section's header comment above. Built separately by
+# WebGraph/webgraph_seed.py, which downloads Common Crawl's published
+# domain-level ranks file (harmonic centrality + PageRank, real link
+# authority computed from their own crawl — see that script's docstring
+# for the exact source/format) and writes a small reduced domain->tier CSV
+# (~10M rows, tens of MB gzipped — nowhere near GitHub's 2GB release-asset
+# cap). 2026-09, REVISED: that CSV is uploaded to a GitHub Release, NOT a
+# Supabase table — a live per-domain Supabase read for every quality-gate
+# candidate would mean real ongoing egress/storage cost for data that
+# never changes mid-run and is cheap to just hold in memory. Instead this
+# file is downloaded ONCE per crawl process (lazy singleton, same pattern
+# as the MX resolver above) and every lookup after that is a plain local
+# dict read — zero network cost, zero latency, for the rest of the run.
+#
+# Two tiers, not a single flag, because "somewhere in the top ~10M
+# domains" and "top ~1M domains" are meaningfully different confidence
+# levels — the web has on the order of a couple hundred million distinct
+# registered domains, so even top-10M is a real distinction, and top-1M is
+# a strong one.
+WEBGRAPH_TIERS_URL = os.environ.get("WEBGRAPH_TIERS_URL", "")  # GitHub Release asset URL, .csv or .csv.gz
+WEBGRAPH_STRONG_TIER_SCORE = 30   # tier 1 — top ~1M domains by harmonic centrality
+WEBGRAPH_MODERATE_TIER_SCORE = 15  # tier 2 — top ~10M, below the tier-1 cutoff
+
+_webgraph_tiers: dict[str, int] | None = None  # lazy singleton, loaded once per process
+_webgraph_load_lock: asyncio.Lock | None = None
+
+
+async def _load_webgraph_tiers(session: aiohttp.ClientSession) -> dict[str, int]:
+    """Downloads+parses WEBGRAPH_TIERS_URL exactly once per process, no
+    matter how many concurrent crawl_one() calls ask for it at once (the
+    lock makes every caller but the first just wait on the same in-flight
+    load). Returns {} (never raises) if the URL isn't configured or the
+    download/parse fails — WebGraph just contributes no signal that run,
+    same graceful-degradation shape as the MX resolver above."""
+    global _webgraph_tiers, _webgraph_load_lock
+    if _webgraph_tiers is not None:
+        return _webgraph_tiers
+    if _webgraph_load_lock is None:
+        _webgraph_load_lock = asyncio.Lock()
+    async with _webgraph_load_lock:
+        if _webgraph_tiers is not None:  # someone else finished it while we waited
+            return _webgraph_tiers
+        if not WEBGRAPH_TIERS_URL:
+            _webgraph_tiers = {}
+            return _webgraph_tiers
+        log.info(f"Loading WebGraph domain tiers from {WEBGRAPH_TIERS_URL} (once per run)...")
+        tiers: dict[str, int] = {}
+        try:
+            async with session.get(WEBGRAPH_TIERS_URL, timeout=aiohttp.ClientTimeout(total=120)) as r:
+                r.raise_for_status()
+                raw = await r.read()
+            text = (gzip.decompress(raw) if WEBGRAPH_TIERS_URL.endswith(".gz") else raw) \
+                .decode("utf-8", errors="ignore")
+            for line in text.splitlines()[1:]:  # [1:] skips the "domain,tier" header
+                domain, _, tier_str = line.strip().partition(",")
+                if not domain or not tier_str:
+                    continue
+                try:
+                    tiers[domain] = int(tier_str)
+                except ValueError:
+                    continue
+            log.info(f"  loaded {len(tiers):,} WebGraph-tiered domains")
+        except Exception as e:
+            log.warning(f"  failed to load WebGraph tiers ({e}) — WebGraph signal disabled this run")
+            tiers = {}
+        _webgraph_tiers = tiers
+        return _webgraph_tiers
+
+
+async def _webgraph_score(session: aiohttp.ClientSession, domain: str) -> tuple[int, str | None]:
+    """One in-memory dict lookup (after the one-time load above). Returns
+    (score, signal_name) — a domain simply absent from the tiers (i.e.
+    outside whatever top-N the seed job kept, or WEBGRAPH_TIERS_URL unset)
+    means no signal (0, None), never a penalty — most real small/mid
+    companies won't be in a top-10M-by-inbound-links list and that's
+    expected, not evidence of anything."""
+    tiers = await _load_webgraph_tiers(session)
+    tier = tiers.get(domain)
+    if tier == 1:
+        return WEBGRAPH_STRONG_TIER_SCORE, "webgraph_top_tier"
+    if tier == 2:
+        return WEBGRAPH_MODERATE_TIER_SCORE, "webgraph_moderate_tier"
+    return 0, None
+
+
+def _company_maturity_score(html: str) -> tuple[int, list[str]]:
+    """Scores how much a homepage looks like an established, multi-person
+    company site rather than a micro-site — purely from HTML already in
+    hand (no extra requests). Returns (score, [matched signal names]) —
+    the names are for stats/debugging, not stored anywhere yet."""
+    score = 0
+    signals: list[str] = []
+    if _ORG_SCHEMA_TYPE_RE.search(html):
+        score += 15
+        signals.append("org_schema")
+        if _ORG_EMPLOYEE_COUNT_RE.search(html):
+            score += 10
+            signals.append("employee_count")
+        if _ORG_AUTHORITY_SAMEAS_RE.search(html):
+            score += 10
+            signals.append("authority_sameas")
+    if _CORP_FOOTER_LINKS_RE.search(html):
+        score += 15
+        signals.append("corp_footer_links")
+    if _COMPLIANCE_BANNER_RE.search(html):
+        score += 5
+        signals.append("compliance_banner")
+    if _ENTERPRISE_MARTECH_RE.search(html):
+        score += 15
+        signals.append("enterprise_martech")
+    if _OBSERVABILITY_RE.search(html):
+        score += 5
+        signals.append("observability")
+    if _LEGAL_ENTITY_SUFFIX_RE.search(html):
+        score += 5
+        signals.append("legal_entity_suffix")
+    return score, signals
+
+
+async def _company_maturity_score_async(session: aiohttp.ClientSession, html: str,
+                                         domain: str) -> tuple[int, list[str]]:
+    """_company_maturity_score() plus the MX lookup and the WebGraph
+    authority-tier lookup — kept as a separate async wrapper so every
+    existing (sync, HTML-only) call site and test of
+    _company_maturity_score keeps working unchanged."""
+    score, signals = _company_maturity_score(html)
+    mx_score, mx_signal = await _mx_provider_score(domain)
+    if mx_signal:
+        score += mx_score
+        signals.append(mx_signal)
+    wg_score, wg_signal = await _webgraph_score(session, domain)
+    if wg_signal:
+        score += wg_score
+        signals.append(wg_signal)
+    return score, signals
 # ── fetching ─────────────────────────────────────────────────────────────
 
 # Content types that are never worth reading as text — everything else
@@ -662,6 +964,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                      stats: dict, parse_pool: concurrent.futures.Executor,
                      target_geo_countries: set[str] = ACCEPT_ANY_COUNTRY,
                      capture_inhouse: bool = True,
+                     apply_maturity_gate: bool = True,
                      ) -> tuple[list[tuple[str, str, str, str, str, str | None, str | None]], dict | None]:
     """Homepage -> career paths -> sitemap (guessed, then robots.txt).
     Every page fetched at a hit-bearing tier is merged (_collapse_hits),
@@ -781,17 +1084,39 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                 best_inhouse = sitemap_inhouse
 
         stats["dropped_no_ats"] += 1
-        # 2026-08: capture_inhouse=False (opendata_probe.py, common_crawl_probe.py)
-        # means "don't feed archive_ii from this source" — neither of those
-        # sources carries an employee-count/size signal, so a no-ATS hit from
-        # them is indistinguishable from a genuine small business; archive_ii
-        # was getting flooded with exactly that noise. people_data_labs_probe.py (and
-        # any future size-aware source) still captures normally — but note
-        # both of THOSE also now pre-filter to companies above the size
-        # threshold before ever reaching crawl_one, so what lands in
-        # archive_ii is a company that's both (a) above the size bar and
-        # (b) confirmed to have no recognized ATS.
+        # 2026-09, REVISED: capture_inhouse=False used to mean "this source
+        # never feeds archive_ii" for opendata_probe.py/common_crawl_probe.py
+        # (neither carries an employee-count/size signal). Both now pass
+        # capture_inhouse=True instead and rely on apply_maturity_gate below
+        # to do the filtering the size column can't — so they DO feed
+        # archive_ii now, gated by company-maturity instead of size.
+        #
+        # apply_maturity_gate distinguishes the two gating mechanisms a
+        # caller can use (see crawl_batch's docstring):
+        #   - capture_inhouse_domains given (people_data_labs_probe.py,
+        #     bigpicture_probe.py, kaggle_probe.py): the caller already
+        #     pre-filtered to companies at/above its own employee-count
+        #     threshold before this domain ever reached crawl_one — that
+        #     size gate IS the quality bar for these sources, so the
+        #     maturity check is skipped here (crawl_batch computed
+        #     apply_maturity_gate=False for these).
+        #   - flat capture_inhouse bool, no domains set (opendata_probe.py,
+        #     common_crawl_probe.py, and any other source with no size
+        #     signal at all): the maturity-score check below IS the quality
+        #     bar (crawl_batch computed apply_maturity_gate=True).
         if best_inhouse and capture_inhouse:
+            if apply_maturity_gate:
+                # company-maturity quality gate — scored from the homepage
+                # HTML already fetched above (+ one DNS MX lookup), no extra
+                # HTTP request. Only gates archive_ii (in-house capture);
+                # archive_i (known-ATS hits, returned earlier in this
+                # function) is never touched by this.
+                quality_score, quality_signals = await _company_maturity_score_async(session, html, domain)
+                if quality_score < MIN_QUALITY_SCORE:
+                    stats["inhouse_dropped_low_quality"] += 1
+                    log.debug(f"  archive_ii candidate dropped (quality_score={quality_score} "
+                              f"< {MIN_QUALITY_SCORE}, signals={quality_signals}): {domain}")
+                    return [], None
             stats["inhouse_career_page_captured"] += 1  # -> archive_ii
             return [], _capture(best_inhouse["url"])
         return [], None
@@ -1094,19 +1419,29 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         allowed to produce an archive_ii row this run (every other domain
         behaves as capture_inhouse=False for that one company only, ATS
         matching unaffected). This is the 2026-08 fix for over-filtering:
-        people_data_labs_probe.py/bigpicture_probe.py used to drop small companies
-        from the crawl LIST entirely at seed time, which filtered out
-        their archive_i-eligible ATS hits too, for almost nothing gained
-        — now every company in the target countries gets crawled (feeding
-        archive_i normally no matter its size), and the employee-count
-        floor is applied ONLY at the point a company would otherwise
-        become an archive_ii in-house-page candidate, computed by the
-        caller from its own already-loaded size data.
+        people_data_labs_probe.py/bigpicture_probe.py/kaggle_probe.py used
+        to drop small companies from the crawl LIST entirely at seed time,
+        which filtered out their archive_i-eligible ATS hits too, for
+        almost nothing gained — now every company in the target countries
+        gets crawled (feeding archive_i normally no matter its size), and
+        the employee-count floor is applied ONLY at the point a company
+        would otherwise become an archive_ii in-house-page candidate,
+        computed by the caller from its own already-loaded size data.
+        2026-09: passing this set is ALSO what turns the company-maturity
+        quality gate (node.py's _company_maturity_score_async) OFF for
+        this run — a caller with real size data has already decided its
+        own quality bar; the maturity check would just be a redundant
+        second filter on companies that already cleared a real
+        employee-count threshold.
       - If capture_inhouse_domains is None, falls back to the flat
-        `capture_inhouse` bool for every domain (opendata_probe.py/
-        common_crawl_probe.py still pass capture_inhouse=False this way —
-        they have no size signal for ANY domain, so there's no per-domain
-        set to build).
+        `capture_inhouse` bool for every domain. 2026-09: opendata_probe.py
+        and common_crawl_probe.py now pass capture_inhouse=True this way
+        (they used to pass False — see their run_crawl()s) — with no size
+        signal for ANY domain, the company-maturity quality gate is what
+        decides archive_ii eligibility for these two instead of an
+        employee-count floor; this is exactly the case that turns the
+        maturity gate ON (apply_maturity_gate = capture_inhouse_domains is
+        None, computed below).
 
     shard_index/shard_count/start_at (2026-08, resume support): when both
     shard_index and shard_count are given, this shard's progress is
@@ -1122,7 +1457,15 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
             return domain in capture_inhouse_domains
         return capture_inhouse
 
-    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, _capture_for(d))
+    # 2026-09: see this function's docstring above — a caller that supplied
+    # its own size-based domain set has already applied its own quality bar,
+    # so the maturity check is redundant for it and gets skipped; a caller
+    # relying on the flat bool has no size signal at all, so the maturity
+    # check IS its quality bar.
+    apply_maturity_gate = capture_inhouse_domains is None
+
+    tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, _capture_for(d),
+                        apply_maturity_gate)
              for d in domains]
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
