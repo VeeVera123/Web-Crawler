@@ -922,10 +922,38 @@ async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]
             return _webgraph_ranks
         log.info(f"Loading WebGraph rank bands from {WEBGRAPH_TIERS_URL} (once per run)...")
         ranks: dict[str, str] = {}
+        t0 = time.monotonic()
+        downloaded = 0
         try:
-            async with session.get(WEBGRAPH_TIERS_URL, timeout=aiohttp.ClientTimeout(total=120)) as r:
+            # 2026-09: the seed file has grown to 550MB+ compressed (was
+            # comfortably under 120s to fetch when that timeout was first
+            # set, but a real run timed out at ~121s with an EMPTY
+            # exception message — that's asyncio.TimeoutError, whose
+            # str() is always "", which is why the old log line rendered
+            # as "failed to load WebGraph ranks () ..." with no useful
+            # detail at all). A single aiohttp `total` timeout also has to
+            # cover the entire download no matter how large the file gets
+            # in the future, so this now uses sock_connect/sock_read
+            # instead: each individual read must make progress within
+            # sock_read seconds (so a truly stalled connection still
+            # aborts reasonably fast), but there's no fixed ceiling on
+            # total transfer time for a large-but-healthy download.
+            # Streaming in chunks (instead of one `await r.read()`) also
+            # means a slow-but-alive download shows real progress in the
+            # logs instead of one opaque multi-minute wait.
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=90)
+            async with session.get(WEBGRAPH_TIERS_URL, timeout=timeout) as r:
                 r.raise_for_status()
-                raw = await r.read()
+                chunks = []
+                next_log_at = 100 * 1024 * 1024  # log every 100MB
+                async for chunk in r.content.iter_chunked(1024 * 1024):
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if downloaded >= next_log_at:
+                        log.info(f"  ...{downloaded / (1024*1024):,.0f}MB downloaded so far "
+                                  f"({time.monotonic() - t0:.0f}s elapsed)")
+                        next_log_at += 100 * 1024 * 1024
+                raw = b"".join(chunks)
             text = (gzip.decompress(raw) if WEBGRAPH_TIERS_URL.endswith(".gz") else raw) \
                 .decode("utf-8", errors="ignore")
             for line in text.splitlines()[1:]:  # [1:] skips the "domain,band" header
@@ -933,9 +961,18 @@ async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]
                 if not domain or not band:
                     continue
                 ranks[domain] = band
-            log.info(f"  loaded {len(ranks):,} WebGraph-ranked domains")
+            log.info(f"  loaded {len(ranks):,} WebGraph-ranked domains "
+                      f"({downloaded / (1024*1024):,.0f}MB, {time.monotonic() - t0:.0f}s)")
         except Exception as e:
-            log.warning(f"  failed to load WebGraph ranks ({e}) — WebGraph signal disabled this run")
+            # repr(e), not str(e) — an empty-message exception (e.g. bare
+            # asyncio.TimeoutError) renders as "()" from str() with zero
+            # diagnostic value; repr() at least always names the
+            # exception type, and downloaded/elapsed below cover the case
+            # that matters most (a slow/stalled transfer, not an outright
+            # connection failure).
+            log.warning(f"  failed to load WebGraph ranks ({e!r}) after "
+                        f"{downloaded / (1024*1024):,.0f}MB in {time.monotonic() - t0:.0f}s "
+                        f"— WebGraph signal disabled this run")
             ranks = {}
         _webgraph_ranks = ranks
         return _webgraph_ranks
@@ -1486,43 +1523,56 @@ async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows:
 # no manual bookkeeping across N shards required.
 
 async def save_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
-                                 shard_count: int, companies_done: int) -> None:
+                                 shard_count: int, resume_offset: int) -> None:
     """Upserts this shard's progress. Best-effort: a failed write just
     means a future resume falls back to an earlier batch boundary, never
     data loss (the archive_i/archive_ii rows for that batch are already
-    safely committed regardless of whether this call succeeds)."""
+    safely committed regardless of whether this call succeeds).
+
+    2026-09: the Supabase column (and this parameter) were renamed from
+    'companies_done' to 'resume_offset' — the old name was a misnomer for
+    3 of its 4 actual callers. It reads exactly right for OpenData/PDL/
+    BigPicture (a count of companies finished), but Common Crawl reuses
+    this same table/column to checkpoint a FILE index instead (see
+    common_crawl_probe.py's files_done_before) — 'companies_done' holding
+    a file count was confusing on sight. 'resume_offset' describes what
+    the field actually IS regardless of source: the position/offset a
+    resumed run should skip ahead to, whatever unit that source counts in."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
                "Prefer": "resolution=merge-duplicates"}
     row = {"source": source, "shard_index": shard_index, "shard_count": shard_count,
-           "companies_done": companies_done, "updated_at": datetime.now(timezone.utc).isoformat()}
+           "resume_offset": resume_offset, "updated_at": datetime.now(timezone.utc).isoformat()}
     try:
         async with session.post(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
                                  params={"on_conflict": "source,shard_index,shard_count"},
                                  json=[row], timeout=aiohttp.ClientTimeout(total=30)) as r:
             r.raise_for_status()
     except Exception as e:
-        log.warning(f"  couldn't save crawl checkpoint at {companies_done:,} (non-fatal — a future "
+        log.warning(f"  couldn't save crawl checkpoint at {resume_offset:,} (non-fatal — a future "
                     f"resume may just redo one extra batch): {e}")
 
 
 async def load_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
                                  shard_count: int) -> int:
-    """How many companies this exact (source, shard_index, shard_count)
-    already finished on a prior run. 0 if never run, already fully
-    completed (checkpoint cleared on completion), or explicitly reset."""
+    """How far this exact (source, shard_index, shard_count) already got
+    on a prior run — a count of companies for OpenData/PDL/BigPicture, a
+    file index for Common Crawl (see save_crawl_checkpoint's docstring
+    for why the column is generically named 'resume_offset', not
+    'companies_done'). 0 if never run, already fully completed (checkpoint
+    cleared on completion), or explicitly reset."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return 0
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     params = {"source": f"eq.{source}", "shard_index": f"eq.{shard_index}",
-              "shard_count": f"eq.{shard_count}", "select": "companies_done"}
+              "shard_count": f"eq.{shard_count}", "select": "resume_offset"}
     try:
         async with session.get(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
                                 params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
             r.raise_for_status()
             data = await r.json()
-            return data[0]["companies_done"] if data else 0
+            return data[0]["resume_offset"] if data else 0
     except Exception as e:
         log.warning(f"  couldn't load crawl checkpoint (starting this shard from 0): {e}")
         return 0
