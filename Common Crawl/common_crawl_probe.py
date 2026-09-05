@@ -435,6 +435,12 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
         log.info("  hits by country:")
         for country, n in country_breakdown.most_common():
             log.info(f"    {country}: {n}")
+    # 2026-09: Common Crawl has no size signal of its own — every
+    # archive_ii acceptance here went through the Quality Index gate
+    # (capture_inhouse=True, no capture_inhouse_domains set), same as
+    # OpenData — see node.log_quality_index_summary's docstring.
+    log.info("")
+    node.log_quality_index_summary(stats)
 
 
 def main():
