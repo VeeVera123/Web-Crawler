@@ -91,9 +91,10 @@ BASE_URL = "https://data.commoncrawl.org/projects/hyperlinkgraph"
 # intentionally worth 0: this is where most parked/junk domains live,
 # since nobody links to a parking page.
 RANK_BANDS = (
-    # (label, exclusive rank upper bound) — checked in order, first match wins.
-    # Points for each label live in node.py's WEBGRAPH_RANK_BANDS, not here
-    # — this script only needs to assign the right LABEL per domain.
+    # (label, INCLUSIVE rank upper bound, 0-based) — checked in order,
+    # first match wins, so rank <= bound assigns that label. Points for
+    # each label live in node.py's WEBGRAPH_RANK_BANDS, not here — this
+    # script only needs to assign the right LABEL per domain.
     ("S+", 1_000_000),
     ("S", 10_000_000),
     ("A", 25_000_000),
@@ -151,9 +152,10 @@ _RANKS_HEADER_PREFIX = "#"
 
 def _band_for_rank(rank: int) -> str | None:
     """0-based rank -> band label ("S+".."C"), or None if it falls below
-    every band (band "D" — no signal, see RANK_BANDS' comment above)."""
+    every band (band "D" — no signal, see RANK_BANDS' comment above).
+    Boundaries are INCLUSIVE — rank <= upper_bound earns that label."""
     for label, upper_bound in RANK_BANDS:
-        if rank < upper_bound:
+        if rank <= upper_bound:
             return label
     return None
 
@@ -176,7 +178,7 @@ def _parse_ranks_row(line: str, line_index: int) -> str | None:
     return _reverse_domain(host_rev)
 
 
-_LAST_BAND_CUTOFF = RANK_BANDS[-1][1]  # 80,000,000 — no need to stream past this
+_LAST_BAND_CUTOFF = RANK_BANDS[-1][1]  # 80,000,000 — INCLUSIVE, so rank 80,000,000 itself still counts
 
 
 def build_ranks(ranks_url: str) -> dict[str, str]:
@@ -191,7 +193,7 @@ def build_ranks(ranks_url: str) -> dict[str, str]:
     start = time.monotonic()
     i = 0  # counts DATA rows only (header/blank lines don't consume a rank slot)
     for line in _stream_gz_lines(ranks_url):
-        if i >= _LAST_BAND_CUTOFF:
+        if i > _LAST_BAND_CUTOFF:  # > not >= — the cutoff rank itself is still in-band (inclusive)
             break
         domain = _parse_ranks_row(line, i)
         if domain is None:
