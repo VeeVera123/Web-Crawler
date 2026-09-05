@@ -14,6 +14,11 @@ name: WebGraph
 # read the logged sample (domain, tier) rows before unchecking it — see
 # webgraph_seed.py's module docstring for exactly why (the ranks-file
 # column format couldn't be independently verified before this was built).
+#
+# lookup_domains is a separate calibration mode (see webgraph_seed.py's
+# lookup_ranks()) — set it to scan the full ranks file for one or more
+# domains' actual rank instead of building/publishing the tiered CSV, e.g.
+# to check where a known-real company lands before picking a tier cutoff.
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +34,10 @@ on:
         required: false
         type: boolean
         default: true
+      lookup_domains:
+        description: "Calibration mode: comma-separated domains (e.g. heli.technology,example.com) to look up their real rank instead of building/publishing the tiered CSV. Leave blank for the normal seed flow."
+        required: false
+        default: ""
 
 concurrency:
   group: webgraph-${{ github.ref }}
@@ -37,7 +46,7 @@ concurrency:
 jobs:
   seed:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # hard ceiling — this step can't be sharded, the vertices file is loaded whole
+    timeout-minutes: 360   # hard ceiling — the ranks file alone is a real one-time download+stream
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,16 +59,25 @@ jobs:
       - name: Install dependencies
         run: pip install requests python-dotenv
 
-      - name: Download + reduce WebGraph release
+      - name: Download + reduce (or look up) WebGraph release
         run: |
-          ARGS=(--release "${{ github.event.inputs.release }}" --output webgraph_domain_tiers.csv.gz)
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS+=(--dry-run)
+          if [ -n "${{ github.event.inputs.lookup_domains }}" ]; then
+            LOOKUP_ARGS=()
+            IFS=',' read -ra DOMAINS <<< "${{ github.event.inputs.lookup_domains }}"
+            for d in "${DOMAINS[@]}"; do
+              LOOKUP_ARGS+=(--lookup-domain "$d")
+            done
+            python WebGraph/webgraph_seed.py --release "${{ github.event.inputs.release }}" "${LOOKUP_ARGS[@]}"
+          else
+            ARGS=(--release "${{ github.event.inputs.release }}" --output webgraph_domain_tiers.csv.gz)
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              ARGS+=(--dry-run)
+            fi
+            python WebGraph/webgraph_seed.py "${ARGS[@]}"
           fi
-          python WebGraph/webgraph_seed.py "${ARGS[@]}"
 
       - name: Publish to Release (replacing the existing asset on this tag)
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.lookup_domains == '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
