@@ -57,6 +57,7 @@ from supabase_handler import (
     get_existing_urls, touch_seen_jobs_raw,
     touch_archive_i_last_seen,
     SupabaseFetchError,
+    log_egress_summary,
 )
 
 logging.basicConfig(
@@ -152,8 +153,21 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
 
     When total_shards > 1, returns only this shard's slice (for GitHub
     Actions matrix parallelism — see module docstring).
+
+    2026-09: sharding now happens server-side (get_all_slugs() passes
+    shard_index/shard_count straight through to the archive_i_shard
+    Postgres RPC) so each shard's Supabase fetch only ever downloads its
+    own ~1/total_shards slice of archive_i, instead of every shard
+    downloading the full table and discarding (total_shards-1)/total_shards
+    of it client-side. get_all_slugs() itself falls back to the old
+    full-table-then-filter behavior (using this same _shard_of() hash) if
+    the RPC is ever unavailable, so this still works if the migration
+    hasn't been applied yet.
     """
-    pairs = get_all_slugs()
+    if total_shards > 1:
+        pairs = get_all_slugs(shard_index=shard, shard_count=total_shards)
+    else:
+        pairs = get_all_slugs()
 
     if not pairs:
         log.warning("No slugs found in Supabase archive_i!")
@@ -181,7 +195,6 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
     pairs = supported
 
     if total_shards > 1:
-        pairs = [(a, s) for a, s in pairs if _shard_of(a, s, total_shards) == shard]
         log.info(f"Shard {shard}/{total_shards}: {len(pairs)} boards assigned")
 
     ats_counts: dict[str, int] = {}
@@ -582,6 +595,8 @@ def main():
     # step instead (see run_finalize() docstring for why that matters).
     if args.total_shards == 1:
         run_finalize()
+
+    log_egress_summary(label=f"crawl_i shard {args.shard}/{args.total_shards}")
 
 
 if __name__ == "__main__":
