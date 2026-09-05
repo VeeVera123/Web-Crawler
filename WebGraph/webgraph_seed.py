@@ -169,6 +169,48 @@ def build_tiers(ranks_url: str) -> dict[str, int]:
     return domain_tier
 
 
+def lookup_ranks(ranks_url: str, target_domains: list[str]) -> dict[str, int | None]:
+    """Calibration tool, not part of the normal seed flow: streams the FULL
+    ranks file once (no TIER_2_CUTOFF early-exit — a target domain could
+    rank anywhere) looking for `target_domains`, and returns {domain: rank}
+    (0-based rank position, i.e. the same numbering build_tiers() uses to
+    decide tiers) or {domain: None} if never found. Use this to check where
+    a real, known-legitimate company actually ranks before picking/moving a
+    tier cutoff — evidence beats guessing at another round number."""
+    remaining = {d.strip().lower() for d in target_domains}
+    found: dict[str, int | None] = {d: None for d in remaining}
+    log.info(f"Looking up {len(remaining)} domain(s) against the full ranks file: {ranks_url}")
+    start = time.monotonic()
+    i = 0
+    for line in _stream_gz_lines(ranks_url):
+        domain = _parse_ranks_row(line, i)
+        if domain is None:
+            continue
+        if domain in remaining:
+            found[domain] = i
+            remaining.discard(domain)
+            log.info(f"  found {domain} at rank {i:,}")
+            if not remaining:
+                break
+        i += 1
+        if i % PROGRESS_EVERY == 0:
+            elapsed = time.monotonic() - start
+            log.info(f"  ...rank {i:,} scanned ({i / max(elapsed, 0.001):,.0f}/sec), "
+                      f"still looking for: {sorted(remaining)}")
+    log.info(f"Done scanning {i:,} rank rows in {time.monotonic() - start:.0f}s")
+    for domain, rank in found.items():
+        if rank is None:
+            log.info(f"  {domain}: NOT FOUND in {i:,} rank rows scanned "
+                     f"(either genuinely unranked, or beyond the graph's edge)")
+        else:
+            for label, cutoff in (("tier 1", TIER_1_CUTOFF), ("tier 2 @ 10M", 10_000_000),
+                                   ("tier 2 @ 15M", 15_000_000), ("tier 2 @ 20M", 20_000_000),
+                                   ("tier 2 @ 25M", 25_000_000)):
+                verdict = "IN" if rank < cutoff else "out"
+                log.info(f"  {domain}: rank {rank:,} — {verdict} at {label} cutoff")
+    return found
+
+
 def write_tiers_csv(domain_tier: dict[str, int], output_path: str, gzip_output: bool = True) -> None:
     """Writes the reduced (domain,tier) CSV locally — this is what YOU
     upload as a GitHub Release asset (see module docstring), not something
@@ -200,9 +242,18 @@ def main():
                          help="Parse everything and print a sample, but don't write the output CSV. "
                               "Use this on the FIRST run against a new release to sanity-check the "
                               "parsed domains/tiers before trusting them (see module docstring).")
+    parser.add_argument("--lookup-domain", action="append", default=None,
+                         help="Calibration mode — repeatable. Scans the FULL ranks file for this "
+                              "domain's actual rank and reports which tier cutoff it would clear, "
+                              "instead of building the tiered CSV. Use this against a known-real "
+                              "company to pick a tier cutoff from evidence instead of another guess.")
     args = parser.parse_args()
 
     ranks_url = f"{BASE_URL}/{args.release}/domain/{args.release}-domain-ranks.txt.gz"
+
+    if args.lookup_domain:
+        lookup_ranks(ranks_url, args.lookup_domain)
+        return
 
     try:
         domain_tier = build_tiers(ranks_url)
