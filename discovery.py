@@ -10,7 +10,7 @@ Sources:
   2. kalil0321/ats-scrapers (CSV inventories for 15 platforms —
      incl. successfactors, smartrecruiters, workable)
   3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
-  4. Common Crawl index (ongoing discovery for 26 platforms — including
+  4. Common Crawl index (ongoing discovery for 27 platforms — including
      6 also covered by Feashliaa's bulk dump, added as a supplemental
      top-up since dedup is free via the on_conflict upsert. Run as 2
      platform-sharded matrix jobs in discovery.yml — see
@@ -190,9 +190,18 @@ THEIRSTACK_ATS_SLUGS = {
 # HTTP Archive — public BigQuery dataset of Wappalyzer technology-detection
 # results, run monthly against millions of crawled URLs (Chrome UX Report's
 # popular-site list). Needs a Google Cloud project with BigQuery enabled
-# (free Sandbox tier — no credit card — covers this easily: a full query
-# here costs ~1-2GB against a 1TB/month free allowance) and a service
+# (free Sandbox tier — no credit card — covers this easily) and a service
 # account key for programmatic access.
+#
+# 2026-09 cost re-check against HTTP Archive's own current schema docs
+# (har.fyi) and Google's current Sandbox docs: the Sandbox's free quota is
+# still a flat 1 TiB/month of bytes PROCESSED (unchanged), and a single
+# date x client slice of this exact query shape (selecting page + the
+# technology/rank fields only, no categories/info) realistically costs
+# more like ~5-10GB, not the ~1-2GB this comment used to say — the old
+# number was an optimistic guess, this one's from HTTP Archive's own
+# worked query-cost examples. See fetch_httparchive_candidate_urls'
+# docstring for how that revised number sizes the `months` default below.
 HTTPARCHIVE_GCP_PROJECT = os.environ.get("GCP_PROJECT_ID", "")
 # google-cloud-bigquery bills/quotas against YOUR project but queries
 # Google's own public `httparchive` dataset — you don't need write access
@@ -203,6 +212,14 @@ HTTPARCHIVE_GCP_PROJECT = os.environ.get("GCP_PROJECT_ID", "")
 # maintained Wappalyzer fork (github.com/enthec/webappanalyzer) and
 # confirming each key exists verbatim. Platforms with no confirmed
 # fingerprint are left out entirely rather than guessed at.
+#
+# RE-VERIFIED 2026-09, exhaustively (every one of the 17 below re-fetched
+# and re-checked byte-for-byte, not sampled) — zero discrepancies, all 17
+# names below are still exactly correct with no renames/removals. Also
+# closed a real gap from the 2026-08 pass: Oracle Cloud HCM/Fusion
+# Recruiting/Taleo Cloud had never actually been checked either way before
+# (silently missing from both this dict AND the "confirmed NOT present"
+# list below) — now confirmed absent too, added to that list.
 HTTPARCHIVE_ATS_TECH_NAMES = {
     "greenhouse": "Greenhouse",
     "lever": "Lever",
@@ -222,10 +239,13 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     "eploy": "Eploy",
     "breezyhr": "Breezy HR",
     # Confirmed NOT present in the fingerprint set (checked directly, not
-    # assumed): Ashby, Rippling, Folks HR, Softgarden, ClearCompany/
-    # HRMDirect, ADP, Taleo, SuccessFactors, BrassRing, ApplyToJob,
-    # join.com. These platforms just aren't in Wappalyzer's ruleset —
-    # this source can't help with them regardless of query design.
+    # assumed, re-verified 2026-09): Ashby, Rippling, Folks HR, Softgarden,
+    # ClearCompany/HRMDirect, ADP, Taleo, SuccessFactors, BrassRing,
+    # ApplyToJob, join.com, and Oracle Cloud HCM/Fusion Recruiting (newly
+    # checked 2026-09 — no fingerprint under "Oracle Cloud HCM", "Oracle
+    # Fusion", "Oracle Recruiting Cloud", or "Oracle Taleo Cloud" either).
+    # These platforms just aren't in Wappalyzer's ruleset — this source
+    # can't help with them regardless of query design.
 }
 
 # ATS platforms we have working scrapers for (20 active)
@@ -525,8 +545,38 @@ def _url_to_slug_smartrecruiters(url: str) -> str | None:
 
 
 def _url_to_slug_taleo(url: str) -> str | None:
+    """Handles TWO structurally distinct real Taleo products, confirmed
+    live 2026-09:
+      1. "Career Section" (OTM) — the original/classic product:
+         {company}.taleo.net/careersection/{section}/jobsearch.ftl or
+         .../jobdetail.ftl (e.g. capps.taleo.net/careersection/ex/
+         jobdetail.ftl?job=00055524). Slug: '{company}|{section}'.
+      2. Taleo Business Edition (TBE) — a SEPARATE product with a totally
+         different host suffix (.tbe.taleo.net, not bare .taleo.net) AND
+         path shape (/{siteCode}/ats/careers/v2/{jobSearch,searchResults,
+         viewRequisition}?org={company}), e.g. tre.tbe.taleo.net/tre01/
+         ats/careers/v2/jobSearch?org=NVRINC&cws=52. The company identity
+         here is the `org` query param, NOT anything in the host or path
+         — previously this whole product family returned None from every
+         URL (no /careersection/ segment exists in TBE's path at all),
+         silently missing every TBE customer even after TBE's own CDX
+         query patterns were added, since discovery and extraction are two
+         separate steps that both need to agree on the URL shape. Slug:
+         '{tbe_instance}|{org}' (tbe_instance keeps this distinguishable
+         from a same-named org on the classic product, since TBE and
+         Career Section are unrelated Oracle products with independent
+         customer bases)."""
     parsed = urlparse(url)
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").lower()
+    if host.endswith(".tbe.taleo.net"):
+        if "/ats/careers/v2/" not in parsed.path.lower():
+            return None
+        qs = parse_qs(parsed.query)
+        org = (qs.get("org") or [None])[0]
+        tbe_instance = host[: -len(".tbe.taleo.net")]
+        if org and tbe_instance and org.lower() not in SKIP_SLUGS:
+            return f"{tbe_instance}|{org}"
+        return None
     if "taleo.net" in host:
         company = host.replace(".taleo.net", "").lower()
         path_match = re.search(r"/careersection/([^/]+)/", parsed.path)
@@ -711,10 +761,17 @@ def _url_to_slug_zoho(url: str) -> str | None:
     here regardless of how many live customer boards it has. Japan
     customers use a subdomain of the existing .com domain (e.g.
     zohojapan.zohorecruit.com), already covered by the .com suffix below,
-    so no .jp/.cn suffix is needed either."""
+    so no .jp/.cn suffix is needed either.
+    2026-09: added .zohorecruit.com.au — confirmed real, in-scope-country
+    (Australia IS in DEFAULT_COUNTRIES) live customer board
+    (crossapac.zohorecruit.com.au). This is genuinely a separate suffix
+    from plain ".zohorecruit.com" (host.endswith(".zohorecruit.com") is
+    False for a ".com.au" host — the old suffix list silently missed every
+    Australia-region customer even though Australia is squarely in
+    scope)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    for suffix in (".zohorecruit.com", ".zohorecruit.eu"):
+    for suffix in (".zohorecruit.com", ".zohorecruit.eu", ".zohorecruit.com.au"):
         if host.endswith(suffix):
             slug = host[: -len(suffix)].lower()
             if slug and slug not in SKIP_SLUGS and slug != "www":
@@ -1249,7 +1306,20 @@ CC_PLATFORM_PATTERNS = {
     # js?for=interpetrolsa) and already anticipated by _url_to_slug_greenhouse's
     # own docstring — the extractor's substring host check already handles
     # it, only this query pattern was missing.
-    "greenhouse": ["boards.greenhouse.io/*", "boards.eu.greenhouse.io/*"],
+    # 2026-09: added job-boards.greenhouse.io(+.eu) — Greenhouse's newer
+    # "Job Boards 2.0" hosted-board domain, confirmed real and CURRENTLY
+    # GROWING (Greenhouse's own support docs describe a legacy
+    # boards.greenhouse.io deprecation plan) via live examples
+    # (job-boards.greenhouse.io/remotecom, /hubspotjobs, /current81,
+    # job-boards.eu.greenhouse.io/openup). Missing this domain would mean
+    # missing an increasing share of current/future Greenhouse customers,
+    # not just a handful of edge cases — kept the legacy boards.* patterns
+    # too since that domain still carries huge historical volume and isn't
+    # fully retired. _url_to_slug_greenhouse's substring host check
+    # ("greenhouse.io" in host) already matches this domain with no
+    # extractor change needed.
+    "greenhouse": ["boards.greenhouse.io/*", "boards.eu.greenhouse.io/*",
+                   "job-boards.greenhouse.io/*", "job-boards.eu.greenhouse.io/*"],
     # 2026-09: added jobs.eu.lever.co — Lever's own EU-hosted board domain,
     # confirmed live (Lever's OWN careers page is hosted there:
     # jobs.eu.lever.co/lever, plus 3 other distinct customer boards).
@@ -1282,7 +1352,18 @@ CC_PLATFORM_PATTERNS = {
     # which never matches that shape at all. Kept /careers* alongside it
     # for the extractor's separate {company}.rippling.com subdomain form.
     "rippling": ["*.rippling.com/careers*", "*.rippling.com/*/jobs*"],
-    "teamtailor": ["*.teamtailor.com/jobs*"],
+    # 2026-09: added the */jobs* locale-prefixed form alongside the bare
+    # /jobs* one — Teamtailor's own multi-language career-site docs
+    # (support.teamtailor.com "Career sites in multiple languages")
+    # confirm a locale code gets prepended to the path for translated
+    # sites (e.g. {company}.teamtailor.com/no/jobs/..., /de/jobs/...),
+    # which the old bare "/jobs*" pattern (requiring /jobs immediately
+    # after the domain) can't match at all — real impact given
+    # Teamtailor's heavy Nordic/European multi-language customer base.
+    # _url_to_slug_teamtailor already extracts the slug from the
+    # SUBDOMAIN, not the path, so no extractor change is needed — this is
+    # purely a CDX query-pattern widening.
+    "teamtailor": ["*.teamtailor.com/jobs*", "*.teamtailor.com/*/jobs*"],
     "breezyhr": ["*.breezy.hr/*"],
     # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
     "personio": ["*.jobs.personio.de/*", "*.jobs.personio.com/*"],
@@ -1295,9 +1376,35 @@ CC_PLATFORM_PATTERNS = {
     # Crawl to discover. _url_to_slug_taleo's regex only looks at the
     # /careersection/{section}/ segment and doesn't care what filename
     # follows, so no extractor change needed.
-    "taleo": ["*.taleo.net/careersection/*/jobsearch.ftl*", "*.taleo.net/careersection/*/jobdetail.ftl*"],
+    # 2026-09: added the 3 Taleo Business Edition (TBE) patterns — a wholly
+    # separate Oracle product from the classic "Career Section" patterns
+    # above (different host suffix .tbe.taleo.net, different path shape
+    # entirely), confirmed via real live customers (tre.tbe.taleo.net/
+    # tre01/ats/careers/v2/jobSearch?org=NVRINC, phg.tbe.taleo.net/phg01/
+    # ats/careers/v2/searchResults?org=BVHS, City of Delta's .../
+    # viewRequisition?org=XNZ8Q7&rid=1737). _url_to_slug_taleo was updated
+    # alongside this to actually parse TBE's shape (org= query param) —
+    # adding the query pattern alone would have been a silent no-op trap,
+    # since the old extractor only recognized /careersection/ URLs.
+    "taleo": ["*.taleo.net/careersection/*/jobsearch.ftl*", "*.taleo.net/careersection/*/jobdetail.ftl*",
+              "*.tbe.taleo.net/*/ats/careers/v2/jobSearch*", "*.tbe.taleo.net/*/ats/careers/v2/searchResults*",
+              "*.tbe.taleo.net/*/ats/careers/v2/viewRequisition*"],
     "oracle_cloud_hcm": ["*.oraclecloud.com/hcmUI/CandidateExperience/*"],
-    "paylocity": ["recruiting.paylocity.com/recruiting/jobs/*"],
+    # 2026-09: added the capitalized-path form — real live customer URLs
+    # confirmed to commonly use .../Recruiting/Jobs/... (capitalized), not
+    # just the all-lowercase form; Common Crawl's CDX index path matching
+    # is case-sensitive so the old lowercase-only pattern silently missed
+    # these even though _url_to_slug_paylocity's own path comparison is
+    # already case-insensitive (would have parsed them fine once found —
+    # this was purely a discovery-side gap, not an extractor one). Also
+    # added a leading-wildcard host form — one confirmed live example
+    # (2000recruiting.paylocity.com) uses a numeric-prefixed subdomain
+    # instead of the bare recruiting.paylocity.com host; weaker/single-
+    # example evidence but the extractor's own host check is already a
+    # substring match ("paylocity.com" in host), so this costs nothing in
+    # false positives to also query for.
+    "paylocity": ["recruiting.paylocity.com/recruiting/jobs/*", "recruiting.paylocity.com/Recruiting/Jobs/*",
+                  "*recruiting.paylocity.com/*ecruiting/Jobs/*"],
     # 2026-09: added *.clearcompany.com/careers/portal* — see
     # _url_to_slug_hrmdirect's updated docstring for why (rebrand, 12
     # confirmed live customer subdomains, entirely missing before).
@@ -1306,7 +1413,13 @@ CC_PLATFORM_PATTERNS = {
     # (multiple distinct live customer boards found on zohorecruit.eu).
     # .zohorecruit.in (India) deliberately excluded — out of scope, see
     # _url_to_slug_zoho's docstring.
-    "zoho": ["*.zohorecruit.com/jobs/*", "*.zohorecruit.eu/jobs/*"],
+    # 2026-09: added .zohorecruit.com.au — confirmed real Australia-region
+    # customer (crossapac.zohorecruit.com.au, Australia IS in scope,
+    # unlike India). _url_to_slug_zoho's suffix list was updated alongside
+    # this — the old ".zohorecruit.com" endswith-check does NOT match a
+    # ".com.au" host, so adding just the query pattern without the
+    # extractor fix would have been a silent no-op.
+    "zoho": ["*.zohorecruit.com/jobs/*", "*.zohorecruit.eu/jobs/*", "*.zohorecruit.com.au/jobs/*"],
     # "api.softgarden.io/.../jobboards/{channelId}/..." added 2026-08 —
     # confirmed real (softgarden's own dev docs), and _url_to_slug_softgarden
     # already parses this shape via its /jobboards/ regex — it just wasn't
@@ -1347,6 +1460,26 @@ CC_PLATFORM_PATTERNS = {
     # to accidentally match) while catching every real path variant
     # instead of just guessing at path segments one at a time.
     "avature": ["*.avature.net/*"],
+    # NEW (2026-09): BrassRing had NO Common Crawl discovery at all before
+    # this — a real gap, since the scraper for it (scrape_brassring) is
+    # actively re-enabled/working, unlike SuccessFactors below. Confirmed
+    # live customer examples: sjobs.brassring.com/TGnewUI/Search/Home/Home
+    # (Lowe's, Kodak), krb-sjobs.brassring.com/TGnewUI/Search/Home/Home
+    # (IBM, Ahold) — a leading wildcard subdomain catches both the
+    # standard "sjobs." and the "krb-sjobs." enterprise-customer variant.
+    # _url_to_slug_brassring extracts entirely from the partnerid/siteid
+    # query params, not the path, so this one pattern is sufficient
+    # regardless of which exact path/casing (TGnewUI vs TGNewUI) a
+    # specific customer's URL happens to use.
+    "brassring": ["*.brassring.com/TGnewUI/*"],
+    # SuccessFactors deliberately has NO Common Crawl pattern — confirmed
+    # 2026-09 still genuinely blocked from scraping (SAP's own Career Site
+    # Builder architecture renders job listings client-side via an OData
+    # call, not present in the initial HTML; no evidence this has changed).
+    # Discovering SuccessFactors slugs via Common Crawl would be pure
+    # wasted effort while the scraper itself can't turn them into job
+    # data — see ats_scrapers.py's scrape_successfactors comment for why
+    # it's blacklisted. Revisit only if that scraping blocker is ever lifted.
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -1388,6 +1521,11 @@ CC_EXTRACTORS = {
     "jobvite": _url_to_slug_jobvite,
     "adp": _url_to_slug_adp_discovery,  # combined modern + legacy-resolve, see above
     "avature": _url_to_slug_avature,
+    # New (2026-09): brassring — see the CC_PLATFORM_PATTERNS entry above
+    # for why this platform had no Common Crawl discovery at all before.
+    # No SuccessFactors entry here on purpose — kept out of BOTH dicts
+    # together, matching keys as this dict's own comment above requires.
+    "brassring": _url_to_slug_brassring,
 }
 
 
@@ -1452,7 +1590,7 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
     (37 slugs for ~4 minutes of live fetching against a 3000-page sample)
     and its GitHub Actions matrix slot was handed to a second Common Crawl
     shard instead, since Common Crawl was already the slowest-running
-    source in the matrix (26 platforms x up to 6 crawls x however many
+    source in the matrix (27 platforms x up to 6 crawls x however many
     patterns each, all sequential within one job) and splitting it in two
     actually cuts wall-clock, unlike WDC which was just spending runtime
     for near-nothing. Pass cc_shard=None (default) to run all platforms
@@ -1955,8 +2093,8 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
 # of "pages that likely link to one of our ATS platforms" than YC's
 # company list is.
 
-def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
-                                      months: int = 13) -> dict[str, list[str]]:
+def fetch_httparchive_candidate_urls(limit_per_tech: int = 200_000,
+                                      months: int = 24) -> dict[str, list[str]]:
     """Query HTTP Archive's public BigQuery dataset for pages where a
     known ATS technology was detected. Returns {ats: [urls]}, ranked by
     CrUX popularity (most popular/reliable first) within limit_per_tech.
@@ -1971,9 +2109,32 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
     desktop rendering differences that change what Wappalyzer detects) —
     so scanning N months x 2 clients surfaces real additional companies
     that a single-snapshot query structurally cannot see, not just a
-    higher score against the same pool. Still cheap: ~1-2GB per
-    month/client scanned against BigQuery Sandbox's 1TB/month free
-    allowance, so even months=6 (12 scans) is well under 1% of quota.
+    higher score against the same pool.
+
+    2026-09, raised again after re-checking actual costs against HTTP
+    Archive's own current schema docs (har.fyi) and Google's current
+    Sandbox docs:
+      - limit_per_tech raised 2000 -> 200,000 (100x) at ZERO added query
+        cost: this only affects the QUALIFY/ROW_NUMBER() window function,
+        which BigQuery evaluates AFTER reading the matching bytes from the
+        source partitions — bytes billed depend on what's SCANNED, never
+        on output row count, so LIMIT 2000 vs LIMIT 200000 costs exactly
+        the same. There was never a reason for the old low cap once that
+        was understood; effectively unbounded now, capped only high enough
+        to rule out a truly pathological result set.
+      - months raised 13 -> 24 (so 48 date x client scans per run, up from
+        26): re-checking real per-partition costs against HTTP Archive's
+        own worked query-cost examples put this exact query shape (page +
+        rank + technology fields only, no categories/info) closer to
+        ~5-10GB per date x client, not the ~1-2GB this file used to assume
+        — the old number was an optimistic guess, not a measured one. At
+        the revised, more conservative ~10GB/slice: 48 slices ~= 480GB,
+        under half of the Sandbox's still-current 1 TiB/month free quota,
+        leaving real headroom for a few repeated runs in the same month
+        (e.g. iterating on this query during development) without risking
+        the quota. Not pushed further than 24 months for exactly that
+        margin-of-safety reason — this is deliberately aggressive, not
+        reckless.
 
     NOTE: this does NOT change what HTTP Archive's crawl universe covers
     in the first place (Chrome UX Report's popular-site list) — it only
@@ -2086,17 +2247,41 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 2000,
     return urls_by_ats
 
 
-def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 13,
-                             max_workers: int = 30) -> dict[str, dict[str, str]]:
+def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
+                             max_workers: int = 100,
+                             resolve_time_budget_minutes: int = 300) -> dict[str, dict[str, str]]:
     """Resolve HTTP Archive's candidate pages to real ATS slugs, reusing
     the exact same resolver built for the Y Combinator source.
 
-    max_workers raised 15->30 alongside the higher default limit_per_tech
-    (200->2000) and months (1->6) — those changes can produce roughly
-    10x+ as many candidate pages to resolve per run, so resolve
-    concurrency needs to scale with it or a run's wall-clock would blow up
-    proportionally. Each resolve is 1-2 lightweight HTTP fetches, so this
-    is still well within what a single GitHub Actions runner handles fine.
+    max_workers raised 15->30->100 alongside the much higher default
+    limit_per_tech (200->2000->200,000) — each resolve is only 1-2
+    lightweight HTTP fetches, and unlike a single-API source (TheirStack,
+    BigQuery itself), these fetches hit thousands of DIFFERENT company
+    domains, so there's no single server to be impolite to by running
+    100 at once; a GitHub Actions runner handles this fine.
+
+    2026-09: limit_per_tech's old low caps (2000, before that 200) were
+    based on a mistaken assumption that a bigger cap cost more BigQuery
+    money — it doesn't (see fetch_httparchive_candidate_urls' docstring:
+    QUALIFY/ROW_NUMBER() only trims OUTPUT rows after BigQuery has already
+    scanned the same bytes regardless of the cap). So the query-side cap
+    is now effectively unbounded (200,000/tech). But raising ONLY that
+    number, with nothing else changed, would have been a real mistake: it
+    can produce up to ~17 techs x 200,000 = a few million candidate URLs
+    in one run, each needing its own live HTTP fetch to resolve — that's
+    real wall-clock cost this project has no way to make free, and every
+    resolved slug was only being accumulated in memory and written to
+    Supabase in one shot at the very end, meaning a run that ran out of
+    CI job time would lose EVERYTHING resolved that run, not just the
+    unresolved remainder. resolve_time_budget_minutes fixes that: past
+    this many minutes of resolving, the loop stops WAITING on any not-yet-
+    finished fetch (in-flight ones are abandoned, not force-killed) and
+    returns whatever's already resolved, same self-stop-gracefully shape
+    every other long-running crawl in this project already uses (see
+    node.py/opendata_probe.py/common_crawl_probe.py's --time-budget-minutes).
+    0 disables the budget (run to full completion) — kept non-zero by
+    default here specifically because the query-side cap is no longer a
+    natural ceiling on resolve work the way it used to be.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -2105,13 +2290,18 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 13,
         return {}
 
     all_urls = [(ats, url) for ats, urls in urls_by_ats.items() for url in urls]
-    log.info(f"HTTP Archive: resolving {len(all_urls)} candidate pages...")
+    log.info(f"HTTP Archive: resolving up to {len(all_urls)} candidate pages "
+             + (f"(time budget: {resolve_time_budget_minutes}min)..." if resolve_time_budget_minutes
+                else "(no time budget — will run to completion)..."))
 
     _robots_check_stats["unreachable"] = 0
     _robots_check_stats["disallowed_by_rule"] = 0
 
     slugs_by_ats: dict[str, dict[str, str]] = {}
     resolved = 0
+    stopped_early = False
+    start = time.monotonic()
+    budget_seconds = resolve_time_budget_minutes * 60 if resolve_time_budget_minutes else None
 
     def _resolve_one(item):
         expected_ats, url = item
@@ -2119,9 +2309,17 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 13,
         time.sleep(0.1)
         return expected_ats, result
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_resolve_one, item) for item in all_urls]
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {pool.submit(_resolve_one, item) for item in all_urls}
         for future in as_completed(futures):
+            if budget_seconds and time.monotonic() - start >= budget_seconds:
+                stopped_early = True
+                log.warning(f"HTTP Archive: resolve time budget ({resolve_time_budget_minutes}min) "
+                            f"reached at {resolved}/{len(all_urls)} resolved — stopping here rather "
+                            f"than risk the whole run's progress to a hard CI timeout. Everything "
+                            f"resolved so far is still kept and written to Supabase normally.")
+                break
             try:
                 expected_ats, result = future.result()
             except Exception:
@@ -2136,17 +2334,24 @@ def fetch_httparchive_slugs(limit_per_tech: int = 2000, months: int = 13,
                 # just filed under the platform actually confirmed.
                 slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
                 resolved += 1
+    finally:
+        # cancel_futures=True drops anything not yet STARTED; anything
+        # already mid-fetch in a worker thread is abandoned (its result is
+        # simply never collected), not force-killed — same trade-off
+        # every graceful-stop in this project makes, never a hard kill.
+        pool.shutdown(wait=False, cancel_futures=True)
 
-    log.info(f"HTTP Archive: resolved {resolved}/{len(all_urls)} candidate pages")
+    log.info(f"HTTP Archive: resolved {resolved}/{len(all_urls)} candidate pages"
+             + (" (stopped early on time budget)" if stopped_early else ""))
     for ats, slugs in slugs_by_ats.items():
         log.info(f"  {ats}: {len(slugs)} companies from HTTP Archive")
 
     skipped = len(all_urls) - resolved
-    log.info(f"  HTTP Archive summary: {resolved} resolved, {skipped} skipped "
+    log.info(f"  HTTP Archive summary: {resolved} resolved, {skipped} skipped/not-yet-attempted "
              f"({_robots_check_stats['unreachable']} unreachable sites, "
              f"{_robots_check_stats['disallowed_by_rule']} disallowed by "
-             f"robots.txt, rest had no detectable ATS link) — run with "
-             f"-v/--verbose for the per-site detail.")
+             f"robots.txt, rest had no detectable ATS link or weren't reached before the time "
+             f"budget) — run with -v/--verbose for the per-site detail.")
 
     return slugs_by_ats
 
@@ -2371,26 +2576,42 @@ def main():
              "platforms (default: 40, under the free tier's 50/month)",
     )
     parser.add_argument(
-        "--httparchive-limit", type=int, default=2000,
+        "--httparchive-limit", type=int, default=200_000,
         help="Max candidate pages to pull PER ATS platform from HTTP "
              "Archive's BigQuery dataset, ranked by popularity (default: "
-             "2000, raised from 200 — the resolve step is 1-2 live fetches "
-             "per candidate, same cost profile as --yc-limit)",
+             "200,000, raised 2026-09 from 2000 — this cap costs nothing "
+             "extra in BigQuery (QUALIFY only trims OUTPUT rows after the "
+             "same bytes are scanned regardless), so it's now effectively "
+             "unbounded. The real cost is downstream: each candidate needs "
+             "a live HTTP fetch to resolve to a slug — see "
+             "--httparchive-resolve-budget-minutes, which bounds that.",
     )
     parser.add_argument(
-        "--httparchive-months", type=int, default=13,
+        "--httparchive-months", type=int, default=24,
         help="Number of recent monthly HTTP Archive crawl partitions to "
              "query, unioned with both desktop+mobile clients and deduped "
-             "(default: 13, raised from 6 2026-09 — the underlying query's "
-             "own WHERE clause already only looks back 13 months, so this "
-             "was leaving over half the actually-queryable history unused "
-             "for free; QUALIFY still caps OUTPUT rows per tech at "
-             "--httparchive-limit regardless of how many months are "
-             "scanned, so this widens candidate DIVERSITY the popularity "
-             "ranking picks from, without increasing the live-fetch resolve "
-             "cost at all — see fetch_httparchive_candidate_urls docstring "
-             "for why multi-month/multi-client is the real lever for more "
-             "coverage here, not just a bigger --httparchive-limit alone)",
+             "(default: 24, raised 2026-09 from 13 — re-checked against "
+             "HTTP Archive's own current query-cost docs: ~5-10GB per "
+             "date x client, so 24 months x 2 clients = 48 scans stays "
+             "under half of BigQuery Sandbox's 1TiB/month free quota, "
+             "leaving headroom for repeat runs in the same month. QUALIFY "
+             "still caps OUTPUT rows per tech at --httparchive-limit "
+             "regardless of how many months are scanned, so this widens "
+             "candidate DIVERSITY the popularity ranking picks from, "
+             "without increasing the live-fetch resolve cost at all — see "
+             "fetch_httparchive_candidate_urls docstring for why multi-"
+             "month/multi-client is the real lever for more coverage here, "
+             "not just a bigger --httparchive-limit alone)",
+    )
+    parser.add_argument(
+        "--httparchive-resolve-budget-minutes", type=int, default=300,
+        help="Self-stop gracefully after this many minutes of resolving "
+             "HTTP Archive candidate pages to real slugs, keeping whatever "
+             "was resolved so far rather than losing it all to a hard CI "
+             "job timeout (default: 300; 0 = no budget, run to full "
+             "completion — see fetch_httparchive_slugs docstring for why "
+             "this matters now that --httparchive-limit is effectively "
+             "unbounded).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -2458,7 +2679,7 @@ def main():
         else:
             grand_total += op_total
 
-    # Source 4: Common Crawl (ongoing discovery for 26 platforms — run as
+    # Source 4: Common Crawl (ongoing discovery for 27 platforms — run as
     # 2 shards in discovery.yml, see fetch_commoncrawl_slugs docstring)
     if args.source in ("commoncrawl", "all"):
         log.info("\n--- COMMON CRAWL (ongoing discovery) ---")
@@ -2528,7 +2749,8 @@ def main():
     if args.source in ("httparchive", "all"):
         log.info("\n--- HTTP ARCHIVE (BigQuery, technology-fingerprint detection) ---")
         ha_slugs = fetch_httparchive_slugs(limit_per_tech=args.httparchive_limit,
-                                            months=args.httparchive_months)
+                                            months=args.httparchive_months,
+                                            resolve_time_budget_minutes=args.httparchive_resolve_budget_minutes)
         ha_total = sum(len(s) for s in ha_slugs.values())
         if ha_total:
             log.info(f"HTTP Archive total: {ha_total} slugs across "
