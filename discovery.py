@@ -88,7 +88,7 @@ import re
 import sqlite3
 import tempfile
 import time
-from urllib.parse import urlparse, parse_qs, urljoin
+from urllib.parse import urlparse, parse_qs, urljoin, unquote
 
 import requests
 from dotenv import load_dotenv
@@ -444,11 +444,19 @@ def _url_to_slug_lever(url: str) -> str | None:
 
 
 def _url_to_slug_ashby(url: str) -> str | None:
+    """2026-09: confirmed live 118 archive_i rows stored with a literal
+    "%20" (and other percent-escapes) instead of a decoded space/char —
+    e.g. "Abode%20Money" — because `parsed.path` is never decoded by
+    urlparse; org names with spaces or punctuation come through Ashby's
+    URL still percent-encoded, and this was stored as-is. unquote() here
+    normalizes it to the real org name (matching what a browser/API
+    consumer would see), so this stops silently doubling up storage for
+    the same company under an encoded vs. would-be-decoded spelling."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "ashbyhq.com" in host:
         parts = parsed.path.strip("/").split("/")
-        slug = parts[0] if parts else None
+        slug = unquote(parts[0]) if parts and parts[0] else None
         if slug and slug.lower() not in SKIP_SLUGS:
             return slug
     return None
@@ -504,17 +512,57 @@ def _url_to_slug_workday(url: str) -> str | None:
     return None
 
 
+# 2026-09: real archive_i rows confirmed this was mis-extracting Rippling
+# logo/asset URLs as if they were company slugs — e.g.
+# ats.rippling.com/fd30a211c9541cb8751de95c09ed87e98ac64a91.png stored the
+# literal hash+extension as the "slug". Root cause: Pattern 1 took
+# parts[0] UNCONDITIONALLY, despite its own comment saying the real shape
+# is "{company}/jobs" — nothing ever checked that "jobs" was actually
+# anywhere in the path, so a bare one-segment asset URL with no "/jobs"
+# at all matched just as happily as a real board link. Fixed two ways,
+# belt-and-suspenders: (1) Pattern 1 now requires "jobs" to actually
+# appear later in the path, and (2) both patterns reject a candidate that
+# LOOKS like an asset filename (known extension) or a bare hex hash
+# (logo/image ids on this ATS, confirmed 5-for-5 in the real bad rows) —
+# so a future asset URL shape this project hasn't seen yet still can't
+# sneak through pattern (1) alone.
+_ASSET_FILENAME_RE = re.compile(
+    r"\.(png|jpe?g|gif|svg|webp|ico|bmp|css|js|mjs|woff2?|ttf|eot|pdf|mp4|webm|json|map)$",
+    re.I,
+)
+_BARE_HEX_HASH_RE = re.compile(r"^[0-9a-f]{16,64}$", re.I)
+
+
+def _looks_like_real_slug(candidate: str) -> bool:
+    """Shared guard for path-segment-based extractors: rejects the two
+    confirmed-in-production shapes of "this isn't a company slug, it's an
+    asset" — a filename with a known static-asset extension, or a bare
+    hex hash/id with no extension at all (e.g. a CDN object key)."""
+    if not candidate:
+        return False
+    if _ASSET_FILENAME_RE.search(candidate):
+        return False
+    if _BARE_HEX_HASH_RE.match(candidate):
+        return False
+    return True
+
+
 def _url_to_slug_rippling(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "rippling.com" in host:
-        # Pattern 1: ats.rippling.com/{company}/jobs (most common in OpenPostings)
-        parts = parsed.path.strip("/").split("/")
-        if parts and parts[0] and parts[0].lower() not in SKIP_SLUGS:
+        # Pattern 1: ats.rippling.com/{company}/jobs[/...] — "jobs" must
+        # actually be present somewhere after the company segment, not
+        # just assumed from parts[0] alone (see the comment above).
+        parts = [p for p in parsed.path.strip("/").split("/") if p]
+        if (parts and "jobs" in [p.lower() for p in parts[1:]]
+                and parts[0].lower() not in SKIP_SLUGS
+                and _looks_like_real_slug(parts[0])):
             return parts[0]
         # Pattern 2: {company}.rippling.com (subdomain-based)
         slug = host.replace(".rippling.com", "").lower()
-        if slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "ats"):
+        if (slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "ats")
+                and _looks_like_real_slug(slug)):
             return slug
     return None
 
@@ -986,10 +1034,32 @@ def _url_to_slug_jobvite(url: str) -> str | None:
     return None
 
 
+# 2026-09: real archive_i rows confirmed a real, live source of garbage
+# here — 34 of ~12k stored ADP slugs weren't a clean "{cid}|{ccId}" pair
+# at all, e.g. literal Word "HYPERLINK" field-code text, doubled/nested
+# URLs, HTML entities (&lang;, &lt;br&gt;), stray whitespace inside a
+# UUID, and truncation ellipses ("c858a3[…]bf") all ended up INSIDE the
+# stored cid/ccId values. Root cause: `parse_qs` faithfully returns
+# whatever raw text sits between "cid=" and the next "&" (or end of
+# string) with no shape check at all — and some real captured pages
+# (Wayback/Common Crawl) have a malformed second "?...cid=..." embedded
+# in what was scraped as a single query value, e.g. from a pasted-Word
+# job posting whose "link" is literal visible text rather than a real
+# `<a href>`. urlparse/parse_qs can't tell that apart from a genuinely
+# messy-but-real query string — so this only catches it by validating
+# the RESULT looks like ADP's actual cid/ccId shape before trusting it,
+# same principle as _looks_like_real_slug above.
+_ADP_CID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_ADP_CCID_RE = re.compile(r"^\d+_\d+$")
+
+
 def _url_to_slug_adp(url: str) -> str | None:
     """Extract slug from ADP Workforce Now career-center URLs.
     Both 'cid' and 'ccId' query params are required to hit the public
-    job-requisitions API — our internal slug format is '{cid}|{ccId}'."""
+    job-requisitions API — our internal slug format is '{cid}|{ccId}'.
+    Both are validated against ADP's own confirmed shapes (cid: a UUID;
+    ccId: digits_digits) before being trusted — see the comment above for
+    the real garbage this rejects."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "adp.com" not in host:
@@ -997,8 +1067,8 @@ def _url_to_slug_adp(url: str) -> str | None:
     qs = parse_qs(parsed.query)
     cid = (qs.get("cid") or qs.get("CID") or [None])[0]
     cc_id = (qs.get("ccId") or qs.get("ccid") or qs.get("CCID") or [None])[0]
-    if cid and cc_id:
-        return f"{cid}|{cc_id}"
+    if cid and cc_id and _ADP_CID_RE.match(cid.strip()) and _ADP_CCID_RE.match(cc_id.strip()):
+        return f"{cid.strip()}|{cc_id.strip()}"
     return None
 
 
@@ -1034,8 +1104,12 @@ def _resolve_adp_legacy_client(client: str) -> str | None:
         final_qs = parse_qs(urlparse(r.url).query)
         cid = (final_qs.get("cid") or [None])[0]
         cc_id = (final_qs.get("ccId") or [None])[0] or "19000101_000001"
-        if cid:
-            return f"{cid}|{cc_id}"
+        # Same shape validation as _url_to_slug_adp — this is ADP's own
+        # redirect response, not scraped page text, so garbage here is
+        # less likely, but there's no reason to trust it any less
+        # carefully than the other path just because the source differs.
+        if cid and _ADP_CID_RE.match(cid.strip()) and _ADP_CCID_RE.match(cc_id.strip()):
+            return f"{cid.strip()}|{cc_id.strip()}"
     except Exception as e:
         log.debug(f"ADP legacy client resolve failed for '{client}': {e}")
     return None
