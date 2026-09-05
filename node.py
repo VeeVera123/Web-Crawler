@@ -570,7 +570,12 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
     return best
 
 
-# ── Company maturity heuristics (2026-09) ───────────────────────────────
+# ── Quality Index (2026-09) ──────────────────────────────────────────────
+# This is the named gate that decides archive_ii eligibility for
+# opendata_probe.py and common_crawl_probe.py (the two sources with no
+# employee-count/size signal of their own) — see crawl_batch's docstring
+# for how apply_maturity_gate wires a source into this vs. a real size
+# filter (PDL/BigPicture).
 # archive_ii (in-house/unrecognized-ATS career pages) was accumulating a
 # lot of noise from single-person sites, hobbyist projects, and tiny shops
 # that happen to have a "Careers" or "Join us" page with no real hiring
@@ -601,9 +606,10 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
 # ~2.7 GiB compressed one-time-per-release download, not the multi-
 # terabyte dataset this was originally assumed to be. It's built and
 # refreshed by a separate batch job (see WebGraph/webgraph_seed.py) into a
-# small `webgraph_domains` Supabase table (domain -> authority tier); this
-# module only ever does a single cheap read against that table per
-# quality-gate candidate — see _webgraph_score() below.
+# small reduced (domain, rank band) CSV published as a GitHub Release
+# asset; this module downloads it ONCE per process and holds it in memory
+# from then on — see _webgraph_score() below and its graduated S+/S/A/B/C
+# rank bands further down this section.
 #
 # SIGNAL RELIABILITY, and why the weights below aren't all equal: a link-
 # authority measure computed externally from the real web graph (WebGraph)
@@ -621,7 +627,7 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
 #
 # This is a soft heuristic score, not a hard proof of company size — it
 # exists to cut obvious noise before it reaches archive_ii, not to
-# perfectly classify company scale. MIN_QUALITY_SCORE is deliberately
+# perfectly classify company scale. QUALITY_INDEX_THRESHOLD is deliberately
 # tunable (not a magic constant scattered across the file) since the
 # right cutoff will need calibrating against real archive_ii output.
 _ORG_SCHEMA_TYPE_RE = re.compile(r'"@type"\s*:\s*"(?:Organization|Corporation)"', re.I)
@@ -670,7 +676,7 @@ _OBSERVABILITY_RE = re.compile(
     r'(?:datadoghq\.com|dynatrace\.com|newrelic\.com|nr-data\.net|sentry\.io|js\.sentry-cdn\.com|'
     r'appdynamics\.com|instana\.io|splunkcloud\.com)', re.I)
 
-MIN_QUALITY_SCORE = 20
+QUALITY_INDEX_THRESHOLD = 20
 
 # ── DNS MX-record provider (2026-09) ────────────────────────────────────
 # Two tiers, scored differently because they mean different things:
@@ -734,14 +740,14 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
     return 0, None
 
 
-# ── Common Crawl WebGraph authority tier (2026-09) ──────────────────────
+# ── Common Crawl WebGraph rank bands (2026-09) ──────────────────────────
 # The strongest signal in this whole scoring system — see the reliability
 # note in this section's header comment above. Built separately by
 # WebGraph/webgraph_seed.py, which downloads Common Crawl's published
 # domain-level ranks file (harmonic centrality + PageRank, real link
 # authority computed from their own crawl — see that script's docstring
-# for the exact source/format) and writes a small reduced domain->tier CSV
-# (~10M rows, tens of MB gzipped — nowhere near GitHub's 2GB release-asset
+# for the exact source/format) and writes a small reduced domain->band CSV
+# (~tens of millions of rows, tens of MB gzipped — nowhere near GitHub's 2GB release-asset
 # cap). 2026-09, REVISED: that CSV is uploaded to a GitHub Release, NOT a
 # Supabase table — a live per-domain Supabase read for every quality-gate
 # candidate would mean real ongoing egress/storage cost for data that
@@ -750,78 +756,120 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
 # as the MX resolver above) and every lookup after that is a plain local
 # dict read — zero network cost, zero latency, for the rest of the run.
 #
-# Two tiers, not a single flag, because "somewhere in the top ~10M
-# domains" and "top ~1M domains" are meaningfully different confidence
-# levels — the web has on the order of a couple hundred million distinct
-# registered domains, so even top-10M is a real distinction, and top-1M is
-# a strong one.
+# Six graduated rank bands (S+/S/A/B/C/D), not a flat "in the top N or
+# nothing" cutoff — 2026-09, revised after checking a REAL, known-
+# legitimate company (heli.technology, already confirmed hiring globally
+# in the jobs DB) against the actual ranks file: it landed at rank
+# 44,860,492 out of ~118.0M domain nodes (Common Crawl's own published
+# count for this release — see their blog) — roughly the 62nd percentile,
+# nowhere near any of the flat cutoffs (10M/15M/20M/25M) that were being
+# considered. A binary cutoff would have given a real, legitimately-hiring
+# company ZERO credit just for not being especially link-popular. Graduated
+# bands let a domain like that earn a modest, honest amount of credit
+# instead of an all-or-nothing cliff.
+#
+# Band boundaries and points, reasoned (not just round numbers) from
+# Common Crawl's own published graph statistics for this era of releases —
+# domain-level: 118.0M nodes, 2.8B edges; the largest strongly-connected
+# component (the "real, mutually-linked core" of the web) is 30.0M nodes
+# (25.4%); 63.2% (74.5M) of all nodes are "dangling" (no outbound links —
+# a rough, imperfect proxy for peripheral/thin sites, since it measures
+# outbound links only, not inbound authority):
+#   S+ : rank <  1,000,000  (top ~0.8%)  — unmistakably major (Google,
+#        Wikipedia, Facebook-tier). Strong enough to clear the Quality
+#        Index bar alone.
+#   S  : rank <  10,000,000 (top ~8.5%)  — clearly well-established. Also
+#        clears the bar alone.
+#   A  : rank <  25,000,000 (top ~21%, close to the graph's own 25.4%
+#        strongly-connected-component size) — solidly connected, real
+#        established orgs. Needs one more smallish signal to pass.
+#   B  : rank <  50,000,000 (top ~42%) — modestly connected; real but
+#        unremarkable companies land here (this is heli.technology's
+#        band). A cautious, small credit — needs several other signals
+#        to actually clear the bar, per "safely exclude rather than
+#        include."
+#   C  : rank <  80,000,000 (top ~68%, near where "dangling"/peripheral
+#        nodes start being the majority) — very weakly connected. A
+#        token credit only.
+#   D  : rank >= 80,000,000, OR not found in the ranks file at all — no
+#        credit. This is where most parked/junk domains live (nobody
+#        links to a parking page), so this band intentionally contributes
+#        nothing rather than risk rewarding noise.
+# These bands are still a judgment call, calibrated against one real data
+# point plus the graph's own published shape stats — not a rigorously
+# derived cutoff. Revisit if more known-good/known-bad companies get
+# checked against real ranks (see webgraph_seed.py's lookup_ranks()).
 WEBGRAPH_TIERS_URL = os.environ.get("WEBGRAPH_TIERS_URL", "")  # GitHub Release asset URL, .csv or .csv.gz
-WEBGRAPH_STRONG_TIER_SCORE = 30   # tier 1 — top ~1M domains by harmonic centrality
-WEBGRAPH_MODERATE_TIER_SCORE = 15  # tier 2 — top ~10M, below the tier-1 cutoff
+WEBGRAPH_RANK_BANDS = (
+    # (label, exclusive rank upper bound, points)  — checked in order, first match wins
+    ("S+", 1_000_000, 30),
+    ("S", 10_000_000, 20),
+    ("A", 25_000_000, 12),
+    ("B", 50_000_000, 6),
+    ("C", 80_000_000, 2),
+)
 
-_webgraph_tiers: dict[str, int] | None = None  # lazy singleton, loaded once per process
+_webgraph_ranks: dict[str, str] | None = None  # domain -> band label ("S+".."C"), lazy singleton
 _webgraph_load_lock: asyncio.Lock | None = None
 
 
-async def _load_webgraph_tiers(session: aiohttp.ClientSession) -> dict[str, int]:
+async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]:
     """Downloads+parses WEBGRAPH_TIERS_URL exactly once per process, no
     matter how many concurrent crawl_one() calls ask for it at once (the
     lock makes every caller but the first just wait on the same in-flight
     load). Returns {} (never raises) if the URL isn't configured or the
     download/parse fails — WebGraph just contributes no signal that run,
-    same graceful-degradation shape as the MX resolver above."""
-    global _webgraph_tiers, _webgraph_load_lock
-    if _webgraph_tiers is not None:
-        return _webgraph_tiers
+    same graceful-degradation shape as the MX resolver above. The CSV
+    (built by webgraph_seed.py) carries a band LABEL per domain directly
+    (domain,band) — bands are assigned once at seed time, not recomputed
+    per lookup."""
+    global _webgraph_ranks, _webgraph_load_lock
+    if _webgraph_ranks is not None:
+        return _webgraph_ranks
     if _webgraph_load_lock is None:
         _webgraph_load_lock = asyncio.Lock()
     async with _webgraph_load_lock:
-        if _webgraph_tiers is not None:  # someone else finished it while we waited
-            return _webgraph_tiers
+        if _webgraph_ranks is not None:  # someone else finished it while we waited
+            return _webgraph_ranks
         if not WEBGRAPH_TIERS_URL:
-            _webgraph_tiers = {}
-            return _webgraph_tiers
-        log.info(f"Loading WebGraph domain tiers from {WEBGRAPH_TIERS_URL} (once per run)...")
-        tiers: dict[str, int] = {}
+            _webgraph_ranks = {}
+            return _webgraph_ranks
+        log.info(f"Loading WebGraph rank bands from {WEBGRAPH_TIERS_URL} (once per run)...")
+        ranks: dict[str, str] = {}
         try:
             async with session.get(WEBGRAPH_TIERS_URL, timeout=aiohttp.ClientTimeout(total=120)) as r:
                 r.raise_for_status()
                 raw = await r.read()
             text = (gzip.decompress(raw) if WEBGRAPH_TIERS_URL.endswith(".gz") else raw) \
                 .decode("utf-8", errors="ignore")
-            for line in text.splitlines()[1:]:  # [1:] skips the "domain,tier" header
-                domain, _, tier_str = line.strip().partition(",")
-                if not domain or not tier_str:
+            for line in text.splitlines()[1:]:  # [1:] skips the "domain,band" header
+                domain, _, band = line.strip().partition(",")
+                if not domain or not band:
                     continue
-                try:
-                    tiers[domain] = int(tier_str)
-                except ValueError:
-                    continue
-            log.info(f"  loaded {len(tiers):,} WebGraph-tiered domains")
+                ranks[domain] = band
+            log.info(f"  loaded {len(ranks):,} WebGraph-ranked domains")
         except Exception as e:
-            log.warning(f"  failed to load WebGraph tiers ({e}) — WebGraph signal disabled this run")
-            tiers = {}
-        _webgraph_tiers = tiers
-        return _webgraph_tiers
+            log.warning(f"  failed to load WebGraph ranks ({e}) — WebGraph signal disabled this run")
+            ranks = {}
+        _webgraph_ranks = ranks
+        return _webgraph_ranks
 
 
 async def _webgraph_score(session: aiohttp.ClientSession, domain: str) -> tuple[int, str | None]:
     """One in-memory dict lookup (after the one-time load above). Returns
-    (score, signal_name) — a domain simply absent from the tiers (i.e.
-    outside whatever top-N the seed job kept, or WEBGRAPH_TIERS_URL unset)
-    means no signal (0, None), never a penalty — most real small/mid
-    companies won't be in a top-10M-by-inbound-links list and that's
-    expected, not evidence of anything."""
-    tiers = await _load_webgraph_tiers(session)
-    tier = tiers.get(domain)
-    if tier == 1:
-        return WEBGRAPH_STRONG_TIER_SCORE, "webgraph_top_tier"
-    if tier == 2:
-        return WEBGRAPH_MODERATE_TIER_SCORE, "webgraph_moderate_tier"
+    (score, signal_name) — a domain simply absent from the ranks (i.e.
+    band D — outside the kept bands, or WEBGRAPH_TIERS_URL unset) means no
+    signal (0, None), never a penalty — plenty of real small/mid companies
+    land in D and that's expected, not evidence of anything."""
+    ranks = await _load_webgraph_ranks(session)
+    band = ranks.get(domain)
+    for label, _, points in WEBGRAPH_RANK_BANDS:
+        if band == label:
+            return points, f"webgraph_rank_{label.lower().replace('+', 'plus')}"
     return 0, None
 
 
-def _company_maturity_score(html: str) -> tuple[int, list[str]]:
+def _quality_index_score(html: str) -> tuple[int, list[str]]:
     """Scores how much a homepage looks like an established, multi-person
     company site rather than a micro-site — purely from HTML already in
     hand (no extra requests). Returns (score, [matched signal names]) —
@@ -855,13 +903,13 @@ def _company_maturity_score(html: str) -> tuple[int, list[str]]:
     return score, signals
 
 
-async def _company_maturity_score_async(session: aiohttp.ClientSession, html: str,
-                                         domain: str) -> tuple[int, list[str]]:
-    """_company_maturity_score() plus the MX lookup and the WebGraph
-    authority-tier lookup — kept as a separate async wrapper so every
-    existing (sync, HTML-only) call site and test of
-    _company_maturity_score keeps working unchanged."""
-    score, signals = _company_maturity_score(html)
+async def _quality_index_score_async(session: aiohttp.ClientSession, html: str,
+                                      domain: str) -> tuple[int, list[str]]:
+    """_quality_index_score() plus the MX lookup and the WebGraph rank-band
+    lookup — kept as a separate async wrapper so every existing (sync,
+    HTML-only) call site and test of _quality_index_score keeps working
+    unchanged."""
+    score, signals = _quality_index_score(html)
     mx_score, mx_signal = await _mx_provider_score(domain)
     if mx_signal:
         score += mx_score
@@ -1089,33 +1137,33 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
         # (neither carries an employee-count/size signal). Both now pass
         # capture_inhouse=True instead and rely on apply_maturity_gate below
         # to do the filtering the size column can't — so they DO feed
-        # archive_ii now, gated by company-maturity instead of size.
+        # archive_ii now, gated by the Quality Index instead of size.
         #
         # apply_maturity_gate distinguishes the two gating mechanisms a
         # caller can use (see crawl_batch's docstring):
         #   - capture_inhouse_domains given (people_data_labs_probe.py,
-        #     bigpicture_probe.py, kaggle_probe.py): the caller already
+        #     bigpicture_probe.py): the caller already
         #     pre-filtered to companies at/above its own employee-count
         #     threshold before this domain ever reached crawl_one — that
         #     size gate IS the quality bar for these sources, so the
-        #     maturity check is skipped here (crawl_batch computed
+        #     Quality Index is skipped here (crawl_batch computed
         #     apply_maturity_gate=False for these).
         #   - flat capture_inhouse bool, no domains set (opendata_probe.py,
         #     common_crawl_probe.py, and any other source with no size
-        #     signal at all): the maturity-score check below IS the quality
-        #     bar (crawl_batch computed apply_maturity_gate=True).
+        #     signal at all): the Quality Index below IS the quality bar
+        #     (crawl_batch computed apply_maturity_gate=True).
         if best_inhouse and capture_inhouse:
             if apply_maturity_gate:
-                # company-maturity quality gate — scored from the homepage
-                # HTML already fetched above (+ one DNS MX lookup), no extra
-                # HTTP request. Only gates archive_ii (in-house capture);
-                # archive_i (known-ATS hits, returned earlier in this
-                # function) is never touched by this.
-                quality_score, quality_signals = await _company_maturity_score_async(session, html, domain)
-                if quality_score < MIN_QUALITY_SCORE:
+                # Quality Index — scored from the homepage HTML already
+                # fetched above (+ one DNS MX lookup + one WebGraph rank-
+                # band lookup), no extra HTTP request. Only gates archive_ii
+                # (in-house capture); archive_i (known-ATS hits, returned
+                # earlier in this function) is never touched by this.
+                quality_score, quality_signals = await _quality_index_score_async(session, html, domain)
+                if quality_score < QUALITY_INDEX_THRESHOLD:
                     stats["inhouse_dropped_low_quality"] += 1
-                    log.debug(f"  archive_ii candidate dropped (quality_score={quality_score} "
-                              f"< {MIN_QUALITY_SCORE}, signals={quality_signals}): {domain}")
+                    log.debug(f"  archive_ii candidate dropped (Quality Index={quality_score} "
+                              f"< {QUALITY_INDEX_THRESHOLD}, signals={quality_signals}): {domain}")
                     return [], None
             stats["inhouse_career_page_captured"] += 1  # -> archive_ii
             return [], _capture(best_inhouse["url"])
@@ -1419,7 +1467,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         allowed to produce an archive_ii row this run (every other domain
         behaves as capture_inhouse=False for that one company only, ATS
         matching unaffected). This is the 2026-08 fix for over-filtering:
-        people_data_labs_probe.py/bigpicture_probe.py/kaggle_probe.py used
+        people_data_labs_probe.py/bigpicture_probe.py used
         to drop small companies from the crawl LIST entirely at seed time,
         which filtered out their archive_i-eligible ATS hits too, for
         almost nothing gained — now every company in the target countries
@@ -1427,21 +1475,20 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         the employee-count floor is applied ONLY at the point a company
         would otherwise become an archive_ii in-house-page candidate,
         computed by the caller from its own already-loaded size data.
-        2026-09: passing this set is ALSO what turns the company-maturity
-        quality gate (node.py's _company_maturity_score_async) OFF for
-        this run — a caller with real size data has already decided its
-        own quality bar; the maturity check would just be a redundant
-        second filter on companies that already cleared a real
-        employee-count threshold.
+        2026-09: passing this set is ALSO what turns the Quality Index
+        (node.py's _quality_index_score_async — the archive_ii gate for
+        sources with no size signal) OFF for this run — a caller with real
+        size data has already decided its own quality bar; the Quality
+        Index would just be a redundant second filter on companies that
+        already cleared a real employee-count threshold.
       - If capture_inhouse_domains is None, falls back to the flat
         `capture_inhouse` bool for every domain. 2026-09: opendata_probe.py
         and common_crawl_probe.py now pass capture_inhouse=True this way
         (they used to pass False — see their run_crawl()s) — with no size
-        signal for ANY domain, the company-maturity quality gate is what
-        decides archive_ii eligibility for these two instead of an
-        employee-count floor; this is exactly the case that turns the
-        maturity gate ON (apply_maturity_gate = capture_inhouse_domains is
-        None, computed below).
+        signal for ANY domain, the Quality Index is what decides archive_ii
+        eligibility for these two instead of an employee-count floor; this
+        is exactly the case that turns it ON (apply_maturity_gate =
+        capture_inhouse_domains is None, computed below).
 
     shard_index/shard_count/start_at (2026-08, resume support): when both
     shard_index and shard_count are given, this shard's progress is
