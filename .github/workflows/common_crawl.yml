@@ -84,6 +84,11 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # 2026-09: WebGraph domain-authority rank bands (S+/S/A/B/C) —
+          # see webgraph.yml (builds/refreshes this Release asset) and
+          # node.py's _load_webgraph_ranks() (downloads it once per
+          # process, holds it in memory — not a live per-domain lookup).
+          WEBGRAPH_TIERS_URL: https://github.com/${{ github.repository }}/releases/download/webgraph-domain-tiers/webgraph_domain_tiers.csv.gz
         run: |
           CRAWL_ARGS=()
           if [ -n "${{ github.event.inputs.crawl_list }}" ]; then
