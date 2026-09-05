@@ -522,25 +522,12 @@ def scrape_bamboohr(slug: str) -> list[dict]:
     return jobs
 
 
-# ── Generic sitemap.xml scraping/fallback ─────────────────
-# 2026-09: iCIMS has always been sitemap-only (there's no JSON API to fall
-# back TO), but that same technique — parse sitemap.xml, filter to URLs
-# that look like job postings, extract a readable title from the URL path
-# — is useful as a FALLBACK for other platforms too, when their real
-# primary method (a JSON API call, an HTML table scrape) returns nothing.
-# A career site's sitemap.xml is often still correct even when the page
-# structure or API response shape has quietly changed underneath a
-# regex/JSON scraper, so trying it before giving up on a company entirely
-# is a cheap, real improvement. Generalized here so every eligible
-# platform shares one implementation instead of copy-pasting iCIMS's.
+# ── iCIMS ──────────────────────────────────────────────
 
-def _fetch_sitemap_locs(sitemap_url: str, _depth: int = 0, _max_sub: int = 15) -> list[str]:
-    """Fetch a sitemap.xml URL and return every <loc> text found. Handles
-    both a direct <urlset> (a real sitemap of pages) and a <sitemapindex>
-    (a sitemap OF sitemaps, common on larger career sites) — recurses one
-    level into the index, capped at _max_sub sub-sitemaps so a site with
-    hundreds of them can't turn one fallback attempt into hundreds of
-    requests."""
+def scrape_icims(slug: str) -> list[dict]:
+    """iCIMS sitemap scraper — parses sitemap.xml for job URLs.
+    Title is extracted from URL path. No description/location from sitemap."""
+    sitemap_url = f"https://{slug}.icims.com/sitemap.xml"
     headers = {
         "Accept": "application/xml",
         "User-Agent": random.choice(USER_AGENTS),
@@ -554,128 +541,13 @@ def _fetch_sitemap_locs(sitemap_url: str, _depth: int = 0, _max_sub: int = 15) -
         return []
 
     ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    tag = root.tag.rsplit("}", 1)[-1]  # strip namespace, e.g. "{...}sitemapindex" -> "sitemapindex"
-
-    if tag == "sitemapindex" and _depth == 0:
-        locs = []
-        sub_sitemaps = root.findall(".//s:sitemap/s:loc", ns)[:_max_sub]
-        for loc_el in sub_sitemaps:
-            sub_url = (loc_el.text or "").strip()
-            if sub_url:
-                locs.extend(_fetch_sitemap_locs(sub_url, _depth=_depth + 1))
-        return locs
-
-    return [
-        (loc_el.text or "").strip()
-        for loc_el in root.findall(".//s:url/s:loc", ns)
-        if loc_el.text
-    ]
-
-
-def _title_from_sitemap_url(job_url: str, marker: str) -> str | None:
-    """Extract a readable title from a job URL's path, e.g.
-    '.../jobs/12345/senior-account-executive' -> 'Senior Account Executive'.
-    Returns None if the URL doesn't look like a real job-detail page (just
-    the marker with nothing meaningful after it)."""
-    path = job_url.split(marker, 1)[-1].strip("/")
-    if not path:
-        return None
-    parts = [p for p in path.split("/") if p]
-    # Prefer the LAST segment with letters in it (skips pure-numeric IDs,
-    # e.g. ".../jobs/12345/senior-account-executive" -> the title segment,
-    # not the numeric one before it).
-    for part in reversed(parts):
-        if re.search(r"[a-zA-Z]", part):
-            title = unquote(part).replace("-", " ").replace("_", " ").strip().title()
-            return title if title else None
-    return None
-
-
-# Platforms with a single, predictable per-company subdomain AND a job
-# URL that embeds a readable title slug (not just a numeric ID — a bare
-# ID gives no usable title, so those platforms aren't listed here even
-# if they do publish a sitemap). (domain_template, url_marker,
-# display_name) — domain_template takes the company slug via {slug}.
-SITEMAP_FALLBACK_PLATFORMS = {
-    "teamtailor": ("https://{slug}.teamtailor.com/sitemap.xml", "/jobs/", "Teamtailor"),
-    "breezyhr": ("https://{slug}.breezy.hr/sitemap.xml", "/p/", "BreezyHR"),
-    # NOTE: HRMDirect's real job-detail path format under /employment/ was
-    # not independently confirmed live (only the base "/employment/{path}"
-    # pattern is confirmed, from scrape_hrmdirect's own URL construction)
-    # — the marker is deliberately broad, and _title_from_sitemap_url plus
-    # the openings.php exclusion below filter out the listing/search page
-    # itself so only real per-job paths survive.
-    "hrmdirect": ("https://{slug}.hrmdirect.com/sitemap.xml", "/employment/", "HRMDirect"),
-}
-
-
-def _scrape_via_sitemap_fallback(ats: str, slug: str) -> list[dict]:
-    """Last-resort fallback when a platform's real scraper returned
-    nothing: try that company's sitemap.xml directly. No location/
-    description/department — sitemap.xml carries none of that — so jobs
-    from here are deliberately minimal (title + URL only) and flow through
-    the same downstream role/location AI classification as everything
-    else. `source_ats` is suffixed "(sitemap fallback)" so these are
-    identifiable in the jobs table if their lower fidelity ever needs
-    investigating."""
-    entry = SITEMAP_FALLBACK_PLATFORMS.get(ats)
-    if not entry:
-        return []
-    domain_template, marker, display_name = entry
-    sitemap_url = domain_template.format(slug=slug)
-
-    locs = _fetch_sitemap_locs(sitemap_url)
-    if not locs:
-        return []
-
     jobs = []
-    seen_urls = set()
-    for job_url in locs:
-        if marker not in job_url or job_url in seen_urls:
+
+    for url_el in root.findall(".//s:url", ns):
+        loc_el = url_el.find("s:loc", ns)
+        if loc_el is None:
             continue
-        # Skip the listing/search page itself and other non-job utility
-        # pages that share the same URL prefix as real job-detail pages
-        # (relevant for platforms like HRMDirect whose marker is broad —
-        # see SITEMAP_FALLBACK_PLATFORMS' comment on that one).
-        if re.search(r"openings\.php|/apply(/|$)|\.(php|aspx)(\?|$)", job_url, re.I):
-            continue
-        title = _title_from_sitemap_url(job_url, marker)
-        if not title:
-            continue
-        seen_urls.add(job_url)
-        jobs.append({
-            "title": title,
-            "url": job_url,
-            "company": slug.replace("-", " ").title(),
-            "location": "",
-            "country": "",
-            "department": "",
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": "",
-            "description_snippet": "",
-            "source_ats": f"{display_name} (sitemap fallback)",
-            "slug": slug,
-        })
-
-    if jobs:
-        log.info(f"{ats}/{slug}: primary scrape returned nothing, sitemap "
-                 f"fallback found {len(jobs)} job(s)")
-    return jobs
-
-
-# ── iCIMS ──────────────────────────────────────────────
-
-def scrape_icims(slug: str) -> list[dict]:
-    """iCIMS sitemap scraper — parses sitemap.xml for job URLs (iCIMS has
-    no JSON API to use as a primary method; sitemap.xml IS the primary
-    method here, not a fallback). Title is extracted from URL path. No
-    description/location from sitemap."""
-    sitemap_url = f"https://{slug}.icims.com/sitemap.xml"
-    locs = _fetch_sitemap_locs(sitemap_url)
-
-    jobs = []
-    for job_url in locs:
+        job_url = (loc_el.text or "").strip()
         if not job_url or "/jobs/" not in job_url or job_url.endswith("/jobs/intro"):
             continue
 
@@ -1365,11 +1237,18 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 
 
 # ── BrassRing (IBM/Infinite) ─────────────────────────────
-# Restored 2026-09 — mistakenly removed alongside a UKG/Phenom cleanup
-# under the wrong assumption it was JS-rendered like those two. It's a
-# real, working HTTP API scraper (sjobs.brassring.com/.../MatchedJobs) —
-# no JS rendering involved. See BLACKLISTED_ATS.md for the correction.
-
+# 2026-09: re-enabled after live investigation. This was previously
+# disabled under a generic "JS-rendered / auth-required / blocked /
+# robots.txt" comment shared with several other platforms, but none of
+# those specific reasons actually held up for BrassRing: sjobs.brassring.com
+# has no robots.txt at all (confirmed 404), the target endpoint is a real
+# JSON API (not a client-side-JS-only page), and there's no login/auth
+# wall in front of it. The real reason it was returning nothing: the code
+# below POSTed straight to the AJAX search endpoint without ever loading
+# the Home page first, so it carried no session cookies — BrassRing's
+# search endpoint 500s on a cookie-less request. Fixed by priming the
+# session (one GET to Search/Home/Home) before the POST, same as a real
+# browser session would do.
 def scrape_brassring(slug: str) -> list[dict]:
     """BrassRing search API scraper. Slug format: 'partner_id|site_id'."""
     parts = slug.split("|")
@@ -1378,12 +1257,28 @@ def scrape_brassring(slug: str) -> list[dict]:
         return []
 
     partner_id, site_id = parts
+    home_url = "https://sjobs.brassring.com/TGnewUI/Search/Home/Home"
     search_url = "https://sjobs.brassring.com/TgNewUI/Search/Ajax/MatchedJobs"
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": random.choice(USER_AGENTS),
     }
+
+    # Prime the session: BrassRing's AJAX search endpoint needs the cookies
+    # issued by the Home page load, or it 500s. A plain POST without this
+    # step is indistinguishable from "the API is dead" (see module notes
+    # above) — it isn't, it just needs a session first.
+    try:
+        _get_session().get(
+            home_url,
+            params={"partnerid": partner_id, "siteid": site_id},
+            headers={"User-Agent": headers["User-Agent"]},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except Exception as e:
+        log.debug(f"BrassRing: session-priming GET failed for {slug}: {e}")
+        return []
 
     all_jobs = []
     page = 1
@@ -1597,10 +1492,6 @@ def scrape_teamtailor(slug: str) -> list[dict]:
 
 
 # ── SAP SuccessFactors ─────────────────────────────────
-# Restored 2026-09 — mistakenly removed alongside a UKG/Phenom cleanup
-# under the wrong assumption it was JS-rendered like those two. It's a
-# real, working HTTP JSON API scraper — no JS rendering involved. See
-# BLACKLISTED_ATS.md for the correction.
 
 def scrape_successfactors(slug: str) -> list[dict]:
     """SAP SuccessFactors career site scraper.
@@ -3052,244 +2943,6 @@ def scrape_avature(slug: str) -> list[dict]:
     return jobs
 
 
-def scrape_jobscore(slug: str) -> list[dict]:
-    """JobScore — public, documented, unauthenticated JSON feed. Confirmed
-    live 2026-09: https://careers.jobscore.com/jobs/{slug}/feed.json
-    returns {"jobs": [...]} with rich per-job fields (title, department,
-    location/city/state/country, apply_url, detail_url, description,
-    job_type, remote, salary fields) — verified against a real company's
-    feed before shipping this, not built from docs alone.
-    """
-    company_name = slug.replace("-", " ").title()
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(f"https://careers.jobscore.com/jobs/{slug}/feed.json", headers=headers)
-    if not r:
-        return []
-    try:
-        data = r.json()
-    except Exception:
-        return []
-
-    jobs = []
-    for item in data.get("jobs", []):
-        loc_parts = [p for p in (item.get("city"), item.get("state"), item.get("country")) if p]
-        location = item.get("location") or ", ".join(loc_parts)
-        desc = _snippet(item.get("description", ""))
-        salary = item.get("formatted_public_compensation", "") or _extract_salary(desc)
-        job_url = item.get("detail_url") or item.get("apply_url") or ""
-        if not job_url:
-            continue
-        jobs.append({
-            "title": (item.get("title") or "").strip(),
-            "url": job_url,
-            "company": company_name,
-            "location": location,
-            "country": item.get("country", ""),
-            "department": item.get("department", ""),
-            "workplace_type": "Remote" if item.get("remote") else "",
-            "employment_type": item.get("job_type", ""),
-            "salary": salary,
-            "description_snippet": desc,
-            "source_ats": "JobScore",
-            "slug": slug,
-        })
-    return jobs
-
-
-def scrape_trakstar(slug: str) -> list[dict]:
-    """Trakstar Hire (formerly Recruiterbox) — public JSON openings API.
-    Confirmed live 2026-09: https://jsapi.recruiterbox.com/v1/openings?
-    client_name={slug} — no API key needed, just the tenant slug as a
-    query param (same shape as this platform's own documented "Frontend
-    API"). Verified live against real slugs before shipping — both test
-    companies happened to have 0 open postings at verification time, but
-    the response was well-formed JSON matching the documented
-    meta/objects schema both times, not an error page, which is what a
-    wrong endpoint would produce instead.
-    """
-    company_name = slug.replace("-", " ").title()
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get("https://jsapi.recruiterbox.com/v1/openings",
-             params={"client_name": slug}, headers=headers)
-    if not r:
-        return []
-    try:
-        data = r.json()
-    except Exception:
-        return []
-
-    jobs = []
-    for item in data.get("objects", []):
-        job_url = item.get("hosted_url", "")
-        if not job_url:
-            continue
-        loc = item.get("location") or {}
-        loc_parts = [p for p in (loc.get("city"), loc.get("state"), loc.get("country")) if p]
-        desc = _snippet(item.get("description", ""))
-        jobs.append({
-            "title": (item.get("title") or "").strip(),
-            "url": job_url,
-            "company": company_name,
-            "location": ", ".join(loc_parts),
-            "country": loc.get("country", ""),
-            "department": item.get("team", ""),
-            "workplace_type": "Remote" if item.get("allows_remote") else "",
-            "employment_type": item.get("position_type", ""),
-            "salary": _extract_salary(desc),
-            "description_snippet": desc,
-            "source_ats": "Trakstar",
-            "slug": slug,
-        })
-    return jobs
-
-
-def scrape_gem(slug: str) -> list[dict]:
-    """Gem (gem.com) Career Sites — public, unauthenticated JSON API.
-    Confirmed live 2026-09: https://api.gem.com/job_board/v0/{slug}/job_posts/
-    returns a plain JSON array of job posts (no wrapper key), each with
-    title/content/content_plain/location/location_type/departments/
-    offices/employment_type/absolute_url/requisition_id — verified live
-    against real companies (gem, function-health, inception, bluesky)
-    before shipping this, not built from docs alone. Gem is primarily a
-    recruiting CRM, but its "Career Sites" product also powers real
-    candidate-facing public job boards at jobs.gem.com/{slug} backed by
-    this same API — see _url_to_slug_gem in discovery.py.
-    """
-    company_name = slug.replace("-", " ").title()
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(f"https://api.gem.com/job_board/v0/{slug}/job_posts/", headers=headers)
-    if not r:
-        return []
-    try:
-        data = r.json()
-    except Exception:
-        return []
-    # API returns a bare list of job posts, not {"jobs": [...]}
-    items = data if isinstance(data, list) else data.get("job_posts", [])
-
-    jobs = []
-    for item in items:
-        job_url = item.get("absolute_url", "")
-        if not job_url:
-            continue
-        loc = item.get("location") or {}
-        location = loc.get("name", "") if isinstance(loc, dict) else str(loc)
-        departments = item.get("departments") or []
-        department = departments[0].get("name", "") if departments else ""
-        desc = _snippet(item.get("content_plain") or item.get("content", ""))
-        jobs.append({
-            "title": (item.get("title") or "").strip(),
-            "url": job_url,
-            "company": company_name,
-            "location": location,
-            "country": "",
-            "department": department,
-            "workplace_type": "Remote" if item.get("location_type") == "remote" else "",
-            "employment_type": item.get("employment_type", ""),
-            "salary": _extract_salary(desc),
-            "description_snippet": desc,
-            "source_ats": "Gem",
-            "slug": slug,
-        })
-    return jobs
-
-
-def scrape_ycombinator(slug: str) -> list[dict]:
-    """Work at a Startup (YC company job boards) — REBUILT 2026-09 after
-    its old implementation was deleted with job_board_scrapers.py in the
-    2026-08 restructure (see archive_i's own "no scraper registered"
-    warnings, which is what surfaced this gap).
-
-    HONEST LIMITATION, stated plainly rather than glossed over: this
-    implementation is NOT verified against ycombinator.com's real HTML the
-    way Gem/JobScore/Trakstar above were. This session's sandbox could not
-    reach ycombinator.com via a direct HTTP fetch (network egress policy
-    blocked it outright), and the only other tool available (a
-    URL-fetch-and-summarize tool) converts pages to markdown before
-    returning them — it could confirm the page is real, server-rendered
-    HTML with visible job titles/locations/salaries, but could NOT show
-    actual `<div>`/class-name markup to build a real CSS-selector parser
-    against, the way every other scraper in this file was built.
-
-    What WAS confirmed live, repeatedly, and is what this function
-    actually relies on: ycombinator.com/companies/{slug}/jobs is a real
-    page, and every job listing on it links to its own detail page at
-    EXACTLY the pattern /companies/{slug}/jobs/{job_id}-{title-slug} —
-    verified against a real company (swiftsku ->
-    .../jobs/FYRif1G-senior-account-executive-smb). This function extracts
-    postings by matching THAT URL pattern directly in the raw HTML via
-    BeautifulSoup's href matching (a much more stable contract than a
-    styling class name, and the one part of the real page actually seen),
-    not by any div/class structure this session never saw. It does not
-    fetch each individual job page for a full description — the listing
-    page didn't expose one either, so description_snippet is left blank
-    here and picked up by enrich_descriptions() same as any other platform
-    without a registered description fetcher.
-
-    workatastartup.com/companies/{slug} (the URL discovery.py's
-    _url_to_slug_ycombinator still watches for) 302-redirects to
-    ycombinator.com/companies/{slug} now — confirmed live — so this
-    scrapes the ycombinator.com host directly rather than following a
-    redirect on every call.
-
-    If this comes back empty or wrong against real production slugs,
-    that's this docstring's caveat playing out, not a mystery — the fix
-    is pasting real saved HTML from
-    https://www.ycombinator.com/companies/<a-real-slug>/jobs (fetched from
-    somewhere that isn't sandboxed) so an exact parser can replace this
-    heuristic one.
-    """
-    company_name = slug.replace("-", " ").title()
-    url = f"https://www.ycombinator.com/companies/{slug}/jobs"
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(url, headers=headers)
-    if not r:
-        return []
-    try:
-        soup = BeautifulSoup(r.text, "html.parser")
-    except Exception:
-        return []
-
-    job_link_re = re.compile(
-        r"^/companies/" + re.escape(slug) + r"/jobs/([A-Za-z0-9_]+)-([a-z0-9-]+)/?$"
-    )
-    jobs = []
-    seen_urls = set()
-    for a in soup.find_all("a", href=job_link_re):
-        href = a.get("href", "")
-        if href in seen_urls:
-            continue  # the same job link can legitimately appear more than
-            # once on the page (e.g. a title link and a separate "Apply"
-            # link both pointing at the same posting)
-        seen_urls.add(href)
-
-        match = job_link_re.match(href)
-        title_slug = match.group(2) if match else ""
-        # Anchor text is the primary title source; the URL's own
-        # title-slug (hyphenated, e.g. "senior-account-executive-smb") is
-        # the fallback for the (rare) case an anchor wraps an icon/image
-        # instead of visible text.
-        title = a.get_text(strip=True) or title_slug.replace("-", " ").title()
-        if not title:
-            continue
-
-        jobs.append({
-            "title": title,
-            "url": f"https://www.ycombinator.com{href}",
-            "company": company_name,
-            "location": "",
-            "country": "",
-            "department": "",
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": "",
-            "description_snippet": "",
-            "source_ats": "YCombinator",
-            "slug": slug,
-        })
-    return jobs
-
-
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -3320,68 +2973,45 @@ SCRAPERS = {
     "jobvite": scrape_jobvite,
     "adp": scrape_adp,
     "avature": scrape_avature,
-    # ── New (2026-09): JobScore / Trakstar — public JSON APIs, confirmed
-    # live against real companies before being added (see each function's
-    # docstring). Gupy/Eightfold/HRMOS were also candidates from the same
-    # request but are NOT added: Gupy's documented API looks like an
-    # authenticated per-company business API rather than a public
-    # candidate-facing feed, Eightfold's public listings appear to need
-    # JS rendering (same class of problem as Phenom below), and HRMOS's
-    # documented API (core.hrmos.co) looks business-authenticated too —
-    # none of the three had a confirmed public unauthenticated endpoint
-    # the way JobScore/Trakstar did, so nothing was guessed and shipped.
-    "jobscore": scrape_jobscore,
-    "trakstar": scrape_trakstar,
-    # ── New (2026-09): Gem — re-investigated at the user's request after
-    # an earlier "couldn't verify" answer on this platform specifically.
-    # It does have a public, unauthenticated JSON API (unlike the earlier
-    # bloomberry.com company-list request, which is a genuinely paywalled/
-    # capped third-party data broker with no public export — a different
-    # site from Gem itself). See scrape_gem docstring.
-    "gem": scrape_gem,
-    # ── Rebuilt (2026-09): YCombinator / Work at a Startup — the old
-    # scraper was lost in an earlier file restructure, orphaning ~1,442
-    # archive_i rows. See scrape_ycombinator's docstring for exactly what
-    # was and wasn't verified live (sandbox couldn't fetch raw HTML from
-    # this domain, so this matches job URLs by pattern, not CSS selector).
-    "ycombinator": scrape_ycombinator,
-    # ── Restored 2026-09: BrassRing/SuccessFactors were wrongly removed
-    # under the assumption they were JS-rendered — they're real, working
-    # HTTP API scrapers. See BLACKLISTED_ATS.md for the correction.
+    # 2026-09: re-enabled — see scrape_brassring's docstring for the real
+    # root cause (missing session priming, not JS-rendering/auth/robots).
     "brassring": scrape_brassring,
-    "successfactors": scrape_successfactors,
-    # ── DISABLED / never implemented — see BLACKLISTED_ATS.md at the repo
-    # root for the full list and reasons (ukg, phenom, gupy, eightfold,
-    # hrmos, and any future rejects). That file is the source of truth
-    # now — check it before re-adding any of these.
+    # ── DISABLED (confirmed live, 2026-09) ──
+    # "successfactors": scrape_successfactors — CONFIRMED genuinely blocked,
+    #    not just an unverified guess: WebFetch against 4 independent live
+    #    SuccessFactors career-site hosts (career5/8/10.successfactors.*,
+    #    performancemanager4.successfactors.com), including the exact
+    #    /xi/ui/pages/careersite/api/v1/jobs path this scraper targets,
+    #    returned ROBOTS_DISALLOWED on every single request. Independently
+    #    corroborated: SuccessFactors career sites render client-side from
+    #    an OData call, and the exact API host/path varies per SAP data
+    #    center/tenant (15+ known data centers), so even ignoring
+    #    robots.txt this isn't a single stable pattern. Stays excluded.
+    # "ukg": — robots.txt disallow on recruiting.ultipro.com; every real
+    #          URL we could verify also served an "unsupported browser"
+    #          fallback page instead of real content. Excluded.
+    # "phenom": — confirmed client-side-JS-only rendering for both listings
+    #             and full descriptions. No plain-HTTP path exists, and
+    #             adding a headless browser conflicts with this project's
+    #             established architecture. Excluded.
+    # YCombinator (Work at a Startup) moved to job_board_scrapers.py —
+    # it's a multi-company job AGGREGATOR (like RemoteOK/Jobicy), not a
+    # single-company ATS, so it belongs in the job-boards pipeline, not
+    # keyed by per-company slug here. See scrape_ycombinator() there.
 }
 
 
 def scrape_board(ats: str, slug: str) -> list[dict]:
-    """Dispatch to the correct scraper. 2026-09: if the primary scraper
-    returns nothing (empty result OR raised an exception) and this
-    platform has a sitemap fallback registered (SITEMAP_FALLBACK_PLATFORMS),
-    try that before giving up — a company's sitemap.xml is often still
-    correct even when the primary JSON/HTML scraper has quietly broken
-    underneath it (site redesign, API shape change, temporary error)."""
-    ats_lower = ats.lower()
-    fn = SCRAPERS.get(ats_lower)
+    """Dispatch to the correct scraper."""
+    fn = SCRAPERS.get(ats.lower())
     if not fn:
         log.warning(f"Unknown ATS: {ats}")
         return []
     try:
-        jobs = fn(slug)
+        return fn(slug)
     except Exception as e:
         log.error(f"Error scraping {ats}/{slug}: {e}")
-        jobs = []
-
-    if not jobs and ats_lower in SITEMAP_FALLBACK_PLATFORMS:
-        try:
-            jobs = _scrape_via_sitemap_fallback(ats_lower, slug)
-        except Exception as e:
-            log.error(f"Sitemap fallback also failed for {ats}/{slug}: {e}")
-
-    return jobs
+        return []
 
 
 # ── Second-pass: fetch individual job descriptions ─────
@@ -4070,17 +3700,25 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
 #             final fallback for every other platform if its dedicated
 #             fetcher finds nothing.
 #
-# Honest limitation: Rippling, BambooHR, iCIMS, Workday, Personio, JOIN,
-# Taleo, and Paylocity render their REAL application form client-side
-# (React/Angular SPA) behind session state, or inside a cross-origin iframe
-# (iCIMS), or behind partner-gated auth (Workday Staffing API, iCIMS
-# iForms). None of that is reachable with plain HTTP requests — it would
-# require a headless browser (Playwright/Selenium) driving the actual
-# "Apply" click. We still run the Level-3 DOM parser against their best
-# known URL as a best-effort attempt (a few tenants may have server-side-
-# rendered fallback markup), but expect these to mostly return nothing.
-# That's a real platform limitation, not a bug in this code — flagged
-# explicitly here so nobody "fixes" it into a false success rate later.
+# Honest limitation: Rippling, BambooHR, iCIMS, Workday, JOIN, and
+# Paylocity render their REAL application form client-side (React/Angular
+# SPA) behind session state, or inside a cross-origin iframe (iCIMS), or
+# behind partner-gated auth (Workday Staffing API, iCIMS iForms). None of
+# that is reachable with plain HTTP requests — it would require a headless
+# browser (Playwright/Selenium) driving the actual "Apply" click. We still
+# run the Level-3 DOM parser against their best known URL as a best-effort
+# attempt (a few tenants may have server-side-rendered fallback markup),
+# but expect these to mostly return nothing. That's a real platform
+# limitation, not a bug in this code — flagged explicitly here so nobody
+# "fixes" it into a false success rate later.
+#
+# Personio and Taleo were in this list too until 2026-09, when live
+# research confirmed each actually has a distinct, real apply-page URL
+# (Personio: posting URL + "/apply"; Taleo: swap jobdetail.ftl for
+# jobapply.ftl, per Oracle's own docs) — their fetchers now try that URL
+# first. Still best-effort (the form itself may still be JS-rendered
+# underneath), but it's a real, confirmed-live URL rather than just
+# re-fetching the listing page.
 
 _WORK_AUTH_RE = re.compile(
     r"(authorized?\s*to\s*work|work\s*authoriz|visa\s*sponsor|"
@@ -4609,7 +4247,21 @@ def _fetch_workday_questions(job: dict) -> str:
 
 
 def _fetch_personio_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    """2026-09: try the dedicated /apply URL first — confirmed live
+    (index-soft.jobs.personio.com/job/{id}/apply, linked from the posting's
+    own "Apply for this job" button) rather than only re-fetching the
+    posting page. Still best-effort/Level-3 only: the real form itself is
+    client-side-rendered, so this just gives the DOM parser a shot at a
+    page more likely to carry the actual form markup than the listing
+    page. Falls back to the plain posting URL if that fails."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    apply_url = url.rstrip("/") + "/apply"
+    found = _fetch_generic_form_questions(apply_url)
+    if found:
+        return _format_auth_questions(found)
+    return _format_auth_questions(_fetch_generic_form_questions(url))
 
 
 def _fetch_joincom_questions(job: dict) -> str:
@@ -4617,7 +4269,21 @@ def _fetch_joincom_questions(job: dict) -> str:
 
 
 def _fetch_taleo_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    """2026-09: Oracle's own Taleo career-section docs confirm the apply
+    page is a DISTINCT .ftl file from the posting page — jobapply.ftl vs
+    jobdetail.ftl, same job= query param — not a guess, this is Oracle's
+    documented URL convention. Swap to it before running the DOM parser;
+    falls back to the plain posting URL if the swap doesn't apply (no
+    jobdetail.ftl in the URL) or the apply page yields nothing."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    if "jobdetail.ftl" in url:
+        apply_url = url.replace("jobdetail.ftl", "jobapply.ftl")
+        found = _fetch_generic_form_questions(apply_url)
+        if found:
+            return _format_auth_questions(found)
+    return _format_auth_questions(_fetch_generic_form_questions(url))
 
 
 def _fetch_paylocity_questions(job: dict) -> str:
@@ -4634,6 +4300,21 @@ def _fetch_paylocity_questions(job: dict) -> str:
 
 def _fetch_smartrecruiters_questions(job: dict) -> str:
     return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+
+
+# ── Jobvite ──
+# 2026-09: added — confirmed live (jobs.jobvite.com/{company}/job/{id} →
+# "Apply" button href is the same URL + "/apply"). Best-effort/Level-3
+# only: no public question-definition API found for Jobvite, so this
+# relies on the generic DOM form parser same as the other Level-3
+# platforms above.
+
+def _fetch_jobvite_questions(job: dict) -> str:
+    url = job.get("url", "")
+    if not url:
+        return ""
+    apply_url = url.rstrip("/") + "/apply"
+    return _format_auth_questions(_fetch_generic_form_questions(apply_url))
 
 
 # ── Dispatch table: source_ats (as stored on job dicts) → fetcher ──
@@ -4658,6 +4339,7 @@ QUESTION_FETCHERS = {
     "JOIN": _fetch_joincom_questions,
     "Taleo": _fetch_taleo_questions,
     "Paylocity": _fetch_paylocity_questions,
+    "Jobvite": _fetch_jobvite_questions,
 }
 
 
