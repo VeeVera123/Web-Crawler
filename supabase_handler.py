@@ -3,6 +3,7 @@ Supabase handler — writes filtered jobs to PostgreSQL via REST API.
 Handles deduplication by job URL, populates slug_registry, and logs scan reports.
 """
 
+import hashlib
 import logging
 import random
 import time
@@ -17,6 +18,14 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 log = logging.getLogger(__name__)
+
+
+class SupabaseEgressLimitExceeded(Exception):
+    """Raised when this process's own tracked Supabase response bytes
+    cross SUPABASE_MAX_EGRESS_MB (if set) — a deliberate circuit breaker,
+    not a retry-worthy transient error. See _track_egress()/module
+    docstring section on egress safety below."""
+    pass
 
 
 class SupabaseFetchError(Exception):
@@ -53,6 +62,69 @@ HEADERS = {
 REST = f"{SUPABASE_URL}/rest/v1"
 
 
+# ── Egress safety ────────────────────────────────────────
+# 2026-09: this process's own running total of Supabase response bytes —
+# a plain module-level counter, not a Supabase-side metric, so it only
+# ever reflects THIS shard's own traffic within THIS run. Two purposes:
+#   1. Visibility — log_egress_summary() prints one line at the end of a
+#      run so egress trend-watching doesn't require digging through
+#      Supabase's own dashboard/billing pages.
+#   2. A hard circuit breaker — if SUPABASE_MAX_EGRESS_MB is set (env
+#      var, unset by default = no limit), _track_egress() raises
+#      SupabaseEgressLimitExceeded the moment this process's own total
+#      crosses it, so a genuinely runaway loop (a pagination bug, an
+#      unbounded retry storm, an accidentally-unsharded full-table pull)
+#      fails loudly and stops spending egress instead of quietly running
+#      to completion having downloaded far more than intended.
+_egress_bytes = 0
+_SUPABASE_MAX_EGRESS_MB = os.environ.get("SUPABASE_MAX_EGRESS_MB", "")
+
+
+def _track_egress(resp) -> None:
+    global _egress_bytes
+    try:
+        n = len(resp.content)
+    except Exception:
+        return
+    _egress_bytes += n
+    if _SUPABASE_MAX_EGRESS_MB:
+        try:
+            cap_bytes = float(_SUPABASE_MAX_EGRESS_MB) * 1024 * 1024
+        except ValueError:
+            return
+        if _egress_bytes > cap_bytes:
+            raise SupabaseEgressLimitExceeded(
+                f"This run's Supabase egress ({_egress_bytes / 1024 / 1024:.1f}MB) crossed "
+                f"SUPABASE_MAX_EGRESS_MB={_SUPABASE_MAX_EGRESS_MB} — stopping rather than "
+                f"continuing to download.")
+
+
+def _md5_shard_of(key: str, shard_count: int) -> int:
+    """Same deterministic hash crawl_i.py's/crawl_ii.py's own _shard_of()
+    used before server-side sharding existed — kept here ONLY as the
+    fallback path's sharding mechanism (see get_all_slugs()/
+    get_archive_ii_pages()) for when the archive_i_shard()/
+    archive_ii_shard() RPCs aren't reachable. Deliberately a DIFFERENT
+    hash than the RPCs' Postgres hashtext() — that's fine, since which
+    scheme is used is decided once per run (whichever path succeeds) and
+    every shard in that same run takes the same path, so the two schemes
+    never need to agree with each other, only be internally consistent
+    for the duration of one run."""
+    h = hashlib.md5(key.encode()).hexdigest()
+    return int(h, 16) % shard_count
+
+
+def get_egress_bytes() -> int:
+    """This process's own cumulative tracked Supabase response bytes so far."""
+    return _egress_bytes
+
+
+def log_egress_summary(label: str = "") -> None:
+    mb = _egress_bytes / 1024 / 1024
+    prefix = f"[{label}] " if label else ""
+    log.info(f"{prefix}Supabase egress this run: {mb:.2f}MB ({_egress_bytes:,} bytes)")
+
+
 # ── Helpers ──────────────────────────────────────────────
 
 def _post(table: str, data: dict | list[dict], upsert: bool = False) -> dict | list | None:
@@ -62,8 +134,11 @@ def _post(table: str, data: dict | list[dict], upsert: bool = False) -> dict | l
         headers["Prefer"] = "return=representation,resolution=merge-duplicates"
     try:
         r = http_requests.post(f"{REST}/{table}", headers=headers, json=data, timeout=30)
+        _track_egress(r)
         r.raise_for_status()
         return r.json()
+    except SupabaseEgressLimitExceeded:
+        raise
     except Exception as e:
         log.error(f"Supabase POST {table} failed: {e}")
         return None
@@ -76,8 +151,11 @@ def _patch(table: str, filters: str, data: dict) -> bool:
             f"{REST}/{table}?{filters}",
             headers=HEADERS, json=data, timeout=30,
         )
+        _track_egress(r)
         r.raise_for_status()
         return True
+    except SupabaseEgressLimitExceeded:
+        raise
     except Exception as e:
         detail = ""
         resp = getattr(e, "response", None)
@@ -102,6 +180,7 @@ def _get(table: str, params: str = "", limit: int = 10000) -> list[dict]:
     for attempt in range(MAX_HTTP_RETRIES):
         try:
             r = http_requests.get(url, headers=HEADERS, timeout=30)
+            _track_egress(r)
             if r.status_code in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
                 wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
                 log.warning(
@@ -112,6 +191,8 @@ def _get(table: str, params: str = "", limit: int = 10000) -> list[dict]:
                 continue
             r.raise_for_status()
             return r.json()
+        except SupabaseEgressLimitExceeded:
+            raise
         except Exception as e:
             last_error = e
             if attempt < MAX_HTTP_RETRIES - 1:
@@ -124,6 +205,39 @@ def _get(table: str, params: str = "", limit: int = 10000) -> list[dict]:
 
     log.error(f"Supabase GET {table} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
     raise SupabaseFetchError(f"GET {table} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
+
+
+def _rpc(fn: str, params: dict, limit: int = 1000) -> list[dict]:
+    """POST to a Postgres function via PostgREST's /rpc/ endpoint — same
+    retry/egress-tracking behavior as _get(). Used for the server-side
+    sharded reads (archive_i_shard/archive_ii_shard, see their SQL
+    definitions) so a shard only ever pulls its OWN ~1/N slice over the
+    wire, instead of the whole table filtered client-side afterward."""
+    url = f"{REST}/rpc/{fn}"
+    last_error = None
+    for attempt in range(MAX_HTTP_RETRIES):
+        try:
+            r = http_requests.post(url, headers=HEADERS, json=params, timeout=30)
+            _track_egress(r)
+            if r.status_code in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                log.warning(f"Supabase RPC {fn} got HTTP {r.status_code}, "
+                            f"retrying in {wait:.1f}s (attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except SupabaseEgressLimitExceeded:
+            raise
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_HTTP_RETRIES - 1:
+                wait = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                log.warning(f"Supabase RPC {fn} failed ({e}), "
+                            f"retrying in {wait:.1f}s (attempt {attempt + 1}/{MAX_HTTP_RETRIES})")
+                time.sleep(wait)
+    log.error(f"Supabase RPC {fn} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
+    raise SupabaseFetchError(f"RPC {fn} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
 
 # ── Slug Registry ────────────────────────────────────────
@@ -226,20 +340,59 @@ def resolve_oracle_slug(old_slug: str, new_slug: str) -> bool:
         return False
 
 
-def get_all_slugs() -> list[tuple[str, str]]:
+def get_all_slugs(shard_index: int | None = None, shard_count: int | None = None) -> list[tuple[str, str]]:
     """
-    Fetch all (ats, slug) pairs from slug_registry.
-    Supabase caps responses at 1000 rows, so we paginate with that limit.
+    Fetch (ats, slug) pairs from archive_i (formerly slug_registry).
 
-    Raises SupabaseFetchError if any page fetch fails after retries — this
-    is intentionally NOT caught here. main.py's load_slugs() needs to be
-    able to tell "the registry is genuinely empty" apart from "the fetch to
-    Supabase broke", so it can fail the shard loudly instead of silently
-    scraping nothing.
+    2026-09: when shard_index/shard_count are given, this now calls the
+    archive_i_shard() Postgres RPC (see the migration that created it) so
+    Supabase does the "which 1/N of this table belongs to this shard"
+    filtering ITSELF — only that shard's own slice ever crosses the wire.
+    Before this, EVERY shard downloaded the WHOLE table (paginated, but
+    unfiltered) and then filtered client-side via crawl_i.py's own
+    _shard_of() hash — with N shards running, that's the full table's
+    egress paid N times over just to keep 1/N of it each time.
+
+    Falls back to the old full-table-then-client-filter behavior (via
+    crawl_i.py's own _shard_of, applied by the caller) if the RPC call
+    itself fails for any reason (e.g. migration not yet applied on this
+    Supabase project) — logged clearly so the fallback is never silent.
+    shard_index/shard_count omitted (both None) always uses the
+    unsharded full-table path, same as before.
+
+    Raises SupabaseFetchError if every fetch attempt fails after retries —
+    this is intentionally NOT caught here. crawl_i.py's load_slugs() needs
+    to be able to tell "the registry is genuinely empty" apart from "the
+    fetch to Supabase broke", so it can fail the shard loudly instead of
+    silently scraping nothing.
     """
+    batch_size = 1000  # Supabase/PostgREST default max per response
+    sharded = shard_index is not None and shard_count is not None and shard_count > 1
+
+    if sharded:
+        try:
+            pairs = []
+            offset = 0
+            while True:
+                rows = _rpc("archive_i_shard", {
+                    "p_shard_index": shard_index, "p_shard_count": shard_count,
+                    "p_limit": batch_size, "p_offset": offset,
+                })
+                if not rows:
+                    break
+                pairs.extend((row["ats"], row["slug"]) for row in rows)
+                if len(rows) < batch_size:
+                    break
+                offset += batch_size
+            log.info(f"Loaded {len(pairs)} slugs from Supabase archive_i "
+                     f"(server-side sharded: {shard_index}/{shard_count})")
+            return pairs
+        except SupabaseFetchError as e:
+            log.warning(f"archive_i_shard RPC failed, falling back to full-table fetch + "
+                        f"client-side sharding for this run: {e}")
+
     pairs = []
     offset = 0
-    batch_size = 1000  # Supabase default max per response
 
     while True:
         rows = _get(
@@ -255,23 +408,59 @@ def get_all_slugs() -> list[tuple[str, str]]:
             break
         offset += batch_size
 
-    log.info(f"Loaded {len(pairs)} slugs from Supabase slug_registry")
+    if sharded:
+        pairs = [(a, s) for a, s in pairs if _md5_shard_of(f"{a}|{s}", shard_count) == shard_index]
+        log.info(f"Loaded {len(pairs)} slugs from Supabase archive_i "
+                 f"(full table, client-side sharded: {shard_index}/{shard_count})")
+    else:
+        log.info(f"Loaded {len(pairs)} slugs from Supabase archive_i (full table)")
     return pairs
 
 
-def get_archive_ii_pages() -> list[dict]:
-    """Fetch every {career_page_url, website_url} pair from archive_ii
+def get_archive_ii_pages(shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
+    """Fetch {career_page_url, website_url} pairs from archive_ii
     (formerly archive_iii — in-house/unsupported career pages captured by
     node.py's crawl_batch()). This is Crawl II's (crawl_ii.py) input list,
     the same role get_all_slugs() plays for Crawl I.
 
-    Raises SupabaseFetchError if any page fetch fails after retries — same
-    reasoning as get_all_slugs(): crawl_ii.py needs to tell "archive_ii is
-    genuinely empty" apart from "the fetch to Supabase broke" so it can
-    fail the shard loudly instead of silently scraping nothing."""
+    2026-09: same server-side sharding as get_all_slugs() — see that
+    function's docstring for the full "why" (archive_ii_shard RPC, same
+    fallback-on-RPC-failure behavior, same egress-multiplication problem
+    this fixes). Sharded here on website_url (crawl_ii.py's own
+    _shard_of() hashes the same field).
+
+    Raises SupabaseFetchError if every fetch attempt fails after retries —
+    same reasoning as get_all_slugs(): crawl_ii.py needs to tell
+    "archive_ii is genuinely empty" apart from "the fetch to Supabase
+    broke" so it can fail the shard loudly instead of silently scraping
+    nothing."""
+    batch_size = 1000
+    sharded = shard_index is not None and shard_count is not None and shard_count > 1
+
+    if sharded:
+        try:
+            rows = []
+            offset = 0
+            while True:
+                page = _rpc("archive_ii_shard", {
+                    "p_shard_index": shard_index, "p_shard_count": shard_count,
+                    "p_limit": batch_size, "p_offset": offset,
+                })
+                if not page:
+                    break
+                rows.extend(page)
+                if len(page) < batch_size:
+                    break
+                offset += batch_size
+            log.info(f"Loaded {len(rows)} career pages from Supabase archive_ii "
+                     f"(server-side sharded: {shard_index}/{shard_count})")
+            return rows
+        except SupabaseFetchError as e:
+            log.warning(f"archive_ii_shard RPC failed, falling back to full-table fetch + "
+                        f"client-side sharding for this run: {e}")
+
     rows = []
     offset = 0
-    batch_size = 1000
 
     while True:
         page = _get(
@@ -286,7 +475,12 @@ def get_archive_ii_pages() -> list[dict]:
             break
         offset += batch_size
 
-    log.info(f"Loaded {len(rows)} career pages from Supabase archive_ii")
+    if sharded:
+        rows = [r for r in rows if _md5_shard_of(r.get("website_url") or "", shard_count) == shard_index]
+        log.info(f"Loaded {len(rows)} career pages from Supabase archive_ii "
+                 f"(full table, client-side sharded: {shard_index}/{shard_count})")
+    else:
+        log.info(f"Loaded {len(rows)} career pages from Supabase archive_ii (full table)")
     return rows
 
 
