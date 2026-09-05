@@ -2148,6 +2148,68 @@ def _find_career_page_link(html: str, base_url: str) -> str | None:
     return None
 
 
+def resolve_candidate_page_to_ats_slug(url: str, timeout: int = 15) -> tuple[str, str] | None:
+    """Like resolve_company_to_ats_slug, but for a candidate URL a source
+    (HTTP Archive) already told us has a matching ATS fingerprint ON THAT
+    EXACT PAGE. Tries the specific page first, only falling back to the
+    homepage-based rediscovery resolve_company_to_ats_slug does if the
+    exact page itself doesn't pan out.
+
+    2026-09: HTTP Archive's resolve step used to call
+    resolve_company_to_ats_slug(url) directly on the candidate page, which
+    immediately throws away everything but the URL's bare hostname
+    (scheme://host) and starts fresh from THAT host's homepage — e.g.
+    "acme.com/careers/greenhouse-widget" gets stripped down to "acme.com"
+    before any fetch even happens. That discards the one concrete fact we
+    already had: the exact path where BigQuery/Wappalyzer confirmed the
+    fingerprint. A real loss of recall follows from that — a homepage
+    that doesn't directly link to the confirmed page (a few clicks deep,
+    or only reachable via the traffic CrUX itself tracked, not top nav)
+    would resolve to nothing even though a real match is already known to
+    exist at that exact URL.
+
+    Order of attempts, cheapest/most-specific first, and STRICTLY additive
+    over the old behavior (falls through to the exact same logic as
+    before as its last resort, so this can only resolve MORE than it used
+    to, never less):
+      1. Check the candidate URL itself against every known ATS pattern
+         (URL_TO_SLUG) — free, no network — covers the case where the
+         "page" IS already hosted on the vendor's own domain (e.g. a
+         boards.greenhouse.io/... page Wappalyzer flagged directly).
+      2. Fetch that EXACT page (not the homepage) and scan its own
+         outbound links — covers the case where the candidate page is
+         the company's own career page embedding an ATS widget/link,
+         which is exactly the page BigQuery already told us has one.
+      3. Fall back to resolve_company_to_ats_slug(url)'s existing
+         homepage + one-hop-to-careers logic, unchanged.
+    """
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if not parsed.hostname:
+        return None
+
+    # (1) the URL itself, no network needed.
+    for ats, resolver in URL_TO_SLUG.items():
+        slug = resolver(url)
+        if slug:
+            return ats, slug
+
+    # (2) the exact candidate page — the one BigQuery already confirmed.
+    base = f"{parsed.scheme}://{parsed.hostname}"
+    if _robots_allows(base, parsed.path or "/"):
+        try:
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": YC_USER_AGENT})
+            if r.status_code < 400:
+                hit = _scan_html_for_ats_slug(r.text, url)
+                if hit:
+                    return hit
+        except Exception:
+            pass
+
+    # (3) fall back to the pre-existing homepage + one-hop rediscovery —
+    # never resolves worse than before this function existed.
+    return resolve_company_to_ats_slug(url, timeout=timeout)
+
+
 def resolve_company_to_ats_slug(website: str, timeout: int = 15) -> tuple[str, str] | None:
     """Given a company's own homepage URL, try to find which ATS it uses
     and that ATS's slug for it. Checks robots.txt before fetching each
@@ -2628,7 +2690,13 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
 
     def _resolve_one(item):
         expected_ats, url = item
-        result = resolve_company_to_ats_slug(url)
+        # resolve_candidate_page_to_ats_slug, not resolve_company_to_ats_slug
+        # directly — this source already knows the EXACT page BigQuery
+        # confirmed has the fingerprint, so try that page itself first
+        # before falling back to the homepage-based rediscovery the YC
+        # source uses (which only ever has a bare homepage URL to start
+        # from, never a confirmed page). See that function's docstring.
+        result = resolve_candidate_page_to_ats_slug(url)
         time.sleep(0.1)
         return expected_ats, result
 
