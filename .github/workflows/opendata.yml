@@ -43,7 +43,20 @@ on:
 
 concurrency:
   group: opendata-${{ github.ref }}
-  cancel-in-progress: true
+  # 2026-09: was cancel-in-progress: true. That does NOT key off shard
+  # count — it cancels every job of an ENTIRE prior workflow_dispatch run
+  # (all shards, regardless of whether it's 2 or 20) the instant a new
+  # dispatch starts on the same branch. Confirmed to actually fire against
+  # a real run (2 shards SIGTERM'd, exit 143, mid-WebGraph-download, while
+  # the crawl.yml/discovery.yml separate workflows were unaffected — this
+  # concurrency group is scoped to opendata.yml alone).
+  # cancel-in-progress: false makes a new dispatch on the same branch
+  # QUEUE behind whatever's already running in this group instead of
+  # killing it — every shard of an in-flight run is now safe from being
+  # cancelled by a later dispatch, no matter how many shards either run
+  # uses. (Shard count and this setting are unrelated — more shards alone
+  # was never going to produce "queueing" instead of cancellation.)
+  cancel-in-progress: false
 
 jobs:
   seed:
