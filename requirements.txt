@@ -18,6 +18,9 @@ selectolax>=0.3
 # aiodns — concurrent async DNS resolution, used by node.py's crawl engine
 # at high concurrency (see new_connector()). Optional — the script falls
 # back to aiohttp's default resolver if missing, just slower under heavy load.
+# 2026-09: also now powers the archive_ii quality gate's DNS MX-record
+# provider check (see _mx_provider_score() in node.py) — same graceful
+# degradation if missing, that one signal is just skipped (0 score impact).
 aiodns>=3.0
 
 # duckdb removed 2026-08 — was only needed by the retired host-crawl
