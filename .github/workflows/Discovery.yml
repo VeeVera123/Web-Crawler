@@ -13,10 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 10-job matrix over 7 sources, all running in parallel — instead of one
+  # 9-job matrix over 8 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
-  # thousands of live per-company fetches for sources 6-7), so sharding
+  # thousands of live per-company fetches for sources 6-8), so sharding
   # BY SOURCE is the natural split here — unlike daily_scan.yml's ATS-board
   # matrix, there's no single flat pool of "work items" to hash-shard
   # across a fixed number of workers. Concurrent writes across different
@@ -24,24 +24,16 @@ jobs:
   # `on_conflict=ats,slug` per-row, so there's no shared mutable state to
   # race on.
   #
-  # commoncrawl runs as 4 separate jobs (platform-sharded, not source-
-  # sharded) rather than 1 — originally split into 2 in 2026-08 when a 9th
-  # source, Web Data Commons, was retired for a bad cost/payoff ratio (37
-  # net-new slugs for ~4 minutes of live fetching against a 3000-page
-  # sample) and its matrix slot was handed to Common Crawl instead, since
-  # Common Crawl was already the slowest single job in this matrix (27
-  # platforms x up to 6 crawls x however many patterns each, all
-  # sequential in one job) and actually benefits from being split, unlike
-  # WDC which was just spending runtime for near-nothing. Bumped from 2 to
-  # 4 shards in 2026-09 when TheirStack (formerly source 7) was removed,
-  # freeing up another matrix slot for the same reason — Common Crawl
-  # remained the slowest source and splitting further keeps cutting
-  # wall-clock. See discovery.py's fetch_commoncrawl_slugs docstring for
-  # how the platform-sharding works.
-  #
-  # TheirStack (freemium technology-usage API) was removed 2026-09 at the
-  # user's request — see discovery.py's module docstring for the full
-  # list of remaining sources.
+  # commoncrawl runs as 2 separate jobs (platform-sharded, not source-
+  # sharded) rather than 1 — added 2026-08 when a 9th source, Web Data
+  # Commons, was retired for a bad cost/payoff ratio (37 net-new slugs for
+  # ~4 minutes of live fetching against a 3000-page sample) and its matrix
+  # slot was handed to Common Crawl instead, since Common Crawl was
+  # already the slowest single job in this matrix (27 platforms x up to 6
+  # crawls x however many patterns each, all sequential in one job) and
+  # actually benefits from being split, unlike WDC which was just
+  # spending runtime for near-nothing. See discovery.py's
+  # fetch_commoncrawl_slugs docstring for how the platform-sharding works.
   discover:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -53,15 +45,12 @@ jobs:
           - source: kalil
           - source: openpostings
           - source: commoncrawl
-            extra_args: "--cc-shard 0 --cc-total-shards 4"
+            extra_args: "--cc-shard 0 --cc-total-shards 2"
           - source: commoncrawl
-            extra_args: "--cc-shard 1 --cc-total-shards 4"
-          - source: commoncrawl
-            extra_args: "--cc-shard 2 --cc-total-shards 4"
-          - source: commoncrawl
-            extra_args: "--cc-shard 3 --cc-total-shards 4"
-          - source: wayback
+            extra_args: "--cc-shard 1 --cc-total-shards 2"
+          - source: wayback_adp
           - source: yc
+          - source: theirstack
           - source: httparchive
 
     steps:
@@ -86,13 +75,12 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
-      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-        run: exec python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
-        # GCP_PROJECT_ID/GCP_SA_KEY are optional — discovery.py logs a
-        # one-line notice and skips the httparchive source cleanly if
-        # they aren't set, rather than failing the run. See discovery.py's
-        # module docstring (source 7) for what's needed and how to set it
-        # up. THEIRSTACK_API_KEY was removed 2026-09 along with the
-        # TheirStack source itself.
+        run: python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
+        # THEIRSTACK_API_KEY and GCP_PROJECT_ID/GCP_SA_KEY are optional —
+        # discovery.py logs a one-line notice and skips that source cleanly
+        # if either isn't set, rather than failing the run. See
+        # discovery.py's module docstring (sources 7 and 8) for what each
+        # needs and how to set it up.
