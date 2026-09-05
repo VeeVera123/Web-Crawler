@@ -567,6 +567,17 @@ _ATS_VENDOR_DOMAINS = (
     # in-house-looking page will slip through this particular check.
     "pageuppeople.com", "pinpointhq.com", "flatchr.io", "jobylon.com",
     "occupop-careers.com",
+    # 2026-09: another round of well-known ATS/HCM vendor hosted-careers
+    # domains that weren't in this list yet — same rationale as the batch
+    # above (a page on any of these is ATS-related, not an in-house build,
+    # whether or not this project has a working scraper for that vendor
+    # yet). A wrong/no-longer-used domain here is harmless (the suffix
+    # check just never matches it) — no real ATS domain should be withheld
+    # for lack of a scraper.
+    "csod.com", "ultipro.com", "dayforcehcm.com", "applytojob.com",
+    "comeet.co", "phenompeople.com", "eightfold.ai", "clearcompanyhr.com",
+    "freshteam.com", "newtonsoftware.com", "applicantpro.com",
+    "hiringthing.com", "paycomonline.com", "isolvedhire.com",
 )
 
 
@@ -1012,12 +1023,30 @@ _WEBGRAPH_MAX_PARTS = 8                        # parallel Range-request connecti
 _WEBGRAPH_MIN_PART_BYTES = 32 * 1024 * 1024    # don't bother splitting below this
 
 
+_WEBGRAPH_PART_RETRIES = 3  # retries per part before giving up on the whole download
+
+
 async def _fetch_range(session: aiohttp.ClientSession, url: str, start: int, end: int,
                         timeout: aiohttp.ClientTimeout) -> bytes:
-    """One Range-request slice of a larger download (inclusive byte bounds)."""
-    async with session.get(url, headers={"Range": f"bytes={start}-{end}"}, timeout=timeout) as r:
-        r.raise_for_status()
-        return await r.read()
+    """One Range-request slice of a larger download (inclusive byte bounds).
+    2026-09: retries this one slice a few times on a transient failure —
+    with _WEBGRAPH_MAX_PARTS parallel connections in flight, a single
+    dropped/stalled part used to fail asyncio.gather() for the WHOLE
+    download (every other part's bytes already fetched, thrown away for
+    nothing) instead of just that slice re-fetching, same class of bug as
+    webgraph_seed.py's single-stream download had."""
+    last_exc: Exception | None = None
+    for attempt in range(_WEBGRAPH_PART_RETRIES + 1):
+        try:
+            async with session.get(url, headers={"Range": f"bytes={start}-{end}"},
+                                    timeout=timeout) as r:
+                r.raise_for_status()
+                return await r.read()
+        except Exception as e:
+            last_exc = e
+            if attempt < _WEBGRAPH_PART_RETRIES:
+                await asyncio.sleep(min(2 ** (attempt + 1), 20))
+    raise last_exc
 
 
 async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]:
