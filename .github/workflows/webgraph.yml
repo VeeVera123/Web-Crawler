@@ -2,23 +2,26 @@ name: WebGraph
 
 # Seed-only pipeline (no crawl stage — this doesn't crawl any domains
 # itself). Downloads + reduces Common Crawl's own domain-level WebGraph
-# release (harmonic centrality + PageRank) into a small (domain,tier) CSV
-# and publishes it to a GitHub Release under a STABLE tag/filename —
-# common_crawl.yml and opendata.yml's crawl jobs both point their
-# WEBGRAPH_TIERS_URL env var at that same fixed URL, so re-running this
-# workflow to pick up a new Common Crawl release never requires touching
-# those other two workflows. Manual/occasional — Common Crawl republishes
-# this dataset roughly every 2-3 months, not on any tighter schedule.
+# release (harmonic centrality + PageRank) into a small (domain,band) CSV
+# — graduated S+/S/A/B/C rank bands feeding node.py's Quality Index, not a
+# flat tier cutoff (see webgraph_seed.py's RANK_BANDS comment) — and
+# publishes it to a GitHub Release under a STABLE tag/filename (retained
+# as "webgraph-domain-tiers"/"webgraph_domain_tiers.csv.gz" so
+# common_crawl.yml and opendata.yml's crawl jobs never need updating just
+# because the banding scheme changed). Manual/occasional — Common Crawl
+# republishes this dataset roughly every 2-3 months, not on any tighter
+# schedule.
 #
 # ALWAYS run with dry_run checked first against a new --release value and
-# read the logged sample (domain, tier) rows before unchecking it — see
+# read the logged sample (domain, band) rows before unchecking it — see
 # webgraph_seed.py's module docstring for exactly why (the ranks-file
 # column format couldn't be independently verified before this was built).
 #
 # lookup_domains is a separate calibration mode (see webgraph_seed.py's
 # lookup_ranks()) — set it to scan the full ranks file for one or more
-# domains' actual rank instead of building/publishing the tiered CSV, e.g.
-# to check where a known-real company lands before picking a tier cutoff.
+# domains' actual rank and which band it lands in, instead of
+# building/publishing the banded CSV, e.g. to sanity-check a band boundary
+# against a known-real company.
 on:
   workflow_dispatch:
     inputs:
@@ -83,6 +86,6 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.release_tag || 'webgraph-domain-tiers' }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
-            --title "WebGraph domain tiers" \
-            --notes "Reduced Common Crawl WebGraph domain-authority tiers — see WebGraph/webgraph_seed.py. Source release: ${{ github.event.inputs.release }}. Regenerated $(date -u +%Y-%m-%d)."
+            --title "WebGraph domain rank bands" \
+            --notes "Reduced Common Crawl WebGraph domain-authority rank bands (S+/S/A/B/C) — see WebGraph/webgraph_seed.py. Source release: ${{ github.event.inputs.release }}. Regenerated $(date -u +%Y-%m-%d)."
           gh release upload "$TAG" webgraph_domain_tiers.csv.gz --clobber
