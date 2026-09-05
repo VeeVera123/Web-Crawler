@@ -55,6 +55,9 @@ import sys
 import time
 
 import requests
+import urllib3.exceptions
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -126,18 +129,90 @@ def _err(e: Exception) -> str:
     return str(e) or repr(e) or type(e).__name__
 
 
+# 2026-09: a real run on a residential/office connection hit
+# urllib3.exceptions.ReadTimeoutError partway through — data.commoncrawl.org
+# stalled for >60s mid-stream (confirmed: the traceback's own line numbers
+# point straight at the `for line in text:` loop below, not the initial
+# connect). The old bare `requests.get(url, stream=True, timeout=60)` had
+# no retry at any layer: one stalled read killed the whole multi-hundred-
+# million-row scan, and lookup_ranks() (used for calibration, no early
+# exit) is the flow most exposed to this since it may need to stream the
+# ENTIRE file. gzip can't resume mid-stream from a byte offset without
+# re-implementing DEFLATE's block-resumption (not worth it here), so on a
+# stalled/dropped connection this just re-opens the request from byte 0
+# and re-decodes — cheap relative to the network wait — but skips the
+# lines already yielded so a caller mid-way through a scan sees no
+# duplicates and no gap.
+_STREAM_CONNECT_TIMEOUT = 15   # seconds to establish the TCP/TLS connection
+_STREAM_READ_TIMEOUT = 120     # seconds of silence on an open connection before giving up on it
+_STREAM_MAX_RETRIES = 6        # whole-request retries after a stall/drop, not counting the first try
+
+
+def _make_retrying_session() -> requests.Session:
+    """A `Retry` adapter only covers connection-establishment failures and
+    a handful of retryable HTTP statuses — it does NOT cover a read that
+    times out after the connection is already open and streaming (that's
+    exactly what hit us live), so this session still needs the outer
+    retry loop in _stream_gz_lines below. This adapter just means a
+    dropped/refused connection on RE-request doesn't need its own extra
+    layer of backoff on top of that loop's."""
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=(429, 500, 502, 503, 504),
+                   allowed_methods=frozenset(["GET"]))
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 def _stream_gz_lines(url: str):
     """Streams a remote .gz text file line-by-line without ever holding
     the whole decompressed file in memory — same shape as opendata_seed.py's
-    streaming reads, just gzip directly (no zip container to open here)."""
-    r = requests.get(url, stream=True, timeout=60)
-    r.raise_for_status()
-    raw = r.raw
-    raw.decode_content = True
-    with gzip.GzipFile(fileobj=raw) as gz:
-        text = io.TextIOWrapper(gz, encoding="utf-8", errors="ignore")
-        for line in text:
-            yield line.rstrip("\n")
+    streaming reads, just gzip directly (no zip container to open here).
+    Resilient to a mid-stream stall or dropped connection (see the
+    comment above _STREAM_CONNECT_TIMEOUT): re-opens the request from
+    scratch, re-decodes, and skips lines already yielded to this
+    generator's caller, up to _STREAM_MAX_RETRIES times."""
+    session = _make_retrying_session()
+    lines_yielded = 0
+    attempt = 0
+    while True:
+        try:
+            r = session.get(url, stream=True,
+                             timeout=(_STREAM_CONNECT_TIMEOUT, _STREAM_READ_TIMEOUT))
+            r.raise_for_status()
+            raw = r.raw
+            raw.decode_content = True
+            skip = lines_yielded
+            with gzip.GzipFile(fileobj=raw) as gz:
+                text = io.TextIOWrapper(gz, encoding="utf-8", errors="ignore")
+                for line in text:
+                    if skip:
+                        skip -= 1
+                        continue
+                    yield line.rstrip("\n")
+                    lines_yielded += 1
+            return  # stream reached EOF cleanly
+        except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError) as e:
+            # NOTE: because this reads straight from `r.raw` (bypassing
+            # requests' own iter_content, which normally re-wraps urllib3
+            # errors as requests.exceptions.*), a stall surfaces as the
+            # RAW urllib3.exceptions.ReadTimeoutError, not
+            # requests.exceptions.ReadTimeout — confirmed by the real
+            # traceback this fix was written against, which named the
+            # urllib3 class directly. Catching only requests.exceptions.*
+            # would have missed it entirely, which is exactly what happened
+            # before this fix.
+            attempt += 1
+            if attempt > _STREAM_MAX_RETRIES:
+                log.error(f"  giving up after {attempt - 1} retries and {lines_yielded:,} lines "
+                          f"yielded ({_err(e)})")
+                raise
+            wait = min(2 ** attempt, 60)
+            log.warning(f"  stream stalled/dropped after {lines_yielded:,} lines ({_err(e)}) — "
+                        f"retrying whole download from the top, skipping already-seen lines "
+                        f"(attempt {attempt}/{_STREAM_MAX_RETRIES}, waiting {wait}s)...")
+            time.sleep(wait)
 
 
 def _reverse_domain(rev_domain: str) -> str:
