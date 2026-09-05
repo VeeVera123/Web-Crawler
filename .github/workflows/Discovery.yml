@@ -13,10 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 9-job matrix over 8 sources, all running in parallel — instead of one
+  # 37-job matrix over 7 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
-  # thousands of live per-company fetches for sources 6-8), so sharding
+  # thousands of live per-company fetches for sources 6-7), so sharding
   # BY SOURCE is the natural split here — unlike daily_scan.yml's ATS-board
   # matrix, there's no single flat pool of "work items" to hash-shard
   # across a fixed number of workers. Concurrent writes across different
@@ -24,16 +24,33 @@ jobs:
   # `on_conflict=ats,slug` per-row, so there's no shared mutable state to
   # race on.
   #
-  # commoncrawl runs as 2 separate jobs (platform-sharded, not source-
-  # sharded) rather than 1 — added 2026-08 when a 9th source, Web Data
-  # Commons, was retired for a bad cost/payoff ratio (37 net-new slugs for
-  # ~4 minutes of live fetching against a 3000-page sample) and its matrix
-  # slot was handed to Common Crawl instead, since Common Crawl was
-  # already the slowest single job in this matrix (27 platforms x up to 6
-  # crawls x however many patterns each, all sequential in one job) and
-  # actually benefits from being split, unlike WDC which was just
-  # spending runtime for near-nothing. See discovery.py's
-  # fetch_commoncrawl_slugs docstring for how the platform-sharding works.
+  # commoncrawl runs as 31 separate jobs (platform-sharded, not source-
+  # sharded) rather than 1 — originally split into 2 in 2026-08 when a 9th
+  # source, Web Data Commons, was retired for a bad cost/payoff ratio (37
+  # net-new slugs for ~4 minutes of live fetching against a 3000-page
+  # sample) and its matrix slot was handed to Common Crawl instead, since
+  # Common Crawl was already the slowest single job in this matrix
+  # (platforms x up to 6 crawls x however many patterns each, all
+  # sequential in one job) and actually benefits from being split, unlike
+  # WDC which was just spending runtime for near-nothing. Went 2 -> 4 in
+  # 2026-09 when TheirStack (formerly source 7) was removed, freeing up a
+  # matrix slot; then 4 -> 31 (ONE SHARD PER PLATFORM, confirmed against
+  # discovery.py's CC_PLATFORM_PATTERNS — len() == 31) once it was clear
+  # that's the actual ceiling: fetch_commoncrawl_slugs shards by
+  # `i % cc_total_shards == cc_shard` over the platform LIST, not a hash
+  # of individual work items, so cc-total-shards beyond 31 would just
+  # create shards owning zero platforms — pure waste, not more
+  # parallelism. This last jump is free wall-clock, not added cost or
+  # query volume: CDX index lookups are a cheap, unauthenticated public
+  # API with no scanned-bytes billing to watch (unlike httparchive's
+  # BigQuery-backed source below, which is why THAT source's shard count
+  # isn't just cranked up the same way — see its own note further down).
+  # See discovery.py's fetch_commoncrawl_slugs docstring for how the
+  # platform-sharding works.
+  #
+  # TheirStack (freemium technology-usage API) was removed 2026-09 at the
+  # user's request — see discovery.py's module docstring for the full
+  # list of remaining sources.
   discover:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -45,12 +62,92 @@ jobs:
           - source: kalil
           - source: openpostings
           - source: commoncrawl
-            extra_args: "--cc-shard 0 --cc-total-shards 2"
+            extra_args: "--cc-shard 0 --cc-total-shards 31"
           - source: commoncrawl
-            extra_args: "--cc-shard 1 --cc-total-shards 2"
+            extra_args: "--cc-shard 1 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 2 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 3 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 4 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 5 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 6 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 7 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 8 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 9 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 10 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 11 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 12 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 13 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 14 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 15 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 16 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 17 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 18 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 19 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 20 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 21 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 22 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 23 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 24 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 25 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 26 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 27 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 28 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 29 --cc-total-shards 31"
+          - source: commoncrawl
+            extra_args: "--cc-shard 30 --cc-total-shards 31"
           - source: wayback_adp
           - source: yc
-          - source: theirstack
+          # httparchive stays a single job, deliberately NOT sharded the
+          # same way commoncrawl just was: its fetch_httparchive_slugs()
+          # runs ONE BigQuery query across all ~20 known ATS tech
+          # fingerprints at once (see discovery.py). Splitting that query
+          # by tech (one shard per tech, mirroring cc_shard) would look
+          # like the same win, but BigQuery bills by bytes SCANNED from
+          # the source partitions, not by output rows or WHERE-clause
+          # selectivity — the table isn't clustered/partitioned by
+          # `technology`, so a query for 1 tech scans the same partition
+          # bytes as a query for all 20. Sharding it 20 ways would
+          # multiply this source's BigQuery cost ~20x for zero extra
+          # coverage (per fetch_httparchive_candidate_urls' own docstring,
+          # the current single run already sits at ~480GB, close to half
+          # the free Sandbox tier's 1 TiB/month quota — 20x that blows
+          # through it on one run). If this source ever needs to be
+          # faster within its 90-minute job timeout, the right fix is
+          # restructuring it into a seed+probe split like OpenData's (one
+          # job queries BigQuery once and uploads the candidate URL list
+          # as a Release asset, then N probe jobs shard the live
+          # per-company HTTP resolving — which has no BigQuery cost at
+          # all) rather than shard count. Not touched here — flag this if
+          # httparchive coverage ever becomes the bottleneck worth that
+          # extra plumbing.
           - source: httparchive
 
     steps:
@@ -75,12 +172,13 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
-        run: python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
-        # THEIRSTACK_API_KEY and GCP_PROJECT_ID/GCP_SA_KEY are optional —
-        # discovery.py logs a one-line notice and skips that source cleanly
-        # if either isn't set, rather than failing the run. See
-        # discovery.py's module docstring (sources 7 and 8) for what each
-        # needs and how to set it up.
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
+        # GCP_PROJECT_ID/GCP_SA_KEY are optional — discovery.py logs a
+        # one-line notice and skips the httparchive source cleanly if
+        # they aren't set, rather than failing the run. See discovery.py's
+        # module docstring (source 7) for what's needed and how to set it
+        # up. THEIRSTACK_API_KEY was removed 2026-09 along with the
+        # TheirStack source itself.
