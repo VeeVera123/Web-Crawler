@@ -1,7 +1,7 @@
 """
 PEOPLE DATA LABS PROBE — a thin, disposable probe source on top of node.py
 (the permanent engine). Reads PDL's Free Company Dataset, extracts
-{name, domain, country, size}, hands domains to node.crawl_batch(). All
+{name, domain, country, size}, and hands domains to node.crawl_batch(). All
 fetch/parse/detect/write logic lives in node.py — fix a bug there once,
 every probe/seed source gets the fix.
 
@@ -304,6 +304,11 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                     log.info("  checkpoint shows this shard is already fully done — nothing left to crawl.")
                     return
                 domains = domains[start_at:]
+            # 2026-09: passing capture_inhouse_domains (a real size-based
+            # allowlist) is also what turns node.py's company-maturity
+            # quality gate OFF for this source — PDL's own size filter
+            # above is the quality bar here, not a second HTML/MX
+            # heuristic on top of it. See crawl_batch's docstring.
             _, elapsed, rate, time_budget_hit = await node.crawl_batch(
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
