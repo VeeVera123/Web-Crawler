@@ -24,65 +24,83 @@ jobs:
   # `on_conflict=ats,slug` per-row, so there's no shared mutable state to
   # race on.
   #
-  # commoncrawl runs as 4 separate jobs (platform-sharded, not source-
+  # commoncrawl runs as 3 separate jobs (platform-sharded, not source-
   # sharded) rather than 1 — originally split into 2 in 2026-08 when a 9th
   # source, Web Data Commons, was retired for a bad cost/payoff ratio (37
   # net-new slugs for ~4 minutes of live fetching against a 3000-page
   # sample) and its matrix slot was handed to Common Crawl instead, since
-  # Common Crawl was already the slowest single job in this matrix (27
-  # platforms x up to 6 crawls x however many patterns each, all
+  # Common Crawl was already the slowest single job in this matrix
+  # (platforms x up to 6 crawls x however many patterns each, all
   # sequential in one job) and actually benefits from being split, unlike
-  # WDC which was just spending runtime for near-nothing. Bumped from 2 to
-  # 4 shards in 2026-09 when TheirStack (formerly source 7) was removed,
-  # freeing up another matrix slot for the same reason — Common Crawl
-  # remained the slowest source and splitting further keeps cutting
-  # wall-clock. See discovery.py's fetch_commoncrawl_slugs docstring for
-  # how the platform-sharding works.
+  # WDC which was just spending runtime for near-nothing. Went 2 -> 4 -> 3
+  # as the matrix's other slots shifted around (TheirStack removed, then
+  # httparchive gained its own shards below) — 3 keeps it split without
+  # over-provisioning past what this account's concurrent-job cap can
+  # actually run at once (queued-but-not-running shards buy nothing, see
+  # this conversation's own shard-count discussion). See discovery.py's
+  # fetch_commoncrawl_slugs docstring for how the platform-sharding works.
+  #
+  # httparchive runs as 3 separate jobs too (date-sharded, via --ha-shard/
+  # --ha-total-shards) — this source's single ~90min job was the slowest
+  # thing left in the matrix. Deliberately NOT sharded by ATS tech the way
+  # commoncrawl is sharded by platform: `httparchive.crawl.pages` is
+  # partitioned by `date`, not by `technology`, so splitting the resolved
+  # crawl-date list means each shard's BigQuery query scans roughly its
+  # own fraction of the partition bytes — summed across shards, same
+  # total bytes scanned as one unsharded run, just parallelized. Splitting
+  # by tech instead would have each shard rescan the SAME full-date-range
+  # bytes regardless of which tech it filters for (technology isn't a
+  # partition/clustering key) — multiplying this source's BigQuery cost by
+  # the shard count for zero extra coverage, which is why that path was
+  # rejected. See fetch_httparchive_candidate_urls' docstring for the full
+  # reasoning.
+  #
+  # Every sharded entry below also sets `name:` — without it, GitHub's
+  # default matrix job display name spells out every matrix key verbatim
+  # (e.g. "discover (commoncrawl, --cc-shard 0 --cc-total-shards 3)"),
+  # which gets long and repetitive fast across this many shards. The job
+  # itself still just uses `name:` for display; `matrix.source` (and
+  # extra_args) are what actually drive the run.
   #
   # TheirStack (freemium technology-usage API) was removed 2026-09 at the
   # user's request — see discovery.py's module docstring for the full
   # list of remaining sources.
-  #
-  # httparchive runs as 2 separate jobs too (date-sharded, via --ha-shard/
-  # --ha-total-shards), added 2026-09 because this source's single ~90min
-  # job was the slowest thing left in the matrix and often didn't finish.
-  # Deliberately NOT sharded by ATS tech the way commoncrawl is sharded by
-  # platform: `httparchive.crawl.pages` is partitioned by `date`, not by
-  # `technology`, so splitting the resolved crawl-date list in half means
-  # each shard's BigQuery query scans roughly half the partition bytes —
-  # summed across shards, same total bytes scanned as one unsharded run,
-  # just parallelized. Splitting by tech instead would have each shard
-  # rescan the SAME full-date-range bytes regardless of which tech it
-  # filters for (no cost benefit from that WHERE clause, since technology
-  # isn't a partition/clustering key) — multiplying this source's BigQuery
-  # cost by the shard count for zero extra coverage, which is why THAT
-  # path was rejected rather than just cranking this shard count up
-  # further. See fetch_httparchive_candidate_urls' docstring for the full
-  # reasoning.
   discover:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false   # one bad source/shard shouldn't cancel the rest
       matrix:
         include:
           - source: feashliaa
+            name: feashliaa
           - source: kalil
+            name: kalil
           - source: openpostings
+            name: openpostings
           - source: commoncrawl
+            name: common crawl 1
+            extra_args: "--cc-shard 0 --cc-total-shards 3"
+          - source: commoncrawl
+            name: common crawl 2
+            extra_args: "--cc-shard 1 --cc-total-shards 3"
+          - source: commoncrawl
+            name: common crawl 3
+            extra_args: "--cc-shard 2 --cc-total-shards 3"
           - source: wayback_adp
+            name: wayback_adp
           - source: yc
-            extra_args: "--cc-shard 0 --cc-total-shards 4"
-          - source: commoncrawl
-            extra_args: "--cc-shard 1 --cc-total-shards 4"
-          - source: commoncrawl
-            extra_args: "--cc-shard 2 --cc-total-shards 4"
+            name: yc
           - source: httparchive
-            extra_args: "--ha-shard 0 --ha-total-shards 2"
+            name: http archive 1
+            extra_args: "--ha-shard 0 --ha-total-shards 3"
           - source: httparchive
-            extra_args: "--ha-shard 1 --ha-total-shards 2"
+            name: http archive 2
+            extra_args: "--ha-shard 1 --ha-total-shards 3"
           - source: httparchive
-            extra_args: "--ha-shard 1 --ha-total-shards 2"
+            name: http archive 3
+            extra_args: "--ha-shard 2 --ha-total-shards 3"
 
     steps:
       - name: Checkout
