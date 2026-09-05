@@ -614,13 +614,24 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
 # SIGNAL RELIABILITY, and why the weights below aren't all equal: a link-
 # authority measure computed externally from the real web graph (WebGraph)
 # is the hardest of all these signals to fake — it requires other real,
-# independent sites to actually link to you. Structured org data that names
-# a checkable external authority (a real Wikipedia/SEC/Crunchbase page) and
-# a dedicated, procured enterprise mail-security gateway are next hardest —
-# still self-reported/self-installed, but not something a two-person shop
-# does by accident. Enterprise martech/observability tags and corporate
-# footer links are real but easy for anyone to add. Compliance banners
-# (OneTrust etc.), a bare legal-entity suffix, and mainstream hosted email
+# independent sites to actually link to you. Being on file with a national
+# securities regulator/company registrar (sec.gov and its 17 per-country
+# equivalents — see _ORG_REGULATOR_SAMEAS_RE) is next: it carries real
+# legal reporting obligations, a harder thing to fake than markup alone —
+# and verifying a claimed Wikipedia sameAs link by actually fetching the
+# article and checking it names this domain (_wikipedia_mention_score)
+# turns that particular signal from "this page's own markup claims a wiki
+# link" into "an independent page really does reference this domain".
+# Structured org data that names a checkable external authority (a real
+# Wikipedia/Crunchbase/Bloomberg page, unverified) and a dedicated,
+# procured enterprise mail-security gateway are next hardest — still
+# self-reported/self-installed, but not something a two-person shop does
+# by accident. A schema-claimed employee count only counts once parsed and
+# found to actually clear EMPLOYEE_COUNT_MIN_FOR_CREDIT — the bare
+# presence of the key proves nothing, since a schema can claim any number
+# including 1. Enterprise martech/observability tags and corporate footer
+# links are real but easy for anyone to add. Compliance banners (OneTrust
+# etc.), a bare legal-entity suffix, and mainstream hosted email
 # (Workspace/M365) are the weakest — all three are now just as common on a
 # one-person LLC as on a large company, so they're weighted low: useful for
 # breaking ties, not for carrying the score alone.
@@ -631,17 +642,74 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
 # tunable (not a magic constant scattered across the file) since the
 # right cutoff will need calibrating against real archive_ii output.
 _ORG_SCHEMA_TYPE_RE = re.compile(r'"@type"\s*:\s*"(?:Organization|Corporation)"', re.I)
-_ORG_EMPLOYEE_COUNT_RE = re.compile(r'"numberOfEmployees"', re.I)
+# 2026-09: the old regex only checked that the KEY existed, so a schema
+# claiming a single employee got the same credit as one claiming 5,000 —
+# a real gap, fixed by actually parsing the number out and requiring it
+# clear EMPLOYEE_COUNT_MIN_FOR_CREDIT before awarding anything. Handles
+# both shapes schema.org allows: a bare number/string
+# ("numberOfEmployees": 250) and a QuantitativeValue object
+# ("numberOfEmployees": {"@type": "QuantitativeValue", "value": 250}, or
+# ..."minValue": 250 for a range) — the {0,160} window is generous enough
+# to span a QuantitativeValue object's other fields without also reaching
+# into an unrelated later key.
+EMPLOYEE_COUNT_MIN_FOR_CREDIT = 50
+_ORG_EMPLOYEE_COUNT_RE = re.compile(
+    r'"numberOfEmployees"\s*:\s*(?:\{[^}]{0,160}?"(?:value|minValue)"\s*:\s*)?"?(\d{1,9})"?', re.I)
 # Weighted 2026-09 up from +5 to +10 as part of the reliability rebalance
 # above — a fabricated Organization schema is cheap, but linking it to a
-# real, checkable Wikipedia/SEC/Crunchbase/Bloomberg page is a much harder
-# thing for a tiny operation to fake convincingly.
+# real, checkable Wikipedia/Crunchbase/Bloomberg page is a much harder
+# thing for a tiny operation to fake convincingly. sec.gov and its
+# per-country equivalents were split out below into their own, higher-
+# weighted bucket (formal regulator/registrar filing is a different, and
+# stronger, kind of evidence than a wiki/directory profile). linkedin.com
+# dropped entirely — a LinkedIn company page is something businesses of
+# every size, including solo founders, routinely create; it was never a
+# real size signal here.
 _ORG_AUTHORITY_SAMEAS_RE = re.compile(
-    r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:wikipedia\.org|crunchbase\.com|sec\.gov|bloomberg\.com|linkedin\.com/company)',
+    r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:wikipedia\.org|crunchbase\.com|bloomberg\.com)',
     re.I)
+# 2026-09: national securities-regulator / company-registrar sites — one
+# per country in DEFAULT_COUNTRIES (see opendata_probe.py/
+# people_data_labs_probe.py) plus the US's sec.gov, since this project
+# targets all 18, not just the US. Weighted higher than the generic
+# authority bucket above: being on file with a national regulator/
+# registrar carries real legal reporting obligations, which is a harder
+# and more consequential thing to fake than a Wikipedia/Crunchbase
+# profile. Not a perfect size signal on its own — some of these registries
+# (e.g. company-registration ones like the Netherlands' KVK or Ireland's
+# CRO) cover ordinary registered businesses of any size, not just large
+# public companies — which is exactly why this stays a soft score
+# contributor rather than a gate by itself, same as everything else here.
+_ORG_REGULATOR_SAMEAS_RE = re.compile(
+    r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:'
+    r'sec\.gov|'                                          # United States — SEC EDGAR
+    r'company-information\.service\.gov\.uk|'              # United Kingdom — Companies House
+    r'sedarplus\.ca|'                                       # Canada — SEDAR+
+    r'asic\.gov\.au|'                                       # Australia — ASIC
+    r'cro\.ie|'                                             # Ireland — Companies Registration Office
+    r'companies-register\.companiesoffice\.govt\.nz|'       # New Zealand — Companies Office
+    r'bizfile\.gov\.sg|'                                    # Singapore — ACRA BizFile+
+    r'kvk\.nl|'                                             # Netherlands — Kamer van Koophandel
+    r'brreg\.no|'                                           # Norway — Brønnøysund Register Centre
+    r'bolagsverket\.se|'                                    # Sweden — Bolagsverket
+    r'virk\.dk|'                                            # Denmark — Erhvervsstyrelsen/CVR
+    r'ytj\.fi|'                                             # Finland — Business Information System (PRH)
+    r'justiz\.gv\.at|'                                      # Austria — Firmenbuch
+    r'kbo-bce\.be|'                                         # Belgium — Crossroads Bank for Enterprises
+    r'skatturinn\.is|'                                      # Iceland — Directorate of Internal Revenue
+    r'lbr\.lu|'                                             # Luxembourg — Luxembourg Business Registers
+    r'infogreffe\.fr|'                                      # France — Infogreffe/RCS
+    r'handelsregister\.de'                                  # Germany — Handelsregister
+    r')', re.I)
+# 2026-09: expanded beyond the original 7-phrase set with more terms large,
+# established organizations routinely have pages for but a small shop
+# essentially never does (annual reporting/governance/leadership
+# structure, earnings disclosure) — same reasoning as the original set.
 _CORP_FOOTER_LINKS_RE = re.compile(
     r'\b(?:investor relations|investors?|newsroom|press releases?|board of directors|'
-    r'esg\b|sustainability report)\b', re.I)
+    r'esg\b|sustainability report|annual report|shareholders?|corporate governance|'
+    r'executive (?:team|leadership)|leadership team|media kit|quarterly results|'
+    r'earnings call|form 10-k|proxy statement)\b', re.I)
 # Legal entity suffixes near a copyright line — expanded 2026-09 beyond the
 # original US/UK/DE/FR-heavy set to cover the major suffixes for the rest of
 # the countries this project actually targets for "global jobs" (AU, NL, IT,
@@ -774,24 +842,27 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
 # component (the "real, mutually-linked core" of the web) is 30.0M nodes
 # (25.4%); 63.2% (74.5M) of all nodes are "dangling" (no outbound links —
 # a rough, imperfect proxy for peripheral/thin sites, since it measures
-# outbound links only, not inbound authority):
-#   S+ : rank <  1,000,000  (top ~0.8%)  — unmistakably major (Google,
+# outbound links only, not inbound authority). Boundaries are INCLUSIVE
+# (rank <= bound, 0-based) per band, checked top-down, first match wins —
+# webgraph_seed.py's _band_for_rank() is the single source of truth for
+# the actual cutoff logic; this list only needs to match its boundaries:
+#   S+ : rank <=  1,000,000 (top ~0.8%)  — unmistakably major (Google,
 #        Wikipedia, Facebook-tier). Strong enough to clear the Quality
 #        Index bar alone.
-#   S  : rank <  10,000,000 (top ~8.5%)  — clearly well-established. Also
+#   S  : rank <= 10,000,000 (top ~8.5%)  — clearly well-established. Also
 #        clears the bar alone.
-#   A  : rank <  25,000,000 (top ~21%, close to the graph's own 25.4%
+#   A  : rank <= 25,000,000 (top ~21%, close to the graph's own 25.4%
 #        strongly-connected-component size) — solidly connected, real
 #        established orgs. Needs one more smallish signal to pass.
-#   B  : rank <  50,000,000 (top ~42%) — modestly connected; real but
+#   B  : rank <= 50,000,000 (top ~42%) — modestly connected; real but
 #        unremarkable companies land here (this is heli.technology's
 #        band). A cautious, small credit — needs several other signals
 #        to actually clear the bar, per "safely exclude rather than
 #        include."
-#   C  : rank <  80,000,000 (top ~68%, near where "dangling"/peripheral
+#   C  : rank <= 80,000,000 (top ~68%, near where "dangling"/peripheral
 #        nodes start being the majority) — very weakly connected. A
 #        token credit only.
-#   D  : rank >= 80,000,000, OR not found in the ranks file at all — no
+#   D  : rank >  80,000,000, OR not found in the ranks file at all — no
 #        credit. This is where most parked/junk domains live (nobody
 #        links to a parking page), so this band intentionally contributes
 #        nothing rather than risk rewarding noise.
@@ -801,12 +872,12 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
 # checked against real ranks (see webgraph_seed.py's lookup_ranks()).
 WEBGRAPH_TIERS_URL = os.environ.get("WEBGRAPH_TIERS_URL", "")  # GitHub Release asset URL, .csv or .csv.gz
 WEBGRAPH_RANK_BANDS = (
-    # (label, exclusive rank upper bound, points)  — checked in order, first match wins
+    # (label, inclusive rank upper bound (0-based), points) — checked in order, first match wins
     ("S+", 1_000_000, 30),
-    ("S", 10_000_000, 20),
-    ("A", 25_000_000, 12),
-    ("B", 50_000_000, 6),
-    ("C", 80_000_000, 2),
+    ("S", 10_000_000, 25),
+    ("A", 25_000_000, 20),
+    ("B", 50_000_000, 15),
+    ("C", 80_000_000, 10),
 )
 
 _webgraph_ranks: dict[str, str] | None = None  # domain -> band label ("S+".."C"), lazy singleton
@@ -879,12 +950,16 @@ def _quality_index_score(html: str) -> tuple[int, list[str]]:
     if _ORG_SCHEMA_TYPE_RE.search(html):
         score += 15
         signals.append("org_schema")
-        if _ORG_EMPLOYEE_COUNT_RE.search(html):
+        employee_match = _ORG_EMPLOYEE_COUNT_RE.search(html)
+        if employee_match and int(employee_match.group(1)) >= EMPLOYEE_COUNT_MIN_FOR_CREDIT:
             score += 10
             signals.append("employee_count")
         if _ORG_AUTHORITY_SAMEAS_RE.search(html):
             score += 10
             signals.append("authority_sameas")
+        if _ORG_REGULATOR_SAMEAS_RE.search(html):
+            score += 20
+            signals.append("regulator_listing")
     if _CORP_FOOTER_LINKS_RE.search(html):
         score += 15
         signals.append("corp_footer_links")
@@ -903,12 +978,58 @@ def _quality_index_score(html: str) -> tuple[int, list[str]]:
     return score, signals
 
 
+# 2026-09: a sameAs link to wikipedia.org (scored by _ORG_AUTHORITY_SAMEAS_RE
+# above) only proves the page's OWN markup points somewhere on
+# wikipedia.org — anyone can write that, whether or not the article is
+# really about them. This regex captures the actual article URL out of the
+# sameAs array so _wikipedia_mention_score() below can fetch it and check
+# for a real cross-reference back to this domain.
+_WIKIPEDIA_SAMEAS_URL_RE = re.compile(
+    r'"sameAs"\s*:\s*\[[^\]]{0,600}?"(https?://[a-z]{2,3}\.wikipedia\.org/wiki/[^"]+)"', re.I)
+WIKIPEDIA_VERIFY_TIMEOUT = 5.0
+
+
+async def _wikipedia_mention_score(session: aiohttp.ClientSession, html: str,
+                                    domain: str) -> tuple[int, str | None]:
+    """One extra fetch, only for domains that already claimed a Wikipedia
+    sameAs link: pulls the real article and checks whether it actually
+    names THIS domain — a company's Wikipedia infobox "Website" field
+    almost always links (or plain-text names) its real official domain, so
+    finding this domain's string anywhere in the article page is a
+    meaningful, if soft, check that the claimed article is really about
+    this company rather than a same-named unrelated topic or a wrong/
+    copy-pasted link. This is a BONUS on top of the base
+    "authority_sameas" credit, never a replacement for it — a domain that
+    links to Wikipedia but fails this check still gets the base +10, just
+    not this extra credit. Limited to Wikipedia (not Crunchbase/Bloomberg):
+    those sit behind paywalls/bot-blocking that would make a fetch-based
+    check unreliable rather than just conservative. Any failure (no
+    sameAs link, fetch error, timeout, 4xx/5xx) returns (0, None) — never
+    a penalty, same graceful-degradation shape as every other network
+    signal here."""
+    m = _WIKIPEDIA_SAMEAS_URL_RE.search(html)
+    if not m:
+        return 0, None
+    wiki_url = m.group(1)
+    try:
+        async with session.get(wiki_url, timeout=aiohttp.ClientTimeout(total=WIKIPEDIA_VERIFY_TIMEOUT),
+                                headers={"User-Agent": USER_AGENT}) as r:
+            if r.status >= 400:
+                return 0, None
+            article_html = await r.text(errors="ignore")
+    except Exception:
+        return 0, None
+    if domain.lower() in article_html.lower():
+        return 15, "wikipedia_mention_verified"
+    return 0, None
+
+
 async def _quality_index_score_async(session: aiohttp.ClientSession, html: str,
                                       domain: str) -> tuple[int, list[str]]:
-    """_quality_index_score() plus the MX lookup and the WebGraph rank-band
-    lookup — kept as a separate async wrapper so every existing (sync,
-    HTML-only) call site and test of _quality_index_score keeps working
-    unchanged."""
+    """_quality_index_score() plus the MX lookup, the WebGraph rank-band
+    lookup, and the Wikipedia cross-reference check — kept as a separate
+    async wrapper so every existing (sync, HTML-only) call site and test
+    of _quality_index_score keeps working unchanged."""
     score, signals = _quality_index_score(html)
     mx_score, mx_signal = await _mx_provider_score(domain)
     if mx_signal:
@@ -918,6 +1039,10 @@ async def _quality_index_score_async(session: aiohttp.ClientSession, html: str,
     if wg_signal:
         score += wg_score
         signals.append(wg_signal)
+    wiki_score, wiki_signal = await _wikipedia_mention_score(session, html, domain)
+    if wiki_signal:
+        score += wiki_score
+        signals.append(wiki_signal)
     return score, signals
 # ── fetching ─────────────────────────────────────────────────────────────
 
