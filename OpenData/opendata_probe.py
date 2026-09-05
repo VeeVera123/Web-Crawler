@@ -240,6 +240,11 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
         log.info(f"  career pages found: {career_pages_total} total — {known_ats_found} known-ats "
                  f"(→ archive_i, as usual) + {inhouse_captured} in-house/unsupported "
                  f"(→ archive_ii, {inhouse_captured / career_pages_total * 100:.1f}% of all career pages found)")
+    # 2026-09: OpenData has no size signal of its own — every archive_ii
+    # acceptance here went through the Quality Index gate (capture_inhouse=
+    # True, no capture_inhouse_domains set, see the call above) — so this
+    # always has something to report whenever inhouse_captured > 0.
+    node.log_quality_index_summary(stats)
 
 
 def main():
