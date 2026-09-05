@@ -2466,14 +2466,31 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200_000,
 
     # Find the available monthly crawl partitions first — hardcoding dates
     # would silently go stale as new crawls land / old ones age out.
+    #
+    # 2026-09: the WHERE bound below used to be a HARDCODED "INTERVAL 13
+    # MONTH", left over from before `months` was raised 13 -> 24 — meaning
+    # that whole widening never actually did anything: this bound filtered
+    # out everything older than 13 months BEFORE "LIMIT @months" ever got
+    # a chance to return more, so months=24 (or any value > 13) silently
+    # behaved identically to months=13. Confirmed live: a real run asking
+    # for 24 months got back exactly 12 dates (Sept 2025 .. Aug 2026) —
+    # consistent with this 13-month wall, not with the wider window the
+    # docstring above describes. Now the lookback window itself scales
+    # with `months` (+3 slack for any gap month/late-published crawl), so
+    # raising --httparchive-months actually reaches further back. This
+    # also means the real BigQuery cost this whole time has been roughly
+    # HALF of what the docstring's "48 slices ~= 480GB" estimate assumed
+    # (at most ~13 dates x 2 clients, not 24 x 2) — more quota headroom
+    # than documented, not less.
     try:
         date_rows = list(client.query(
             "SELECT DISTINCT date FROM `httparchive.crawl.pages` "
-            "WHERE date > DATE_SUB(CURRENT_DATE(), INTERVAL 13 MONTH) "
+            "WHERE date > DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_months MONTH) "
             "ORDER BY date DESC "
             "LIMIT @months",
             job_config=bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("months", "INT64", months),
+                bigquery.ScalarQueryParameter("lookback_months", "INT64", months + 3),
             ]),
         ).result())
         crawl_dates = [r.date for r in date_rows]
