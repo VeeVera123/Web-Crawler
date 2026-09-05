@@ -2369,10 +2369,29 @@ def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]
 # company list is.
 
 def fetch_httparchive_candidate_urls(limit_per_tech: int = 200_000,
-                                      months: int = 24) -> dict[str, list[str]]:
+                                      months: int = 24,
+                                      ha_shard: int | None = None,
+                                      ha_total_shards: int = 1) -> dict[str, list[str]]:
     """Query HTTP Archive's public BigQuery dataset for pages where a
     known ATS technology was detected. Returns {ats: [urls]}, ranked by
     CrUX popularity (most popular/reliable first) within limit_per_tech.
+
+    2026-09: ha_shard/ha_total_shards split the resolved `crawl_dates`
+    list across `ha_total_shards` independent runs — added so this source
+    (previously a single ~90-minute job) can be sharded WITHOUT the cost
+    blowup sharding by ATS tech would cause. `httparchive.crawl.pages` is
+    partitioned by `date` (HTTP Archive's own published schema), and this
+    query already filters on `date IN UNNEST(@crawl_dates)` — so a shard
+    given HALF the dates scans roughly HALF the partition bytes, same as
+    querying that half-range alone; summed across shards, total bytes
+    scanned is the same as one unsharded run, just parallelized. Sharding
+    by TECH instead (one shard per ATS fingerprint) would NOT have this
+    property: `technology` isn't a partition/clustering key, so a
+    1-tech-of-20 query scans the exact same bytes as a 20-tech query,
+    multiplying cost by the shard count for zero benefit — see
+    discovery.yml's comment on this source for why that path was
+    rejected. Pass ha_shard=None (default) to query all resolved dates in
+    one call, same as before this existed.
 
     Widened 2026-08 from a single-month/desktop-only query (limit_per_tech
     200) to querying the last `months` monthly crawl partitions AND both
@@ -2466,6 +2485,16 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200_000,
         log.warning("HTTP Archive: no recent crawl partitions found — skipping.")
         return {}
 
+    if ha_shard is not None and ha_total_shards > 1:
+        full_count = len(crawl_dates)
+        crawl_dates = [d for i, d in enumerate(crawl_dates) if i % ha_total_shards == ha_shard]
+        log.info(f"HTTP Archive: shard {ha_shard}/{ha_total_shards} — "
+                 f"{len(crawl_dates)}/{full_count} crawl dates assigned to this shard")
+        if not crawl_dates:
+            log.warning("HTTP Archive: this shard got zero dates (ha_total_shards > "
+                        "months available) — nothing to query.")
+            return {}
+
     log.info(f"HTTP Archive: querying {len(crawl_dates)} crawl(s) "
              f"({crawl_dates[-1]} .. {crawl_dates[0]}), both desktop+mobile, "
              f"for {len(HTTPARCHIVE_ATS_TECH_NAMES)} known ATS fingerprints...")
@@ -2524,7 +2553,9 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200_000,
 
 def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
                              max_workers: int = 100,
-                             resolve_time_budget_minutes: int = 300) -> dict[str, dict[str, str]]:
+                             resolve_time_budget_minutes: int = 300,
+                             ha_shard: int | None = None,
+                             ha_total_shards: int = 1) -> dict[str, dict[str, str]]:
     """Resolve HTTP Archive's candidate pages to real ATS slugs, reusing
     the exact same resolver built for the Y Combinator source.
 
@@ -2560,7 +2591,7 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    urls_by_ats = fetch_httparchive_candidate_urls(limit_per_tech, months)
+    urls_by_ats = fetch_httparchive_candidate_urls(limit_per_tech, months, ha_shard, ha_total_shards)
     if not urls_by_ats:
         return {}
 
@@ -2674,7 +2705,19 @@ def _fetch_resolved_oracle_tenants() -> set[str]:
     try:
         while True:
             r = requests.get(
-                f"{SUPABASE_URL}/rest/v1/slug_registry",
+                # 2026-09: was "slug_registry" — that table doesn't exist
+                # any more (renamed to archive_i a while back; node.py's
+                # ARCHIVE_I_TABLE comment says as much: "was slug_registry").
+                # This function's try/except swallowed the resulting 404
+                # silently every run, so the oracle_cloud_hcm de-dup check
+                # has been returning {} (no resolved tenants found)
+                # unconditionally — legacy tenant slugs could have been
+                # re-added every week instead of being filtered. See
+                # upsert_to_supabase's matching fix for the bigger half of
+                # this same bug (the actual write path — confirmed live via
+                # a real "Could not find the table 'public.slug_registry'"
+                # PostgREST 404 in a run's own logs).
+                f"{SUPABASE_URL}/rest/v1/archive_i",
                 headers=headers,
                 timeout=30,
                 params={
@@ -2728,12 +2771,27 @@ def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
 
 def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                         dry_run: bool = False) -> int:
-    """Upsert slugs to Supabase slug_registry. Returns total upserted.
+    """Upsert slugs to Supabase archive_i. Returns total upserted.
 
     slugs_by_ats values can be:
       - set[str]          → slugs only (no company name)
       - dict[str, str]    → {slug: company_name}
-    """
+
+    2026-09: was writing to "slug_registry", a table that no longer
+    exists — it was renamed to archive_i at some point (node.py's
+    ARCHIVE_I_TABLE comment: "was slug_registry"), but this file was never
+    updated to match. Confirmed live via a real run's own logs: every
+    single upsert across every source (Feashliaa, Common Crawl, YC,
+    HTTP Archive, all of it) was failing with PostgREST 404 "Could not
+    find the table 'public.slug_registry'" and just logging an ERROR line
+    per chunk rather than crashing the run — meaning this whole pipeline's
+    actual writes had been silently going nowhere for however long that
+    rename has been live, while every fetch/query/live-HTTP-resolve step
+    still ran (and cost/rate-limited) for nothing. Also drops the "name"
+    field entirely: archive_i has no such column (id/ats/slug/source/
+    first_seen/last_seen only — confirmed against the live schema), so
+    sending it once the table name was fixed would have just traded one
+    failure mode for another (a PostgREST "column not found" 400)."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         log.error("SUPABASE_URL or SUPABASE_KEY not set")
         return 0
@@ -2770,12 +2828,12 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i + chunk_size]
-            rows = []
-            for slug, name in chunk:
-                row = {"ats": ats, "slug": slug, "source": source}
-                if name:
-                    row["name"] = name[:300]
-                rows.append(row)
+            # name (company name, when a source has one) has nowhere to
+            # go — archive_i doesn't carry that column — so it's dropped
+            # here rather than sent and rejected. Slug/ATS is still the
+            # part every downstream consumer (node.py's crawl) actually
+            # needs; the name was never more than a nice-to-have.
+            rows = [{"ats": ats, "slug": slug, "source": source} for slug, _name in chunk]
 
             if dry_run:
                 ats_total += len(chunk)
@@ -2784,7 +2842,7 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
             r = None
             try:
                 r = requests.post(
-                    f"{SUPABASE_URL}/rest/v1/slug_registry",
+                    f"{SUPABASE_URL}/rest/v1/archive_i",
                     headers=headers,
                     json=rows,
                     timeout=60,
@@ -2889,6 +2947,20 @@ def main():
              "unbounded).",
     )
     parser.add_argument(
+        "--ha-shard", type=int, default=None,
+        help="Which HTTP Archive date-shard this run covers (0-indexed, "
+             "used with --ha-total-shards). Splits the resolved crawl-date "
+             "list, NOT the tech list — see fetch_httparchive_candidate_urls "
+             "docstring for why date-sharding is cost-neutral (partition "
+             "pruning) while tech-sharding would multiply BigQuery cost. "
+             "Default: None = all dates in one run.",
+    )
+    parser.add_argument(
+        "--ha-total-shards", type=int, default=1,
+        help="Total number of HTTP Archive date-shards (default: 1, i.e. "
+             "no sharding).",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Count slugs without writing to Supabase",
     )
@@ -2980,7 +3052,14 @@ def main():
         log.info(f"Wayback CDX total: {wb_total} slugs")
 
         if not args.dry_run:
-            upserted = upsert_to_supabase(wb_slugs, source="wayback_adp",
+            # 2026-09: "wayback_adp" isn't in archive_i's own source CHECK
+            # constraint (only the bare "wayback" is, matching 2,910 real
+            # historical rows already written under that label before this
+            # source's --source flag was renamed to wayback_adp) — writing
+            # "wayback_adp" here would fail the constraint on every row
+            # even after the table-name fix above. "wayback" it is, to
+            # match both the constraint and this source's own prior data.
+            upserted = upsert_to_supabase(wb_slugs, source="wayback",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
@@ -3025,7 +3104,9 @@ def main():
         log.info("\n--- HTTP ARCHIVE (BigQuery, technology-fingerprint detection) ---")
         ha_slugs = fetch_httparchive_slugs(limit_per_tech=args.httparchive_limit,
                                             months=args.httparchive_months,
-                                            resolve_time_budget_minutes=args.httparchive_resolve_budget_minutes)
+                                            resolve_time_budget_minutes=args.httparchive_resolve_budget_minutes,
+                                            ha_shard=args.ha_shard,
+                                            ha_total_shards=args.ha_total_shards)
         ha_total = sum(len(s) for s in ha_slugs.values())
         if ha_total:
             log.info(f"HTTP Archive total: {ha_total} slugs across "
