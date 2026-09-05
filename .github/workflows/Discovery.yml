@@ -70,17 +70,17 @@ jobs:
           - source: kalil
           - source: openpostings
           - source: commoncrawl
+          - source: wayback_adp
+          - source: yc
             extra_args: "--cc-shard 0 --cc-total-shards 4"
           - source: commoncrawl
             extra_args: "--cc-shard 1 --cc-total-shards 4"
           - source: commoncrawl
             extra_args: "--cc-shard 2 --cc-total-shards 4"
-          - source: commoncrawl
-            extra_args: "--cc-shard 3 --cc-total-shards 4"
-          - source: wayback_adp
-          - source: yc
           - source: httparchive
             extra_args: "--ha-shard 0 --ha-total-shards 2"
+          - source: httparchive
+            extra_args: "--ha-shard 1 --ha-total-shards 2"
           - source: httparchive
             extra_args: "--ha-shard 1 --ha-total-shards 2"
 
