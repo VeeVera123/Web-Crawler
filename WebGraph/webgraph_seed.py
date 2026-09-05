@@ -16,30 +16,23 @@ WEBGRAPH_TIERS_URL in node.py) — deliberately NOT a live Supabase table:
 that would mean real ongoing egress/storage cost for data that never
 changes mid-run and is cheap to just hold in memory instead.
 
-SOURCE (confirmed via Common Crawl's own blog announcing this release —
-https://commoncrawl.org/blog/host--and-domain-level-web-graphs): for a
-release named e.g. "cc-main-2025-mar-apr-may", two files live under
-https://data.commoncrawl.org/projects/hyperlinkgraph/<release>/domain/:
-  - <release>-domain-vertices.txt.gz — one line per domain: "id, reversed
-    domain, host count" (confirmed format).
-  - <release>-domain-ranks.txt.gz — confirmed to contain harmonic
-    centrality + PageRank, in RANK order (line 0 = most authoritative).
-
-WHAT'S NOT INDEPENDENTLY CONFIRMED, READ THIS BEFORE TRUSTING THE OUTPUT:
-this dev environment could not reach data.commoncrawl.org to inspect the
-real ranks file byte-for-byte (network-restricted sandbox), so the exact
-column layout below is this project's best-informed inference from how
-Common Crawl's own tooling (built on the LAW/webgraph framework, whose
-"ranks" files list node ids IN rank order, not a value per node in node-id
-order) is documented to work — NOT a verified fact. _parse_ranks_line()
-below auto-detects the column count and logs exactly what it saw, and
-main() prints a handful of sample (domain, tier) rows before writing
-anything — READ that output on the FIRST real run (this needs actual
-network access, i.e. run it in GitHub Actions, not this dev sandbox) and
-confirm the sample domains look like real, sensibly-ranked sites before
-trusting the table for production filtering. If the shape doesn't match
-any case _parse_ranks_line() recognizes, the script aborts loudly with the
-raw line printed rather than silently writing a guess.
+SOURCE — CONFIRMED 2026-09 against the real file (a live run's error
+output printed the actual header line, resolving what an earlier version
+of this script could only infer): for a release named e.g.
+"cc-main-2026-jun-jul-aug", the ranks file lives at
+https://data.commoncrawl.org/projects/hyperlinkgraph/<release>/domain/<release>-domain-ranks.txt.gz
+— TAB-separated, one '#'-prefixed header row, then data rows in RANK order
+(row 0 = most authoritative by harmonic centrality):
+    #harmonicc_pos  #harmonicc_val  #pr_pos  #pr_val  #host_rev  #n_hosts
+Column 5 (host_rev) IS the domain itself (Common Crawl's reversed-label
+notation, e.g. "com.example"), so no join against a separate vertices
+file is needed — this script never downloads the vertices file at all.
+That matters beyond just simplicity: an earlier version of this script DID
+load the vertices file (119.7M rows) fully into memory to resolve node ids
+the ranks file turns out to name directly, and that was a real out-of-
+memory failure on a live run. Skipping it means this script only ever
+holds ~TIER_2_CUTOFF (10M) tiered domains in memory, never the full
+~120M-domain graph.
 
 Usage:
     python webgraph_seed.py --release cc-main-2025-mar-apr-may
@@ -115,92 +108,64 @@ def _reverse_domain(rev_domain: str) -> str:
     return ".".join(reversed(parts))
 
 
-def load_vertices(vertices_url: str) -> dict[int, str]:
-    """id -> normal-order domain. Loaded fully into memory (a dict of ints
-    -> short strings for ~100-200M domains is a few GB — real, but a one-
-    time cost on a machine that isn't this dev sandbox; GitHub Actions
-    runners have enough RAM for this, and it only runs when a new Common
-    Crawl webgraph release needs seeding, not on every crawl)."""
-    log.info(f"Loading vertices: {vertices_url}")
-    id_to_domain: dict[int, str] = {}
-    start = time.monotonic()
-    n = 0
-    for line in _stream_gz_lines(vertices_url):
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        try:
-            node_id = int(parts[0])
-        except ValueError:
-            continue
-        domain = _reverse_domain(parts[1])
-        if domain:
-            id_to_domain[node_id] = domain
-        n += 1
-        if n % PROGRESS_EVERY == 0:
-            elapsed = time.monotonic() - start
-            log.info(f"  ...{n:,} vertices loaded ({n / max(elapsed, 0.001):,.0f}/sec)")
-    log.info(f"Loaded {len(id_to_domain):,} vertices in {time.monotonic() - start:.0f}s")
-    return id_to_domain
+# CONFIRMED 2026-09 against the real file (a live run's error output
+# printed the actual header line): the ranks file is TAB-separated with a
+# leading '#' header/comment row, 6 columns:
+#   #harmonicc_pos  #harmonicc_val  #pr_pos  #pr_val  #host_rev  #n_hosts
+# Column 5 (host_rev) is the domain itself, already in Common Crawl's
+# reversed-label notation — meaning the ranks file needs NO join against
+# the vertices file at all to get a domain string. That vertices file
+# (119.7M rows) was the actual cause of a real OOM on a prior run: loading
+# it fully into a dict just to resolve node ids the ranks file already
+# names directly. Dropping the vertices step entirely fixes the memory
+# problem at its root instead of working around it with sharding — this
+# script now only ever holds the ~TIER_2_CUTOFF (10M) tiered domains in
+# memory, never the full ~120M-domain graph.
+_RANKS_HEADER_PREFIX = "#"
 
 
-def _parse_ranks_line(line: str, line_index: int) -> int | None:
-    """Returns the node id ranked at `line_index` (0-based, i.e. line 0 is
-    the #1 most authoritative domain) by harmonic centrality, or None if
-    the line is blank/unparseable. Handles the column shapes this project
-    could reasonably expect from a LAW-webgraph-style ranks file — see
-    this module's docstring for what's confirmed vs. inferred here:
-      - 1 column:  just the node id, already in rank order.
-      - 2 columns: (harmonic_node_id, pagerank_node_id) — this is the
-        PRIMARY expected shape; harmonic centrality is column 1.
-      - 4 columns: (harmonic_node_id, harmonic_value, pagerank_node_id,
-        pagerank_value) — same idea with the raw metric values kept too.
-    Any other column count raises ValueError with the raw line included,
-    so main() aborts loudly instead of silently mis-parsing."""
-    if not line.strip():
+def _parse_ranks_row(line: str, line_index: int) -> str | None:
+    """Returns the domain named at `line_index` (0-based, i.e. line 0 is
+    the #1 most authoritative domain by harmonic centrality), or None for
+    a blank/header/comment line. Raises ValueError (raw line included) for
+    any row that isn't the confirmed 6-column tab-separated shape, so
+    main() aborts loudly instead of silently mis-parsing a format change."""
+    if not line.strip() or line.startswith(_RANKS_HEADER_PREFIX):
         return None
-    parts = line.split()
-    try:
-        if len(parts) == 1:
-            return int(parts[0])
-        if len(parts) in (2, 4):
-            return int(parts[0])
-    except ValueError:
-        pass
-    raise ValueError(f"Unrecognized ranks-file line shape ({len(parts)} columns) at line "
-                      f"{line_index}: {line!r}")
+    parts = line.split("\t")
+    if len(parts) != 6:
+        raise ValueError(f"Unrecognized ranks-file line shape ({len(parts)} tab-separated columns) "
+                          f"at line {line_index}: {line!r}")
+    host_rev = parts[4].strip()
+    if not host_rev:
+        return None
+    return _reverse_domain(host_rev)
 
 
-def build_tiers(ranks_url: str, id_to_domain: dict[int, str]) -> dict[str, int]:
-    """Streams the ranks file (already in rank order — see module
-    docstring) and assigns tier 1/2 to the first TIER_1_CUTOFF /
-    TIER_2_CUTOFF domains it maps to a known vertex id. Stops reading once
-    past TIER_2_CUTOFF (no need to stream the rest)."""
+def build_tiers(ranks_url: str) -> dict[str, int]:
+    """Streams the ranks file (already in rank order — see the confirmed-
+    format note above) and assigns tier 1/2 straight from each row's own
+    host_rev column — no vertices file, no id join, no ~120M-entry dict.
+    Stops reading once past TIER_2_CUTOFF (no need to stream the rest)."""
     log.info(f"Loading ranks (rank-ordered): {ranks_url}")
     domain_tier: dict[str, int] = {}
     start = time.monotonic()
-    unmapped = 0
-    for i, line in enumerate(_stream_gz_lines(ranks_url)):
+    i = 0  # counts DATA rows only (header/blank lines don't consume a rank slot)
+    for line in _stream_gz_lines(ranks_url):
         if i >= TIER_2_CUTOFF:
             break
-        node_id = _parse_ranks_line(line, i)
-        if node_id is None:
-            continue
-        domain = id_to_domain.get(node_id)
+        domain = _parse_ranks_row(line, i)
         if domain is None:
-            unmapped += 1
             continue
-        if domain in domain_tier:
-            continue  # keep the FIRST (best) rank a domain appears at
-        domain_tier[domain] = 1 if i < TIER_1_CUTOFF else 2
-        if (i + 1) % PROGRESS_EVERY == 0:
+        if domain not in domain_tier:  # keep the FIRST (best) rank a domain appears at
+            domain_tier[domain] = 1 if i < TIER_1_CUTOFF else 2
+        i += 1
+        if i % PROGRESS_EVERY == 0:
             elapsed = time.monotonic() - start
-            log.info(f"  ...rank {i + 1:,} processed ({(i + 1) / max(elapsed, 0.001):,.0f}/sec), "
-                      f"{len(domain_tier):,} domains tiered so far, {unmapped:,} unmapped ids")
-    log.info(f"Done: {len(domain_tier):,} domains tiered, {unmapped:,} rank entries had no matching "
-             f"vertex id, in {time.monotonic() - start:.0f}s")
+            log.info(f"  ...rank {i:,} processed ({i / max(elapsed, 0.001):,.0f}/sec), "
+                      f"{len(domain_tier):,} domains tiered so far")
+    log.info(f"Done: {len(domain_tier):,} domains tiered (of {i:,} rank rows read) in "
+             f"{time.monotonic() - start:.0f}s")
     return domain_tier
 
 
@@ -237,16 +202,10 @@ def main():
                               "parsed domains/tiers before trusting them (see module docstring).")
     args = parser.parse_args()
 
-    vertices_url = f"{BASE_URL}/{args.release}/domain/{args.release}-domain-vertices.txt.gz"
     ranks_url = f"{BASE_URL}/{args.release}/domain/{args.release}-domain-ranks.txt.gz"
 
-    id_to_domain = load_vertices(vertices_url)
-    if not id_to_domain:
-        log.error("No vertices loaded — aborting.")
-        sys.exit(1)
-
     try:
-        domain_tier = build_tiers(ranks_url, id_to_domain)
+        domain_tier = build_tiers(ranks_url)
     except ValueError as e:
         log.error(f"Ranks file didn't match any recognized shape — aborting rather than guessing. {e}")
         log.error("Share a few raw lines from the actual ranks file so this parser can be fixed for "
