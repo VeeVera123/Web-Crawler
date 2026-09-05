@@ -528,6 +528,16 @@ _ATS_VENDOR_DOMAINS = (
     "zohorecruit.eu", "paylocity.com", "join.com", "personio.de", "personio.com",
     "workatastartup.com", "ycombinator.com", "eploy.net", "folksats.app", "glowinthecloud.com",
     "jobadder.com", "jobvite.com", "adp.com", "avature.net",
+    # 2026-09: PageUp / Pinpoint / Flatchr / Jobylon / Occupop added.
+    # Occupop included even though it has no working scraper yet (see
+    # discovery.py's SUPPORTED_ATS comment) — a page on occupop-careers.com
+    # is still ATS-related, not in-house, regardless of whether this
+    # project can currently scrape it. Homerun deliberately NOT added
+    # here — its customers run on their OWN domain (jobs.{company-domain}),
+    # not a fixed vendor suffix, so there's nothing to list; a Homerun
+    # in-house-looking page will slip through this particular check.
+    "pageuppeople.com", "pinpointhq.com", "flatchr.io", "jobylon.com",
+    "occupop-careers.com",
 )
 
 
@@ -694,11 +704,16 @@ _ORG_REGULATOR_SAMEAS_RE = re.compile(
     r'bolagsverket\.se|'                                    # Sweden — Bolagsverket
     r'virk\.dk|'                                            # Denmark — Erhvervsstyrelsen/CVR
     r'ytj\.fi|'                                             # Finland — Business Information System (PRH)
-    r'justiz\.gv\.at|'                                      # Austria — Firmenbuch
+    r'justizonline\.gv\.at|justiz\.gv\.at|'                 # Austria — Firmenbuch (justizonline.gv.at is the
+                                                             # current live query tool; justiz.gv.at kept too,
+                                                             # still a real government domain hosting a Firmenbuch
+                                                             # subpath, just not the primary tool anymore — 2026-09)
     r'kbo-bce\.be|'                                         # Belgium — Crossroads Bank for Enterprises
     r'skatturinn\.is|'                                      # Iceland — Directorate of Internal Revenue
     r'lbr\.lu|'                                             # Luxembourg — Luxembourg Business Registers
-    r'infogreffe\.fr|'                                      # France — Infogreffe/RCS
+    r'annuaire-entreprises\.data\.gouv\.fr|infogreffe\.fr|'  # France — Annuaire des Entreprises (RNE, the
+                                                             # purely-.gouv.fr official successor) preferred;
+                                                             # Infogreffe kept too, still real/valid — 2026-09
     r'handelsregister\.de'                                  # Germany — Handelsregister
     r')', re.I)
 # 2026-09: expanded beyond the original 7-phrase set with more terms large,
@@ -1044,6 +1059,44 @@ async def _quality_index_score_async(session: aiohttp.ClientSession, html: str,
         score += wiki_score
         signals.append(wiki_signal)
     return score, signals
+
+
+def log_quality_index_summary(stats: dict) -> None:
+    """Logs what share of Quality-Index-GATED archive_ii acceptances used
+    each individual signal this run — e.g. "webgraph_rank_b=45.2%
+    regulator_listing=12.0% org_schema=68.4%" — so a run's actual signal
+    mix is visible, not just the pass/fail count crawl_one already logs.
+    Call once at the end of a run, alongside the existing
+    career-pages-found summary line (see opendata_probe.py's/
+    common_crawl_probe.py's run_crawl()).
+
+    Percentages are OF ACCEPTED ENTRIES, not of all candidates checked —
+    "45% used WebGraph" means 45% of the archive_ii rows this run actually
+    kept had a WebGraph signal contribute to their score, not that 45% of
+    everything crawled did. They don't sum to 100%: most accepted entries
+    clear QUALITY_INDEX_THRESHOLD on more than one signal at once (that's
+    the whole point of a multi-signal score), so this is deliberately a
+    per-signal coverage breakdown, not a partition.
+
+    No-op if this run had zero Quality-Index-gated acceptances — a
+    capture_inhouse_domains-based caller (PDL/BigPicture) never runs the
+    Quality Index at all (see crawl_one's docstring on apply_maturity_gate)
+    and so never populates quality_gated_accepted/quality_signal__* in the
+    first place; nothing to summarize there, and this stays silent rather
+    than logging a misleading all-zero line."""
+    accepted = stats.get("quality_gated_accepted", 0)
+    if not accepted:
+        return
+    prefix = "quality_signal__"
+    signal_counts = {k[len(prefix):]: v for k, v in stats.items() if k.startswith(prefix)}
+    if not signal_counts:
+        return
+    ranked = sorted(signal_counts.items(), key=lambda kv: -kv[1])
+    breakdown = "  ".join(f"{name}={count / accepted * 100:.1f}%" for name, count in ranked)
+    log.info(f"  Quality Index signal mix ({accepted:,} Quality-Index-gated archive_ii "
+             f"acceptances this run — % of THOSE that had each signal, not of all candidates "
+             f"checked; doesn't sum to 100%, most accepted entries clear the bar on more than "
+             f"one signal at once): {breakdown}")
 # ── fetching ─────────────────────────────────────────────────────────────
 
 # Content types that are never worth reading as text — everything else
@@ -1290,6 +1343,20 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                     log.debug(f"  archive_ii candidate dropped (Quality Index={quality_score} "
                               f"< {QUALITY_INDEX_THRESHOLD}, signals={quality_signals}): {domain}")
                     return [], None
+                # 2026-09: per-signal acceptance tally — lets a run report
+                # "what % of accepted archive_ii entries used each signal"
+                # (see opendata_probe.py/common_crawl_probe.py's end-of-run
+                # summary) instead of just the pass/fail count above, which
+                # said nothing about WHICH signals actually did the work.
+                # quality_gated_accepted is the denominator: only entries
+                # that actually went through this gate (apply_maturity_gate
+                # True) ever computed quality_signals at all — a
+                # capture_inhouse_domains-based caller's accepted rows never
+                # reach this branch, so they're correctly excluded rather
+                # than silently diluting the percentages.
+                stats["quality_gated_accepted"] += 1
+                for signal_name in quality_signals:
+                    stats[f"quality_signal__{signal_name}"] += 1
             stats["inhouse_career_page_captured"] += 1  # -> archive_ii
             return [], _capture(best_inhouse["url"])
         return [], None
