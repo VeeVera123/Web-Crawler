@@ -86,8 +86,7 @@ jobs:
         env:
           OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
         run: |
-          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-          exec python OpenData/opendata_seed.py \
+          python OpenData/opendata_seed.py \
             --output opendata_organizations_filtered.csv \
             --skip-rows ${{ github.event.inputs.restart_id || '0' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }}
@@ -170,14 +169,18 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # 2026-09: WebGraph domain-authority rank bands (S+/S/A/B/C) —
+          # see webgraph.yml (builds/refreshes this Release asset) and
+          # node.py's _load_webgraph_ranks() (downloads it once per
+          # process, holds it in memory — not a live per-domain lookup).
+          WEBGRAPH_TIERS_URL: https://github.com/${{ github.repository }}/releases/download/webgraph-domain-tiers/webgraph_domain_tiers.csv.gz
         run: |
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
           RESTART_ARGS=()
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
             RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
-          # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-          exec python OpenData/opendata_probe.py \
+          python OpenData/opendata_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
