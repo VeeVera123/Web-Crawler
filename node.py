@@ -898,6 +898,27 @@ WEBGRAPH_RANK_BANDS = (
 _webgraph_ranks: dict[str, str] | None = None  # domain -> band label ("S+".."C"), lazy singleton
 _webgraph_load_lock: asyncio.Lock | None = None
 
+# 2026-09: parallel-Range-request download tuning. A single aiohttp stream
+# over one TCP connection ramps up slowly (TCP slow start) and never uses
+# more than one connection's worth of bandwidth no matter how big the file
+# is — confirmed live (0.76MB/s for the first 100MB, only reaching
+# 4.3MB/s by 500MB). GitHub's release-asset CDN is Azure Blob Storage
+# under the hood (confirmed via its own response headers), which — like
+# every major blob store — supports HTTP Range requests, so the same
+# trick download accelerators/`gh release download` use (many small
+# parallel connections instead of one big one) applies here with zero
+# server-side changes needed (no re-uploading/rebuilding the seed file).
+_WEBGRAPH_MAX_PARTS = 8                        # parallel Range-request connections
+_WEBGRAPH_MIN_PART_BYTES = 32 * 1024 * 1024    # don't bother splitting below this
+
+
+async def _fetch_range(session: aiohttp.ClientSession, url: str, start: int, end: int,
+                        timeout: aiohttp.ClientTimeout) -> bytes:
+    """One Range-request slice of a larger download (inclusive byte bounds)."""
+    async with session.get(url, headers={"Range": f"bytes={start}-{end}"}, timeout=timeout) as r:
+        r.raise_for_status()
+        return await r.read()
+
 
 async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]:
     """Downloads+parses WEBGRAPH_TIERS_URL exactly once per process, no
@@ -908,7 +929,21 @@ async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]
     same graceful-degradation shape as the MX resolver above. The CSV
     (built by webgraph_seed.py) carries a band LABEL per domain directly
     (domain,band) — bands are assigned once at seed time, not recomputed
-    per lookup."""
+    per lookup.
+
+    2026-09: downloads via several parallel HTTP Range requests instead of
+    one single-connection stream (see _WEBGRAPH_MAX_PARTS' comment for
+    why) — a 1-byte Range probe both discovers the total file size (from
+    the Content-Range response header, no separate HEAD round-trip needed)
+    and whether the host honors Range at all: a 206 reply means yes, and
+    also hands back the ALREADY-RESOLVED post-redirect URL (GitHub's
+    release URL 302s to a signed Azure Blob URL) to reuse for every
+    parallel part, so the redirect only happens once instead of once per
+    part. A 200 reply means the host ignored Range entirely — in that
+    case the probe response body already IS the whole file, so it's used
+    directly with no wasted second request and no parallelism (same as
+    the old single-stream behavior, just as an automatic fallback rather
+    than the only path)."""
     global _webgraph_ranks, _webgraph_load_lock
     if _webgraph_ranks is not None:
         return _webgraph_ranks
@@ -933,27 +968,72 @@ async def _load_webgraph_ranks(session: aiohttp.ClientSession) -> dict[str, str]
             # as "failed to load WebGraph ranks () ..." with no useful
             # detail at all). A single aiohttp `total` timeout also has to
             # cover the entire download no matter how large the file gets
-            # in the future, so this now uses sock_connect/sock_read
-            # instead: each individual read must make progress within
-            # sock_read seconds (so a truly stalled connection still
-            # aborts reasonably fast), but there's no fixed ceiling on
-            # total transfer time for a large-but-healthy download.
-            # Streaming in chunks (instead of one `await r.read()`) also
-            # means a slow-but-alive download shows real progress in the
-            # logs instead of one opaque multi-minute wait.
+            # in the future, so this uses sock_connect/sock_read instead:
+            # each individual read must make progress within sock_read
+            # seconds (so a truly stalled connection still aborts
+            # reasonably fast), but there's no fixed ceiling on total
+            # transfer time for a large-but-healthy download.
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=90)
-            async with session.get(WEBGRAPH_TIERS_URL, timeout=timeout) as r:
-                r.raise_for_status()
-                chunks = []
-                next_log_at = 100 * 1024 * 1024  # log every 100MB
-                async for chunk in r.content.iter_chunked(1024 * 1024):
-                    chunks.append(chunk)
-                    downloaded += len(chunk)
-                    if downloaded >= next_log_at:
-                        log.info(f"  ...{downloaded / (1024*1024):,.0f}MB downloaded so far "
+
+            async with session.get(WEBGRAPH_TIERS_URL, headers={"Range": "bytes=0-0"},
+                                    timeout=timeout) as probe:
+                probe.raise_for_status()
+                if probe.status == 206:
+                    content_range = probe.headers.get("Content-Range", "")
+                    total_bytes = (int(content_range.rsplit("/", 1)[-1])
+                                    if "/" in content_range else 0)
+                    resolved_url = str(probe.url)
+                    await probe.read()  # drain the single probe byte
+                else:
+                    # Host ignored Range and sent the whole file back —
+                    # use it directly rather than a wasted second request.
+                    resolved_url = None
+                    total_bytes = 0
+                    raw = await probe.read()
+                    downloaded = len(raw)
+
+            if resolved_url and total_bytes:
+                part_count = max(1, min(_WEBGRAPH_MAX_PARTS, total_bytes // _WEBGRAPH_MIN_PART_BYTES))
+                if part_count <= 1:
+                    async with session.get(resolved_url, timeout=timeout) as r:
+                        r.raise_for_status()
+                        raw = await r.read()
+                        downloaded = len(raw)
+                else:
+                    part_size = -(-total_bytes // part_count)  # ceil division
+                    byte_ranges = []
+                    start = 0
+                    while start < total_bytes:
+                        end = min(start + part_size, total_bytes) - 1
+                        byte_ranges.append((start, end))
+                        start = end + 1
+                    log.info(f"  host supports Range requests — fetching {len(byte_ranges)} "
+                              f"parts of ~{part_size / (1024*1024):.0f}MB each in parallel "
+                              f"({total_bytes / (1024*1024):,.0f}MB total)...")
+
+                    async def _get_part(part_index: int, start: int, end: int) -> tuple[int, bytes]:
+                        nonlocal downloaded
+                        data = await _fetch_range(session, resolved_url, start, end, timeout)
+                        downloaded += len(data)
+                        log.info(f"    part {part_index + 1}/{len(byte_ranges)} done — "
+                                  f"{downloaded / (1024*1024):,.0f}MB downloaded so far "
                                   f"({time.monotonic() - t0:.0f}s elapsed)")
-                        next_log_at += 100 * 1024 * 1024
-                raw = b"".join(chunks)
+                        return part_index, data
+
+                    parts = await asyncio.gather(
+                        *[_get_part(i, s, e) for i, (s, e) in enumerate(byte_ranges)]
+                    )
+                    parts.sort(key=lambda p: p[0])
+                    raw = b"".join(data for _, data in parts)
+            elif resolved_url:
+                # 206 came back but Content-Range didn't parse cleanly —
+                # fall back to one plain fetch of the already-resolved URL
+                # rather than guessing at a byte-range split.
+                async with session.get(resolved_url, timeout=timeout) as r:
+                    r.raise_for_status()
+                    raw = await r.read()
+                    downloaded = len(raw)
+
             text = (gzip.decompress(raw) if WEBGRAPH_TIERS_URL.endswith(".gz") else raw) \
                 .decode("utf-8", errors="ignore")
             for line in text.splitlines()[1:]:  # [1:] skips the "domain,band" header
