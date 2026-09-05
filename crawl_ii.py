@@ -90,7 +90,7 @@ import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_
 from classifier import (  # noqa: E402
     keyword_classify_role, ai_classify_roles,
     _keyword_classify_location_detail, ai_classify_locations,
-    detect_visa_sponsorship,
+    detect_visa_sponsorship, PLACEHOLDER_LOC_RE,
     PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
 from supabase_handler import (  # noqa: E402
@@ -210,26 +210,53 @@ def _is_expired(valid_through) -> bool:
 
 
 def _jsonld_location(item: dict) -> str:
+    """2026-09: two real gaps fixed here, both losing genuine multi-country
+    hiring evidence the classifier needs:
+    (1) jobLocation as an array (real, common for Greenhouse/Ashby/Lever
+        postings open across several offices) used to only read loc[0] —
+        every other office/country in the array was silently discarded,
+        so a job open in 5 countries reported just its first office's
+        city, which then correctly (but wrongly, for THIS posting) fails
+        the classifier's strict allowlist.
+    (2) applicantLocationRequirements used to only be read when
+        jobLocationType=="TELECOMMUTE" — but real postings often carry
+        BOTH a physical jobLocation (HQ office) AND a separate
+        applicantLocationRequirements list for remote-eligible countries
+        (a hybrid "based at HQ, remote OK from these countries" posting).
+        That combination used to only ever surface the single HQ office,
+        hiding the actual remote-eligibility breadth.
+    Both fixes just read MORE of what schema.org's own JobPosting fields
+    already carry — no new signal invented, no extra request."""
+    parts: list[str] = []
     loc = item.get("jobLocation")
-    if isinstance(loc, list):
-        loc = loc[0] if loc else None
-    if isinstance(loc, dict):
-        addr = loc.get("address")
+    locs = loc if isinstance(loc, list) else ([loc] if loc else [])
+    for l in locs:
+        if not isinstance(l, dict):
+            continue
+        addr = l.get("address")
         if isinstance(addr, dict):
-            parts = [addr.get(k) for k in ("addressLocality", "addressRegion", "addressCountry")]
-            parts = [p for p in parts if p and isinstance(p, str)]
-            if parts:
-                return ", ".join(parts)
-    # Remote-style postings often carry this instead of (or alongside) jobLocation
-    if item.get("jobLocationType") == "TELECOMMUTE":
-        req = item.get("applicantLocationRequirements")
-        names = []
-        if isinstance(req, dict):
-            names = [req.get("name")] if req.get("name") else []
-        elif isinstance(req, list):
-            names = [r.get("name") for r in req if isinstance(r, dict) and r.get("name")]
-        return f"Remote ({', '.join(names)})" if names else "Remote"
-    return ""
+            place = [addr.get(k) for k in ("addressLocality", "addressRegion", "addressCountry")]
+            place = [p for p in place if p and isinstance(p, str)]
+            if place:
+                joined = ", ".join(place)
+                if joined not in parts:
+                    parts.append(joined)
+
+    req = item.get("applicantLocationRequirements")
+    req_names: list[str] = []
+    if isinstance(req, dict):
+        if req.get("name"):
+            req_names = [req["name"]]
+    elif isinstance(req, list):
+        req_names = [r.get("name") for r in req if isinstance(r, dict) and r.get("name")]
+    req_names = list(dict.fromkeys(req_names))  # dedupe, keep order
+
+    if req_names:
+        parts.append(f"Remote ({', '.join(req_names)})")
+    elif item.get("jobLocationType") == "TELECOMMUTE" and not parts:
+        parts.append("Remote")
+
+    return "; ".join(parts)
 
 
 def _extract_jsonld_jobs(html: str, page_url: str, company: str) -> list[dict]:
@@ -513,6 +540,78 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     return confirmed
 
 
+# ── Description-text global-hiring enrichment (2026-09, Crawl II only) ──
+# crawl_i.py's ATS-API sources give a clean, structured location field per
+# posting; crawl_ii's heuristic/JSON-LD sources often leave location blank
+# or a bare "Remote" while the REAL hiring scope ("open to candidates
+# worldwide", "work from anywhere") is stated in the job description body
+# text instead — text crawl_ii already has in hand (JSON-LD description,
+# or the apply-page augmentation) but which classifier.py's shared funnel
+# never looks at (it only ever reads job["location"]/job["country"]).
+#
+# This scans that description for a DELIBERATELY narrow subset of
+# classifier.py's own GLOBAL_KEYWORDS phrases — copied verbatim from
+# there, not reinvented — restricted to ones that explicitly reference
+# hiring/candidate location flexibility. classifier.py's full list also
+# has generic corporate-branding entries ("global network", "global
+# presence", "global scale", "earth", "all over the world") that read
+# fine as evidence in a short location field but are common, unrelated
+# marketing copy in a JD body ("our global network of partners") — those
+# are deliberately excluded here to avoid false-positiving a job into
+# "open worldwide" on marketing language alone.
+#
+# Only fires when location is bare/placeholder (same bare-check
+# classifier.py's own _enrich_location_from_title uses) — never
+# overrides a location that already has real content, and only ever
+# ADDS a clean "Worldwide" token for the existing classifier to evaluate
+# through its own tested keyword/residue logic — it does not decide
+# match/no-match itself.
+_JD_STRONG_GLOBAL_HIRING_RE = tuple(re.compile(p, re.I) for p in (
+    r"\bwork\s*from\s*anywhere\b",
+    r"\bwfa\b",
+    r"\bhire\s*(globally|worldwide|anywhere)\b",
+    r"\bhiring\s*(globally|worldwide|anywhere)\b",
+    r"\bopen\s*to\s*(all|any)\s*location",
+    r"\bopen\s*to\s*(all|any)\s*countr",
+    r"\blocation\s*[\-–—:]?\s*anywhere\b",
+    r"\blocation\s*agnostic\b",
+    r"\blocation\s*independent\b",
+    r"\bgeo[\-\s]*agnostic\b",
+    r"\bunrestricted\s*location\b",
+    r"\bno\s*location\s*restriction\b",
+    r"\bno\s*location\s*(requirement|restriction|preference)\b",
+    r"\bno\s*geographic\s*restriction\b",
+    r"\bno\s*country\s*restriction\b",
+    r"\btime[\-\s]*zone\s*agnostic\b",
+    r"\bany\s*time\s*zone\b",
+    r"\bany\s*timezone\b",
+    r"\bregardless\s*of\s*(location|country|time\s*zone|timezone)\b",
+    r"\birrespective\s*of\s*(location|country)\b",
+    r"\bcountry[\-\s]*agnostic\b",
+    r"\bwork\s*from\s*any\s*(country|location)\b",
+    r"\bhire\s*talent\s*(globally|worldwide|from\s*anywhere)\b",
+    r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
+))
+_BARE_LOCATION_VALUES = ("", "remote", "remote worker", "remote job", "fully remote")
+
+
+def _enrich_location_from_description(job: dict) -> None:
+    """Mutates job["location"] in place — see module note above. No-op
+    when location already has real content, or when the description
+    carries none of the narrow phrase set."""
+    loc = (job.get("location") or "").strip()
+    if loc.lower() not in _BARE_LOCATION_VALUES and not PLACEHOLDER_LOC_RE.match(loc):
+        return
+    desc = job.get("description") or ""
+    if not desc:
+        return
+    if any(rx.search(desc) for rx in _JD_STRONG_GLOBAL_HIRING_RE):
+        # A bare "Remote" is worth keeping (distinguishes "remote, open
+        # worldwide" from a placeholder like "TBD"/"See description",
+        # which carries no information worth preserving).
+        job["location"] = f"{loc}, Worldwide" if loc.lower() in ("remote", "remote worker", "remote job", "fully remote") else "Worldwide"
+
+
 # ── Classification + push (mirrors crawl_i.py's role/location/visa funnel) ──
 
 def _filter_roles(jobs: list[dict]) -> list[dict]:
@@ -534,6 +633,7 @@ def _filter_roles(jobs: list[dict]) -> list[dict]:
 def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     matched, confidences, unsure_jobs = [], [], []
     for job in jobs:
+        _enrich_location_from_description(job)
         result, priority = _keyword_classify_location_detail(job)
         if result == "match":
             job["clearance"] = "regex"
