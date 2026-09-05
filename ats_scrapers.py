@@ -2943,6 +2943,409 @@ def scrape_avature(slug: str) -> list[dict]:
     return jobs
 
 
+# ── PageUp ──────────────────────────────────────────────
+
+def scrape_pageup(slug: str) -> list[dict]:
+    """PageUp — HTML scrape of the public job search page.
+    Dominant AU/NZ enterprise ATS (Telstra, Commonwealth Bank, Coles,
+    etc.). Job data is server-rendered — no JS needed.
+
+    Slug format: 'portalId|source' (e.g. '507|fb').
+    List page:   https://careers.pageuppeople.com/{portalId}/{source}/en/
+    Detail page: https://careers.pageuppeople.com/{portalId}/{source}/en/job/{jobId}/{title-slug}
+
+    2026-09: the legacy 'ci' source shape is blocked by PageUp's own
+    robots.txt (matches a '/ci' disallow rule) — this scraper doesn't
+    special-case that (the slug already carries whatever source was
+    actually discovered), but a blocked fetch here just returns []
+    rather than raising, same as any other robots-disallowed request.
+    """
+    parts = slug.split("|", 1)
+    if len(parts) != 2:
+        log.debug(f"Invalid PageUp slug format: {slug} (expected 'portalId|source')")
+        return []
+
+    portal_id, source = parts
+    base = f"https://careers.pageuppeople.com/{portal_id}/{source}/en"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(f"{base}/", headers=headers)
+    if not r:
+        return []
+
+    jobs = []
+    seen = set()
+
+    for match in re.finditer(
+        r'href=["\']([^"\']*/job/(\d+)/([^"\'?#]+))["\'][^>]*>\s*(?:<[^>]+>\s*)*([^<]+)</a>',
+        r.text, re.I
+    ):
+        path, job_id, title_slug, link_text = (
+            match.group(1), match.group(2), match.group(3), match.group(4)
+        )
+        job_url = path if path.startswith("http") else "https://careers.pageuppeople.com" + path
+        if job_url in seen:
+            continue
+        seen.add(job_url)
+        title = unescape(link_text).strip() or unquote(title_slug).replace("-", " ").title()
+
+        # Location is frequently rendered as a sibling element right after
+        # the link inside the same list item — best-effort grab.
+        window = r.text[match.end():match.end() + 400]
+        loc_match = re.search(r'class="[^"]*location[^"]*"[^>]*>([^<]+)', window, re.I)
+        location = unescape(loc_match.group(1)).strip() if loc_match else ""
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": source.replace("-", " ").title(),
+            "location": location,
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "PageUp",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Pinpoint ────────────────────────────────────────────
+
+def scrape_pinpoint(slug: str) -> list[dict]:
+    """Pinpoint (UK) — public unauthenticated JSON API.
+    Slug is the customer subdomain (e.g. 'acme' for acme.pinpointhq.com).
+    Confirmed live: GET https://{slug}.pinpointhq.com/postings.json
+    (documented at developers.pinpointhq.com/docs/jobs-json-endpoint)."""
+    url = f"https://{slug}.pinpointhq.com/postings.json"
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+
+    try:
+        data = r.json()
+    except Exception as e:
+        log.debug(f"Pinpoint: JSON parse failed for {slug}: {e}")
+        return []
+
+    items = data.get("data", [])
+    if not isinstance(items, list):
+        return []
+
+    company_name = slug.replace("-", " ").title()
+    jobs = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        job = item.get("job") or {}
+        department = (job.get("department") or {}).get("name", "")
+        location = (item.get("location") or {}).get("name", "")
+        desc = _snippet(item.get("description", ""))
+        comp_min = item.get("compensation_minimum")
+        comp_max = item.get("compensation_maximum")
+        comp_currency = item.get("compensation_currency", "")
+        salary = ""
+        if comp_min and comp_max:
+            salary = f"{comp_currency} {comp_min}-{comp_max}".strip()
+        elif not salary:
+            salary = _extract_salary(desc)
+
+        job_url = item.get("url") or (
+            f"https://{slug}.pinpointhq.com{item.get('path', '')}" if item.get("path") else ""
+        )
+
+        jobs.append({
+            "title": (item.get("title") or "").strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": location,
+            "country": "",
+            "department": department,
+            "workplace_type": item.get("workplace_type_text", item.get("workplace_type", "")),
+            "employment_type": item.get("employment_type_text", item.get("employment_type", "")),
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "Pinpoint",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Flatchr ─────────────────────────────────────────────
+
+def scrape_flatchr(slug: str) -> list[dict]:
+    """Flatchr (France) — public unauthenticated JSON API.
+    Slug is the company identifier used on careers.flatchr.io.
+    Confirmed live: GET https://careers.flatchr.io/company/{slug}.json"""
+    url = f"https://careers.flatchr.io/company/{slug}.json"
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+
+    r = _get(url, headers=headers)
+    if not r:
+        return []
+
+    try:
+        data = r.json()
+    except Exception as e:
+        log.debug(f"Flatchr: JSON parse failed for {slug}: {e}")
+        return []
+
+    items = data.get("items", [])
+    if not isinstance(items, list):
+        return []
+
+    company_name = slug.replace("-", " ").title()
+    jobs = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        vacancy = item.get("vacancy") or {}
+        title = vacancy.get("title", "")
+        vacancy_id = vacancy.get("vacancy_id", vacancy.get("id", ""))
+        desc = _snippet(vacancy.get("description", ""))
+        salary = vacancy.get("salary", "") or _extract_salary(desc)
+
+        job_url = f"https://careers.flatchr.io/vacancy/{slug}/{vacancy_id}" if vacancy_id else ""
+
+        jobs.append({
+            "title": str(title).strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": item.get("locality", "") or item.get("administrative_area_level_1", ""),
+            "country": "",
+            "department": item.get("metier", ""),
+            "workplace_type": "",
+            "employment_type": vacancy.get("contract_type", ""),
+            "salary": salary,
+            "description_snippet": desc,
+            "source_ats": "Flatchr",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Jobylon ─────────────────────────────────────────────
+
+# Cap how many sitemap-listed job detail pages get fetched per call —
+# the sitemap is site-wide (every customer's jobs, not just this one),
+# so without a bound a single scrape_jobylon call could fetch thousands
+# of unrelated pages just to find this one company's postings.
+_JOBYLON_MAX_DETAIL_FETCHES = 400
+_jobylon_sitemap_cache: dict[str, tuple[float, list[str]]] = {}
+_JOBYLON_SITEMAP_TTL = 3600  # seconds
+
+
+def _jobylon_sitemap_urls() -> list[str]:
+    """Fetch (and briefly cache) the site-wide job-URL list from
+    emp.jobylon.com/sitemap.xml. Cached for _JOBYLON_SITEMAP_TTL seconds
+    since this is the same site-wide resource for every company scraped
+    in a run — refetching it per-company would be pure waste."""
+    cached = _jobylon_sitemap_cache.get("sitemap")
+    if cached and time.time() - cached[0] < _JOBYLON_SITEMAP_TTL:
+        return cached[1]
+
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get("https://emp.jobylon.com/sitemap.xml", headers=headers)
+    if not r:
+        return []
+
+    try:
+        root = ET.fromstring(r.content)
+    except Exception as e:
+        log.debug(f"Jobylon: sitemap XML parse failed: {e}")
+        return []
+
+    urls = []
+    for loc in root.iter():
+        if loc.tag.endswith("loc") and loc.text and "/jobs/" in loc.text:
+            urls.append(loc.text.strip())
+
+    _jobylon_sitemap_cache["sitemap"] = (time.time(), urls)
+    return urls
+
+
+def scrape_jobylon(slug: str) -> list[dict]:
+    """Jobylon (Nordics) — no general-purpose public API (the documented
+    'Feed API' needs a per-customer hash issued manually by Jobylon
+    support, not self-service). Company LISTING pages
+    (emp.jobylon.com/companies/{id}-{slug}/) require JS, but job DETAIL
+    pages are server-rendered — so this discovers job URLs from the
+    site-wide sitemap.xml, then fetches each detail page and keeps only
+    the ones that link back to this company's page.
+
+    Slug format: '{id}-{human_slug}' (e.g. '123-acme'), matching the
+    /companies/{id}-{slug}/ path segment. Best-effort: bounded by
+    _JOBYLON_MAX_DETAIL_FETCHES per call, so a company whose jobs aren't
+    reached within that many sitemap entries may come back incomplete."""
+    company_id = slug.split("-", 1)[0]
+    if not company_id.isdigit():
+        log.debug(f"Invalid Jobylon slug format: {slug} (expected '{{numeric_id}}-{{slug}}')")
+        return []
+
+    company_path_marker = f"/companies/{company_id}-"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    job_urls = _jobylon_sitemap_urls()
+    if not job_urls:
+        return []
+
+    company_name = slug.split("-", 1)[1].replace("-", " ").title() if "-" in slug else slug
+
+    jobs = []
+    fetched = 0
+    for job_url in job_urls:
+        if fetched >= _JOBYLON_MAX_DETAIL_FETCHES:
+            log.debug(f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) "
+                      f"for {slug}, stopping")
+            break
+        r = _get(job_url, headers=headers)
+        fetched += 1
+        if not r:
+            continue
+        if company_path_marker not in r.text:
+            continue
+
+        title, desc, location = "", "", ""
+        for ld_match in re.finditer(
+            r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
+            r.text, re.I
+        ):
+            try:
+                ld_data = json.loads(ld_match.group(1))
+            except Exception:
+                continue
+            items = ld_data if isinstance(ld_data, list) else [ld_data]
+            for item in items:
+                if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                    title = item.get("title", "")
+                    desc = _snippet(item.get("description", ""))
+                    loc_obj = item.get("jobLocation", {})
+                    if isinstance(loc_obj, list) and loc_obj:
+                        loc_obj = loc_obj[0]
+                    addr = loc_obj.get("address", {}) if isinstance(loc_obj, dict) else {}
+                    location = addr.get("addressLocality", "") if isinstance(addr, dict) else ""
+                    break
+
+        if not title:
+            title_match = re.search(r"<title>([^<]+)</title>", r.text, re.I)
+            title = unescape(title_match.group(1)).strip() if title_match else ""
+
+        if not title:
+            continue
+
+        jobs.append({
+            "title": title.strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": location,
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": _extract_salary(desc) if desc else "",
+            "description_snippet": desc,
+            "source_ats": "Jobylon",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Homerun ─────────────────────────────────────────────
+
+def scrape_homerun(slug: str) -> list[dict]:
+    """Homerun (Netherlands) — no usable public API without a Bearer
+    token, but not needed: job data is embedded directly in the
+    server-rendered HTML as an HTML-entity-encoded JSON blob in a Vue
+    'v-bind' attribute:
+      <job-list v-bind="{&quot;content&quot;:{&quot;vacancies&quot;:
+      [...],&quot;departments&quot;:[...],&quot;job_types&quot;:[...],
+      &quot;locations&quot;:[...]}}">
+
+    Slug is the customer's own full hostname (e.g. 'jobs.acme.com') —
+    Homerun customers run on their OWN domain, not a shared subdomain."""
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    r = _get(f"https://{slug}/", headers=headers)
+    if not r:
+        return []
+
+    attr_match = re.search(
+        r'<job-list[^>]+v-bind="([^"]+)"', r.text, re.I
+    )
+    if not attr_match:
+        log.debug(f"Homerun: no <job-list v-bind> attribute found for {slug}")
+        return []
+
+    try:
+        content = json.loads(unescape(attr_match.group(1))).get("content", {})
+    except Exception as e:
+        log.debug(f"Homerun: JSON parse failed for {slug}: {e}")
+        return []
+
+    vacancies = content.get("vacancies", [])
+    if not isinstance(vacancies, list):
+        return []
+
+    departments = {d.get("id"): d.get("name", "") for d in content.get("departments", []) if isinstance(d, dict)}
+    locations = {l.get("id"): l.get("name", "") for l in content.get("locations", []) if isinstance(l, dict)}
+    job_types = {j.get("id"): j.get("name", "") for j in content.get("job_types", []) if isinstance(j, dict)}
+
+    company_name = slug.replace("jobs.", "", 1).split(".")[0].replace("-", " ").title()
+
+    jobs = []
+    for v in vacancies:
+        if not isinstance(v, dict):
+            continue
+        title = v.get("title", "")
+        job_url = v.get("url", "")
+        if job_url and not job_url.startswith("http"):
+            job_url = f"https://{slug}{job_url}" if job_url.startswith("/") else f"https://{slug}/{job_url}"
+        if not job_url:
+            job_url = f"https://{slug}/"
+
+        jobs.append({
+            "title": str(title).strip(),
+            "url": job_url,
+            "company": company_name,
+            "location": locations.get(v.get("location_id"), ""),
+            "country": "",
+            "department": departments.get(v.get("department_id"), ""),
+            "workplace_type": "",
+            "employment_type": job_types.get(v.get("job_type_id"), ""),
+            "salary": "",
+            "description_snippet": "",
+            "source_ats": "Homerun",
+            "slug": slug,
+        })
+
+    return jobs
+
+
+# ── Occupop ─────────────────────────────────────────────
+
+def scrape_occupop(slug: str) -> list[dict]:
+    """Occupop (Ireland) — NOT CURRENTLY WORKING, kept for reference only
+    (see SCRAPERS dict below — deliberately NOT registered there, same as
+    scrape_successfactors). Every checked customer subdomain
+    ({slug}.occupop-careers.com) served an empty 'Loading...' SPA shell
+    with zero job data in the raw HTML; the official API
+    (api.occupop.com/rest/jobs) requires a Bearer token (confirmed via a
+    live 403 response) and no public unauthenticated endpoint was found.
+    This function is a placeholder that always returns [] until either a
+    real public API is found or a headless-browser network trace
+    uncovers whatever XHR call the SPA itself makes — see SUPPORTED_ATS's
+    comment in discovery.py for the full writeup."""
+    log.debug(f"Occupop: scraping not yet implemented (JS-rendered SPA, no public API) — {slug}")
+    return []
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -2976,6 +3379,20 @@ SCRAPERS = {
     # 2026-09: re-enabled — see scrape_brassring's docstring for the real
     # root cause (missing session priming, not JS-rendering/auth/robots).
     "brassring": scrape_brassring,
+    # ── New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon / Homerun ──
+    "pageup": scrape_pageup,
+    "pinpoint": scrape_pinpoint,
+    "flatchr": scrape_flatchr,
+    "jobylon": scrape_jobylon,
+    "homerun": scrape_homerun,
+    # "occupop": scrape_occupop — NOT registered. See scrape_occupop's own
+    #    docstring: every checked customer subdomain is a JS-rendered SPA
+    #    shell with zero job data in raw HTML, and the only known API
+    #    requires a Bearer token (confirmed via live 403). Also correctly
+    #    left out of discovery.py's SUPPORTED_ATS — shipping a registered
+    #    scraper here that always returns [] would silently look like a
+    #    working platform. Revisit if a public API or headless-browser
+    #    approach is added later.
     # ── DISABLED (confirmed live, 2026-09) ──
     # "successfactors": scrape_successfactors — CONFIRMED genuinely blocked,
     #    not just an unverified guess: WebFetch against 4 independent live
