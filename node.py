@@ -285,23 +285,48 @@ def target_countries_geo_form(style_countries: set[str]) -> set[str]:
 
 # ── URL extraction / cleanup ────────────────────────────────────────────
 
-_URL_RE = re.compile(r'https?://[^\s"\'<>\\]{4,300}', re.I)
+_URL_RE = re.compile(r'https?://[^\s"\'<>\\`]{4,300}', re.I)
 _MAX_CANDIDATE_URLS_PER_PAGE = 4000
 
 # _URL_RE stops at a literal quote but not an HTML-encoded one (&quot;)
 # or a curly/smart quote — both show up right after a URL sitting inside
 # an already-entity-escaped JS/JSON blob, and can run on for hundreds of
-# chars past the real URL end.
+# chars past the real URL end. Backtick added to _URL_RE's own exclusion
+# set above (2026-09) so a raw JS template literal at least stops the
+# match at its closing backtick instead of running on into unrelated code.
 _HTML_ENTITY_RE = re.compile(r'&(?:quot|apos|amp|gt|lt|nbsp|#[0-9]+|#x[0-9a-fA-F]+);', re.I)
 _CURLY_QUOTE_RE = re.compile(r'[“”‘’]')
 _TRAILING_STATUS_CODE_RE = re.compile(r'(?:;[0-9]{2,4})+;?$')  # e.g. ';307;'
+# 2026-09: real archive_i rows found with slugs like "${JOB_BOARD_NAME}"
+# and "${encodeURIComponent(board)}" — a site's own un-minified/dev-build
+# JS source, sitting in a <script> tag, contains a template literal like
+# `https://${JOB_BOARD_NAME}.workable.com/embed/...` (unresolved — this
+# is source code, not a rendered URL). Method B's raw-text regex scan
+# matches it as a candidate URL, and _url_to_slug_workable's own host
+# check is a plain substring test ("workable.com" in host) — which is
+# still true for "${JOB_BOARD_NAME}.workable.com" — so it passes straight
+# through and "${JOB_BOARD_NAME}" gets returned as if it were a real
+# company slug. This isn't Workable-specific: every converter here uses
+# the same kind of substring/suffix host check, so any platform is
+# equally exposed. Rejecting outright ANY candidate URL containing a
+# literal "${" is the correct fix at the source (not per-converter) —
+# no real, resolved URL ever contains that sequence.
+_JS_TEMPLATE_PLACEHOLDER_RE = re.compile(r'\$\{')
 
 
 def _clean_extracted_url(url: str) -> str:
     """Cut at the first entity/curly-quote occurrence (not just trim the
     end — an entity-encoded blob can run on for a long time), then
     iteratively strip ordinary trailing junk (comma/semicolon, a stray
-    status-code fragment, unbalanced closing brackets)."""
+    status-code fragment, unbalanced closing brackets). Returns "" (never
+    a garbage string) for an unresolved JS template literal placeholder —
+    see _JS_TEMPLATE_PLACEHOLDER_RE's comment for the real case this
+    caught (literal "${...}" surviving into a "slug"). Checked FIRST,
+    before any of the trimming below, since no amount of trimming makes
+    that kind of match into a real URL — callers must skip empty results
+    rather than add them to a candidate-URL set."""
+    if _JS_TEMPLATE_PLACEHOLDER_RE.search(url):
+        return ""
     m = _HTML_ENTITY_RE.search(url)
     if m:
         url = url[:m.start()]
@@ -330,15 +355,19 @@ def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
             if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
                 continue
             try:
-                urls.add(_clean_extracted_url(urljoin(base_url, href)))
+                cleaned = _clean_extracted_url(urljoin(base_url, href))
             except ValueError:
                 continue
+            if cleaned:  # "" means _clean_extracted_url rejected it outright
+                urls.add(cleaned)
             if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
                 break
     except Exception:
         pass  # a malformed page shouldn't kill the crawl of this company
     for m in _URL_RE.finditer(html):
-        urls.add(_clean_extracted_url(m.group(0)))
+        cleaned = _clean_extracted_url(m.group(0))
+        if cleaned:
+            urls.add(cleaned)
         if len(urls) >= _MAX_CANDIDATE_URLS_PER_PAGE:
             break
     return urls
@@ -662,7 +691,12 @@ _ORG_SCHEMA_TYPE_RE = re.compile(r'"@type"\s*:\s*"(?:Organization|Corporation)"'
 # ..."minValue": 250 for a range) — the {0,160} window is generous enough
 # to span a QuantitativeValue object's other fields without also reaching
 # into an unrelated later key.
-EMPLOYEE_COUNT_MIN_FOR_CREDIT = 50
+# 2026-09: raised from 50 to 200 — the project's target now is companies
+# with 200+ employees specifically (not just "not a solo founder"), so
+# the one signal that can state a company's size DIRECTLY should require
+# clearing that exact bar, not a much lower one left over from an earlier,
+# looser goal.
+EMPLOYEE_COUNT_MIN_FOR_CREDIT = 200
 _ORG_EMPLOYEE_COUNT_RE = re.compile(
     r'"numberOfEmployees"\s*:\s*(?:\{[^}]{0,160}?"(?:value|minValue)"\s*:\s*)?"?(\d{1,9})"?', re.I)
 # Weighted 2026-09 up from +5 to +10 as part of the reliability rebalance
@@ -759,7 +793,20 @@ _OBSERVABILITY_RE = re.compile(
     r'(?:datadoghq\.com|dynatrace\.com|newrelic\.com|nr-data\.net|sentry\.io|js\.sentry-cdn\.com|'
     r'appdynamics\.com|instana\.io|splunkcloud\.com)', re.I)
 
-QUALITY_INDEX_THRESHOLD = 20
+# 2026-09: raised from 20 to 35 — see WEBGRAPH_RANK_BANDS' 2026-09
+# RECALIBRATION comment for the concrete failure case (olphnm.org, a
+# small parish church site with zero other real signals, cleared the old
+# 20-point bar purely off WebGraph rank alone). 35 is chosen specifically
+# so that no single signal in this file — including WebGraph's new,
+# already-lowered S+ ceiling of 20 points — can clear the bar alone
+# anymore; every acceptance now requires at least two independent real
+# signals to combine (e.g. Organization schema + a regulator/registrar
+# listing, both requiring real, checkable filings, sums to exactly 35).
+# This is a deliberate precision-over-recall tradeoff matching the
+# project's new target (established 200+-employee companies specifically,
+# not "any real business") — expect meaningfully fewer archive_ii
+# acceptances than before, by design.
+QUALITY_INDEX_THRESHOLD = 35
 
 # ── DNS MX-record provider (2026-09) ────────────────────────────────────
 # Two tiers, scored differently because they mean different things:
@@ -839,63 +886,116 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
 # as the MX resolver above) and every lookup after that is a plain local
 # dict read — zero network cost, zero latency, for the rest of the run.
 #
-# Six graduated rank bands (S+/S/A/B/C/D), not a flat "in the top N or
-# nothing" cutoff — 2026-09, revised after checking a REAL, known-
-# legitimate company (heli.technology, already confirmed hiring globally
-# in the jobs DB) against the actual ranks file: it landed at rank
-# 44,860,492 out of ~118.0M domain nodes (Common Crawl's own published
-# count for this release — see their blog) — roughly the 62nd percentile,
-# nowhere near any of the flat cutoffs (10M/15M/20M/25M) that were being
-# considered. A binary cutoff would have given a real, legitimately-hiring
-# company ZERO credit just for not being especially link-popular. Graduated
-# bands let a domain like that earn a modest, honest amount of credit
-# instead of an all-or-nothing cliff.
+# Four graduated rank bands (S+/S/A/B — the old, weakest "C" tier is
+# GONE, see 2026-09 revision below), not a flat "in the top N or nothing"
+# cutoff — originally revised after checking a REAL, known-legitimate
+# company (heli.technology, already confirmed hiring globally in the jobs
+# DB) against the actual ranks file: it landed at rank 44,860,492 out of
+# ~118.0M domain nodes (Common Crawl's own published count for that
+# release) — roughly the 62nd percentile, nowhere near any of the flat
+# cutoffs (10M/15M/20M/25M) being considered at the time. A binary cutoff
+# would have given a real, legitimately-hiring company ZERO credit just
+# for not being especially link-popular. Graduated bands let a domain
+# like that earn a modest, honest amount of credit instead of an
+# all-or-nothing cliff.
 #
-# Band boundaries and points, reasoned (not just round numbers) from
-# Common Crawl's own published graph statistics for this era of releases —
-# domain-level: 118.0M nodes, 2.8B edges; the largest strongly-connected
-# component (the "real, mutually-linked core" of the web) is 30.0M nodes
-# (25.4%); 63.2% (74.5M) of all nodes are "dangling" (no outbound links —
-# a rough, imperfect proxy for peripheral/thin sites, since it measures
-# outbound links only, not inbound authority). Boundaries are INCLUSIVE
-# (rank <= bound, 0-based) per band, checked top-down, first match wins —
-# webgraph_seed.py's _band_for_rank() is the single source of truth for
-# the actual cutoff logic; this list only needs to match its boundaries:
+# 2026-09 RECALIBRATION (both the band ceiling AND the points, not just
+# one or the other): a real archive_ii false positive (olphnm.org — a
+# small parish church's Wix site: confirmed via direct fetch to have
+# NONE of this file's other signals — no Organization schema, no
+# sameAs/regulator listing, no corp footer links, no legal-entity suffix,
+# no compliance banner, no martech/observability tags) made it through
+# the Quality Index gate. The root cause wasn't really "the ceiling is
+# too high" so much as a real design bug: the OLD point values (30/25/20
+# for S+/S/A) meant those top 3 bands could clear QUALITY_INDEX_THRESHOLD
+# (20) completely ALONE — contradicting this section's own stated intent
+# ("A needs one more smallish signal to pass") — and WebGraph rank/link-
+# authority correlates with "old, well-cross-linked site" (parish
+# directories, diocese listings, "find a church" aggregators all link to
+# a site like this), NOT with employee headcount, for exactly this class
+# of community/nonprofit site. A well-linked tiny nonprofit can outrank
+# plenty of genuinely large, quieter B2B companies in pure link terms.
+#
+# Fix, in two parts:
+#  1. Points lowered across the board so NO single band — not even S+ —
+#     can clear the new, higher QUALITY_INDEX_THRESHOLD (35) by itself
+#     ever again. WebGraph is the strongest single signal here, but
+#     "strongest" was never meant to mean "sufficient alone" — every
+#     acceptance now requires WebGraph to combine with at least one other
+#     real signal, restoring the design's original intent in practice,
+#     not just in a comment.
+#  2. The band ceiling itself lowered from 80,000,000 to 40,000,000 (the
+#     old, weakest "C" band dropped entirely) — reasoned from Common
+#     Crawl's own current published stats (cc-main-2026-jun-jul-aug:
+#     119,722,885 nodes, 76,352,306 (63.77%) dangling — consistent with
+#     the original 118.0M/63.2% figures, so this isn't a stale estimate).
+#     The old 80M ceiling (top ~67%) sat WELL PAST the point where
+#     dangling/peripheral nodes become the majority (63.77%) — meaning it
+#     was awarding credit to sites less connected than the median node in
+#     the entire graph, an extremely weak bar. 40M (top ~33%) sits
+#     comfortably inside the well-connected minority instead. Real,
+#     concrete tradeoff worth naming: heli.technology (rank 44,860,492,
+#     the very company this graduated-band design was originally built
+#     to accommodate) now falls just past this tighter ceiling and gets
+#     ZERO WebGraph credit — but that's the correct outcome under the new
+#     target (established 200+-employee companies specifically), not a
+#     regression; a small/mid startup losing a soft credit it never
+#     needed to be decisive is the intended effect of raising the bar,
+#     not an accident.
+#
+# NOTE ON FURTHER CALIBRATION: this sandbox has no live network path to
+# Common Crawl's actual ranks file (data.commoncrawl.org — egress
+# blocked) to re-run real per-domain lookups, so 40M is reasoned from the
+# graph's own published aggregate stats above, not fresh per-company
+# rank checks. webgraph.yml's `lookup_domains` calibration mode (see
+# webgraph_seed.py's lookup_ranks()) is the right tool to sanity-check
+# this against more real companies at known employee counts — worth
+# running before the next reseed if this boundary needs finer tuning.
+#
+# Boundaries are INCLUSIVE (rank <= bound, 0-based) per band, checked
+# top-down, first match wins — webgraph_seed.py's _band_for_rank() is the
+# single source of truth for the actual cutoff logic; this list only
+# needs to match its boundaries:
 #   S+ : rank <=  1,000,000 (top ~0.8%)  — unmistakably major (Google,
-#        Wikipedia, Facebook-tier). Strong enough to clear the Quality
-#        Index bar alone.
-#   S  : rank <= 10,000,000 (top ~8.5%)  — clearly well-established. Also
-#        clears the bar alone.
+#        Wikipedia, Facebook-tier). Strong, but per the fix above, no
+#        longer sufficient alone — always needs one more real signal.
+#   S  : rank <= 10,000,000 (top ~8.5%)  — clearly well-established.
+#        Same: strong credit, never solo-sufficient anymore.
 #   A  : rank <= 25,000,000 (top ~21%, close to the graph's own 25.4%
 #        strongly-connected-component size) — solidly connected, real
-#        established orgs. Needs one more smallish signal to pass.
-#   B  : rank <= 50,000,000 (top ~42%) — modestly connected; real but
-#        unremarkable companies land here (this is heli.technology's
-#        band). A cautious, small credit — needs several other signals
-#        to actually clear the bar, per "safely exclude rather than
-#        include."
-#   C  : rank <= 80,000,000 (top ~68%, near where "dangling"/peripheral
-#        nodes start being the majority) — very weakly connected. A
-#        token credit only.
-#   D  : rank >  80,000,000, OR not found in the ranks file at all — no
-#        credit. This is where most parked/junk domains live (nobody
-#        links to a parking page), so this band intentionally contributes
-#        nothing rather than risk rewarding noise.
+#        established orgs. Needs at least one other signal to pass.
+#   B  : rank <= 40,000,000 (top ~33%, safely inside the well-connected
+#        minority — well before the 63.77% point where dangling/
+#        peripheral nodes start being the majority of the graph).
+#        Modestly connected. Needs several other signals to clear the
+#        bar, per "safely exclude rather than include."
+#   (old "C" band, rank <= 80,000,000 / top ~68%, REMOVED 2026-09 — that
+#    ceiling sat past the point where dangling nodes are already the
+#    majority of the graph, an extremely weak bar. Anything below the new
+#    40M ceiling now falls straight to band D.)
+#   D  : rank >  40,000,000, OR not found in the ranks file at all — no
+#        credit. This is where most parked/junk domains (and, as of the
+#        2026-09 recalibration, most small-to-midsize real businesses
+#        too — that's an intentional tightening, not a bug) live.
 # These bands are still a judgment call, calibrated against one real data
 # point plus the graph's own published shape stats — not a rigorously
-# derived cutoff. Revisit if more known-good/known-bad companies get
-# checked against real ranks (see webgraph_seed.py's lookup_ranks()).
+# derived cutoff. Revisit with webgraph.yml's lookup_domains calibration
+# mode if more known-good/known-bad companies get checked against real
+# ranks (see webgraph_seed.py's lookup_ranks() and the NOTE above).
 WEBGRAPH_TIERS_URL = os.environ.get("WEBGRAPH_TIERS_URL", "")  # GitHub Release asset URL, .csv or .csv.gz
 WEBGRAPH_RANK_BANDS = (
-    # (label, inclusive rank upper bound (0-based), points) — checked in order, first match wins
-    ("S+", 1_000_000, 30),
-    ("S", 10_000_000, 25),
-    ("A", 25_000_000, 20),
-    ("B", 50_000_000, 15),
-    ("C", 80_000_000, 10),
+    # (label, inclusive rank upper bound (0-based), points) — checked in
+    # order, first match wins. 2026-09: points lowered across the board
+    # (was 30/25/20/15, plus a since-removed C band at 10) so that NOT
+    # EVEN S+ alone can clear QUALITY_INDEX_THRESHOLD (35) by itself —
+    # see this section's 2026-09 RECALIBRATION comment above for why.
+    ("S+", 1_000_000, 20),
+    ("S", 10_000_000, 15),
+    ("A", 25_000_000, 12),
+    ("B", 40_000_000, 8),
 )
 
-_webgraph_ranks: dict[str, str] | None = None  # domain -> band label ("S+".."C"), lazy singleton
+_webgraph_ranks: dict[str, str] | None = None  # domain -> band label ("S+".."B"), lazy singleton
 _webgraph_load_lock: asyncio.Lock | None = None
 
 # 2026-09: parallel-Range-request download tuning. A single aiohttp stream
@@ -1558,9 +1658,20 @@ async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list
     leave alone" trick already used for date_added below); on a genuine
     first INSERT, the column's own DEFAULT (now()) fires, giving a
     brand-new slug a full verification cycle's grace period before it
-    could ever be considered stale."""
+    could ever be considered stale.
+
+    2026-09: rejects any row whose slug still contains a literal "${" —
+    real archive_i rows were found with slugs like "${JOB_BOARD_NAME}"
+    and "${encodeURIComponent(board)}", a site's own unrendered JS
+    template-literal source leaking through as if it were a real URL/slug
+    (see _JS_TEMPLATE_PLACEHOLDER_RE's comment for the live-crawl path
+    that caused it, now fixed at the source in _clean_extracted_url too).
+    This check is deliberately ALSO here, at the single point every
+    source's rows funnel through before ever reaching the database — a
+    future source-specific bug elsewhere shouldn't be able to write this
+    class of garbage again without also breaking this backstop."""
     slim_rows = [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"]}
-                 for r in rows]
+                 for r in rows if "${" not in r["slug"]]
     return await _upsert_rows(session, ARCHIVE_I_TABLE, "ats,slug", slim_rows)
 
 
