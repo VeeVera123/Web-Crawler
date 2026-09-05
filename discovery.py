@@ -238,12 +238,24 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     "jobvite": "Jobvite",
     "eploy": "Eploy",
     "breezyhr": "Breezy HR",
+    # New (2026-09) — confirmed via direct fingerprint-file fetch against
+    # the enthec/webappanalyzer fork, same verification standard as the
+    # rest of this dict:
+    "pageup": "PageUp",     # scriptSrc: careers-static.pageuppeople.com
+                             # (works even on a fully custom domain, since
+                             # the fingerprint is asset-host-based, not
+                             # relying on the shared pageuppeople.com
+                             # career-site domain)
+    "jobylon": "Jobylon",   # scriptSrc: *.jobylon.com
+    "homerun": "Homerun",   # js globals: homerunI18n / homerunPrivacySettings
+    # Pinpoint, Flatchr, Occupop: checked, NO fingerprint found under any
+    # plausible name (including "Cezanne" for Occupop, post-rebrand) —
+    # left out entirely rather than guessed at, per this dict's own rule.
     # Confirmed NOT present in the fingerprint set (checked directly, not
     # assumed, re-verified 2026-09): Ashby, Rippling, Folks HR, Softgarden,
     # ClearCompany/HRMDirect, ADP, Taleo, SuccessFactors, BrassRing,
-    # ApplyToJob, join.com, and Oracle Cloud HCM/Fusion Recruiting (newly
-    # checked 2026-09 — no fingerprint under "Oracle Cloud HCM", "Oracle
-    # Fusion", "Oracle Recruiting Cloud", or "Oracle Taleo Cloud" either).
+    # ApplyToJob, join.com, Oracle Cloud HCM/Fusion Recruiting, Pinpoint,
+    # Flatchr, and Occupop.
     # These platforms just aren't in Wappalyzer's ruleset — this source
     # can't help with them regardless of query design.
 }
@@ -262,6 +274,13 @@ SUPPORTED_ATS = {
     # Fixed (2026-08) — was blacklisted with wrong URL/API assumptions,
     # now scrapes correctly (see ats_scrapers.py):
     "softgarden",
+    # New (2026-09) — PageUp (AU/NZ, HIGHEST priority of this batch),
+    # Pinpoint (UK), Flatchr (France), Jobylon (Nordics), Homerun
+    # (Netherlands). All 5 confirmed to have a genuinely working scraper
+    # (server-rendered HTML or a real public JSON API — see
+    # ats_scrapers.py for each). Occupop (Ireland) deliberately NOT added
+    # here — see the BLACKLISTED comment below.
+    "pageup", "pinpoint", "flatchr", "jobylon", "homerun",
 }
 
 # Eploy / Folks HR / JobAdder / Jobvite / ADP / Avature (added 2026-08) are
@@ -275,6 +294,15 @@ SUPPORTED_ATS = {
 
 # BLACKLISTED — scrapers exist but don't work (robots.txt / JS-rendered):
 # brassring, successfactors
+# occupop (2026-09): every checked customer subdomain
+# ({slug}.occupop-careers.com) is a JS-rendered SPA shell with zero job
+# data in the raw HTML — no confirmed public unauthenticated API (the
+# official api.occupop.com/rest/jobs endpoint requires a Bearer token,
+# confirmed via a live 403). Genuinely not scrapeable with this project's
+# plain-HTTP architecture without further investigation (e.g. a headless-
+# browser network trace to find whatever XHR call the SPA itself makes).
+# Kept OUT of SUPPORTED_ATS on purpose rather than shipping a scraper that
+# would silently return zero jobs for every real company.
 # ycombinator is no longer per-company here — it moved to
 # job_board_scrapers.py as a multi-company aggregator (see there).
 
@@ -317,6 +345,19 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "zoho recruit": "zoho",
     "zohorecruit": "zoho",
     "softgarden": "softgarden",
+    # New (2026-09):
+    "pageup": "pageup",
+    "pinpoint": "pinpoint",
+    "flatchr": "flatchr",
+    "jobylon": "jobylon",
+    "homerun": "homerun",
+    # "occupop" deliberately NOT mapped here — occupop is not in
+    # SUPPORTED_ATS (no working scraper yet, see that comment), and
+    # fetch_openpostings_slugs()'s slugs_by_ats dict is only pre-seeded
+    # with SUPPORTED_ATS keys — mapping an ATS name here that isn't in
+    # SUPPORTED_ATS would KeyError the very first time OpenPostings
+    # actually contains an Occupop row. Add this mapping back once/if a
+    # working scraper lands and occupop joins SUPPORTED_ATS.
     # Disabled platforms (kept for reference):
     # "brassring", "successfactors"
     # ycombinator moved to job_board_scrapers.py — no longer mapped here.
@@ -1051,6 +1092,141 @@ def _url_to_slug_avature(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_pageup(url: str) -> str | None:
+    """Extract slug from PageUp URLs (AU/NZ enterprise ATS — Telstra,
+    Commonwealth Bank, Coles, etc.). Only handles the shared
+    careers.pageuppeople.com domain — customers on a fully custom domain
+    (e.g. careers.telstra.com) front the same backend but carry no
+    PageUp-specific path shape to key off of; those are only detectable
+    live via the careers-static.pageuppeople.com script-src Wappalyzer
+    fingerprint (see HTTPARCHIVE_ATS_TECH_NAMES), not from a bare URL.
+
+    Pattern: careers.pageuppeople.com/{portalId}/{source}/{lang}/...
+    (also /job/{jobId}/{slug} for individual postings — portalId/source
+    are still the first two path segments there). Our internal slug
+    format is '{portalId}|{source}' — both are required since PageUp
+    boards are namespaced per-portal, not by company name alone.
+
+    2026-09: the legacy /{portalId}/ci/{lang} source shape is blocked by
+    PageUp's own robots.txt (matches a '/ci' disallow rule); the newer
+    /{portalId}/fb/{lang} shape is not — prefer 'fb' when both are seen
+    for the same portalId, but this extractor itself is shape-agnostic
+    and just returns whatever 'source' segment is actually in the URL."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if "pageuppeople.com" not in host:
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        portal_id, source = parts[0], parts[1]
+        if portal_id.lower() not in SKIP_SLUGS and source.lower() not in SKIP_SLUGS:
+            return f"{portal_id}|{source}"
+    return None
+
+
+def _url_to_slug_pinpoint(url: str) -> str | None:
+    """Extract slug from Pinpoint URLs (UK ATS).
+    Pattern: {company}.pinpointhq.com/... — the subdomain alone is the
+    slug; Pinpoint's public JSON API (postings.json) is keyed by the same
+    subdomain, no further path parsing needed."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".pinpointhq.com"):
+        return None
+    slug = host[: -len(".pinpointhq.com")].lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
+    return None
+
+
+def _url_to_slug_flatchr(url: str) -> str | None:
+    """Extract slug from Flatchr URLs (France).
+    Two real URL families, both confirmed live:
+      1. Shared board domain: {slug}.flatchr.io/...
+      2. Company page: careers.flatchr.io/company/{slug}
+         (job postings under careers.flatchr.io/vacancy/{slug}/... use
+         the same company slug as the first path segment)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host.endswith(".flatchr.io") and host != "careers.flatchr.io":
+        slug = host[: -len(".flatchr.io")].lower()
+        if slug and slug not in SKIP_SLUGS and slug != "www":
+            return slug
+        return None
+    if host == "careers.flatchr.io":
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) >= 2 and parts[0] in ("company", "vacancy") and parts[1]:
+            slug = parts[1].lower()
+            if slug not in SKIP_SLUGS:
+                return slug
+    return None
+
+
+def _url_to_slug_jobylon(url: str) -> str | None:
+    """Extract slug from Jobylon URLs (Nordics).
+    Pattern: emp.jobylon.com/companies/{id}-{slug}/ — only the shared
+    emp.jobylon.com domain's /companies/ path carries a company
+    identifier; customers on a fully custom domain (footer-credit only)
+    aren't discoverable from a bare URL and rely on the
+    careers-static-style Wappalyzer fingerprint instead (see
+    HTTPARCHIVE_ATS_TECH_NAMES). Our internal slug is the whole
+    '{id}-{slug}' segment — scrape_jobylon needs the numeric id (not
+    just the human-readable slug) to enumerate that company's jobs via
+    the sitemap."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host != "emp.jobylon.com":
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "companies" and parts[1]:
+        slug = parts[1].lower()
+        if slug not in SKIP_SLUGS:
+            return slug
+    return None
+
+
+def _url_to_slug_homerun(url: str) -> str | None:
+    """Extract slug from Homerun URLs (Netherlands).
+    Unlike most platforms here, Homerun customers run on their OWN
+    domain (conventionally jobs.{company-domain}, e.g.
+    jobs.acme.com) rather than a shared {company}.homerun.co subdomain
+    — there is no company-name segment to parse out of the URL at all,
+    so the full hostname itself IS the slug (this is safe: node.py/
+    ats_scrapers.py only ever use this slug to reconstruct the same
+    hostname when fetching, never to look up a shared-domain subdomain).
+    Only matches hosts that actually look like a Homerun careers site
+    (a 'jobs.' subdomain) to avoid capturing an unrelated URL that just
+    happens to flow through this converter."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host or host in SKIP_SLUGS:
+        return None
+    if host.startswith("jobs."):
+        slug = host.lower()
+        if slug not in SKIP_SLUGS:
+            return slug
+    return None
+
+
+def _url_to_slug_occupop(url: str) -> str | None:
+    """Extract slug from Occupop URLs (Ireland).
+    Pattern: {company-slug}.occupop-careers.com/... — NOT occupop.com,
+    which now redirects to cezannehr.com post-rebrand ("Cezanne
+    Recruitment, powered by Occupop"). NOTE (2026-09): every checked
+    customer page on this domain is a JS-rendered SPA shell with zero
+    job data in the raw HTML and no confirmed public API — this
+    converter is kept so slugs can still be discovered/stored, but see
+    scrape_occupop's docstring for the real scraping-feasibility gap."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".occupop-careers.com"):
+        return None
+    slug = host[: -len(".occupop-careers.com")].lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
+    return None
+
+
 URL_TO_SLUG = {
     "greenhouse": _url_to_slug_greenhouse,
     "lever": _url_to_slug_lever,
@@ -1083,6 +1259,13 @@ URL_TO_SLUG = {
     "jobvite": _url_to_slug_jobvite,
     "adp": _url_to_slug_adp,
     "avature": _url_to_slug_avature,
+    # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon / Homerun / Occupop
+    "pageup": _url_to_slug_pageup,
+    "pinpoint": _url_to_slug_pinpoint,
+    "flatchr": _url_to_slug_flatchr,
+    "jobylon": _url_to_slug_jobylon,
+    "homerun": _url_to_slug_homerun,
+    "occupop": _url_to_slug_occupop,
 }
 
 
@@ -1480,6 +1663,18 @@ CC_PLATFORM_PATTERNS = {
     # wasted effort while the scraper itself can't turn them into job
     # data — see ats_scrapers.py's scrape_successfactors comment for why
     # it's blacklisted. Revisit only if that scraping blocker is ever lifted.
+    # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon — all 4 have a
+    # real shared-domain URL shape to query for. Homerun deliberately has
+    # NO entry here — its customers run on their OWN domain (jobs.
+    # {company-domain}), not a shared *.homerun.co subdomain, so there is
+    # no single host pattern to query Common Crawl for; Occupop also has
+    # NO entry here — same reasoning as SuccessFactors above (confirmed
+    # JS-rendered SPA, no working scraper yet, so discovering slugs for it
+    # would be wasted effort until that's fixed).
+    "pageup": ["careers.pageuppeople.com/*"],
+    "pinpoint": ["*.pinpointhq.com/*"],
+    "flatchr": ["*.flatchr.io/*", "careers.flatchr.io/company/*"],
+    "jobylon": ["emp.jobylon.com/companies/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -1526,6 +1721,12 @@ CC_EXTRACTORS = {
     # No SuccessFactors entry here on purpose — kept out of BOTH dicts
     # together, matching keys as this dict's own comment above requires.
     "brassring": _url_to_slug_brassring,
+    # New (2026-09) — kept in sync with CC_PLATFORM_PATTERNS above (no
+    # Homerun/Occupop entries here either — see that dict's comment):
+    "pageup": _url_to_slug_pageup,
+    "pinpoint": _url_to_slug_pinpoint,
+    "flatchr": _url_to_slug_flatchr,
+    "jobylon": _url_to_slug_jobylon,
 }
 
 
