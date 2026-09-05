@@ -96,6 +96,7 @@ from classifier import (  # noqa: E402
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
     get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
+    log_egress_summary,
 )
 
 logging.basicConfig(
@@ -124,14 +125,25 @@ def _shard_of(website_url: str, total_shards: int) -> int:
 def load_pages(shard: int = 0, total_shards: int = 1) -> list[dict]:
     """Load {career_page_url, website_url} pairs from archive_ii, sharded
     the same way crawl_i.py shards archive_i — a stable hash rather than a
-    running index so every shard gets an even, source-agnostic slice."""
-    pages = get_archive_ii_pages()
+    running index so every shard gets an even, source-agnostic slice.
+
+    2026-09: sharding now happens server-side (get_archive_ii_pages() passes
+    shard_index/shard_count straight through to the archive_ii_shard
+    Postgres RPC) so each shard's Supabase fetch only ever downloads its
+    own ~1/total_shards slice of archive_ii, instead of every shard
+    downloading the full table and discarding the rest client-side.
+    get_archive_ii_pages() falls back to the old full-table-then-filter
+    behavior (using this same _shard_of() hash) if the RPC is ever
+    unavailable."""
+    if total_shards > 1:
+        pages = get_archive_ii_pages(shard_index=shard, shard_count=total_shards)
+    else:
+        pages = get_archive_ii_pages()
     if not pages:
         log.warning("No pages found in Supabase archive_ii!")
         return []
 
     if total_shards > 1:
-        pages = [p for p in pages if _shard_of(p["website_url"], total_shards) == shard]
         log.info(f"Shard {shard}/{total_shards}: {len(pages)} career pages assigned")
 
     return pages
@@ -374,6 +386,65 @@ def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) 
     }
 
 
+# ── 2026-09: best-effort /apply page augmentation ──────────────────────
+# Some ATS platforms structure a job's own URL as {base}/{company}/
+# {opaque-id}[/...] — e.g. Ashby (jobs.ashbyhq.com/{company}/{uuid}) and
+# Gem-hosted boards (jobs.gem.com/{company}/{opaque-token}) — and
+# additionally serve a SEPARATE /apply sibling page under that same
+# opaque id, carrying the actual application FORM fields (visa
+# sponsorship, work-authorization, clearance, EEO questions, etc.) —
+# wording that's sometimes absent from the job posting/description page
+# itself but present only on the form a candidate would actually see.
+# Deliberately conservative: only guessed when the URL's last path
+# segment looks like an opaque id (long alnum/-/_ token, not a readable
+# word/slug), never on a URL that's already an /apply page, and skipped
+# entirely when the posting's own description already carries visa/
+# clearance language (no point spending an extra request confirming what
+# is already known). Best-effort only — any failure here just means the
+# posting is returned as-is, exactly like before this existed.
+_ID_LIKE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]{16,}$")
+_HAS_VISA_OR_CLEARANCE_SIGNAL_RE = re.compile(
+    r"visa|sponsor|clearance|work\s*authoriz|eligib(le|ility)\s*to\s*work", re.I)
+
+
+def _guess_apply_url(job_url: str) -> str | None:
+    try:
+        parsed = urlparse(job_url)
+    except Exception:
+        return None
+    path = parsed.path.rstrip("/")
+    if not path or path.endswith("/apply"):
+        return None
+    segments = [s for s in path.split("/") if s]
+    if len(segments) < 2 or not _ID_LIKE_SEGMENT_RE.match(segments[-1]):
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}{path}/apply"
+
+
+async def _augment_with_apply_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                                    stats: dict, job: dict) -> None:
+    """Mutates job["description"] in place if the guessed /apply page is
+    reachable and actually carries visa/clearance-relevant text — never
+    raises, never removes/blocks the posting either way."""
+    if _HAS_VISA_OR_CLEARANCE_SIGNAL_RE.search(job.get("description") or ""):
+        return
+    apply_url = _guess_apply_url(job.get("url", ""))
+    if not apply_url:
+        return
+    try:
+        async with sem:
+            fetched = await node._fetch_page(session, apply_url, stats)
+    except Exception:
+        return
+    if not fetched:
+        return
+    _, apply_html = fetched
+    apply_text = _strip_html(apply_html, max_len=4000)
+    if _HAS_VISA_OR_CLEARANCE_SIGNAL_RE.search(apply_text):
+        job["description"] = f"{job.get('description') or ''}\n\n{apply_text}"
+        stats["apply_page_augmented"] += 1
+
+
 def _company_name_from_domain(website_url: str) -> str:
     host = urlparse(website_url).netloc or website_url
     host = re.sub(r"^www\.", "", host)
@@ -417,6 +488,7 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     if jsonld_jobs:
         stats["jsonld_pages"] += 1
         stats["jsonld_postings"] += len(jsonld_jobs)
+        await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j) for j in jsonld_jobs))
         return jsonld_jobs
 
     candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, final_url)
@@ -437,6 +509,7 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     results = await asyncio.gather(*(_fetch_and_confirm(c) for c in candidates))
     confirmed = [r for r in results if r]
     stats["heuristic_postings"] += len(confirmed)
+    await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j) for j in confirmed))
     return confirmed
 
 
@@ -691,6 +764,8 @@ async def _run_shard(shard: int, total_shards: int) -> None:
              f"postings confirmed")
     log.info(f"  Unreachable/no-signal: {stats['page_unreachable']} pages unreachable, "
              f"{stats['no_postings_found']} pages with no postings found")
+
+    log_egress_summary(label=f"crawl_ii shard {shard}/{total_shards}")
 
 
 def main():
