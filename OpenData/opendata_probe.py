@@ -200,11 +200,16 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                     log.info("  checkpoint shows this shard is already fully done — nothing left to crawl.")
                     return
                 domains = domains[start_at:]
-            # capture_inhouse=False (2026-08): OpenData carries no employee-
-            # count/size signal, so a no-ATS hit here can't be told apart
-            # from a genuine small business — this source no longer feeds
-            # archive_ii at all, only archive_i (known-ATS hits still write
-            # normally either way).
+            # 2026-09, REVISED: OpenData carries no employee-count/size
+            # column at all (never has — this dataset's schema is just
+            # name/domain/country), so a no-ATS hit here used to be
+            # indistinguishable from a genuine small business and this
+            # source fed archive_i only. Now that node.py's company-
+            # maturity heuristic exists (HTML signals + a DNS MX check,
+            # not employee count), that's a real substitute quality bar —
+            # capture_inhouse=True here, with no capture_inhouse_domains
+            # set, is exactly what turns the maturity gate ON for this
+            # source (see crawl_batch's docstring).
             _, elapsed, rate, time_budget_hit = await node.crawl_batch(
                 domains, session, sem, stats, parse_pool, target_geo_countries,
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
