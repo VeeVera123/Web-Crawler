@@ -31,8 +31,9 @@ That matters beyond just simplicity: an earlier version of this script DID
 load the vertices file (119.7M rows) fully into memory to resolve node ids
 the ranks file turns out to name directly, and that was a real out-of-
 memory failure on a live run. Skipping it means this script only ever
-holds domains ranked within the last band's boundary (80M, see RANK_BANDS
-below) in memory, never the full ~120M-domain graph.
+holds domains ranked within the last band's boundary (40M as of the
+2026-09 recalibration, was 80M — see RANK_BANDS below) in memory, never
+the full ~120M-domain graph.
 
 Usage:
     python webgraph_seed.py --release cc-main-2025-mar-apr-may
@@ -66,7 +67,8 @@ sys.path.insert(0, os.path.join(_ROOT, "Main"))
 
 BASE_URL = "https://data.commoncrawl.org/projects/hyperlinkgraph"
 
-# Six graduated rank bands (S+/S/A/B/C/D) by harmonic centrality — the
+# Four graduated rank bands (S+/S/A/B, plus implicit D — the old,
+# weakest "C" tier was dropped 2026-09) by harmonic centrality — the
 # metric Common Crawl's own blog post describes first and the one most
 # literature treats as the more robust of the two for "is this a real,
 # well-connected site". MUST stay in sync with node.py's
@@ -80,16 +82,31 @@ BASE_URL = "https://data.commoncrawl.org/projects/hyperlinkgraph"
 # at rank 44,860,492 out of ~118.0M domain nodes (roughly the 62nd
 # percentile) — nowhere near any flat cutoff being considered, which would
 # have given it ZERO WebGraph credit despite being real. Graduated bands
-# let it land in "B" instead and earn a small, honest amount of credit.
+# let a domain like that earn a small, honest amount of credit instead of
+# an all-or-nothing cliff.
 #
-# Boundaries reasoned from Common Crawl's own published graph stats for
-# this era of releases (118.0M domain nodes; largest strongly-connected
-# component 30.0M/25.4%; 63.2%/74.5M nodes "dangling"/no outbound links —
-# a rough proxy for peripheral sites) — see node.py's WEBGRAPH_RANK_BANDS
-# comment for the full reasoning per band. Domains ranked below the last
-# band (or never found in the ranks file) get NO signal — band "D",
-# intentionally worth 0: this is where most parked/junk domains live,
-# since nobody links to a parking page.
+# 2026-09 RECALIBRATION: the last band's ceiling lowered from 80,000,000
+# to 40,000,000 (the old, weakest "C" band dropped entirely) and every
+# band's POINT VALUE lowered too (see node.py's WEBGRAPH_RANK_BANDS —
+# points live there, not here) — a real archive_ii false positive
+# (olphnm.org, a small parish church site with none of the Quality
+# Index's other signals) made it through purely on WebGraph rank alone,
+# because the old points let even a single top band clear the whole
+# acceptance bar by itself. MUST stay in sync with node.py's
+# WEBGRAPH_RANK_BANDS boundaries — see that comment for the full
+# reasoning (current published graph stats, the precision/recall
+# tradeoff, and the explicit note that heli.technology itself — rank
+# 44,860,492 — now falls just past this tighter 40M ceiling and gets
+# zero credit, an intentional result of the new, higher target).
+#
+# Boundaries reasoned from Common Crawl's own current published graph
+# stats (cc-main-2026-jun-jul-aug: 119,722,885 domain nodes; 76,352,306
+# (63.77%) "dangling"/no-outbound-links nodes — a rough proxy for
+# peripheral sites) — see node.py's WEBGRAPH_RANK_BANDS comment for the
+# full per-band reasoning. Domains ranked below the last band (or never
+# found in the ranks file) get NO signal — band "D", intentionally worth
+# 0: this is where most parked/junk domains (and, post-recalibration,
+# most small/midsize real businesses too) live.
 RANK_BANDS = (
     # (label, INCLUSIVE rank upper bound, 0-based) — checked in order,
     # first match wins, so rank <= bound assigns that label. Points for
@@ -98,8 +115,7 @@ RANK_BANDS = (
     ("S+", 1_000_000),
     ("S", 10_000_000),
     ("A", 25_000_000),
-    ("B", 50_000_000),
-    ("C", 80_000_000),
+    ("B", 40_000_000),
 )
 
 PROGRESS_EVERY = 1_000_000
@@ -151,7 +167,7 @@ _RANKS_HEADER_PREFIX = "#"
 
 
 def _band_for_rank(rank: int) -> str | None:
-    """0-based rank -> band label ("S+".."C"), or None if it falls below
+    """0-based rank -> band label ("S+".."B"), or None if it falls below
     every band (band "D" — no signal, see RANK_BANDS' comment above).
     Boundaries are INCLUSIVE — rank <= upper_bound earns that label."""
     for label, upper_bound in RANK_BANDS:
@@ -178,12 +194,12 @@ def _parse_ranks_row(line: str, line_index: int) -> str | None:
     return _reverse_domain(host_rev)
 
 
-_LAST_BAND_CUTOFF = RANK_BANDS[-1][1]  # 80,000,000 — INCLUSIVE, so rank 80,000,000 itself still counts
+_LAST_BAND_CUTOFF = RANK_BANDS[-1][1]  # 40,000,000 (2026-09, was 80,000,000) — INCLUSIVE, so rank 40,000,000 itself still counts
 
 
 def build_ranks(ranks_url: str) -> dict[str, str]:
     """Streams the ranks file (already in rank order — see the confirmed-
-    format note above) and assigns a band label (S+.."C") straight from
+    format note above) and assigns a band label (S+.."B") straight from
     each row's own host_rev column via _band_for_rank() — no vertices
     file, no id join, no ~120M-entry dict. Stops reading once past the
     last band's boundary (no need to stream the rest — anything beyond
