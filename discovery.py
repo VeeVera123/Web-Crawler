@@ -17,18 +17,22 @@ Sources:
      fetch_commoncrawl_slugs docstring for why, and --cc-shard/
      --cc-total-shards below)
   5. Wayback Machine CDX (ADP-only supplemental discovery)
-  6. Y Combinator (yc-oss/api — ~6k companies, free, no auth. Each
-     company's own website is fetched and scanned for a link to a
-     known ATS domain — this is net-new discovery, not just another
-     dump of the same companies the other sources already have,
-     since YC startups skew toward exactly the modern ATS platforms
-     — Greenhouse/Lever/Ashby/Rippling — this project already covers
-     well, just companies too new/small to be in the bigger dumps yet)
-  7. TheirStack (freemium technology-usage API — 50 company credits/
+  6. Y Combinator — REMOVED 2026-09 (see main()'s Source 6 comment).
+     fetch_yc_slugs() itself is left defined/unused.
+  7. Latmay H.F (huggingface.co/datasets/latmay/ats-career-page-urls —
+     69,638 rows, each already an ATS URL resolved by the dataset
+     owner. No live crawl needed — an offline pass through URL_TO_SLUG.
+     Logs to Supabase under source="Latmay H.F".)
+  8. Edward H.F (huggingface.co/datasets/edwarddgao/open-apply-jobs —
+     31M+ individual job-posting rows across 375 Parquet shards, no
+     ATS label or dedup by the owner. Only apply_url is ever read
+     (column-projected at the Parquet level); every URL is matched
+     against URL_TO_SLUG. Logs to Supabase under source="Edward H.F".)
+  9. TheirStack (freemium technology-usage API — 50 company credits/
      month on the free tier, so this is a small monthly trickle for
      gap-filling thin platforms, not a bulk source. Needs a free
      THEIRSTACK_API_KEY — sign up at theirstack.com, no credit card)
-  8. HTTP Archive (public BigQuery dataset — real technology-fingerprint
+  10. HTTP Archive (public BigQuery dataset — real technology-fingerprint
      detection, i.e. the same method commercial "companies using X"
      trackers are built on, run monthly against millions of crawled
      URLs by Google/HTTP Archive. Catches ATS integrations embedded via
@@ -52,9 +56,10 @@ Sources:
   fetch_commoncrawl_slugs), since Common Crawl was already the slowest
   single source in the matrix and actually benefits from splitting.
 
-Runs weekly (Sunday) via GitHub Actions, as an 8-source, 9-job matrix —
-Common Crawl split across 2 platform-sharded jobs, the other 7 sources
-one job each, all in parallel (see .github/workflows/discovery.yml) —
+Runs weekly (Sunday) via GitHub Actions, as a 7-source, 8-job matrix
+(YC removed 2026-09, Latmay H.F + Edward H.F added) — Common Crawl
+split across 2 platform-sharded jobs, the other 6 sources one job
+each, all in parallel (see .github/workflows/discovery.yml) —
 rather than one job running everything back-to-back. Each source (or
 Common Crawl shard) is already an independent fetch-and-resolve pass with
 its own cost profile (bulk single download vs. thousands of live
@@ -72,7 +77,8 @@ Usage:
     python discovery.py --source openpostings  # OpenPostings only
     python discovery.py --source commoncrawl   # Common Crawl only
     python discovery.py --source wayback_adp   # Wayback CDX (ADP) only
-    python discovery.py --source yc            # Y Combinator only
+    python discovery.py --source latmay        # Latmay H.F (Hugging Face) only
+    python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
     python discovery.py --source commoncrawl --cc-shard 0 --cc-total-shards 2
@@ -1286,13 +1292,31 @@ def _url_to_slug_homerun(url: str) -> str | None:
     hostname when fetching, never to look up a shared-domain subdomain).
     Only matches hosts that actually look like a Homerun careers site
     (a 'jobs.' subdomain) to avoid capturing an unrelated URL that just
-    happens to flow through this converter."""
+    happens to flow through this converter.
+
+    2026-09: found (via the new Latmay H.F/Edward H.F sources' own unit
+    tests) to be over-broad enough to steal Dayforce's
+    jobs.dayforcehcm.com — the ONE OTHER platform in this file that
+    also happens to use a 'jobs.' subdomain, but on a SHARED vendor
+    domain (dayforcehcm.com), not each customer's own domain the way
+    Homerun actually works. Since URL_TO_SLUG is iterated in
+    insertion order and this entry comes before "dayforce" in the
+    dict, every dayforce URL was silently resolving to a bogus
+    "homerun" slug (the literal hostname jobs.dayforcehcm.com) instead
+    of ever reaching _url_to_slug_dayforce — a real, pre-existing bug,
+    not something introduced by the new sources; it just took a URL
+    outside this file's earlier live-crawl code paths (which happened
+    to never hit this specific host) to surface it. Excluding the one
+    known shared-domain collision here is the minimal, safe fix —
+    _url_to_slug_dayforce's own host check already requires the exact
+    jobs.dayforcehcm.com host, so nothing about Dayforce resolution
+    depends on this exclusion, only Homerun's false-positive on it."""
     parsed = urlparse(url)
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").lower()
     if not host or host in SKIP_SLUGS:
         return None
-    if host.startswith("jobs."):
-        slug = host.lower()
+    if host.startswith("jobs.") and host != "jobs.dayforcehcm.com":
+        slug = host
         if slug not in SKIP_SLUGS:
             return slug
     return None
@@ -1314,6 +1338,70 @@ def _url_to_slug_occupop(url: str) -> str | None:
     slug = host[: -len(".occupop-careers.com")].lower()
     if slug and slug not in SKIP_SLUGS and slug != "www":
         return slug
+    return None
+
+
+# 2026-09: Dayforce / Getro / JazzHR added — the top 3 platforms by volume
+# in the latmay/ats-career-page-urls HF dataset (2181/1804/1325 rows
+# respectively) that this project didn't already recognize. URL shapes
+# below are confirmed against REAL sample rows pulled live from that
+# dataset (not guessed from memory) — see this session's own research:
+#   Dayforce: jobs.dayforcehcm.com/api/geo/associated, /api/geo/e0229, ...
+#   Getro:    getro.getro.com/, 1up.getro.com/, 3m.getro.com/, ...
+#   JazzHR:   l2t.applytojob.com/, 10xhealthsystem.applytojob.com/, ...
+# These three are SLUG-DISCOVERY ONLY for now — none are in SUPPORTED_ATS,
+# and no ats_scrapers.py scraper was added for them. Dayforce/Getro are
+# brand new here and would need their own real job-listing-API research
+# (this dataset only confirms the CAREERS-PAGE URL shape, not the
+# underlying jobs API) before a scraper could be written responsibly.
+# JazzHR is a special case: it's the SAME platform as the old "applytojob"
+# entry removed 2026-08 (see SUPPORTED_ATS comment above) — that removal
+# was for a JD-enrichment/US-eligibility-filtering reliability problem in
+# the SCRAPER, not the URL pattern, so re-enabling scraping here would
+# resurrect that same known issue unless it's actually fixed first.
+def _url_to_slug_dayforce(url: str) -> str | None:
+    """Dayforce (Ceridian) — ALL customers share one domain
+    (jobs.dayforcehcm.com); the tenant code is the last /api/geo/{tenant}
+    path segment, not a subdomain."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host != "jobs.dayforcehcm.com":
+        return None
+    m = re.match(r"^/api/geo/([^/]+)/?$", parsed.path)
+    if not m:
+        return None
+    tenant = m.group(1)
+    if tenant.lower() not in SKIP_SLUGS and _looks_like_real_slug(tenant):
+        return tenant
+    return None
+
+
+def _url_to_slug_getro(url: str) -> str | None:
+    """Getro — subdomain-per-tenant on getro.com (VC-portfolio/talent-
+    network job boards)."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(".getro.com"):
+        return None
+    tenant = host[: -len(".getro.com")]
+    if (tenant and tenant not in ("www", "app") and tenant not in SKIP_SLUGS
+            and _looks_like_real_slug(tenant)):
+        return tenant
+    return None
+
+
+def _url_to_slug_jazzhr(url: str) -> str | None:
+    """JazzHR — subdomain-per-tenant on applytojob.com. Same platform as
+    the old 'applytojob' entry removed 2026-08 for a scraper-side JD-
+    filtering issue (see comment above) — URL pattern itself is unaffected
+    and was always correct."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(".applytojob.com"):
+        return None
+    tenant = host[: -len(".applytojob.com")]
+    if tenant and tenant != "www" and tenant not in SKIP_SLUGS and _looks_like_real_slug(tenant):
+        return tenant
     return None
 
 
@@ -1356,6 +1444,11 @@ URL_TO_SLUG = {
     "jobylon": _url_to_slug_jobylon,
     "homerun": _url_to_slug_homerun,
     "occupop": _url_to_slug_occupop,
+    # New (2026-09): slug-discovery only, see the block comment above these
+    # three functions — no scraper/SUPPORTED_ATS entry yet.
+    "dayforce": _url_to_slug_dayforce,
+    "getro": _url_to_slug_getro,
+    "jazzhr": _url_to_slug_jazzhr,
 }
 
 
@@ -2395,7 +2488,215 @@ def fetch_yc_slugs(limit: int = 2000, max_workers: int = 15) -> dict[str, dict[s
 
 
 # ══════════════════════════════════════════════════════════
-# SOURCE 7: TheirStack (freemium technology-usage API)
+# SOURCE 7 & 8: Hugging Face bulk datasets (Latmay + Edward)
+# ══════════════════════════════════════════════════════════
+# Two public HF datasets hand over an ATS URL directly per row — unlike
+# YC/Common Crawl/OpenData, which discover an ATS link by live-crawling
+# a company's own homepage from just a name+domain, these need no crawl
+# at all: every row already IS an ATS URL, so this is an offline pass
+# through the existing URL_TO_SLUG dispatch table, not a live-discovery
+# source. Each gets its own function (never run on a shared seed/probe
+# pipeline, per the user's explicit instruction) and its own literal
+# Supabase `source` value: "Latmay H.F" / "Edward H.F".
+#
+#   latmay/ats-career-page-urls (69,638 rows: canonical_url,
+#     ats_platform). ats_platform is pre-labeled by the dataset owner,
+#     but rather than trust a fragile label->URL_TO_SLUG-key mapping,
+#     canonical_url is matched against EVERY known extractor — same
+#     "try every resolver" pattern this file already uses in
+#     resolve_candidate_page_to_ats_slug's step (1) — so this stays
+#     correct even if a label's wording doesn't match this file's slug
+#     naming exactly.
+#   edwarddgao/open-apply-jobs (31M+ individual job-posting rows,
+#     no ats_platform label, no dedup by the owner — the same
+#     company's board can appear thousands of times across its own job
+#     postings). apply_url is the only field ever read: every other
+#     column (description_html etc.) is projected away at the Parquet
+#     read itself so it's never pulled over the wire or held in memory.
+#
+# Both resolve via HF's auto-converted Parquet export
+# (huggingface.co/api/datasets/{repo}/parquet) rather than parsing the
+# dataset's original storage format directly — confirmed live (2026-09)
+# for both repos: {"default": {"train": [...file urls...]}}, 1 file for
+# Latmay, 375 for Edward.
+#
+# HF egress: contrary to this project's own assumption of a 20TB cap,
+# huggingface.co/docs/hub/storage-limits documents NO egress/bandwidth
+# limit for public dataset downloads of any size — only a rolling
+# 5-minute REQUEST-RATE window on /resolve/ URLs is documented
+# (huggingface.co/docs/hub/rate-limits: 3,000/5min anonymous). A
+# handful of Parquet file downloads, however large each file, costs a
+# handful of requests — nowhere near that window regardless.
+
+def _hf_parquet_urls(repo: str) -> list[str]:
+    """Resolve a public HF dataset's auto-converted Parquet export file
+    URL(s) via the datasets-server Parquet API. Works for any public
+    dataset regardless of its original storage format. Returns [] on
+    any failure (network, unexpected response shape, dataset not yet
+    Parquet-converted) rather than raising — a source outage degrades
+    to "0 slugs from this source" instead of crashing the whole
+    discovery run."""
+    try:
+        r = requests.get(f"https://huggingface.co/api/datasets/{repo}/parquet",
+                          timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        urls: list[str] = []
+        for config_splits in data.values():
+            for split_urls in config_splits.values():
+                urls.extend(split_urls)
+        return urls
+    except Exception as e:
+        log.warning(f"HF Parquet resolve failed for {repo}: {e}")
+        return []
+
+
+def _resolve_url_via_url_to_slug(url: str) -> tuple[str, str] | None:
+    """Match `url` against every known ATS URL pattern (URL_TO_SLUG).
+    Same 'try every resolver' logic already used in
+    resolve_candidate_page_to_ats_slug's step (1) — pulled out standalone
+    here since both HF sources need it directly, with no page fetch/
+    HTML-scan step around it."""
+    if not url:
+        return None
+    for ats, resolver in URL_TO_SLUG.items():
+        try:
+            slug = resolver(url)
+        except Exception:
+            slug = None
+        if slug:
+            return ats, slug
+    return None
+
+
+def fetch_latmay_slugs() -> dict[str, dict[str, str]]:
+    """latmay/ats-career-page-urls — 69,638 rows of {canonical_url,
+    ats_platform}. Small enough to load in one pass, no time-budget/
+    streaming logic needed (contrast fetch_edwarddgao_slugs below)."""
+    import pyarrow.parquet as pq
+
+    file_urls = _hf_parquet_urls("latmay/ats-career-page-urls")
+    if not file_urls:
+        log.warning("Latmay H.F: no Parquet files resolved, skipping source")
+        return {}
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    processed = 0
+    start = time.monotonic()
+    _PROGRESS_EVERY = 5_000
+
+    for file_url in file_urls:
+        try:
+            r = requests.get(file_url, timeout=120)
+            r.raise_for_status()
+        except Exception as e:
+            log.warning(f"Latmay H.F: failed to download {file_url}: {e}")
+            continue
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+            tmp.write(r.content)
+            tmp.flush()
+            table = pq.read_table(tmp.name, columns=["canonical_url"])
+
+        for url in table.column("canonical_url").to_pylist():
+            processed += 1
+            hit = _resolve_url_via_url_to_slug(url)
+            if hit:
+                actual_ats, slug = hit
+                slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+
+            if processed % _PROGRESS_EVERY == 0:
+                elapsed = max(time.monotonic() - start, 0.001)
+                resolved = sum(len(s) for s in slugs_by_ats.values())
+                log.info(f"Latmay H.F: {processed:,} processed "
+                         f"({processed / elapsed:,.1f}/sec), {resolved:,} "
+                         f"resolved ({resolved / processed * 100:.1f}%)")
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} slugs from Latmay H.F")
+    log.info(f"Latmay H.F summary: {processed:,} rows processed, {total:,} "
+             f"slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
+    return slugs_by_ats
+
+
+def fetch_edwarddgao_slugs(time_budget_minutes: int = 300) -> dict[str, dict[str, str]]:
+    """edwarddgao/open-apply-jobs — 31M+ individual job-posting rows
+    across 375 Parquet shards. Only `apply_url` is ever read — every
+    other column (description_html, salary fields, etc.) is projected
+    away at the Parquet read itself, never pulled over the wire or held
+    in memory. No dedup by the dataset owner (same company's board can
+    appear thousands of times across its postings) — harmless here
+    since slugs accumulate into a dict keyed by slug, naturally deduped.
+
+    `time_budget_minutes` self-stops gracefully and keeps whatever was
+    resolved so far, same pattern as fetch_httparchive_slugs — 375
+    shards at 31M+ total rows is real download+parse volume, and a
+    hard CI job timeout mid-shard would otherwise lose an entire run's
+    progress instead of the partial-but-real result a graceful stop
+    keeps. Runs are idempotent (on_conflict upsert), so an
+    incomplete-shard-coverage run still converges over repeat runs."""
+    import pyarrow.parquet as pq
+
+    file_urls = _hf_parquet_urls("edwarddgao/open-apply-jobs")
+    if not file_urls:
+        log.warning("Edward H.F: no Parquet files resolved, skipping source")
+        return {}
+
+    log.info(f"Edward H.F: {len(file_urls)} Parquet shards to process "
+             f"(time budget: {time_budget_minutes}min, 0 = no budget)")
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    processed = 0
+    start = time.monotonic()
+    _PROGRESS_EVERY = 5_000
+    budget_seconds = time_budget_minutes * 60 if time_budget_minutes else None
+
+    for shard_i, file_url in enumerate(file_urls):
+        if budget_seconds and (time.monotonic() - start) >= budget_seconds:
+            log.info(f"Edward H.F: time budget reached after {shard_i}/"
+                     f"{len(file_urls)} shards — stopping gracefully, "
+                     f"keeping {processed:,} rows' worth of progress.")
+            break
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+                with requests.get(file_url, timeout=300, stream=True) as r:
+                    r.raise_for_status()
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        tmp.write(chunk)
+                tmp.flush()
+
+                pf = pq.ParquetFile(tmp.name)
+                for batch in pf.iter_batches(columns=["apply_url"], batch_size=50_000):
+                    for url in batch.column("apply_url").to_pylist():
+                        processed += 1
+                        hit = _resolve_url_via_url_to_slug(url)
+                        if hit:
+                            actual_ats, slug = hit
+                            slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+
+                        if processed % _PROGRESS_EVERY == 0:
+                            elapsed = max(time.monotonic() - start, 0.001)
+                            resolved = sum(len(s) for s in slugs_by_ats.values())
+                            log.info(f"Edward H.F: shard {shard_i + 1}/{len(file_urls)}, "
+                                     f"{processed:,} processed ({processed / elapsed:,.1f}/sec), "
+                                     f"{resolved:,} resolved ({resolved / processed * 100:.1f}%)")
+        except Exception as e:
+            log.warning(f"Edward H.F: shard {shard_i + 1}/{len(file_urls)} "
+                        f"({file_url}) failed, skipping: {e}")
+            continue
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} slugs from Edward H.F")
+    log.info(f"Edward H.F summary: {processed:,} rows processed, {total:,} "
+             f"slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE 9: TheirStack (freemium technology-usage API)
 # ══════════════════════════════════════════════════════════
 
 def fetch_theirstack_slugs(max_companies: int = 40) -> dict[str, dict[str, str]]:
@@ -2631,7 +2932,39 @@ def fetch_httparchive_candidate_urls(limit_per_tech: int = 200_000,
         ).result())
         crawl_dates = [r.date for r in date_rows]
     except Exception as e:
-        log.warning(f"HTTP Archive: failed to find recent crawl dates: {e}")
+        # 2026-09: "Quota exceeded: ... free query bytes scanned" is
+        # Google's BigQuery SANDBOX quota specifically — a monthly cap that
+        # applies ONLY to a project with no Cloud Billing account attached,
+        # separate from (and much stricter than) the standard 1 TiB/month
+        # BigQuery free tier every billing-enabled project also gets at no
+        # charge. Once a sandbox project hits it, EVERY query fails this
+        # way until next month's reset — including a trivial metadata query
+        # like this one, which is why this can happen even right after a
+        # "cheap" query succeeded elsewhere. Confirmed via Google's own
+        # troubleshooting docs (cloud.google.com/bigquery/docs/
+        # troubleshoot-quotas) and HTTP Archive's own BigQuery community
+        # forum: the fix is attaching a Cloud Billing account to
+        # GCP_PROJECT_ID (console.cloud.google.com/billing) — this is
+        # unrelated to actually being charged; on the standard 1 TiB/month
+        # free tier, staying under that amount still costs nothing, it
+        # just isn't hard-blocked the way the no-billing sandbox is. Called
+        # out explicitly here (rather than left as a generic "why did this
+        # 403" mystery) since this exact error string is otherwise easy to
+        # mistake for a code bug.
+        if "free query bytes scanned" in str(e):
+            log.warning(
+                "HTTP Archive: BigQuery SANDBOX quota exhausted for this "
+                "project (this is Google's no-billing-account monthly cap, "
+                "not this project's own crawl-date query being expensive — "
+                "every query fails this way until it resets or a Cloud "
+                "Billing account is attached). Fix: attach a billing "
+                "account to GCP_PROJECT_ID at "
+                "console.cloud.google.com/billing — this unlocks the "
+                "standard 1 TiB/month BigQuery free tier, which is NOT the "
+                "same limit and isn't consumed yet. Skipping HTTP Archive "
+                f"for this run. ({e})")
+        else:
+            log.warning(f"HTTP Archive: failed to find recent crawl dates: {e}")
         return {}
 
     if not crawl_dates:
@@ -2762,16 +3095,21 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
     stopped_early = False
     start = time.monotonic()
     last_heartbeat = start
+    last_logged_processed = 0
+    last_hit: tuple[str, str] | None = None
     # 2026-09: this source used to log nothing at all between the initial
     # "resolving up to N candidate pages" line and the final summary —
     # against a candidate list in the tens/hundreds of thousands with a
     # multi-hour time budget, that made a perfectly healthy run look
-    # indistinguishable from a hung one in the CI log. A heartbeat every
-    # 60s of wall-clock (not every N candidates, since throughput varies a
-    # lot with how many dead/slow sites are in the current batch) plus a
-    # line for every actual resolution fixes that without spamming the log
-    # with one line per candidate that resolves to nothing (the vast
-    # majority — most candidates just don't pan out, that's expected).
+    # indistinguishable from a hung one in the CI log. FIX (this session):
+    # was logging a line on every single hit — against a real run with
+    # thousands of resolutions/minute that's the opposite problem (log
+    # spam, four lines in the same second). Now batched to the same
+    # cadence every other bulk source in this project uses: one line every
+    # 5,000 candidates PROCESSED (not every hit), showing the last company
+    # actually resolved plus rows/sec and running hit% — a 60s wall-clock
+    # heartbeat stays as backup for a slow stretch that never reaches 5,000.
+    _PROGRESS_EVERY = 5_000
     _HEARTBEAT_SECONDS = 60
     budget_seconds = resolve_time_budget_minutes * 60 if resolve_time_budget_minutes else None
 
@@ -2814,10 +3152,17 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
                 # just filed under the platform actually confirmed.
                 slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
                 resolved += 1
-                log.info(f"HTTP Archive: resolved {actual_ats} -> {slug} "
-                         f"({resolved} resolved / {processed}/{len(all_urls)} processed)")
+                last_hit = (actual_ats, slug)
             now = time.monotonic()
-            if now - last_heartbeat >= _HEARTBEAT_SECONDS:
+            if processed - last_logged_processed >= _PROGRESS_EVERY:
+                last_logged_processed = processed
+                last_heartbeat = now
+                elapsed = now - start
+                hit_note = f", last: {last_hit[0]} -> {last_hit[1]}" if last_hit else ""
+                log.info(f"HTTP Archive: ...{processed:,}/{len(all_urls):,} processed "
+                         f"({processed / max(elapsed, 0.001):,.1f}/sec), {resolved:,} resolved "
+                         f"({resolved / processed * 100:.1f}%){hit_note}")
+            elif now - last_heartbeat >= _HEARTBEAT_SECONDS:
                 last_heartbeat = now
                 log.info(f"HTTP Archive: still working — {processed}/{len(all_urls)} processed, "
                          f"{resolved} resolved so far, {(now - start) / 60:.1f}min elapsed")
@@ -3053,14 +3398,16 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Discovery: populate Supabase slug_registry from 8 sources"
+        description="Discovery: populate Supabase slug_registry from 7 sources"
     )
     parser.add_argument(
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
-                 "wayback_adp", "yc", "theirstack", "httparchive", "all"],
+                 "wayback_adp", "theirstack", "httparchive",
+                 "latmay", "edwarddgao", "all"],
         default="all",
-        help="Which source to pull from (default: all)",
+        help="Which source to pull from (default: all). 'yc' removed "
+             "2026-09 — see the module docstring.",
     )
     parser.add_argument(
         "--crawls", type=int, default=6,
@@ -3078,11 +3425,6 @@ def main():
         help="Total number of Common Crawl platform-shards (default: 1, "
              "i.e. no sharding). discovery.yml runs this as 2 (shards 0 "
              "and 1) as separate matrix jobs.",
-    )
-    parser.add_argument(
-        "--yc-limit", type=int, default=2000,
-        help="Max YC companies to attempt per run (default: 2000; 0 = all "
-             "~6k — see fetch_yc_slugs docstring for why this is capped)",
     )
     parser.add_argument(
         "--theirstack-max", type=int, default=40,
@@ -3142,6 +3484,13 @@ def main():
              "no sharding).",
     )
     parser.add_argument(
+        "--edwarddgao-time-budget-minutes", type=int, default=300,
+        help="Self-stop gracefully after this many minutes downloading/"
+             "resolving Edward H.F's 375 Parquet shards, keeping whatever "
+             "was resolved so far (default: 300; 0 = no budget, run to "
+             "full completion — see fetch_edwarddgao_slugs docstring).",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Count slugs without writing to Supabase",
     )
@@ -3160,8 +3509,8 @@ def main():
     log.info("=" * 60)
     log.info("DISCOVERY — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
-    log.info("           + Wayback CDX (ADP) + Y Combinator + TheirStack")
-    log.info("           + HTTP Archive (BigQuery)")
+    log.info("           + Wayback CDX (ADP) + Latmay H.F + Edward H.F")
+    log.info("           + TheirStack + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
     grand_total = 0
@@ -3246,23 +3595,50 @@ def main():
         else:
             grand_total += wb_total
 
-    # Source 6: Y Combinator (net-new companies too small/new for the
-    # bulk dumps above — see fetch_yc_slugs docstring)
-    if args.source in ("yc", "all"):
-        log.info("\n--- Y COMBINATOR (own-website ATS discovery) ---")
-        yc_slugs = fetch_yc_slugs(limit=args.yc_limit)
-        yc_total = sum(len(s) for s in yc_slugs.values())
-        log.info(f"Y Combinator total: {yc_total} slugs across "
-                 f"{sum(1 for s in yc_slugs.values() if s)} platforms")
+    # Source 6 (Y Combinator) REMOVED 2026-09 at the user's request: YC-
+    # batch companies aren't ATS-specific — they surface through Common
+    # Crawl/OpenPostings/the HF sources below just as well, so a dedicated
+    # own-website-crawl source for them wasn't earning its keep.
+    # fetch_yc_slugs() itself is left defined (unused) rather than deleted —
+    # zero risk, and YC_USER_AGENT (a genuinely shared constant, unrelated
+    # to YC Combinator specifically) is still used elsewhere in this file.
+
+    # Source 7: Latmay H.F (huggingface.co/datasets/latmay/ats-career-page-urls
+    # — 69,638 rows, ATS URLs already resolved by the dataset owner)
+    if args.source in ("latmay", "all"):
+        log.info("\n--- LATMAY H.F (Hugging Face, 69,638 ATS career page URLs) ---")
+        lm_slugs = fetch_latmay_slugs()
+        lm_total = sum(len(s) for s in lm_slugs.values())
+        if lm_total:
+            log.info(f"Latmay H.F total: {lm_total} slugs across "
+                     f"{sum(1 for s in lm_slugs.values() if s)} platforms")
 
         if not args.dry_run:
-            upserted = upsert_to_supabase(yc_slugs, source="yc",
+            upserted = upsert_to_supabase(lm_slugs, source="Latmay H.F",
                                            dry_run=args.dry_run)
             grand_total += upserted
         else:
-            grand_total += yc_total
+            grand_total += lm_total
 
-    # Source 7: TheirStack (freemium — small monthly trickle for thin
+    # Source 8: Edward H.F (huggingface.co/datasets/edwarddgao/open-apply-jobs
+    # — 31M+ individual job postings, apply_url resolved through URL_TO_SLUG)
+    if args.source in ("edwarddgao", "all"):
+        log.info("\n--- EDWARD H.F (Hugging Face, 31M+ job postings) ---")
+        ed_slugs = fetch_edwarddgao_slugs(
+            time_budget_minutes=args.edwarddgao_time_budget_minutes)
+        ed_total = sum(len(s) for s in ed_slugs.values())
+        if ed_total:
+            log.info(f"Edward H.F total: {ed_total} slugs across "
+                     f"{sum(1 for s in ed_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(ed_slugs, source="Edward H.F",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ed_total
+
+    # Source 9: TheirStack (freemium — small monthly trickle for thin
     # platforms, see fetch_theirstack_slugs docstring)
     if args.source in ("theirstack", "all"):
         log.info("\n--- THEIRSTACK (freemium, thin-platform gap-fill) ---")
