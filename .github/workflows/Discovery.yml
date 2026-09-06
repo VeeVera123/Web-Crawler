@@ -4,6 +4,17 @@ on:
   schedule:
     - cron: "0 3 * * 0"   # Every Sunday at 3:00 UTC
   workflow_dispatch:       # manual trigger
+    inputs:
+      timeout_minutes:
+        description: >-
+          Per-job timeout in minutes. Default 300 matches discovery.py's own
+          --httparchive-resolve-budget-minutes default, so a normal run's
+          HTTP Archive shards can use their full internal time budget
+          without GitHub killing the job out from under them first (see the
+          2026-09 note on the discover job below). Raise this for a manual
+          run that needs more headroom; scheduled runs always use 300.
+        required: false
+        default: "300"
 
 # Belt-and-suspenders, same reasoning as daily_scan.yml's concurrency block —
 # GitHub already serializes same-workflow schedule/workflow_dispatch runs by
@@ -65,9 +76,22 @@ jobs:
   # TheirStack (freemium technology-usage API) was removed 2026-09 at the
   # user's request — see discovery.py's module docstring for the full
   # list of remaining sources.
+  #
+  # 2026-09: timeout-minutes was hardcoded to 90, completely independent of
+  # discovery.py's own --httparchive-resolve-budget-minutes (default 300)
+  # — every HTTP Archive shard was getting hard-killed by GitHub's job
+  # timeout at 90min with a KeyboardInterrupt, 210 minutes before its own
+  # internal time budget would have stopped it gracefully and written out
+  # whatever it had resolved so far. Now driven by the timeout_minutes
+  # input above (default "300", matching the internal budget so the two
+  # limits don't fight each other) so it can also be raised for one-off
+  # manual runs without editing this file. The other 8 (non-httparchive)
+  # shards finish in a few minutes each regardless — a generous shared job
+  # timeout costs them nothing, it just means a genuinely wedged job doesn't
+  # sit queued/running for hours before GitHub notices.
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ fromJson(inputs.timeout_minutes || '300') }}
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false   # one bad source/shard shouldn't cancel the rest
