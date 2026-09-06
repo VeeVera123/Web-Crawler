@@ -1,151 +1,92 @@
-name: Discovery
+name: Verification Engine — archive_i + archive_ii
 
+# 2026-09: table names below renamed from the stale historical labels
+# archive_ii/archive_iii to match verification.py's own --table choices,
+# which were renamed to the REAL, current Supabase table names after a
+# live CI failure (`--table` rejected an otherwise-correct value because
+# the old choices no longer corresponded to anything real). See
+# verification.py's module docstring for the full history.
+#
+# Scans archive_i (ats + slug boards) and archive_ii (in-house career
+# pages) and removes ONLY rows confirmed dead — the board/page genuinely
+# doesn't exist anymore, never just "zero jobs right now" (see
+# verification.py's own module docstring for the full rule and the
+# 2026-08 research behind which of the 29 ATS platforms have a safe
+# not-found signal — 18 do, 11 explicitly don't and are skipped/left
+# untouched).
+#
+# Same shard + finalize shape as Main/main.py's ATS scanner: N parallel
+# shards each check their own slice and upload a small JSON summary as a
+# build artifact, then a `finalize` job (needs: verify) downloads every
+# shard's summary and prints ONE combined report — active/empty/dead/
+# unverified totals across the whole run.
 on:
-  schedule:
-    - cron: "0 3 * * 0"   # Every Sunday at 3:00 UTC
-  workflow_dispatch:       # manual trigger
+  workflow_dispatch:
     inputs:
-      timeout_minutes:
-        description: >-
-          Per-job timeout in minutes. Default 300 matches discovery.py's own
-          --httparchive-resolve-budget-minutes default, so a normal run's
-          HTTP Archive shards can use their full internal time budget
-          without GitHub killing the job out from under them first (see the
-          2026-09 note on the discover job below). Raise this for a manual
-          run that needs more headroom; scheduled runs always use 300.
+      table:
+        description: "Which table(s) to verify"
         required: false
-        default: "300"
+        type: choice
+        options:
+          - both
+          - archive_i
+          - archive_ii
+        default: both
+      execute:
+        description: "Delete confirmed-dead rows (unchecked = report only)"
+        required: false
+        type: boolean
+        default: false
+      ats:
+        description: "archive_i only — restrict to one ATS platform. Leave blank for all."
+        required: false
+        default: ""
+      shard_count:
+        description: "Parallel GH Actions shards. Prefer MORE shards over higher concurrency (matches main.py's proven-safe 1-request-at-a-time-per-shard pattern) — 10 x 2 = 20 total in-flight is the safe default. Also mind GitHub's ~20-concurrent-job account cap if daily_scan (9 jobs) might overlap."
+        required: false
+        default: "10"
+      concurrency:
+        description: "Concurrent checks in flight PER SHARD (asyncio, unlike main.py's synchronous 1-at-a-time calls) — keep this LOW (1-2) and raise shard_count instead if you want more throughput. shard_count x concurrency must stay well under Supabase's connection headroom (~30 confirmed 2026-08-28)."
+        required: false
+        default: "2"
+      compare_slug_registry:
+        description: "After finalize, report archive_i vs slug_registry overlap (unique ats+slug pairs)"
+        required: false
+        type: boolean
+        default: false
 
-# Belt-and-suspenders, same reasoning as daily_scan.yml's concurrency block —
-# GitHub already serializes same-workflow schedule/workflow_dispatch runs by
-# default, but we don't rely on that.
 concurrency:
-  group: discovery-${{ github.ref }}
+  group: verification-engine-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # 14-job matrix over 8 sources, all running in parallel — instead of one
-  # job running everything back-to-back. Each source is already an
-  # independent fetch-and-resolve pass (bulk single download for most,
-  # thousands of live per-company fetches for sources 6-7), so sharding
-  # BY SOURCE is the natural split here — unlike daily_scan.yml's ATS-board
-  # matrix, there's no single flat pool of "work items" to hash-shard
-  # across a fixed number of workers. Concurrent writes across different
-  # sources/shards are safe: every upsert already goes through
-  # `on_conflict=ats,slug` per-row, so there's no shared mutable state to
-  # race on.
-  #
-  # 2026-09: Y Combinator removed (companies surface via Common Crawl/
-  # OpenPostings/the HF sources just as well — see discovery.py's module
-  # docstring), replaced with two Hugging Face sources: Latmay H.F
-  # (huggingface.co/datasets/latmay/ats-career-page-urls, already-resolved
-  # ATS URLs, no live crawl needed) and Edward H.F
-  # (huggingface.co/datasets/edwarddgao/open-apply-jobs, 31M+ job postings
-  # across 375 Parquet shards — see fetch_edwarddgao_slugs' own time
-  # budget for why it self-stops gracefully rather than needing sharding
-  # here). Both write to Supabase under their own literal `source` values
-  # ("Latmay H.F" / "Edward H.F") — see the 2026-09 archive_i.source CHECK
-  # constraint migration.
-  #
-  # commoncrawl runs as 3 separate jobs (platform-sharded, not source-
-  # sharded) rather than 1 — originally split into 2 in 2026-08 when a 9th
-  # source, Web Data Commons, was retired for a bad cost/payoff ratio (37
-  # net-new slugs for ~4 minutes of live fetching against a 3000-page
-  # sample) and its matrix slot was handed to Common Crawl instead, since
-  # Common Crawl was already the slowest single job in this matrix
-  # (platforms x up to 6 crawls x however many patterns each, all
-  # sequential in one job) and actually benefits from being split, unlike
-  # WDC which was just spending runtime for near-nothing. Went 2 -> 4 -> 3
-  # as the matrix's other slots shifted around (TheirStack removed, then
-  # httparchive gained its own shards below) — 3 keeps it split without
-  # over-provisioning past what this account's concurrent-job cap can
-  # actually run at once (queued-but-not-running shards buy nothing, see
-  # this conversation's own shard-count discussion). See discovery.py's
-  # fetch_commoncrawl_slugs docstring for how the platform-sharding works.
-  #
-  # httparchive runs as 3 separate jobs too (date-sharded, via --ha-shard/
-  # --ha-total-shards) — this source's single ~90min job was the slowest
-  # thing left in the matrix. Deliberately NOT sharded by ATS tech the way
-  # commoncrawl is sharded by platform: `httparchive.crawl.pages` is
-  # partitioned by `date`, not by `technology`, so splitting the resolved
-  # crawl-date list means each shard's BigQuery query scans roughly its
-  # own fraction of the partition bytes — summed across shards, same
-  # total bytes scanned as one unsharded run, just parallelized. Splitting
-  # by tech instead would have each shard rescan the SAME full-date-range
-  # bytes regardless of which tech it filters for (technology isn't a
-  # partition/clustering key) — multiplying this source's BigQuery cost by
-  # the shard count for zero extra coverage, which is why that path was
-  # rejected. See fetch_httparchive_candidate_urls' docstring for the full
-  # reasoning.
-  #
-  # Every sharded entry below also sets `name:` — without it, GitHub's
-  # default matrix job display name spells out every matrix key verbatim
-  # (e.g. "discover (commoncrawl, --cc-shard 0 --cc-total-shards 3)"),
-  # which gets long and repetitive fast across this many shards. The job
-  # itself still just uses `name:` for display; `matrix.source` (and
-  # extra_args) are what actually drive the run.
-  #
-  # TheirStack (freemium technology-usage API) was removed 2026-09 at the
-  # user's request — see discovery.py's module docstring for the full
-  # list of remaining sources.
-  #
-  # 2026-09: timeout-minutes was hardcoded to 90, completely independent of
-  # discovery.py's own --httparchive-resolve-budget-minutes (default 300)
-  # — every HTTP Archive shard was getting hard-killed by GitHub's job
-  # timeout at 90min with a KeyboardInterrupt, 210 minutes before its own
-  # internal time budget would have stopped it gracefully and written out
-  # whatever it had resolved so far. Now driven by the timeout_minutes
-  # input above (default "300", matching the internal budget so the two
-  # limits don't fight each other) so it can also be raised for one-off
-  # manual runs without editing this file. The other 8 (non-httparchive)
-  # shards finish in a few minutes each regardless — a generous shared job
-  # timeout costs them nothing, it just means a genuinely wedged job doesn't
-  # sit queued/running for hours before GitHub notices.
-  discover:
+  prepare-matrix:
+    # Same reason as people_data_labs.yml's prepare-matrix job — workflow_dispatch
+    # inputs can't be referenced directly inside a matrix, so shard_count ->
+    # [0, 1, ..., shard_count-1] is computed here first.
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJson(inputs.timeout_minutes || '300') }}
-    name: ${{ matrix.name }}
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "shard_count: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
-      fail-fast: false   # one bad source/shard shouldn't cancel the rest
-      matrix:
-        include:
-          - source: feashliaa
-            name: feashliaa
-          - source: kalil
-            name: kalil
-          - source: openpostings
-            name: openpostings
-          - source: commoncrawl
-            name: common crawl 1
-            extra_args: "--cc-shard 0 --cc-total-shards 3"
-          - source: commoncrawl
-            name: common crawl 2
-            extra_args: "--cc-shard 1 --cc-total-shards 3"
-          - source: commoncrawl
-            name: common crawl 3
-            extra_args: "--cc-shard 2 --cc-total-shards 3"
-          - source: wayback_adp
-            name: wayback_adp
-          - source: latmay
-            name: Latmay H.F
-          - source: edwarddgao
-            name: Edward H.F 1
-            extra_args: "--hf-shard 0 --hf-total-shards 3"
-          - source: edwarddgao
-            name: Edward H.F 2
-            extra_args: "--hf-shard 1 --hf-total-shards 3"
-          - source: edwarddgao
-            name: Edward H.F 3
-            extra_args: "--hf-shard 2 --hf-total-shards 3"
-          - source: httparchive
-            name: http archive 1
-            extra_args: "--ha-shard 0 --ha-total-shards 3"
-          - source: httparchive
-            name: http archive 2
-            extra_args: "--ha-shard 1 --ha-total-shards 3"
-          - source: httparchive
-            name: http archive 3
-            extra_args: "--ha-shard 2 --ha-total-shards 3"
+      fail-fast: false   # one shard's flakiness shouldn't cancel the rest
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -157,27 +98,88 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # pyarrow: needed by the Latmay H.F / Edward H.F sources to read
-        # Hugging Face's auto-converted Parquet dataset exports.
-        run: pip install requests python-dotenv google-cloud-bigquery pyarrow
+        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
 
-      - name: Write GCP service account key (for HTTP Archive/BigQuery source)
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        if: ${{ env.GCP_SA_KEY != '' && matrix.source == 'httparchive' }}
-        run: echo "$GCP_SA_KEY" > "${{ runner.temp }}/gcp-key.json"
-
-      - name: "Run discovery (source: ${{ matrix.source }})"
+      - name: "Verify shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '10' }}"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
-      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-        run: exec python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
-        # GCP_PROJECT_ID/GCP_SA_KEY are optional — discovery.py logs a
-        # one-line notice and skips the httparchive source cleanly if
-        # they aren't set, rather than failing the run. See discovery.py's
-        # module docstring (source 7) for what's needed and how to set it
-        # up. THEIRSTACK_API_KEY was removed 2026-09 along with the
-        # TheirStack source itself.
+          # ats_scrapers.py (imported for the active/empty job-count split)
+          # pulls in Main/config.py, which requires SOME LLM key to even
+          # finish importing even though nothing here calls an LLM — reusing
+          # the same secret daily_scan.yml already has configured is enough
+          # to satisfy that import. See verification.py's module docstring.
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: |
+          python Verification/verification.py \
+            --table ${{ github.event.inputs.table || 'both' }} \
+            --concurrency ${{ github.event.inputs.concurrency || '30' }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.shard_count || '10' }} \
+            --summary-out "summary-${{ matrix.shard }}.json" \
+            ${{ github.event.inputs.execute == 'true' && '--execute' || '' }} \
+            ${{ github.event.inputs.ats != '' && format('--ats {0}', github.event.inputs.ats) || '' }}
+
+      - name: Upload shard summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-summary-${{ matrix.shard }}
+          path: summary-${{ matrix.shard }}.json
+          retention-days: 14
+
+  finalize:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+
+      - name: Download every shard's summary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verification-summary-*
+          path: summaries
+          merge-multiple: true
+
+      - name: Combined report — all shards
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: python Verification/verification.py --summarize summaries
+
+  compare-slug-registry:
+    # Only meaningful AFTER a real --execute run has actually removed the
+    # confirmed-dead rows — otherwise "archive_i only" would include rows
+    # that were just confirmed dead and are about to disappear anyway.
+    needs: finalize
+    if: ${{ github.event.inputs.compare_slug_registry == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+
+      - name: Compare archive_i vs slug_registry
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: python Verification/verification.py --compare-slug-registry
