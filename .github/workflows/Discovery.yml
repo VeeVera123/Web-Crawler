@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 11-job matrix over 7 sources, all running in parallel — instead of one
+  # 12-job matrix over 8 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -34,6 +34,18 @@ jobs:
   # sources/shards are safe: every upsert already goes through
   # `on_conflict=ats,slug` per-row, so there's no shared mutable state to
   # race on.
+  #
+  # 2026-09: Y Combinator removed (companies surface via Common Crawl/
+  # OpenPostings/the HF sources just as well — see discovery.py's module
+  # docstring), replaced with two Hugging Face sources: Latmay H.F
+  # (huggingface.co/datasets/latmay/ats-career-page-urls, already-resolved
+  # ATS URLs, no live crawl needed) and Edward H.F
+  # (huggingface.co/datasets/edwarddgao/open-apply-jobs, 31M+ job postings
+  # across 375 Parquet shards — see fetch_edwarddgao_slugs' own time
+  # budget for why it self-stops gracefully rather than needing sharding
+  # here). Both write to Supabase under their own literal `source` values
+  # ("Latmay H.F" / "Edward H.F") — see the 2026-09 archive_i.source CHECK
+  # constraint migration.
   #
   # commoncrawl runs as 3 separate jobs (platform-sharded, not source-
   # sharded) rather than 1 — originally split into 2 in 2026-08 when a 9th
@@ -114,8 +126,10 @@ jobs:
             extra_args: "--cc-shard 2 --cc-total-shards 3"
           - source: wayback_adp
             name: wayback_adp
-          - source: yc
-            name: yc
+          - source: latmay
+            name: Latmay H.F
+          - source: edwarddgao
+            name: Edward H.F
           - source: httparchive
             name: http archive 1
             extra_args: "--ha-shard 0 --ha-total-shards 3"
@@ -136,7 +150,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests python-dotenv google-cloud-bigquery
+        # pyarrow: needed by the Latmay H.F / Edward H.F sources to read
+        # Hugging Face's auto-converted Parquet dataset exports.
+        run: pip install requests python-dotenv google-cloud-bigquery pyarrow
 
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
         env:
