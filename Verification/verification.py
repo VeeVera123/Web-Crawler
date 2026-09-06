@@ -761,7 +761,7 @@ async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_r
                     counts["dead"] += 1
                 log.info(f"    {ats}/{slug}: DEAD — would delete (report-only)")
                 return
-            ok = await delete_row(session, node.STAGING_TABLE, row["id"])
+            ok = await delete_row(session, node.ARCHIVE_I_TABLE, row["id"])
             async with lock:
                 counts["dead" if ok else "unverified"] += 1
             if ok:
@@ -888,7 +888,7 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
         await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
-        all_rows = await fetch_rows(session, node.STAGING_TABLE, "id,ats,slug", ats_filter, None,
+        all_rows = await fetch_rows(session, node.ARCHIVE_I_TABLE, "id,ats,slug", ats_filter, None,
                                      shard_index, shard_count)
 
         verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
@@ -994,41 +994,27 @@ async def _fetch_pair_set(session: aiohttp.ClientSession, table: str) -> set[tup
 
 
 async def compare_slug_registry() -> None:
-    """archive_ii and slug_registry (the production ATS scanner's own
-    source-of-truth table — see Main/main.py's load_slugs) are both keyed
-    on (ats, slug). This compares the two sets directly: how much of what
-    verification just confirmed-good in archive_ii has actually been
-    promoted into slug_registry (overlap), vs sitting in archive_ii as a
-    real, still-unpromoted candidate (archive_ii-only) — best run AFTER an
-    --execute pass so archive_ii-only doesn't include rows that were just
-    confirmed dead and are about to be deleted anyway."""
-    async with aiohttp.ClientSession(connector=_new_connector(10)) as session:  # sequential pagination only
-        log.info("── Comparing archive_ii vs slug_registry (both keyed on ats,slug) ──")
-        archive_ii_pairs = await _fetch_pair_set(session, node.STAGING_TABLE)
-        slug_registry_pairs = await _fetch_pair_set(session, "slug_registry")
-
-    overlap = archive_ii_pairs & slug_registry_pairs
-    only_archive_ii = archive_ii_pairs - slug_registry_pairs
-    only_registry = slug_registry_pairs - archive_ii_pairs
-
-    by_ats = {}
-    for ats, _ in only_archive_ii:
-        by_ats[ats] = by_ats.get(ats, 0) + 1
-
-    print("\n" + "=" * 70)
-    print("archive_ii  vs  slug_registry — unique (ats, slug) comparison")
-    print("=" * 70)
-    print(f"  archive_ii unique pairs:                {len(archive_ii_pairs)}")
-    print(f"  slug_registry unique pairs:              {len(slug_registry_pairs)}")
-    print(f"  In both (already promoted):              {len(overlap)}")
-    print(f"  archive_ii only (not yet in registry):   {len(only_archive_ii)}")
-    print(f"  slug_registry only (not in archive_ii):  {len(only_registry)}")
-    print("=" * 70)
-    if by_ats:
-        print("  archive_ii-only, by platform:")
-        for ats, n in sorted(by_ats.items(), key=lambda kv: -kv[1]):
-            print(f"    {ats:<20} {n}")
-        print("=" * 70)
+    """OBSOLETE as of the 2026-08 restructure (see node.py's module-level
+    comment: 'the OLD archive_ii (an ATS-match staging/quarantine table
+    that a separate verify step promoted into slug_registry) is GONE —
+    ATS hits now write directly to ARCHIVE_I_TABLE with no intermediate
+    verify/promote step'). This function's whole premise — a separate
+    quarantine table vs. a production registry table, comparing which
+    (ats,slug) pairs have been 'promoted' from one to the other — no
+    longer applies: there is only ONE table (archive_i) now. Left in
+    place (rather than deleted) as a clearly-marked no-op instead of
+    silently 'fixing' its two stale table-name references (node.
+    STAGING_TABLE, literal 'slug_registry') into comparing archive_i
+    against itself, which would run without error but produce a
+    meaningless always-100%-overlap report — worse than refusing to run,
+    since it looks like real output. Rewriting this into something
+    meaningful (e.g. comparing archive_i against archive_ii's current,
+    unrelated in-house/unsupported-career-page role) is a separate task,
+    not a same-shape fix."""
+    log.error("compare_slug_registry is obsolete since the 2026-08 archive_ii "
+              "restructure (no more separate staging/quarantine table to compare "
+              "against production) — see this function's docstring. Not running.")
+    sys.exit(1)
 
 
 def main():
