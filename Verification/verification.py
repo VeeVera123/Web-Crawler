@@ -1,7 +1,8 @@
 """
-VERIFICATION ENGINE (2026-08) — scans archive_ii (ats + slug, formerly
-quarantine) and archive_iii (career pages, formerly scrape_test) and
-removes ONLY rows that are CONFIRMED DEAD: the board/page genuinely no
+VERIFICATION ENGINE (2026-08, --table values renamed 2026-09) — scans
+archive_i (ats + slug, formerly quarantine/slug_registry) and archive_ii
+(career pages, formerly scrape_test) and removes ONLY rows that are
+CONFIRMED DEAD: the board/page genuinely no
 longer exists. It does NOT remove rows just because a real board
 currently has zero open postings, or a career page's content has
 changed — see THE RULE below for why, and the 2026-08 research summary
@@ -28,7 +29,7 @@ reuses several of its already-proven per-platform checks):
     only job is pruning slugs/pages that never existed, were mistyped,
     or the company has genuinely torn down — not "currently quiet".
 
-REPORTING (2026-08): every archive_ii row that verifies as NOT dead gets
+REPORTING (2026-08): every archive_i row that verifies as NOT dead gets
 a second, best-effort pass through ats_scrapers.scrape_board() — the
 exact same production scraper the daily ATS scanner uses — purely to
 split the report into ACTIVE (>=1 open job right now) vs EMPTY (real,
@@ -70,7 +71,7 @@ SAFETY MODEL (a wrong delete here is real, silent, permanent data loss):
     an explicit, structural "confirmed dead" return value can lead to a
     delete, mirroring certificate_transparency_probe.py's own
     verify_row() pattern exactly.
-  - archive_iii verification requires BOTH the career_page_url AND the
+  - archive_ii verification requires BOTH the career_page_url AND the
     company's own website_url (root domain) to independently fail before
     a row is treated as dead — a career page alone returning 404 usually
     just means the page moved (common on a real, live site), which is
@@ -107,9 +108,9 @@ the import fails before verification even starts. See verification.yml.
 
 Usage:
     pip install aiohttp python-dotenv requests beautifulsoup4
-    python verification.py --table archive_ii                        # report-only
-    python verification.py --table archive_ii --ats greenhouse
-    python verification.py --table archive_ii --shard-index 0 --shard-count 10 --summary-out shard0.json
+    python verification.py --table archive_i                         # report-only
+    python verification.py --table archive_i --ats greenhouse
+    python verification.py --table archive_i --shard-index 0 --shard-count 10 --summary-out shard0.json
     python verification.py --summarize ./summaries                    # combine + print all shard*.json in a dir
     python verification.py --table both --execute                     # ACTUALLY deletes confirmed-dead rows
 """
@@ -141,7 +142,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(me
                      datefmt="%H:%M:%S")
 log = logging.getLogger("verification")
 
-# ── archive_ii: 8 verifiers, formerly imported from
+# ── archive_i: 8 verifiers, formerly imported from
 # "Certificate Transparency"/certificate_transparency_probe.py ─────────
 # 2026-09: that whole module has been retired and removed from the repo
 # (confirmed live via a GitHub Actions run: `ModuleNotFoundError: No
@@ -323,7 +324,7 @@ def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
     return aiohttp.TCPConnector(limit=concurrency + 10, ttl_dns_cache=300)
 
 
-# ── archive_ii: platforms with NO safe "does not exist" signal ────────────
+# ── archive_i: platforms with NO safe "does not exist" signal ────────────
 # Left completely untouched — never checked, never deleted, only counted.
 # See the module docstring above for why each one is here.
 _UNVERIFIABLE_ATS = {
@@ -344,8 +345,8 @@ _UNVERIFIABLE_ATS = {
 }
 
 
-# ── archive_ii: NEW verifiers (platforms certificate_transparency_probe.py
-# never covered) ────────────────────────────────────────────────────────
+# ── archive_i: NEW verifiers (platforms the now-retired
+# certificate_transparency_probe.py never covered) ─────────────────────
 
 async def _verify_rippling(session: aiohttp.ClientSession, slug: str) -> bool:
     """Rippling's real production scraper (ats_scrapers.scrape_rippling)
@@ -526,7 +527,7 @@ ARCHIVE_II_VERIFIERS = {
 }
 
 
-# ── archive_iii: career-page verification ─────────────────────────────
+# ── archive_ii: career-page verification ─────────────────────────────
 
 # ── 2026-09: soft-404 / parked-domain / masked-error detection ─────────
 # A 200 OK is not, by itself, proof a career page is still real — three
@@ -651,7 +652,7 @@ async def _url_confirmed_dead(session: aiohttp.ClientSession, url: str) -> bool 
         return None
 
 
-async def verify_archive_iii_row(session: aiohttp.ClientSession, row: dict) -> bool:
+async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict) -> bool:
     """DEAD only if BOTH the specific career_page_url AND the company's
     root website_url independently confirm dead — a career page 404 alone
     usually just means the page moved on an otherwise-live site, which is
@@ -851,9 +852,9 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
 
 # ── orchestration ───────────────────────────────────────────────────
 
-async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_run: bool,
-                                 sem: asyncio.Semaphore, executor: concurrent.futures.ThreadPoolExecutor,
-                                 counts: dict, lock: asyncio.Lock) -> None:
+async def verify_archive_i_row(session: aiohttp.ClientSession, row: dict, dry_run: bool,
+                                sem: asyncio.Semaphore, executor: concurrent.futures.ThreadPoolExecutor,
+                                counts: dict, lock: asyncio.Lock) -> None:
     ats, slug = row["ats"], row["slug"]
     verifier = ARCHIVE_II_VERIFIERS[ats]
     async with sem:
@@ -889,14 +890,14 @@ async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict, dry_r
             counts["active" if jobs else "empty"] += 1
 
 
-async def verify_archive_iii_row_task(session: aiohttp.ClientSession, row: dict, dry_run: bool,
-                                       sem: asyncio.Semaphore, counts: dict, lock: asyncio.Lock) -> None:
-    # The delete stays INSIDE the semaphore, same as verify_archive_ii_row —
+async def verify_archive_ii_row_task(session: aiohttp.ClientSession, row: dict, dry_run: bool,
+                                      sem: asyncio.Semaphore, counts: dict, lock: asyncio.Lock) -> None:
+    # The delete stays INSIDE the semaphore, same as verify_archive_i_row —
     # otherwise a batch of rows all confirming dead at once could fire every
     # delete concurrently, uncapped by --concurrency.
     async with sem:
         try:
-            is_dead = await verify_archive_iii_row(session, row)
+            is_dead = await verify_archive_ii_row(session, row)
         except Exception as e:
             async with lock:
                 counts["unverified"] += 1
@@ -957,11 +958,11 @@ def _print_summary(label: str, checked: int, counts: dict, dry_run: bool):
     print("=" * 70)
 
 
-def _empty_counts_ii() -> dict:
+def _empty_counts_i() -> dict:
     return {"active": 0, "empty": 0, "dead": 0, "unverified": 0}
 
 
-def _empty_counts_iii() -> dict:
+def _empty_counts_ii() -> dict:
     return {"live": 0, "dead": 0, "unverified": 0}
 
 
@@ -981,10 +982,10 @@ async def _stagger_shard_start(shard_index: int | None, shard_count: int | None)
         await asyncio.sleep(delay)
 
 
-async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: bool,
-                          concurrency: int, shard_index: int | None, shard_count: int | None) -> dict:
+async def run_archive_i(ats_filter: str | None, limit: int | None, dry_run: bool,
+                         concurrency: int, shard_index: int | None, shard_count: int | None) -> dict:
     sem = asyncio.Semaphore(concurrency)
-    counts = _empty_counts_ii()
+    counts = _empty_counts_i()
     lock = asyncio.Lock()
 
     if ats_filter and ats_filter in _UNVERIFIABLE_ATS:
@@ -994,7 +995,7 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
 
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-        log.info(f"── Verifying archive_ii{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
+        log.info(f"── Verifying archive_i{f' ({ats_filter})' if ats_filter else ' (all verifiable platforms)'}{shard_note} ──")
         await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
@@ -1018,29 +1019,29 @@ async def run_archive_ii(ats_filter: str | None, limit: int | None, dry_run: boo
 
         log.info(f"  {checked} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
         if not checked:
-            _print_summary("archive_ii" + shard_note, checked, counts, dry_run)
+            _print_summary("archive_i" + shard_note, checked, counts, dry_run)
             return counts
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-            tasks = [verify_archive_ii_row(session, row, dry_run, sem, executor, counts, lock)
+            tasks = [verify_archive_i_row(session, row, dry_run, sem, executor, counts, lock)
                      for row in verifiable_rows]
-            progress_task = asyncio.create_task(_run_progress(counts, checked + len(skipped_rows), "archive_ii"))
+            progress_task = asyncio.create_task(_run_progress(counts, checked + len(skipped_rows), "archive_i"))
             await asyncio.gather(*tasks)
             progress_task.cancel()
 
-    _print_summary("archive_ii" + shard_note, checked, counts, dry_run)
+    _print_summary("archive_i" + shard_note, checked, counts, dry_run)
     return counts
 
 
-async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
-                           shard_index: int | None, shard_count: int | None) -> dict:
+async def run_archive_ii(limit: int | None, dry_run: bool, concurrency: int,
+                          shard_index: int | None, shard_count: int | None) -> dict:
     sem = asyncio.Semaphore(concurrency)
-    counts = _empty_counts_iii()
+    counts = _empty_counts_ii()
     lock = asyncio.Lock()
 
     async with aiohttp.ClientSession(connector=_new_connector(concurrency)) as session:
         shard_note = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
-        log.info(f"── Verifying archive_iii (career pages){shard_note} ──")
+        log.info(f"── Verifying archive_ii (career pages){shard_note} ──")
         await _stagger_shard_start(shard_index, shard_count)
         # Sharded server-side (see fetch_rows) — each shard fetches ONLY its
         # own ~1/N slice, not the whole table filtered down client-side.
@@ -1050,22 +1051,22 @@ async def run_archive_iii(limit: int | None, dry_run: bool, concurrency: int,
 
         log.info(f"  {total} rows to check" + (" (report-only)" if dry_run else " (EXECUTE MODE — confirmed-dead rows WILL be deleted)"))
         if not total:
-            _print_summary("archive_iii" + shard_note, total, counts, dry_run)
+            _print_summary("archive_ii" + shard_note, total, counts, dry_run)
             return counts
 
-        tasks = [verify_archive_iii_row_task(session, row, dry_run, sem, counts, lock) for row in rows]
-        progress_task = asyncio.create_task(_run_progress(counts, total, "archive_iii"))
+        tasks = [verify_archive_ii_row_task(session, row, dry_run, sem, counts, lock) for row in rows]
+        progress_task = asyncio.create_task(_run_progress(counts, total, "archive_ii"))
         await asyncio.gather(*tasks)
         progress_task.cancel()
 
-    _print_summary("archive_iii" + shard_note, total, counts, dry_run)
+    _print_summary("archive_ii" + shard_note, total, counts, dry_run)
     return counts
 
 
 def _summarize_dir(directory: str) -> None:
     """finalize-style aggregation — reads every *.json summary a shard
     wrote (via --summary-out) out of `directory` and prints ONE combined
-    report, the same shape run_archive_ii/run_archive_iii print on their
+    report, the same shape run_archive_i/run_archive_ii print on their
     own, just totaled across every shard. Mirrors Main/main.py's
     `--finalize` step running once after every shard has finished."""
     paths = sorted(glob.glob(os.path.join(directory, "*.json")))
@@ -1073,8 +1074,8 @@ def _summarize_dir(directory: str) -> None:
         log.error(f"No *.json shard summaries found in {directory!r} — nothing to combine.")
         sys.exit(1)
 
+    combined_i = _empty_counts_i()
     combined_ii = _empty_counts_ii()
-    combined_iii = _empty_counts_iii()
     dry_run = None
     shards_seen = 0
 
@@ -1084,18 +1085,18 @@ def _summarize_dir(directory: str) -> None:
         shards_seen += 1
         if dry_run is None:
             dry_run = data.get("dry_run", True)
+        for key, val in (data.get("archive_i") or {}).items():
+            combined_i[key] = combined_i.get(key, 0) + val
         for key, val in (data.get("archive_ii") or {}).items():
             combined_ii[key] = combined_ii.get(key, 0) + val
-        for key, val in (data.get("archive_iii") or {}).items():
-            combined_iii[key] = combined_iii.get(key, 0) + val
 
     log.info(f"Combined {shards_seen} shard summaries from {directory}")
+    if any(combined_i.values()):
+        checked_i = combined_i["active"] + combined_i["empty"] + combined_i["dead"]
+        _print_summary("archive_i — ALL SHARDS COMBINED", checked_i, combined_i, bool(dry_run))
     if any(combined_ii.values()):
-        checked_ii = combined_ii["active"] + combined_ii["empty"] + combined_ii["dead"]
+        checked_ii = combined_ii["live"] + combined_ii["dead"]
         _print_summary("archive_ii — ALL SHARDS COMBINED", checked_ii, combined_ii, bool(dry_run))
-    if any(combined_iii.values()):
-        checked_iii = combined_iii["live"] + combined_iii["dead"]
-        _print_summary("archive_iii — ALL SHARDS COMBINED", checked_iii, combined_iii, bool(dry_run))
 
 
 async def _fetch_pair_set(session: aiohttp.ClientSession, table: str) -> set[tuple[str, str]]:
@@ -1121,7 +1122,7 @@ async def compare_slug_registry() -> None:
     meaningful (e.g. comparing archive_i against archive_ii's current,
     unrelated in-house/unsupported-career-page role) is a separate task,
     not a same-shape fix."""
-    log.error("compare_slug_registry is obsolete since the 2026-08 archive_ii "
+    log.error("compare_slug_registry is obsolete since the 2026-08 archive_i "
               "restructure (no more separate staging/quarantine table to compare "
               "against production) — see this function's docstring. Not running.")
     sys.exit(1)
@@ -1129,11 +1130,16 @@ async def compare_slug_registry() -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Verify archive_ii/archive_iii rows against live ATS boards/career pages (async). "
+        description="Verify archive_i/archive_ii rows against live ATS boards/career pages (async). "
                      "Report-only by default — pass --execute to actually delete confirmed-dead rows.")
-    parser.add_argument("--table", choices=["archive_ii", "archive_iii", "both"], default="both")
+    # 2026-09: choices renamed from the stale historical labels
+    # archive_ii/archive_iii to match the REAL, current Supabase table
+    # names (archive_i = ats+slug boards, archive_ii = career pages) — the
+    # old labels caused a live CI failure (`--table archive_i` rejected as
+    # an invalid choice) because they no longer corresponded to anything.
+    parser.add_argument("--table", choices=["archive_i", "archive_ii", "both"], default="both")
     parser.add_argument("--ats", default=None,
-                         help="archive_ii only — restrict to one ATS platform (e.g. greenhouse)")
+                         help="archive_i only — restrict to one ATS platform (e.g. greenhouse)")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--execute", action="store_true",
                          help="Actually delete confirmed-dead rows. Without this, always report-only.")
@@ -1148,7 +1154,7 @@ def main():
                          help="Skip verification entirely — just combine every *.json in this directory "
                               "(written by earlier --summary-out runs) into one final report")
     parser.add_argument("--compare-slug-registry", action="store_true",
-                         help="Skip verification entirely — just compare archive_ii's (ats,slug) pairs "
+                         help="Skip verification entirely — just compare archive_i's (ats,slug) pairs "
                               "against slug_registry's and report overlap/unique-to-each counts")
     args = parser.parse_args()
 
@@ -1174,11 +1180,11 @@ def main():
 
     async def _run_all():
         summary = {"dry_run": dry_run}
+        if args.table in ("archive_i", "both"):
+            summary["archive_i"] = await run_archive_i(
+                args.ats, args.limit, dry_run, args.concurrency, args.shard_index, args.shard_count)
         if args.table in ("archive_ii", "both"):
             summary["archive_ii"] = await run_archive_ii(
-                args.ats, args.limit, dry_run, args.concurrency, args.shard_index, args.shard_count)
-        if args.table in ("archive_iii", "both"):
-            summary["archive_iii"] = await run_archive_iii(
                 args.limit, dry_run, args.concurrency, args.shard_index, args.shard_count)
         if args.summary_out:
             os.makedirs(os.path.dirname(args.summary_out) or ".", exist_ok=True)
