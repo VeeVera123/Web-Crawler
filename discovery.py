@@ -56,10 +56,12 @@ Sources:
   fetch_commoncrawl_slugs), since Common Crawl was already the slowest
   single source in the matrix and actually benefits from splitting.
 
-Runs weekly (Sunday) via GitHub Actions, as a 7-source, 8-job matrix
-(YC removed 2026-09, Latmay H.F + Edward H.F added) — Common Crawl
-split across 2 platform-sharded jobs, the other 6 sources one job
-each, all in parallel (see .github/workflows/discovery.yml) —
+Runs weekly (Sunday) via GitHub Actions, as a 7-source, 16-job matrix
+(YC removed 2026-09, Latmay H.F + Edward H.F added, each 3-way
+sharded like commoncrawl/httparchive) — Common Crawl and HTTP Archive
+each split across 3 jobs, Latmay H.F and Edward H.F each split across
+3 jobs too, the remaining 4 sources one job each, all in parallel
+(see .github/workflows/Discovery.yml) —
 rather than one job running everything back-to-back. Each source (or
 Common Crawl shard) is already an independent fetch-and-resolve pass with
 its own cost profile (bulk single download vs. thousands of live
@@ -2569,10 +2571,19 @@ def _resolve_url_via_url_to_slug(url: str) -> tuple[str, str] | None:
     return None
 
 
-def fetch_latmay_slugs() -> dict[str, dict[str, str]]:
+def fetch_latmay_slugs(hf_shard: int | None = None, hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
     """latmay/ats-career-page-urls — 69,638 rows of {canonical_url,
     ats_platform}. Small enough to load in one pass, no time-budget/
-    streaming logic needed (contrast fetch_edwarddgao_slugs below)."""
+    streaming logic needed (contrast fetch_edwarddgao_slugs below).
+
+    2026-09: sharded 3-way in discovery.yml, same as commoncrawl/
+    httparchive — only ONE Parquet file backs this whole dataset, so
+    (unlike Edward's per-file sharding below) the shard split happens
+    AFTER downloading it: all rows are read once, then each shard keeps
+    only its own contiguous ~1/N slice of ROW INDEXES. Every shard still
+    downloads the same ~69k-row file (small, cheap) — sharding here is
+    purely to spread the per-row URL_TO_SLUG resolution work, not to cut
+    download volume the way Edward's per-file sharding does."""
     import pyarrow.parquet as pq
 
     file_urls = _hf_parquet_urls("latmay/ats-career-page-urls")
@@ -2580,11 +2591,7 @@ def fetch_latmay_slugs() -> dict[str, dict[str, str]]:
         log.warning("Latmay H.F: no Parquet files resolved, skipping source")
         return {}
 
-    slugs_by_ats: dict[str, dict[str, str]] = {}
-    processed = 0
-    start = time.monotonic()
-    _PROGRESS_EVERY = 5_000
-
+    all_urls: list[str] = []
     for file_url in file_urls:
         try:
             r = requests.get(file_url, timeout=120)
@@ -2597,30 +2604,45 @@ def fetch_latmay_slugs() -> dict[str, dict[str, str]]:
             tmp.write(r.content)
             tmp.flush()
             table = pq.read_table(tmp.name, columns=["canonical_url"])
+        all_urls.extend(table.column("canonical_url").to_pylist())
 
-        for url in table.column("canonical_url").to_pylist():
-            processed += 1
-            hit = _resolve_url_via_url_to_slug(url)
-            if hit:
-                actual_ats, slug = hit
-                slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+    shard_note = ""
+    if hf_total_shards:
+        shard_size = -(-len(all_urls) // hf_total_shards)  # ceil division
+        start_i = hf_shard * shard_size
+        end_i = min(start_i + shard_size, len(all_urls))
+        all_urls = all_urls[start_i:end_i]
+        shard_note = f" [shard {hf_shard}/{hf_total_shards}]"
 
-            if processed % _PROGRESS_EVERY == 0:
-                elapsed = max(time.monotonic() - start, 0.001)
-                resolved = sum(len(s) for s in slugs_by_ats.values())
-                log.info(f"Latmay H.F: {processed:,} processed "
-                         f"({processed / elapsed:,.1f}/sec), {resolved:,} "
-                         f"resolved ({resolved / processed * 100:.1f}%)")
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    processed = 0
+    start = time.monotonic()
+    _PROGRESS_EVERY = 5_000
+
+    for url in all_urls:
+        processed += 1
+        hit = _resolve_url_via_url_to_slug(url)
+        if hit:
+            actual_ats, slug = hit
+            slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+
+        if processed % _PROGRESS_EVERY == 0:
+            elapsed = max(time.monotonic() - start, 0.001)
+            resolved = sum(len(s) for s in slugs_by_ats.values())
+            log.info(f"Latmay H.F{shard_note}: {processed:,}/{len(all_urls):,} processed "
+                     f"({processed / elapsed:,.1f}/sec), {resolved:,} "
+                     f"resolved ({resolved / processed * 100:.1f}%)")
 
     total = sum(len(s) for s in slugs_by_ats.values())
     for ats, slugs in slugs_by_ats.items():
-        log.info(f"  {ats}: {len(slugs)} slugs from Latmay H.F")
-    log.info(f"Latmay H.F summary: {processed:,} rows processed, {total:,} "
+        log.info(f"  {ats}: {len(slugs)} slugs from Latmay H.F{shard_note}")
+    log.info(f"Latmay H.F{shard_note} summary: {processed:,} rows processed, {total:,} "
              f"slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
     return slugs_by_ats
 
 
-def fetch_edwarddgao_slugs(time_budget_minutes: int = 300) -> dict[str, dict[str, str]]:
+def fetch_edwarddgao_slugs(time_budget_minutes: int = 300, hf_shard: int | None = None,
+                            hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
     """edwarddgao/open-apply-jobs — 31M+ individual job-posting rows
     across 375 Parquet shards. Only `apply_url` is ever read — every
     other column (description_html, salary fields, etc.) is projected
@@ -2635,7 +2657,14 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 300) -> dict[str, dict[str
     hard CI job timeout mid-shard would otherwise lose an entire run's
     progress instead of the partial-but-real result a graceful stop
     keeps. Runs are idempotent (on_conflict upsert), so an
-    incomplete-shard-coverage run still converges over repeat runs."""
+    incomplete-shard-coverage run still converges over repeat runs.
+
+    2026-09: `hf_shard`/`hf_total_shards` split 3-way in discovery.yml,
+    same as commoncrawl/httparchive — unlike Latmay's single-file
+    row-index split, this dataset already comes as 375 separate Parquet
+    FILES, so each shard just takes its own contiguous ~1/N slice of
+    the FILE list before downloading anything — cutting download volume
+    per shard too, not just per-row work."""
     import pyarrow.parquet as pq
 
     file_urls = _hf_parquet_urls("edwarddgao/open-apply-jobs")
@@ -2643,7 +2672,15 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 300) -> dict[str, dict[str
         log.warning("Edward H.F: no Parquet files resolved, skipping source")
         return {}
 
-    log.info(f"Edward H.F: {len(file_urls)} Parquet shards to process "
+    shard_note = ""
+    if hf_total_shards:
+        shard_size = -(-len(file_urls) // hf_total_shards)  # ceil division
+        start_i = hf_shard * shard_size
+        end_i = min(start_i + shard_size, len(file_urls))
+        file_urls = file_urls[start_i:end_i]
+        shard_note = f" [shard {hf_shard}/{hf_total_shards}]"
+
+    log.info(f"Edward H.F{shard_note}: {len(file_urls)} Parquet shards to process "
              f"(time budget: {time_budget_minutes}min, 0 = no budget)")
 
     slugs_by_ats: dict[str, dict[str, str]] = {}
@@ -2652,10 +2689,10 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 300) -> dict[str, dict[str
     _PROGRESS_EVERY = 5_000
     budget_seconds = time_budget_minutes * 60 if time_budget_minutes else None
 
-    for shard_i, file_url in enumerate(file_urls):
+    for file_i, file_url in enumerate(file_urls):
         if budget_seconds and (time.monotonic() - start) >= budget_seconds:
-            log.info(f"Edward H.F: time budget reached after {shard_i}/"
-                     f"{len(file_urls)} shards — stopping gracefully, "
+            log.info(f"Edward H.F{shard_note}: time budget reached after {file_i}/"
+                     f"{len(file_urls)} files — stopping gracefully, "
                      f"keeping {processed:,} rows' worth of progress.")
             break
 
@@ -2679,18 +2716,18 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 300) -> dict[str, dict[str
                         if processed % _PROGRESS_EVERY == 0:
                             elapsed = max(time.monotonic() - start, 0.001)
                             resolved = sum(len(s) for s in slugs_by_ats.values())
-                            log.info(f"Edward H.F: shard {shard_i + 1}/{len(file_urls)}, "
+                            log.info(f"Edward H.F{shard_note}: file {file_i + 1}/{len(file_urls)}, "
                                      f"{processed:,} processed ({processed / elapsed:,.1f}/sec), "
                                      f"{resolved:,} resolved ({resolved / processed * 100:.1f}%)")
         except Exception as e:
-            log.warning(f"Edward H.F: shard {shard_i + 1}/{len(file_urls)} "
+            log.warning(f"Edward H.F{shard_note}: file {file_i + 1}/{len(file_urls)} "
                         f"({file_url}) failed, skipping: {e}")
             continue
 
     total = sum(len(s) for s in slugs_by_ats.values())
     for ats, slugs in slugs_by_ats.items():
-        log.info(f"  {ats}: {len(slugs)} slugs from Edward H.F")
-    log.info(f"Edward H.F summary: {processed:,} rows processed, {total:,} "
+        log.info(f"  {ats}: {len(slugs)} slugs from Edward H.F{shard_note}")
+    log.info(f"Edward H.F{shard_note} summary: {processed:,} rows processed, {total:,} "
              f"slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
     return slugs_by_ats
 
@@ -3491,6 +3528,21 @@ def main():
              "full completion — see fetch_edwarddgao_slugs docstring).",
     )
     parser.add_argument(
+        "--hf-shard", type=int, default=None,
+        help="Which Hugging Face shard this run covers (0-indexed, used "
+             "with --hf-total-shards) — applies to BOTH latmay and "
+             "edwarddgao. For edwarddgao this slices the 375 Parquet FILES "
+             "(cuts download volume per shard); for latmay (a single file) "
+             "this slices ROW INDEXES after the one download. Default: "
+             "None = all rows/files in one run.",
+    )
+    parser.add_argument(
+        "--hf-total-shards", type=int, default=1,
+        help="Total number of Hugging Face shards (default: 1, i.e. no "
+             "sharding). discovery.yml runs this as 3 for both latmay and "
+             "edwarddgao, matching commoncrawl/httparchive's shard count.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Count slugs without writing to Supabase",
     )
@@ -3607,7 +3659,7 @@ def main():
     # — 69,638 rows, ATS URLs already resolved by the dataset owner)
     if args.source in ("latmay", "all"):
         log.info("\n--- LATMAY H.F (Hugging Face, 69,638 ATS career page URLs) ---")
-        lm_slugs = fetch_latmay_slugs()
+        lm_slugs = fetch_latmay_slugs(hf_shard=args.hf_shard, hf_total_shards=args.hf_total_shards)
         lm_total = sum(len(s) for s in lm_slugs.values())
         if lm_total:
             log.info(f"Latmay H.F total: {lm_total} slugs across "
@@ -3625,7 +3677,8 @@ def main():
     if args.source in ("edwarddgao", "all"):
         log.info("\n--- EDWARD H.F (Hugging Face, 31M+ job postings) ---")
         ed_slugs = fetch_edwarddgao_slugs(
-            time_budget_minutes=args.edwarddgao_time_budget_minutes)
+            time_budget_minutes=args.edwarddgao_time_budget_minutes,
+            hf_shard=args.hf_shard, hf_total_shards=args.hf_total_shards)
         ed_total = sum(len(s) for s in ed_slugs.values())
         if ed_total:
             log.info(f"Edward H.F total: {ed_total} slugs across "
