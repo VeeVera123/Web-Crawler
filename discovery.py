@@ -87,6 +87,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import time
 from urllib.parse import urlparse, parse_qs, urljoin, unquote
 
@@ -420,7 +421,7 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
         return None
     parts = path.split("/")
     slug = parts[0] if parts else None
-    if slug and slug.lower() not in SKIP_SLUGS:
+    if slug and slug.lower() not in SKIP_SLUGS and _looks_like_real_slug(slug):
         return slug
     return None
 
@@ -438,7 +439,7 @@ def _url_to_slug_lever(url: str) -> str | None:
     if host == "lever.co" or host.endswith(".lever.co"):
         parts = parsed.path.strip("/").split("/")
         slug = parts[0] if parts else None
-        if slug and slug.lower() not in SKIP_SLUGS:
+        if slug and slug.lower() not in SKIP_SLUGS and _looks_like_real_slug(slug):
             return slug
     return None
 
@@ -507,7 +508,11 @@ def _url_to_slug_workday(url: str) -> str | None:
         if path_parts and _WORKDAY_LOCALE_SEGMENT_RE.match(path_parts[0]):
             path_parts = path_parts[1:]
         site_id = path_parts[0] if path_parts else ""
-        if company and wd and site_id:
+        # 2026-09: confirmed 61 real archive_i rows where site_id was an
+        # asset request caught on this same host (favicon.ico) — e.g.
+        # "2fasmglobal|favicon.ico" — because site_id was trusted
+        # unconditionally. Same guard as rippling/pageup's fix below.
+        if company and wd and site_id and _looks_like_real_slug(site_id):
             return f"{company}|{wd}|{site_id}"
     return None
 
@@ -590,7 +595,8 @@ def _url_to_slug_workable(url: str) -> str | None:
         parts = parsed.path.strip("/").split("/")
         if parts and parts[0]:
             slug = parts[0].lower()
-            if slug and slug not in SKIP_SLUGS and slug not in _WORKABLE_RESERVED_PATH_TOKENS:
+            if (slug and slug not in SKIP_SLUGS and slug not in _WORKABLE_RESERVED_PATH_TOKENS
+                    and _looks_like_real_slug(slug)):
                 return slug
         return None
     sub = host.replace(".workable.com", "").lower()
@@ -628,7 +634,8 @@ def _url_to_slug_smartrecruiters(url: str) -> str | None:
     parts = parsed.path.strip("/").split("/")
     if parts and parts[0]:
         slug = parts[0]
-        if slug.lower() not in SKIP_SLUGS and slug.lower() not in ("jobs", "careers", "posting"):
+        if (slug.lower() not in SKIP_SLUGS and slug.lower() not in ("jobs", "careers", "posting")
+                and _looks_like_real_slug(slug)):
             return slug
     return None
 
@@ -749,6 +756,13 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
 
 
 def _url_to_slug_successfactors(url: str) -> str | None:
+    """2026-09: confirmed live archive_i rows with a trailing space baked
+    into the stored slug (e.g. "career8.successfactors.com|management ")
+    — root cause: `company_key`/`path_match.group(1)` were never
+    stripped, so a source URL with a raw (technically invalid, but real-
+    world-common) unencoded space in its query string carried that space
+    straight through into the stored slug. .strip() added at every return
+    point that builds a slug from external input."""
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     sf_domains = (".successfactors.com", ".successfactors.eu", ".sapsf.com", ".sapsf.eu")
@@ -760,14 +774,14 @@ def _url_to_slug_successfactors(url: str) -> str | None:
             if k.lower() == "company" and v:
                 company_key = v[0]
         if company_key:
-            return f"{host}|{company_key}"
+            return f"{host}|{company_key.strip()}"
         # Fallback: extract subdomain as instance
         instance = host.split(".")[0]
         if instance and instance not in SKIP_SLUGS:
             # Try extracting company from path
             path_match = re.search(r"/career\?company=([^&]+)", url)
             if path_match:
-                return f"{instance}|{path_match.group(1)}"
+                return f"{instance}|{path_match.group(1).strip()}"
             return instance
     return None
 
@@ -978,7 +992,7 @@ def _url_to_slug_folkshr(url: str) -> str | None:
     parts = parsed.path.strip("/").split("/")
     if parts and parts[0]:
         slug = parts[0].lower()
-        if slug not in SKIP_SLUGS:
+        if slug not in SKIP_SLUGS and _looks_like_real_slug(slug):
             return slug
     return None
 
@@ -996,7 +1010,8 @@ def _url_to_slug_jobadder(url: str) -> str | None:
     parts = parsed.path.strip("/").split("/")
     if len(parts) >= 2 and parts[0] and parts[1]:
         client_id, board_slug = parts[0], parts[1]
-        if client_id.lower() not in SKIP_SLUGS and board_slug.lower() not in SKIP_SLUGS:
+        if (client_id.lower() not in SKIP_SLUGS and board_slug.lower() not in SKIP_SLUGS
+                and _looks_like_real_slug(client_id) and _looks_like_real_slug(board_slug)):
             return f"{client_id}|{board_slug}"
     return None
 
@@ -1193,7 +1208,8 @@ def _url_to_slug_pageup(url: str) -> str | None:
     parts = parsed.path.strip("/").split("/")
     if len(parts) >= 2 and parts[0] and parts[1]:
         portal_id, source = parts[0], parts[1]
-        if portal_id.lower() not in SKIP_SLUGS and source.lower() not in SKIP_SLUGS:
+        if (portal_id.lower() not in SKIP_SLUGS and source.lower() not in SKIP_SLUGS
+                and _looks_like_real_slug(portal_id) and _looks_like_real_slug(source)):
             return f"{portal_id}|{source}"
     return None
 
@@ -1359,9 +1375,19 @@ def fetch_feashliaa_slugs() -> dict[str, set[str]]:
             r.raise_for_status()
             data = r.json()
             if isinstance(data, list):
+                # 2026-09: this upstream repo's own lists have turned out to
+                # contain garbage of exactly the same shape node.py's own
+                # extractors were fixed for this session (bare hex hashes —
+                # confirmed live via archive_i rows like a greenhouse/ashby
+                # "slug" that's actually a raw internal object id, not a
+                # company name) — Feashliaa's data isn't immune just
+                # because it skips our own URL-parsing code. Same guard,
+                # applied here instead of at extraction time since there's
+                # no URL to parse in the first place.
                 clean = {s.strip() for s in data
                          if isinstance(s, str) and s.strip()
-                         and s.strip().lower() not in SKIP_SLUGS}
+                         and s.strip().lower() not in SKIP_SLUGS
+                         and _looks_like_real_slug(s.strip())}
                 slugs_by_ats[ats] = clean
                 log.info(f"  {ats}: {len(clean)} slugs from Feashliaa")
             else:
@@ -1947,37 +1973,79 @@ _ROBOTS_UA = "ATS-Global-Scanner/1.0"
 # robots.txt disallow rules — see fetch_yc_slugs for the summary log).
 _robots_check_stats = {"unreachable": 0, "disallowed_by_rule": 0}
 
+# 2026-09: robots.txt rules are now cached per (base_url, user_agent) for the
+# life of the process instead of re-fetched on every call. HTTP Archive's
+# resolve step routinely calls this twice for the SAME host in one candidate
+# (once for the exact confirmed page in resolve_candidate_page_to_ats_slug,
+# again for the homepage in resolve_company_to_ats_slug's fallback) — that
+# was a guaranteed-duplicate, fully-serial robots.txt fetch (up to 15s each)
+# for every single candidate that fell through to the fallback, on top of
+# whatever legitimate cross-candidate host repeats exist. Caching the parsed
+# rule list (not the per-path decision, since different calls check
+# different paths on the same host) turns that into one fetch per host per
+# run — a real, measurable chunk of this source's wall-clock cost, not just
+# a log-visibility issue.
+_robots_rules_cache: dict[tuple[str, str], list[str] | None] = {}
+_robots_cache_lock = threading.Lock()
+_ROBOTS_FETCH_FAILED = object()  # sentinel distinguishing a cached failure from a cached "no rules"
 
-def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bool:
-    """Minimal robots.txt check: fetch {base_url}/robots.txt and verify
-    `path` isn't disallowed for '*' or our own UA. Fails CLOSED (returns
-    False) on any fetch/parse error — if we can't confirm it's allowed,
-    we don't proceed. This mirrors the same non-negotiable policy already
-    applied to UKG (excluded from ats_scrapers.py for exactly this)."""
+
+def _fetch_robots_rules(base_url: str, user_agent: str) -> list[str] | None:
+    """Fetch+parse {base_url}/robots.txt once, cached thereafter for this
+    process. Returns the list of Disallow patterns applicable to '*'/our UA,
+    or None if the site has no robots.txt (or one that doesn't apply) —
+    None means 'allow everything', distinct from an empty-but-fetched list
+    which also means allow everything but for a different reason (fetched
+    fine, no applicable rules). Raises on fetch/parse failure so the caller
+    can distinguish "confirmed allowed" from "couldn't confirm" and fail
+    closed, same policy as before."""
+    cache_key = (base_url, user_agent)
+    with _robots_cache_lock:
+        if cache_key in _robots_rules_cache:
+            cached = _robots_rules_cache[cache_key]
+            if cached is _ROBOTS_FETCH_FAILED:
+                raise RuntimeError("cached robots.txt fetch failure")
+            return cached
     try:
         r = requests.get(f"{base_url}/robots.txt", timeout=15,
                           headers={"User-Agent": user_agent})
         if r.status_code >= 400:
             # No robots.txt at all is conventionally "allow everything"
-            return True
-        applicable_disallows = []
-        current_ua = None
-        for line in r.text.splitlines():
-            line = line.split("#", 1)[0].strip()
-            if not line or ":" not in line:
-                continue
-            key, _, value = line.partition(":")
-            key = key.strip().lower()
-            value = value.strip()
-            if key == "user-agent":
-                current_ua = value.lower()
-            elif key == "disallow" and current_ua in ("*", user_agent.lower()):
-                if value:
-                    applicable_disallows.append(value)
-        allowed = not any(path.startswith(d) for d in applicable_disallows)
-        if not allowed:
-            _robots_check_stats["disallowed_by_rule"] += 1
-        return allowed
+            rules: list[str] | None = None
+        else:
+            applicable_disallows = []
+            current_ua = None
+            for line in r.text.splitlines():
+                line = line.split("#", 1)[0].strip()
+                if not line or ":" not in line:
+                    continue
+                key, _, value = line.partition(":")
+                key = key.strip().lower()
+                value = value.strip()
+                if key == "user-agent":
+                    current_ua = value.lower()
+                elif key == "disallow" and current_ua in ("*", user_agent.lower()):
+                    if value:
+                        applicable_disallows.append(value)
+            rules = applicable_disallows
+        with _robots_cache_lock:
+            _robots_rules_cache[cache_key] = rules
+        return rules
+    except Exception:
+        with _robots_cache_lock:
+            _robots_rules_cache[cache_key] = _ROBOTS_FETCH_FAILED
+        raise
+
+
+def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bool:
+    """Minimal robots.txt check: verify `path` isn't disallowed for '*' or
+    our own UA, using a per-host cached copy of {base_url}/robots.txt (see
+    _fetch_robots_rules). Fails CLOSED (returns False) on any fetch/parse
+    error — if we can't confirm it's allowed, we don't proceed. This
+    mirrors the same non-negotiable policy already applied to UKG (excluded
+    from ats_scrapers.py for exactly this)."""
+    try:
+        applicable_disallows = _fetch_robots_rules(base_url, user_agent)
     except Exception as e:
         # Almost always a dead/unreachable/misconfigured site (DNS failure,
         # timeout, broken SSL) rather than an actual robots.txt rule — log
@@ -1988,6 +2056,12 @@ def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bo
         _robots_check_stats["unreachable"] += 1
         log.debug(f"robots.txt check failed for {base_url}: {e} — treating as disallowed")
         return False
+    if not applicable_disallows:
+        return True
+    allowed = not any(path.startswith(d) for d in applicable_disallows)
+    if not allowed:
+        _robots_check_stats["disallowed_by_rule"] += 1
+    return allowed
 
 
 _WAYBACK_MAX_PAGES = 25  # safety cap on resumeKey pagination, see below
@@ -2684,8 +2758,21 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
 
     slugs_by_ats: dict[str, dict[str, str]] = {}
     resolved = 0
+    processed = 0
     stopped_early = False
     start = time.monotonic()
+    last_heartbeat = start
+    # 2026-09: this source used to log nothing at all between the initial
+    # "resolving up to N candidate pages" line and the final summary —
+    # against a candidate list in the tens/hundreds of thousands with a
+    # multi-hour time budget, that made a perfectly healthy run look
+    # indistinguishable from a hung one in the CI log. A heartbeat every
+    # 60s of wall-clock (not every N candidates, since throughput varies a
+    # lot with how many dead/slow sites are in the current batch) plus a
+    # line for every actual resolution fixes that without spamming the log
+    # with one line per candidate that resolves to nothing (the vast
+    # majority — most candidates just don't pan out, that's expected).
+    _HEARTBEAT_SECONDS = 60
     budget_seconds = resolve_time_budget_minutes * 60 if resolve_time_budget_minutes else None
 
     def _resolve_one(item):
@@ -2714,7 +2801,9 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
             try:
                 expected_ats, result = future.result()
             except Exception:
+                processed += 1
                 continue
+            processed += 1
             if result:
                 actual_ats, slug = result
                 # Trust what we actually found on the page over what the
@@ -2725,6 +2814,13 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
                 # just filed under the platform actually confirmed.
                 slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
                 resolved += 1
+                log.info(f"HTTP Archive: resolved {actual_ats} -> {slug} "
+                         f"({resolved} resolved / {processed}/{len(all_urls)} processed)")
+            now = time.monotonic()
+            if now - last_heartbeat >= _HEARTBEAT_SECONDS:
+                last_heartbeat = now
+                log.info(f"HTTP Archive: still working — {processed}/{len(all_urls)} processed, "
+                         f"{resolved} resolved so far, {(now - start) / 60:.1f}min elapsed")
     finally:
         # cancel_futures=True drops anything not yet STARTED; anything
         # already mid-fetch in a worker thread is abandoned (its result is
