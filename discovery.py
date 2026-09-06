@@ -56,11 +56,16 @@ Sources:
   fetch_commoncrawl_slugs), since Common Crawl was already the slowest
   single source in the matrix and actually benefits from splitting.
 
-Runs weekly (Sunday) via GitHub Actions, as a 7-source, 16-job matrix
-(YC removed 2026-09, Latmay H.F + Edward H.F added, each 3-way
-sharded like commoncrawl/httparchive) — Common Crawl and HTTP Archive
-each split across 3 jobs, Latmay H.F and Edward H.F each split across
-3 jobs too, the remaining 4 sources one job each, all in parallel
+Runs weekly (Sunday) via GitHub Actions, as a 7-source, 14-job matrix
+(YC removed 2026-09, Latmay H.F + Edward H.F added) — Common Crawl and
+HTTP Archive each split across 3 jobs (see fetch_commoncrawl_slugs/
+fetch_httparchive_slugs docstrings for why), Edward H.F split across
+3 jobs too (375 Parquet files — see fetch_edwarddgao_slugs' own
+hf_shard/hf_total_shards docstring), Latmay H.F left as ONE job (a
+single ~69k-row Parquet file — one small download either way, so
+sharding it would only spread the per-row URL_TO_SLUG work without
+cutting any actual download volume, not worth another job slot for),
+the remaining 3 sources one job each, all in parallel
 (see .github/workflows/Discovery.yml) —
 rather than one job running everything back-to-back. Each source (or
 Common Crawl shard) is already an independent fetch-and-resolve pass with
@@ -2576,14 +2581,15 @@ def fetch_latmay_slugs(hf_shard: int | None = None, hf_total_shards: int | None 
     ats_platform}. Small enough to load in one pass, no time-budget/
     streaming logic needed (contrast fetch_edwarddgao_slugs below).
 
-    2026-09: sharded 3-way in discovery.yml, same as commoncrawl/
-    httparchive — only ONE Parquet file backs this whole dataset, so
-    (unlike Edward's per-file sharding below) the shard split happens
-    AFTER downloading it: all rows are read once, then each shard keeps
-    only its own contiguous ~1/N slice of ROW INDEXES. Every shard still
-    downloads the same ~69k-row file (small, cheap) — sharding here is
-    purely to spread the per-row URL_TO_SLUG resolution work, not to cut
-    download volume the way Edward's per-file sharding does."""
+    2026-09: `hf_shard`/`hf_total_shards` are supported (row-index
+    slicing, after the one download — unlike Edward's per-file sharding
+    below, since only ONE Parquet file backs this whole dataset) but
+    Discovery.yml runs this as a SINGLE unsharded job — one ~69k-row
+    file is a small, cheap download either way, so splitting it would
+    only spread the per-row URL_TO_SLUG work across more jobs without
+    cutting any actual download volume, not worth another matrix slot
+    for. The params stay here for manual/ad-hoc use (--hf-shard /
+    --hf-total-shards on the CLI) rather than being removed outright."""
     import pyarrow.parquet as pq
 
     file_urls = _hf_parquet_urls("latmay/ats-career-page-urls")
