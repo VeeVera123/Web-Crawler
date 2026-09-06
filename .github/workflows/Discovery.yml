@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 16-job matrix over 8 sources, all running in parallel — instead of one
+  # 14-job matrix over 8 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -127,8 +127,7 @@ jobs:
           - source: wayback_adp
             name: wayback_adp
           - source: latmay
-            name: Latmay H.F 
-            extra_args: "--hf-shard 0 --hf-total-shards 3
+            name: Latmay H.F
           - source: edwarddgao
             name: Edward H.F 1
             extra_args: "--hf-shard 0 --hf-total-shards 3"
