@@ -32,3 +32,9 @@ aiodns>=3.0
 # psycopg2 package, so GitHub Actions runners don't need libpq-dev
 # installed separately.
 psycopg2-binary>=2.9
+
+# pyarrow — needed by discovery.py's Latmay H.F / Edward H.F sources
+# (2026-09) to read Hugging Face's auto-converted Parquet dataset
+# exports, with column projection so Edward's heavy unused columns
+# (description_html etc.) are never pulled into memory.
+pyarrow>=15.0
