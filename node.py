@@ -578,6 +578,10 @@ _ATS_VENDOR_DOMAINS = (
     "comeet.co", "phenompeople.com", "eightfold.ai", "clearcompanyhr.com",
     "freshteam.com", "newtonsoftware.com", "applicantpro.com",
     "hiringthing.com", "paycomonline.com", "isolvedhire.com",
+    # 2026-09: getro.com added alongside discovery.py's new dayforce/getro/
+    # jazzhr URL_TO_SLUG entries (dayforcehcm.com/applytojob.com were
+    # already listed above).
+    "getro.com",
 )
 
 
