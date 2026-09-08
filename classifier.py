@@ -691,6 +691,14 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     if has_hard_no_sponsorship_signal(job):
         return "no_match", None
 
+    # ── 0.5. HARD OVERRIDE: scraper-reported workplace_type says this
+    # specific posting is Hybrid/On-site/In-office/In-person, regardless
+    # of what the bare location field claims (e.g. location="Remote" but
+    # workplace_type="Hybrid"). See has_non_remote_workplace_type's
+    # docstring for the real Infor/Pinpoint posting this closes. ──
+    if has_non_remote_workplace_type(job):
+        return "no_match", None
+
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
     if isinstance(raw_loc, list):
@@ -1221,3 +1229,60 @@ def has_hard_no_sponsorship_signal(job: dict) -> bool:
     this closes."""
     text = (job.get("description_snippet") or "") + " " + (job.get("title") or "")
     return _sponsorship_sentence_has_negative_signal(text)
+
+
+# Disqualifying workplace_type tokens: a scraper-reported physical-presence
+# requirement (Hybrid / On-site / In-office / In-person). Real values seen
+# across ats_scrapers.py's ~15 populating call sites: Lever ("remote",
+# "hybrid", "on-site" — lowercase enum), JOIN ("ONSITE", "REMOTE", "HYBRID"
+# — uppercase enum), Ashby/Rippling/Recruitee/SmartRecruiters/Pinpoint
+# ("Remote"/"Hybrid"/"Onsite"/"" free text or boolean-derived), Workday
+# ("remoteType", company-specific free text), Oracle Cloud HCM
+# ("WorkplaceTypeDisplay", free text), Zoho ("Remote_Job"/"Work_Mode").
+# Personio's field is mislabeled (it's actually the XML feed's
+# "schedule" — full-time/part-time — not a real workplace-type signal);
+# left as-is here since those values never match either pattern below,
+# so they're harmless no-ops for this check, not false signals.
+_NON_REMOTE_WORKPLACE_RE = re.compile(
+    r"\b(hybrid|on[\s\-]?site|in[\s\-]?office|in[\s\-]?person)\b", re.I
+)
+_REMOTE_WORKPLACE_RE = re.compile(r"\bremote\b", re.I)
+
+
+def has_non_remote_workplace_type(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does the scraper-captured
+    workplace_type field say this specific posting requires physical
+    presence (Hybrid/On-site/In-office/In-person), regardless of what the
+    bare `location` field claims?
+
+    Real case this closes: an Infor posting on Pinpoint
+    (careers.infor.com/en/postings/769bef61-...) had location="Remote"
+    but Pinpoint's own `workplace_type_text` field said "Hybrid" — the
+    posting page shows this as a "Workplace type: Hybrid" badge, with NO
+    country-restriction prose anywhere on the page (verified directly
+    against the live posting, not inferred). classifier.py was capturing
+    workplace_type on every scraper but never reading it, so the
+    "Remote" location field alone let this straight through as
+    match_global. workplace_type is scraper/platform-STRUCTURED data
+    (an explicit field the ATS itself populates), not prose the AI has
+    to interpret — same category of signal as the sponsorship hard
+    override above, so it gets the same treatment: a hard, pre-AI
+    override that doesn't depend on the AI getting it right.
+
+    A job whose workplace_type lists BOTH a disqualifying value and
+    "remote" (e.g. Rippling's "Hybrid, Remote" when a company posts one
+    requisition across multiple locations of different types) is NOT
+    excluded here — that's a genuine remote option existing alongside
+    on-site ones, not a hybrid-only requirement. Only fires when a
+    disqualifying token is present with no remote token alongside it.
+    Blank/missing workplace_type (the common case — most scrapers don't
+    populate it) or a value that matches neither pattern (e.g.
+    Personio's mislabeled "Full-time") is not a signal either way and
+    falls through to the existing location-keyword/AI classification.
+    """
+    wt = job.get("workplace_type", "")
+    if not wt or not isinstance(wt, str):
+        return False
+    if _REMOTE_WORKPLACE_RE.search(wt):
+        return False
+    return bool(_NON_REMOTE_WORKPLACE_RE.search(wt))
