@@ -156,7 +156,35 @@ _JSONLD_SCRIPT_RE = re.compile(
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _strip_html(text: str, max_len: int = 4000) -> str:
+def _coerce_text(value) -> str:
+    """Real-world JSON-LD is often malformed relative to the schema.org
+    spec a field documented as a plain string (JobPosting.description,
+    most commonly) sometimes shows up instead as a nested object
+    ({"@type": "TextObject", "value": "..."}, or similar) or a list
+    (multiple language variants, or a stray array where a scalar was
+    expected). Extract a usable string from any of these shapes instead
+    of crashing — returns "" for anything with no recoverable text.
+    2026-09: added after a real crash — a live page's JSON-LD had
+    "description" as a dict, and _strip_html's old `if not text: return
+    ""` check let it straight through (a non-empty dict is truthy) into
+    a plain string-only regex .sub(), crashing the whole shard with
+    `TypeError: expected string or bytes-like object, got 'dict'`."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("value", "@value", "text", "description", "name"):
+            v = value.get(key)
+            if isinstance(v, str) and v:
+                return v
+        return ""
+    if isinstance(value, list):
+        parts = [v for v in value if isinstance(v, str) and v]
+        return " ".join(parts)
+    return ""
+
+
+def _strip_html(text, max_len: int = 4000) -> str:
+    text = _coerce_text(text)
     if not text:
         return ""
     text = _TAG_RE.sub(" ", text)
