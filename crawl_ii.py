@@ -242,13 +242,32 @@ def _jsonld_location(item: dict) -> str:
                 if joined not in parts:
                     parts.append(joined)
 
+    def _flatten_names(val) -> list[str]:
+        # 2026-09: `name` is supposed to be a single string per schema.org,
+        # but real-world JSON-LD sometimes puts a list there instead (e.g.
+        # {"name": ["United States", "Canada"]}) — that unhashable list
+        # used to reach dict.fromkeys() below and crash the whole page's
+        # extraction with `TypeError: unhashable type: 'list'`. Flatten one
+        # level and keep only strings so a single malformed entry can't
+        # take down an otherwise-good posting.
+        if isinstance(val, str):
+            return [val] if val else []
+        if isinstance(val, list):
+            out = []
+            for v in val:
+                if isinstance(v, str) and v:
+                    out.append(v)
+            return out
+        return []
+
     req = item.get("applicantLocationRequirements")
     req_names: list[str] = []
     if isinstance(req, dict):
-        if req.get("name"):
-            req_names = [req["name"]]
+        req_names = _flatten_names(req.get("name"))
     elif isinstance(req, list):
-        req_names = [r.get("name") for r in req if isinstance(r, dict) and r.get("name")]
+        for r in req:
+            if isinstance(r, dict):
+                req_names.extend(_flatten_names(r.get("name")))
     req_names = list(dict.fromkeys(req_names))  # dedupe, keep order
 
     if req_names:
