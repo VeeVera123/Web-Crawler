@@ -317,8 +317,12 @@ SUPPORTED_ATS = {
 # browser network trace to find whatever XHR call the SPA itself makes).
 # Kept OUT of SUPPORTED_ATS on purpose rather than shipping a scraper that
 # would silently return zero jobs for every real company.
-# ycombinator is no longer per-company here — it moved to
-# job_board_scrapers.py as a multi-company aggregator (see there).
+# ycombinator (2026-09): NOT an ATS at all — Work at a Startup is a
+# multi-company job-board aggregator. job_board_scrapers.py (which used
+# to house it as an aggregator source) was disabled and removed entirely
+# in an earlier cleanup, so there is no YC code path left anywhere in
+# this project — not here, not in URL_TO_SLUG, not in SCRAPERS. Kept out
+# of SUPPORTED_ATS permanently, not just "for now".
 
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
@@ -374,7 +378,8 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     # working scraper lands and occupop joins SUPPORTED_ATS.
     # Disabled platforms (kept for reference):
     # "brassring", "successfactors"
-    # ycombinator moved to job_board_scrapers.py — no longer mapped here.
+    # "ycombinator" intentionally not mapped — see SUPPORTED_ATS comment
+    # above (not a real ATS, no code path left in this project at all).
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -947,35 +952,18 @@ def _url_to_slug_personio(url: str) -> str | None:
     return None
 
 
-def _url_to_slug_ycombinator(url: str) -> str | None:
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if "workatastartup.com" in host:
-        parts = parsed.path.strip("/").split("/")
-        # Pattern: /companies/{slug}
-        if len(parts) >= 2 and parts[0] == "companies":
-            slug = parts[1]
-            if slug and slug.lower() not in SKIP_SLUGS:
-                return slug
-        # Pattern: /{slug} (direct slug in path). 2026-08: expanded the
-        # reserved-route exclusion list — the site has more top-level nav
-        # routes than just jobs/about/faq that would otherwise be wrongly
-        # returned as a company slug.
-        elif len(parts) >= 1 and parts[0]:
-            slug = parts[0]
-            if (slug.lower() not in SKIP_SLUGS
-                    and slug.lower() not in ("jobs", "about", "faq", "login", "candidates",
-                                              "mission", "legal", "privacy", "terms", "apply",
-                                              "press", "blog", "signup", "companies")):
-                return slug
-    # OpenPostings may store YC URLs as ycombinator.com/companies/{slug}
-    if "ycombinator.com" in host:
-        parts = parsed.path.strip("/").split("/")
-        if len(parts) >= 2 and parts[0] == "companies":
-            slug = parts[1]
-            if slug and slug.lower() not in SKIP_SLUGS:
-                return slug
-    return None
+# _url_to_slug_ycombinator REMOVED 2026-09 (at the user's request): YC/
+# Work at a Startup is a multi-company job-board AGGREGATOR, not a
+# per-company ATS — it has no entry in SCRAPERS or SUPPORTED_ATS, so any
+# URL this resolved to ("ycombinator", slug) could never actually be
+# scraped by crawl_i.py's scrape_board() dispatch. Worse, "ycombinator"
+# sits in verification.py's _UNVERIFIABLE_ATS (no safe not-found check),
+# so a row like that wouldn't even get cleaned up by the verification
+# engine once created — a permanent dead-end row that only ever
+# displaced a genuine ATS resolution for that same URL. Removing this
+# entry (and its URL_TO_SLUG registration below) means a workatastartup.
+# com/ycombinator.com URL now correctly falls through to "no ATS match"
+# instead of being wrongly captured as a fake "ycombinator" ATS slug.
 
 
 def _url_to_slug_eploy(url: str) -> str | None:
@@ -1434,7 +1422,9 @@ URL_TO_SLUG = {
     "softgarden": _url_to_slug_softgarden,
     "zoho": _url_to_slug_zoho,
     "paylocity": _url_to_slug_paylocity,
-    "ycombinator": _url_to_slug_ycombinator,
+    # "ycombinator" removed 2026-09 — see the comment above where its
+    # extractor function used to live (aggregator, not a real per-company
+    # ATS; was producing permanently-unscrapable archive_i rows).
     "personio": _url_to_slug_personio,
     "joincom": _url_to_slug_joincom,
     # New (2026-08):
