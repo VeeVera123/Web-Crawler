@@ -837,6 +837,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
         "non_html": 0, "timeout": 0, "unreachable": 0,
         "page_unreachable": 0, "jsonld_pages": 0, "jsonld_postings": 0,
         "heuristic_pages": 0, "heuristic_postings": 0, "no_postings_found": 0,
+        "apply_page_augmented": 0,
     }
     sem = asyncio.Semaphore(CRAWL_CONCURRENCY)
     connector = new_connector()
@@ -864,6 +865,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
              f"postings confirmed")
     log.info(f"  Unreachable/no-signal: {stats['page_unreachable']} pages unreachable, "
              f"{stats['no_postings_found']} pages with no postings found")
+    log.info(f"  Apply-page augmented: {stats['apply_page_augmented']} postings enriched with apply URL")
 
     log_egress_summary(label=f"crawl_ii shard {shard}/{total_shards}")
 
