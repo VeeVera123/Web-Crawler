@@ -4845,28 +4845,153 @@ def _fetch_hrmdirect_questions(job: dict) -> str:
     return ""
 
 
-# ── Best-effort DOM-only platforms ──────────────────────
-# Verified live (see research notes above): these platforms render their
-# real application form client-side (React/Angular SPA) after JS
-# execution, behind session/cookie state established by the "Apply" click,
-# or (iCIMS) inside a cross-origin iframe. None of that is reachable with
-# plain HTTP requests. We still run the Level-3 DOM parser against the
-# best-known URL in case a given tenant happens to serve server-rendered
-# fallback markup, but for most jobs on these platforms this will
-# correctly return nothing — that's the platform's architecture, not a
-# bug here. Upgrading these to real coverage would require adding a
-# headless-browser step (Playwright) to drive the actual apply flow.
-
-def _fetch_rippling_questions(job: dict) -> str:
+# ── ADP Workforce Now (public JSON — no browser, no click) ──
+# 2026-09: RESEARCHED LIVE. job["url"] (set by scrape_adp) is already the
+# per-requisition DETAIL API endpoint (.../job-requisitions/{itemID}?cid=
+# ...&ccId=...) that _fetch_adp_description also fetches — a public,
+# unauthenticated JSON API. Confirmed live against a real ADP client's
+# requisitions that the detail payload carries a top-level
+# "screeningRequirements" array (empty on every requisition checked in
+# this pass, since not every ADP client configures screening questions —
+# same as Greenhouse boards without custom questions — but the field
+# itself, and the API shape, are real and live-verified, not guessed).
+# ADP's own key name "screeningRequirements" already matches
+# _QUESTION_KEY_RE ("screening"), so the existing generic
+# _walk_for_questions() (used for Oracle Cloud HCM below) finds it with no
+# ADP-specific parsing needed — it recurses the whole payload for any
+# question-shaped array under a matching key, so it's robust even if a
+# populated requisition nests things slightly differently than the empty
+# ones checked here.
+def _fetch_adp_questions(job: dict) -> str:
     url = job.get("url", "")
     if not url:
         return ""
+    r = _get(url, headers={
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+    })
+    if not r:
+        return ""
+    try:
+        data = r.json()
+    except Exception:
+        return ""
+    questions: list[dict] = []
+    _walk_for_questions(data, questions)
+    return _format_auth_questions(questions)
+
+
+# ── Rippling (public Next.js data route — no browser needed) ──
+# 2026-09: RESEARCHED LIVE before writing this (a real Skillable posting on
+# Rippling, ats.rippling.com/skillable-careers/jobs/{jobId}) — the previous
+# version of this function assumed Rippling's apply form needed a headless
+# browser to render (same assumption still true for BambooHR/iCIMS/Workday/
+# JOIN/Paylocity below). That assumption was WRONG for Rippling specifically:
+# clicking "Apply" just navigates to a plain Next.js page
+# (.../jobs/{jobId}/apply?jobBoardSlug={slug}&jobId={jobId}&step=application)
+# whose content comes from Next.js's own server-rendered-data route:
+#   https://ats.rippling.com/_next/data/{buildId}/en-US/{slug}/jobs/{jobId}/apply.json
+#     ?jobBoardSlug={slug}&jobId={jobId}&step=application
+# Confirmed live: a plain server-side GET of that URL (no JS execution, no
+# session/cookies, no click) returns the FULL question set as structured
+# JSON at pageProps.apiData.jobPost.activeJobApplication.additionalQuestions
+# -> [...].form.questions -> [{title, questionType, isRequired, ...}], where
+# questionType "KNOCKOUT" is Rippling's OWN flag for a disqualifying
+# question — better signal than regex-matching the title text, since a
+# real knockout question isn't always about sponsorship (the same live
+# posting also had a KNOCKOUT residency-restriction question with no
+# "sponsor"/"authorized" wording at all, which _WORK_AUTH_RE alone would
+# have missed). buildId isn't guessable but doesn't need to be: it's
+# embedded in the job posting page's own __NEXT_DATA__ script tag, which
+# is a single extra plain-HTTP GET of a page this codebase already fetches
+# the URL for (job["url"], Rippling's listing API's own posting link).
+_RIPPLING_JOB_URL_RE = re.compile(r"ats\.rippling\.com/([^/]+)/jobs/([a-zA-Z0-9-]+)")
+_NEXT_BUILD_ID_RE = re.compile(r'"buildId"\s*:\s*"([^"]+)"')
+
+
+def _fetch_rippling_questions(job: dict) -> str:
+    url = job.get("url", "")
+    m = _RIPPLING_JOB_URL_RE.search(url)
+    if not m:
+        return _format_auth_questions(_fetch_generic_form_questions(url)) if url else ""
+    slug, job_id = m.group(1), m.group(2)
+
+    questions: list[dict] = []
+    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    build_id_match = _NEXT_BUILD_ID_RE.search(r.text) if r else None
+    if build_id_match:
+        build_id = build_id_match.group(1)
+        data_url = (
+            f"https://ats.rippling.com/_next/data/{build_id}/en-US/{slug}/jobs/{job_id}/apply.json"
+        )
+        r2 = _get(
+            data_url,
+            params={"jobBoardSlug": slug, "jobId": job_id, "step": "application"},
+            headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"},
+        )
+        if r2:
+            try:
+                data = r2.json()
+            except Exception:
+                data = None
+            if data:
+                job_post = (
+                    (((data.get("pageProps") or {}).get("apiData") or {}).get("jobPost")) or {}
+                )
+                additional = (job_post.get("activeJobApplication") or {}).get(
+                    "additionalQuestions"
+                ) or []
+                for group in additional:
+                    for q in (group.get("form") or {}).get("questions") or []:
+                        title = _clean_label(str(q.get("title") or ""))
+                        if not title:
+                            continue
+                        required = bool(q.get("isRequired"))
+                        is_knockout = str(q.get("questionType") or "").upper() == "KNOCKOUT"
+                        # Keep every knockout question (Rippling's own
+                        # disqualifying-question flag, not just ones whose
+                        # wording happens to match _WORK_AUTH_RE — see
+                        # module note above for the real residency-question
+                        # example this closes) PLUS anything else that
+                        # matches the usual work-authorization wording.
+                        if is_knockout or _WORK_AUTH_RE.search(title):
+                            questions.append({"label": title, "required": required})
+
+    if questions:
+        # NOTE: deliberately NOT calling _format_auth_questions() here — it
+        # re-filters by _WORK_AUTH_RE internally, which would silently drop
+        # the non-worded KNOCKOUT questions (e.g. the residency-restriction
+        # example above) that were already deliberately kept above. Format
+        # directly instead so that filtering decision actually sticks.
+        return "\n".join(f"Application Question: {q['label']}" for q in questions)
+
+    # Fallback: the Next.js data-route trick can fail if Rippling changes
+    # its build layout — fall back to the old best-effort DOM guesses
+    # rather than returning nothing.
     apply_url = url.rstrip("/") + "/apply"
     found = _fetch_generic_form_questions(apply_url)
     if not found:
         found = _fetch_generic_form_questions(url.rstrip("/") + "/application")
     return _format_auth_questions(found)
 
+
+# ── Best-effort DOM-only platforms (BambooHR / iCIMS / Workday / JOIN /
+# Paylocity) ──
+# 2026-09: RESEARCHED LIVE, not assumed. Workday (a real Lennar posting)
+# and JOIN (a real ShippyPro posting) both put the actual questions behind
+# an account-creation/sign-in wall BEFORE any question ever renders — this
+# is a real authentication gate, not a JS-rendering problem, so a headless
+# browser would hit the exact same wall a plain HTTP request does. Getting
+# past it would mean creating and signing in with fake applicant accounts
+# at scale, which is a different and far riskier undertaking than "add a
+# browser step" and is treated as out of scope here. iCIMS additionally
+# renders inside a cross-origin iframe. BambooHR and Paylocity weren't
+# reachable with a real live example in this research pass; left in this
+# bucket rather than guessed at. We still run the Level-3 DOM parser
+# against the best-known URL in case a tenant happens to serve
+# server-rendered fallback markup, but for most jobs on these platforms
+# this will correctly return nothing — that's the platform's
+# architecture, not a bug here.
 
 def _fetch_bamboohr_questions(job: dict) -> str:
     return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
@@ -4966,6 +5091,7 @@ QUESTION_FETCHERS = {
     "BreezyHR": _fetch_breezyhr_questions,
     # "ApplyToJob": _fetch_applytojob_questions,  # REMOVED 2026-08 — see module notes below
     "HRMDirect": _fetch_hrmdirect_questions,
+    "ADP": _fetch_adp_questions,
     "Zoho": _fetch_zoho_questions,
     "Oracle Cloud HCM": _fetch_oracle_cloud_hcm_questions,
     "Rippling": _fetch_rippling_questions,
