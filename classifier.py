@@ -11,7 +11,7 @@ Falls back to single-provider mode if only LLM_PROVIDER is set.
 
 Then a separate location filter:
   Stage 3 — keyword check for Africa/Global locations
-  Stage 4 — AI for ambiguous locations (Gemini + OpenAI, concurrent)
+  Stage 4 — AI for ambiguous locations (OpenAI only)
 """
 
 import re
@@ -23,72 +23,9 @@ import geo
 
 log = logging.getLogger(__name__)
 
-# 2026-09: mute the openai SDK's own httpx/httpcore client logging — every
-# _ai_call() below already logs a clean per-batch summary ("Role
-# classification: N titles → M batches...", "AI classified X/Y locations
-# ..."), so the SDK's own "HTTP Request: POST .../chat/completions HTTP/1.1
-# 200 OK" line per call is pure duplication once you have that, not
-# additional signal. Set here (not just in each entrypoint's basicConfig)
-# so it's muted no matter which script imports this module.
-for _noisy in ("httpx", "httpcore", "openai"):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
-
 # ── Provider-specific AI client setup ─────────────────────
 MAX_RETRIES = 4
 RETRY_BASE_DELAY = 5  # seconds
-
-# ── Per-run provider health tracking ──────────────────────
-# 2026-09: a provider that's exhausted its quota (daily or otherwise) for
-# THIS run gets marked here and skipped for the rest of the process —
-# instead of every subsequent batch still being round-robin-assigned to it,
-# burning MAX_RETRIES retries and RETRY_BASE_DELAY backoff on a call that's
-# doomed before it starts (see the real Gemini "RESOURCE_EXHAUSTED ...
-# FreeTier" 429 in this project's own logs — a genuine daily-quota
-# exhaustion, not a transient burst, so retrying it is pure waste). Reset
-# per-process (i.e. per GitHub Actions shard) — there's no cross-process
-# state here, same as _last_call_times below.
-_dead_providers: set[str] = set()
-
-# 2026-09: a provider whose calls keep coming back with null content (not
-# a rate-limit/quota error — the request succeeds, the model just returns
-# nothing) was never being marked dead at all, only retried MAX_RETRIES
-# times per batch and then silently given up on for THAT batch — the next
-# batch would round-robin straight back to it and repeat the same losing
-# cycle, which is exactly the real, live behavior reported: "cerebras
-# returned null content (attempt 3/4)" followed immediately by "rerouting
-# ... to: cerebras, groq, nvidia" — rerouting TO the very provider that
-# just failed. Tracked as strikes (one per batch that exhausts retries on
-# null content alone, not per individual attempt) since a single null
-# response can be a one-off model hiccup; 2 separate batches doing it is a
-# real pattern worth cutting off for the rest of the run.
-_NULL_CONTENT_STRIKE_LIMIT = 2
-_null_content_strikes: dict[str, int] = {}
-
-
-def _mark_provider_dead(name: str, reason: str) -> None:
-    """Mark a provider unavailable for the rest of THIS run. Idempotent —
-    only logs once per provider even if multiple concurrent batches hit
-    the same exhausted quota around the same time."""
-    if name in _dead_providers:
-        return
-    _dead_providers.add(name)
-    log.warning(f"{name}: unavailable for the rest of this run ({reason}) — "
-                f"remaining work assigned to it will be rerouted to whichever "
-                f"other provider(s) are still live.")
-
-
-def _record_null_content_strike(name: str) -> None:
-    """Called once per batch that exhausted every retry with only null
-    content back (never a real error, never a real answer). After
-    _NULL_CONTENT_STRIKE_LIMIT such batches, treat the provider as dead —
-    same remaining-work reroute behavior as a quota/rate-limit death."""
-    _null_content_strikes[name] = _null_content_strikes.get(name, 0) + 1
-    if _null_content_strikes[name] >= _NULL_CONTENT_STRIKE_LIMIT:
-        _mark_provider_dead(
-            name,
-            f"{_null_content_strikes[name]} batches in a row returned only "
-            f"null content after every retry — treating as broken for this run",
-        )
 
 
 def _make_client(provider: dict):
@@ -116,44 +53,6 @@ for _p in LOCATION_PROVIDERS:
 _last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
 for _p in LOCATION_PROVIDERS:
     _last_call_times[_p["name"]] = 0.0
-
-# 2026-09: log exactly which providers this process actually configured,
-# once, at import time — the "is NVIDIA even wired up right now" question
-# kept coming up because the only way to tell before this was inferring it
-# from a provider showing up (or not) inside a "N jobs → M batches across
-# K providers (...)" summary line buried mid-run. This is unconditional
-# and always the first classifier.py log line any run produces, so a
-# provider that's silently missing (unset secret, unpushed code, typo'd
-# env var name) is obvious in the first few lines of the log instead of
-# requiring a scroll-and-guess.
-log.info(f"Role classification providers: {[p['name'] for p in ROLE_PROVIDERS] or '(none — legacy single-provider fallback)'}")
-log.info(f"Location classification providers: {[p['name'] for p in LOCATION_PROVIDERS] or '(none — legacy single-provider fallback)'}")
-
-
-def _short_error(e: Exception) -> str:
-    """Compact, human-readable reason instead of dumping the SDK's full
-    raw exception. 2026-09: a real Gemini quota error logged as a single
-    line was several hundred characters of nested quota-metric/links/
-    violations JSON — the OpenAI-compatible SDK embeds the ENTIRE raw
-    error body in str(e). Pulls out just an HTTP status code (if present),
-    the first sentence of the actual message, and a retry-delay hint."""
-    s = str(e)
-    code_match = re.search(r"error code:\s*(\d+)", s, re.I)
-    code = code_match.group(1) if code_match else None
-    msg_match = (
-        re.search(r"'message':\s*'([^']*)", s)
-        or re.search(r'"message":\s*"([^"]*)', s)
-    )
-    message = msg_match.group(1) if msg_match else s
-    # These SDK messages often ramble on with URLs/follow-up instructions
-    # after the actual reason — keep just the first sentence.
-    message = message.split(r"\n")[0].split(". ")[0].strip().rstrip(".")
-    if len(message) > 160:
-        message = message[:160].rstrip() + "…"
-    retry_match = re.search(r"retry\s*(in|delay)?['\"]?\s*[:=]?\s*['\"]?(\d+(?:\.\d+)?)\s*s", s, re.I)
-    retry = f", retry in {int(float(retry_match.group(2)))}s" if retry_match else ""
-    prefix = f"HTTP {code}: " if code else ""
-    return f"{prefix}{message}{retry}"
 
 
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
@@ -185,46 +84,22 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_BASE_DELAY)
                     continue
-                _record_null_content_strike(name)
                 return None
             return content.strip()
         except Exception as e:
             error_str = str(e)
-            error_lower = error_str.lower()
-            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_lower
-            # 2026-09: broadened to match what Gemini's free tier actually
-            # sends on a real daily-quota exhaustion — "RESOURCE_EXHAUSTED"
-            # / "quota exceeded" / "PerDay...FreeTier" (see this project's
-            # own logged error) — the original "tokens per day"/"daily"
-            # substring check missed that real message entirely (its exact
-            # text is "...RequestsPerDay...", which doesn't contain the
-            # substring "daily"), so every quota-exhausted call was wasting
-            # a full MAX_RETRIES round of backoff (5s+10s+15s) retrying a
-            # request that was doomed from its very first response.
-            is_daily_limit = (
-                "tokens per day" in error_lower
-                or "daily" in error_lower
-                or "resource_exhausted" in error_lower
-                or "quota exceeded" in error_lower
-                or "perday" in error_lower.replace(" ", "").replace("_", "")
-            )
+            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_str.lower()
+            is_daily_limit = "tokens per day" in error_str.lower() or "daily" in error_str.lower()
 
             if is_daily_limit:
-                log.error(f"{name} quota exhausted — skipping remaining AI calls for this run "
-                          f"({_short_error(e)})")
-                _mark_provider_dead(name, "quota exhausted")
+                log.error(f"{name} daily token limit reached — skipping remaining AI calls")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
                 log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
                 time.sleep(delay)
                 continue
-            log.error(f"{name} API error (attempt {attempt + 1}): {_short_error(e)}")
-            if is_rate_limit:
-                # Retries exhausted and the LAST failure was still
-                # rate-limit-flavored (not a one-off timeout/500/etc.) —
-                # treat this as sustained exhaustion, not a fluke.
-                _mark_provider_dead(name, f"repeated rate-limit failures after {MAX_RETRIES} attempts")
+            log.error(f"{name} API error (attempt {attempt + 1}): {e}")
             return None
     return None
 
@@ -357,24 +232,20 @@ Respond ONLY with lines like:
 2 NO"""
 
 
-def _classify_role_batch(batch: list[str], provider: dict, client) -> tuple[dict[str, bool], bool]:
-    """Classify a single batch of titles using a specific provider.
-
-    Returns (results, call_failed). 2026-09: call_failed distinguishes "the
-    AI genuinely said NO" from "the call itself never produced an answer" —
-    the caller (ai_classify_roles) needs that distinction to reroute a
-    failed batch to a different provider instead of just defaulting every
-    title in it to exclude. On call_failed=True, `results` is empty; the
-    caller owns deciding what happens to `batch` next."""
+def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, bool]:
+    """Classify a single batch of titles using a specific provider."""
     numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
     user_msg = f"Titles:\n{numbered}"
     max_tokens = max(500, len(batch) * 4)
     text = _ai_call(provider, client, ROLE_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
-    if text is None:
-        return {}, True
-
     results = {}
+    if text is None:
+        log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, defaulting to exclude")
+        for t in batch:
+            results[t] = False
+        return results
+
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2:
@@ -388,7 +259,7 @@ def _classify_role_batch(batch: list[str], provider: dict, client) -> tuple[dict
     for t in batch:
         if t not in results:
             results[t] = False
-    return results, False
+    return results
 
 
 def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[list[str]]:
@@ -430,11 +301,11 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     if not titles:
         return {}
 
-    all_providers = ROLE_PROVIDERS
-    if not all_providers:
+    providers = ROLE_PROVIDERS
+    if not providers:
         # Legacy single-provider fallback
         from config import LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
-        all_providers = [{
+        providers = [{
             "name": LLM_PROVIDER,
             "api_key": LLM_API_KEY,
             "model": LLM_MODEL,
@@ -443,68 +314,13 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             "min_call_interval": 12.5 if LLM_PROVIDER == "cerebras" else 0.0,
         }]
 
-    # 2026-09: a provider marked dead by an EARLIER call to this function
-    # within the same run (e.g. an earlier batch of titles) was previously
-    # still handed a fresh share of work on every new call — only the
-    # reroute pass below checked _dead_providers, so a provider that died
-    # on batch 1 kept getting round-robined new work on batch 2, 3, 4...
-    # for the rest of the run, guaranteeing it would fail again every
-    # time. Filter it out of the INITIAL dispatch too.
-    live_providers = [p for p in all_providers if p["name"] not in _dead_providers]
-    if not live_providers and all_providers:
-        log.error("Role classification: every configured provider is dead for this "
-                  "run — all remaining titles will default to exclude.")
-    all_providers = live_providers or all_providers
-
-    results, failed_titles = _dispatch_role_work(titles, all_providers)
-
-    # 2026-09: a batch that failed outright (provider exhausted/erroring,
-    # not "AI said NO") gets ONE reroute attempt across whichever
-    # providers are still live, instead of silently defaulting to exclude
-    # — see _mark_provider_dead's docstring for why a provider can go dead
-    # mid-run. Capped at one reroute pass (no unbounded retry loop): if
-    # every remaining provider is also dead/failing, that's a real "all
-    # providers unavailable" condition worth a clear log line, not more
-    # retrying.
-    if failed_titles:
-        retry_providers = [p for p in all_providers if p["name"] not in _dead_providers]
-        if retry_providers:
-            log.warning(f"Role classification: rerouting {len(failed_titles)} titles that "
-                        f"failed on their original provider to: "
-                        f"{', '.join(p['name'] for p in retry_providers)}")
-            rerouted, still_failed = _dispatch_role_work(failed_titles, retry_providers)
-            results.update(rerouted)
-            failed_titles = still_failed
-        if failed_titles:
-            log.error(f"Role classification: {len(failed_titles)} titles could not be "
-                      f"classified by ANY provider — defaulting to exclude")
-            for t in failed_titles:
-                results[t] = False
-
-    return results
-
-
-def _dispatch_role_work(titles: list[str], providers: list[dict]) -> tuple[dict[str, bool], list[str]]:
-    """Round-robin `titles` across `providers`, batch per provider's context
-    limit, run all batches concurrently. Returns (results, failed_titles) —
-    failed_titles is every title whose batch's call never produced an
-    answer (see _classify_role_batch), left for the caller to reroute or
-    default rather than silently marked exclude here."""
-    if not providers:
-        # 2026-09: this used to return silently — the caller's "N titles
-        # could not be classified by ANY provider" error would then show
-        # up with no explanation of WHY (no "N titles → M batches across
-        # K providers (...)" summary line ever got logged, since that line
-        # is below this check). Log plainly instead of leaving a gap.
-        log.warning(f"Role classification: 0 providers available for {len(titles)} titles "
-                    f"(all configured providers are dead for this run) — nothing to assign.")
-        return {}, list(titles)
-
+    # ── Split titles round-robin across providers ──
     provider_titles = {p["name"]: [] for p in providers}
     for i, title in enumerate(titles):
         p = providers[i % len(providers)]
         provider_titles[p["name"]].append(title)
 
+    # ── Build batches per provider (respecting each provider's context limits) ──
     all_work = []  # list of (provider, client, batch)
     for p in providers:
         p_titles = provider_titles[p["name"]]
@@ -528,10 +344,10 @@ def _dispatch_role_work(titles: list[str], providers: list[dict]) -> tuple[dict[
     log.info(f"Role classification: {len(titles)} titles → {len(all_work)} batches "
              f"across {len(providers)} providers ({provider_summary})")
 
-    results: dict[str, bool] = {}
-    failed_titles: list[str] = []
+    results = {}
 
-    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+    # Run ALL batches concurrently (each provider's batches interleave)
+    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
         future_map = {}
         for provider, client, batch in all_work:
             f = pool.submit(_classify_role_batch, batch, provider, client)
@@ -540,16 +356,14 @@ def _dispatch_role_work(titles: list[str], providers: list[dict]) -> tuple[dict[
         for future in as_completed(future_map):
             pname, batch = future_map[future]
             try:
-                batch_results, failed = future.result()
-                if failed:
-                    failed_titles.extend(batch)
-                else:
-                    results.update(batch_results)
+                batch_results = future.result()
+                results.update(batch_results)
             except Exception as e:
                 log.error(f"Role classification error ({pname}): {e}")
-                failed_titles.extend(batch)
+                for t in batch:
+                    results[t] = False
 
-    return results, failed_titles
+    return results
 
 
 # ═══════════════════════════════════════════════════════
@@ -651,29 +465,6 @@ GLOBAL_KEYWORDS = [
     r"\bglobal\s*talent\b",
     r"\bglobal\s*talent\s*pool\b",
     r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
-    # 2026-09 expansion — additional real-world phrasings not covered above
-    r"\b100%\s*remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international)\b",
-    r"\bfully\s*remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international)\b",
-    r"\bremote[\s\-]*first\b.{0,30}\b(global|worldwide|anywhere)\b",
-    r"\bglobal(?:ly)?\s*distributed\s*(team|company|workforce)\b",
-    r"\bwe\s*(are\s*)?a?\s*globally\s*distributed\b",
-    r"\bemployees?\s*(work|based|located)\s*(in|across)\s*\d+\+?\s*countries\b",
-    r"\bteam\s*(members?\s*)?(in|across|spanning)\s*\d+\+?\s*countries\b",
-    r"\bhire\s*(people|talent|employees|staff)\s*in\s*(almost\s*)?any\s*country\b",
-    r"\bopen\s*to\s*remote\s*work\s*(globally|worldwide|from\s*anywhere)\b",
-    r"\bglobally\s*remote\b",
-    r"\bremote\s*globally\b",
-    r"\bunrestricted\s*by\s*(location|geography|country)\b",
-    r"\bno\s*restrictions?\s*on\s*(location|geography|country|where\s*you)\b",
-    r"\bwe\s*hire\s*(globally|worldwide|internationally|anywhere)\b",
-    r"\bwe\s*welcome\s*applicants?\s*(from|in)\s*(any|all)\s*(countr|location)\b",
-    r"\bopen\s*to\s*international\s*(candidates|applicants|hires)\b",
-    r"\bglobal\s*(remote\s*)?workforce\b",
-    r"\bfully\s*distributed\s*(team|company|organization|workforce)\b",
-    r"\bremote\s*[\-–—/,()]?\s*(no\s*)?(location|geographic)\s*(restriction|limit)s?\b",
-    r"\bcan\s*be\s*based\s*anywhere\b",
-    r"\blive\s*and\s*work\s*from\s*anywhere\b",
-    r"\bglobal\s*company\s*with\s*(a\s*)?remote[\-\s]*first\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -890,15 +681,18 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     'unsure' so the AI stage gets a look at genuinely ambiguous listings,
     rather than every non-matching job being silently AI-reviewed.
     """
-    # 2026-09: `job.get("location", "")` only falls back to "" when the KEY
-    # is missing — some ATS scrapers set "location": None explicitly (a
-    # board that has the field but leaves it genuinely empty), which .get
-    # passes straight through as None and used to blow up two lines below
-    # with "can only concatenate str (not NoneType) to str" — a real,
-    # live crash that took down whole crawl_i.py shards. `or ""` catches
-    # both the missing-key AND explicit-None cases.
-    raw_loc = job.get("location") or ""
-    raw_country = job.get("country") or ""
+    # ── 0. HARD OVERRIDE: explicit "we can't/won't sponsor" language
+    # anywhere in the title/description always means NO_MATCH, checked
+    # BEFORE the location field or the AI stage ever gets a say. See
+    # has_hard_no_sponsorship_signal's docstring for the real posting
+    # (a company-wide "we hire globally" claim doesn't override a
+    # specific role's own "no sponsorship, must already be authorized"
+    # statement) that slipped past classification without this. ──
+    if has_hard_no_sponsorship_signal(job):
+        return "no_match", None
+
+    raw_loc = job.get("location", "")
+    raw_country = job.get("country", "")
     if isinstance(raw_loc, list):
         raw_loc = ", ".join(str(x) for x in raw_loc)
     if isinstance(raw_country, list):
@@ -1058,7 +852,24 @@ NO_MATCH — evidence of a country- or narrow-region-specific restriction:
 - "must be authorized/eligible to work in [country]"
 - "US/UK/EU work authorization required"
 - "W-2 employment", "W2 only", "must have SSN"
-- "no visa sponsorship", "cannot sponsor", "will not sponsor"
+- "no visa sponsorship", "cannot sponsor", "will not sponsor" — and every
+  paraphrase of this, not just those exact words. Real postings say this
+  an enormous number of ways, and ALL of the following mean the same
+  thing and are ALL grounds for NO_MATCH:
+    "we're not able to sponsor visas at this time"
+    "we are unable to sponsor an employment visa"
+    "not able to offer visa sponsorship for this role"
+    "won't be able to sponsor a work visa"
+    "we don't currently offer visa sponsorship"
+    "sponsorship isn't something we're able to provide"
+    "visa sponsorship is not available for this position"
+    "we're not in a position to sponsor work visas"
+  A REAL EXAMPLE THAT WAS MISSED BEFORE (do not repeat this mistake):
+  a posting said "You must be authorized to work in the US; we're not
+  able to sponsor visas at this time." and was WRONGLY marked as
+  globally open — read the whole sentence, not just for the literal
+  words "cannot sponsor", and treat "not able to" + "sponsor" as the
+  exact same signal as "cannot sponsor".
 - "must reside in [state/country]", "must be located in [place]"
 - "this role is based in [country]" without a global/EMEA/Africa-wide \
   remote option
@@ -1091,127 +902,8 @@ Respond ONLY with lines like:
 4 UNCERTAIN"""
 
 
-# ── Deterministic restriction override ────────────────────
-# 2026-09: real, live misclassification caught by the user — a Lever
-# posting (Voltus) whose description explicitly said "we do not sponsor
-# visas or transfers for new hires. Voltus teammates need to be
-# authorized to work from their home location (in the US or Canada...)"
-# still got labeled MATCH_GLOBAL by the AI stage. That's not a borderline
-# call the prompt's wording could plausibly excuse — it's a job that
-# flatly rules out anyone who isn't already authorized to work in one of
-# two specific countries, which is the textbook NO_MATCH case the prompt
-# already describes. Trusting the model alone for this class of mistake
-# isn't good enough, so this is a deterministic backstop: ANY of these
-# hard-restriction phrases anywhere in the job's title/location/
-# description overrides an AI verdict of MATCH_GLOBAL or MATCH_AFRICA
-# back down to NO_MATCH, regardless of which provider produced it or how
-# confident it sounded. A genuinely global/Africa-wide employer that also
-# happens to mention visa/authorization requirements for a SPECIFIC
-# country is, definitionally, not hiring from anywhere — real global
-# postings don't gate on one or two named countries' work authorization.
-# 2026-09: "must be authorized to work in ___" is deliberately NOT an
-# unconditional trigger below — that exact phrase is genuinely ambiguous
-# on its own ("must be authorized to work in your country of residence"
-# is actually GLOBAL-friendly language, not a restriction). It only
-# counts as a hard restriction when a concrete single-country/region
-# token (or "home location"/"home country" — Voltus's actual phrasing)
-# shows up within a short window after it — narrow enough to still catch
-# real restrictions, without flagging genuinely global "wherever you
-# already are" language as if it named one specific place.
-_SPECIFIC_LOCATION_TOKEN = (
-    r"(us|usa|u\.s\.|united\s*states|uk|u\.k\.|united\s*kingdom|canada|"
-    r"australia|germany|france|india|ireland|netherlands|singapore|"
-    r"nigeria|kenya|south\s*africa|home\s*(location|country)|"
-    r"a\s*specific\s*countr)"
-)
-
-# 2026-09 BUG FIX: this whole block used to end in "(not|un)available" —
-# which as a regex means the literal contiguous string "notavailable" or
-# "unavailable", NOT the two-word phrase "not available". A real job
-# (BigPanda, via Gem) said "visa sponsorship is not available for this
-# position" and the space between "not" and "available" meant this never
-# matched — so the deterministic override missed a textbook case, AND
-# (worse) detect_visa_sponsorship's identical bug meant _VISA_YES_RE's
-# broad "visa\s*sponsor" then fired on the leftover "visa sponsorship"
-# substring, actively marking the job as SPONSORING when it explicitly
-# said the opposite. See NO_SPONSORSHIP_RE below, shared by both this
-# regex and _VISA_NO_RE now (single definition, not two copies that can
-# drift out of sync with each other again).
-NO_SPONSORSHIP_RE = re.compile(
-    # Negated VERB + visa/permit/transfer/immigration noun ("do not sponsor
-    # visas", "unable to sponsor work permits")
-    r"(do\s*not|don\'t|does\s*not|doesn\'t|won\'t|will\s*not|unable\s*to|"
-    r"cannot|can\'t|no\s*longer)\s*(currently\s*)?(provide\s*|offer\s*)?"
-    r"sponsor\s*(visas?|work\s*permits?|transfers?|immigration)"
-    # Negated VERB + "sponsorship" as its own noun, any of provide/offer/
-    # include/give as the verb — catches "does not offer visa sponsorship",
-    # "does not provide work permit sponsorship", "does not include
-    # immigration sponsorship" (real gaps: the verb-form pattern above only
-    # matches "sponsor" itself as the verb, not "offer/provide/include ...
-    # sponsorship" as a separate noun phrase)
-    r"|(do\s*not|don\'t|does\s*not|doesn\'t|won\'t|will\s*not|unable\s*to|"
-    r"cannot|can\'t|no\s*longer)\s*(currently\s*)?(provide|offer|include|give)"
-    r"\s*(visa\s*|work\s*permit\s*|immigration\s*)?sponsorship"
-    r"|no\s*visa\s*sponsorship"
-    r"|not\s*(able\s*to\s*|currently\s*)?sponsor.{0,20}visa"
-    r"|visa\s*sponsorship\s*(is\s*)?(not\s*available|unavailable)"
-    r"|sponsorship\s*(is\s*)?(not\s*available|unavailable|not\s*offered|"
-    r"not\s*provided)"
-    r"|not\s*eligible\s*for\s*(visa\s*)?sponsorship"
-    r"|no\s*sponsorship\s*(available|offered|provided)",
-    re.I,
-)
-
-# Shared by both _HARD_RESTRICTION_RE and _VISA_NO_RE — "must be authorized
-# to work in/from ___" only counts as a real restriction when a concrete
-# single-country/region token follows within a short window (see
-# _SPECIFIC_LOCATION_TOKEN's comment above). 2026-09: _VISA_NO_RE used to
-# have its OWN unconditional "must be authorized/eligible to work" with no
-# such window — meaning the visa_sponsorship column would show "no" for a
-# genuinely global-friendly job like "must be authorized to work in your
-# country of residence", the exact false-positive class already fixed for
-# location classification but left unfixed here. Single shared fragment now
-# so the two can't drift apart again.
-_MUST_BE_AUTHORIZED_RESTRICTED_RE = (
-    r"(must|need[s]?|required)\s*(to\s*)?be\s*authorized\s*to\s*work\s*(in|from)"
-    r"\s*(the\s*)?.{0,25}?" + _SPECIFIC_LOCATION_TOKEN + r"\b"
-)
-
-_HARD_RESTRICTION_RE = re.compile(
-    NO_SPONSORSHIP_RE.pattern
-    + r"|" + _MUST_BE_AUTHORIZED_RESTRICTED_RE
-    + r"|(must|need[s]?)\s*(to\s*)?reside\s*in\s*(the\s*)?(us|usa|uk|canada|"
-    r"united\s*states|united\s*kingdom)",
-    re.I,
-)
-
-
-def _apply_restriction_override(batch_jobs: list[dict], batch_results: list[str]) -> int:
-    """Downgrade any MATCH_GLOBAL/MATCH_AFRICA verdict to NO_MATCH when a
-    hard country/region-restriction or no-sponsorship phrase is present in
-    the job text. Returns how many labels were overridden (for logging)."""
-    overridden = 0
-    for i, job in enumerate(batch_jobs):
-        if batch_results[i] not in ("match_global", "match_africa"):
-            continue
-        text = (
-            (job.get("title") or "") + " " +
-            (job.get("location") or "") + " " +
-            (job.get("description_snippet") or "")
-        )
-        if _HARD_RESTRICTION_RE.search(text):
-            batch_results[i] = "no_match"
-            overridden += 1
-    return overridden
-
-
-def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> list[str]:
     """Classify a single batch of jobs by location using a specific provider.
-
-    Returns (labels, call_failed). 2026-09: call_failed distinguishes "the
-    call never produced an answer" from "the AI genuinely said uncertain" —
-    ai_classify_locations needs that to reroute a dead batch to a
-    different provider instead of defaulting it to uncertain right here.
 
     Descriptions are sent IN FULL (only bounded by MAX_DESC_CHARS, applied
     once already in _build_dynamic_batches) — no further per-batch slicing.
@@ -1243,10 +935,12 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     max_tokens = max(1500, len(batch_jobs) * 8 + 200)
     text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
-    if text is None:
-        return ["uncertain"] * len(batch_jobs), True
-
     batch_results = ["uncertain"] * len(batch_jobs)
+    if text is None:
+        log.warning(f"AI location classification failed ({provider['name']}) "
+                     f"for batch of {len(batch_jobs)}, keeping as uncertain")
+        return batch_results
+
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) >= 1:
@@ -1272,13 +966,7 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
                 elif label.startswith("UNCERTAIN"):
                     batch_results[idx] = "uncertain"
 
-    overridden = _apply_restriction_override(batch_jobs, batch_results)
-    if overridden:
-        log.warning(f"{provider['name']}: overrode {overridden} MATCH_GLOBAL/MATCH_AFRICA "
-                    f"verdict(s) to NO_MATCH — hard visa/country-restriction language found "
-                    f"in the job text that the AI missed.")
-
-    return batch_results, False
+    return batch_results
 
 
 def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
@@ -1330,115 +1018,30 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     return batches
 
 
-def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
+def ai_classify_locations(jobs: list[dict]) -> list[str]:
     """
     Send ambiguous jobs (bare "Remote") to AI for location classification.
-    Uses LOCATION_PROVIDERS (Gemini + OpenAI + whatever else is configured)
-    concurrently.
+    Uses LOCATION_PROVIDERS (Gemini + OpenAI) concurrently.
 
     Jobs are round-robin split across providers, batched per provider's
     context window, and all batches run concurrently.
 
-    Returns a list of (label, provider_name) tuples in the same order as
-    `jobs`, where label is 'match_global', 'match_africa', 'no_match', or
-    'uncertain', and provider_name is whichever provider ('gemini',
-    'openai', ...) actually classified that job — None for a job that
-    never got assigned to a live provider (e.g. every configured provider
-    failed to build a client).
-
-    2026-09: previously returned bare labels, and callers re-derived
-    "which provider did this" themselves via `i % len(LOCATION_PROVIDERS)`
-    — a second, independent copy of the exact round-robin math this
-    function already does internally, which silently drifts out of sync
-    the moment a provider here fails to build a client (that provider's
-    assigned jobs default to 'uncertain' with NO batch ever submitted for
-    them, but the caller's separately-recomputed modulo would still credit
-    the dead provider's name to them). Returning the real provider per job
-    removes that duplicate logic and the drift risk entirely — this is
-    also the fix for jobs.clearance showing the literal string "ai"
-    instead of the actual provider name that classified them, one of the
-    two callers (crawl_ii.py) was never mapping `i % len(LOCATION_PROVIDERS)`
-    at all and just hardcoded "ai".
-
-    On rate limit/failure: defaults to ('uncertain', <provider that tried
-    and failed>) — the provider name is still meaningful there, since a
-    provider whose call failed is still the one that "handled" the job.
+    Returns list of 'match_global', 'match_africa', 'no_match', or
+    'uncertain' in same order. On rate limit/failure: defaults to
+    'uncertain' (include with flag).
     """
     if not jobs:
         return []
 
-    all_providers = LOCATION_PROVIDERS
-    # 2026-09: same dead-provider filter as ai_classify_roles — see that
-    # function's comment. Without this, a provider that died on an earlier
-    # batch this run kept getting fresh work every subsequent call.
-    live_providers = [p for p in all_providers if p["name"] not in _dead_providers]
-    if not live_providers and all_providers:
-        log.error("Location classification: every configured provider is dead for this "
-                  "run — all remaining jobs will stay uncertain.")
-    all_providers = live_providers or all_providers
+    providers = LOCATION_PROVIDERS
 
-    results, failed_jobs = _dispatch_location_work(jobs, all_providers)
-
-    # 2026-09: same reroute-once-then-give-up pattern as ai_classify_roles
-    # — see _mark_provider_dead's docstring. A job whose batch failed
-    # outright (its provider exhausted/erroring, not "AI said uncertain")
-    # gets ONE shot at whichever provider(s) are still alive before it's
-    # left as ('uncertain', None).
-    if failed_jobs:
-        retry_providers = [p for p in all_providers if p["name"] not in _dead_providers]
-        if retry_providers:
-            log.warning(f"Location classification: rerouting {len(failed_jobs)} jobs that "
-                        f"failed on their original provider to: "
-                        f"{', '.join(p['name'] for p in retry_providers)}")
-            # rerouted is aligned to failed_jobs (that's what was passed in
-            # as the `jobs` arg to this second dispatch call) — merge each
-            # result back into `results` at that job's ORIGINAL position in
-            # the outer `jobs` list, by identity (dicts, not values, so a
-            # value-equality index() lookup could pick the wrong one if two
-            # jobs happen to look alike).
-            rerouted, still_failed = _dispatch_location_work(failed_jobs, retry_providers)
-            still_failed_ids = {id(j) for j in still_failed}
-            job_id_to_orig_idx = {id(j): i for i, j in enumerate(jobs)}
-            for job, res in zip(failed_jobs, rerouted):
-                if id(job) not in still_failed_ids:
-                    results[job_id_to_orig_idx[id(job)]] = res
-            failed_jobs = still_failed
-        if failed_jobs:
-            log.error(f"Location classification: {len(failed_jobs)} jobs could not be "
-                      f"classified by ANY provider — keeping as uncertain")
-
-    labels = [r[0] for r in results]
-    classified = sum(1 for l in labels if l != "uncertain")
-    log.info(f"AI classified {classified}/{len(jobs)} locations "
-             f"({labels.count('match_global')} match_global, "
-             f"{labels.count('match_africa')} match_africa, "
-             f"{labels.count('no_match')} no_match, "
-             f"{labels.count('uncertain')} uncertain/unclassified)")
-
-    return results
-
-
-def _dispatch_location_work(
-    jobs: list[dict], providers: list[dict]
-) -> tuple[list[tuple[str, str | None]], list[dict]]:
-    """Round-robin `jobs` across `providers`, batch per provider's context
-    window, run all batches concurrently. Returns (results, failed_jobs) —
-    results is a full-length list aligned to `jobs` (('uncertain', None)
-    for any job whose batch failed), and failed_jobs is the actual job
-    dicts whose batch never produced an answer, for the caller to reroute."""
-    results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
-    if not providers:
-        # 2026-09: same "why did nothing get assigned" logging gap fix as
-        # _dispatch_role_work — see that function's comment.
-        log.warning(f"Location classification: 0 providers available for {len(jobs)} jobs "
-                    f"(all configured providers are dead for this run) — nothing to assign.")
-        return results, list(jobs)
-
+    # ── Round-robin assign jobs to providers (tracking original indices) ──
     provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
     for i, job in enumerate(jobs):
         p = providers[i % len(providers)]
         provider_assignments[p["name"]].append((i, job))
 
+    # ── Build batches per provider ──
     all_work = []  # (provider, client, [(orig_idx, job)...])
     for p in providers:
         assigned = provider_assignments[p["name"]]
@@ -1452,10 +1055,12 @@ def _dispatch_location_work(
             except Exception as e:
                 log.error(f"Cannot create location client for {p['name']}: {e}")
                 continue
+        # Build batches from assigned jobs
         assigned_jobs = [job for _, job in assigned]
         assigned_indices = [idx for idx, _ in assigned]
         batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"])
         for start_idx, batch in batches:
+            # Map batch start_idx back to original indices
             batch_orig_indices = assigned_indices[start_idx:start_idx + len(batch)]
             all_work.append((p, client, batch, batch_orig_indices))
 
@@ -1465,9 +1070,10 @@ def _dispatch_location_work(
     log.info(f"Location classification: {len(jobs)} jobs → {len(all_work)} batches "
              f"across {len(providers)} providers ({provider_summary})")
 
-    failed_jobs: list[dict] = []
+    results = ["uncertain"] * len(jobs)
 
-    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+    # Run all batches concurrently
+    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
         future_map = {}
         for provider, client, batch, orig_indices in all_work:
             f = pool.submit(_classify_location_batch, batch, provider, client)
@@ -1476,51 +1082,94 @@ def _dispatch_location_work(
         for future in as_completed(future_map):
             pname, batch, orig_indices = future_map[future]
             try:
-                batch_results, failed = future.result()
-                if failed:
-                    failed_jobs.extend(batch)
-                else:
-                    for j, label in enumerate(batch_results):
-                        results[orig_indices[j]] = (label, pname)
+                batch_results = future.result()
+                for j, label in enumerate(batch_results):
+                    results[orig_indices[j]] = label
             except Exception as e:
                 log.error(f"Location classification error ({pname}): {e}")
-                failed_jobs.extend(batch)
 
-    return results, failed_jobs
+    classified = sum(1 for r in results if r != "uncertain")
+    log.info(f"AI classified {classified}/{len(jobs)} locations "
+             f"({results.count('match_global')} match_global, "
+             f"{results.count('match_africa')} match_africa, "
+             f"{results.count('no_match')} no_match, "
+             f"{results.count('uncertain')} uncertain/unclassified)")
+
+    return results
 
 
 # ── Visa Sponsorship Detection ──────────────────────────
+#
+# 2026-09: rewritten from a single "negation must sit immediately before
+# the sponsor phrase" regex to a sentence-scoped detector, after a real
+# false negative reached production: a live posting
+# (harmonyworks.com/careers/customer-success-manager) said
+#     "You must be authorized to work in the US; we're not able to
+#      sponsor visas at this time."
+# and was still classified as globally open. The old _VISA_NO_RE pattern
+# was `(no|not|unable|...)\s*(provide\s*)?(visa\s*sponsor|...)` — it
+# required the negation word to sit right before "sponsor" (at most one
+# "provide" in between), so "not ABLE TO sponsor" — with "able to"
+# wedged in the middle — never matched. Real postings phrase this an
+# enormous number of ways ("not able to", "won't be able to", "aren't
+# currently able to", "not in a position to", "unable to at this time",
+# "don't currently offer sponsorship", "sponsorship isn't something we
+# provide", ...) and a rigid adjacency regex will always be one phrasing
+# behind the next one encountered in the wild.
+#
+# The new approach: split into sentences, and for each sentence that
+# mentions the sponsorship/work-permit *topic* at all, check whether that
+# SAME sentence also carries negation or unavailability language
+# ANYWHERE in it (not glued to the topic word). "sponsor"/"sponsorship"
+# is specific enough as a word (job postings essentially never use it in
+# any other sense) that "topic + negation share a sentence" is a strong,
+# low-false-positive signal — far more resilient to paraphrasing than
+# trying to enumerate every possible negation-to-verb construction.
+
+_SPONSOR_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\r?\n+")
+
+_SPONSOR_TOPIC_RE = re.compile(
+    r"\bsponsor(?:ship|ed|ing|s)?\b|\bwork\s*permits?\b|\bimmigration\s*sponsorship\b",
+    re.I,
+)
+
+_SPONSOR_NEGATION_RE = re.compile(
+    r"\b(no|not|cannot|can\'t|can’t|won\'t|won’t|will\s*not|unable|never|"
+    r"doesn\'t|does\s*not|don\'t|do\s*not|isn\'t|is\s*not|aren\'t|are\s*not|"
+    r"without|n\'t)\b",
+    re.I,
+)
+
+# Negation that shows up AFTER the topic word instead of before it
+# ("sponsorship is not available", "visa sponsorship: unavailable").
+_SPONSOR_UNAVAILABLE_RE = re.compile(
+    r"\bunavailable\b|\bnot\s+(?:currently\s+|presently\s+)?(?:offered|provided|available|possible|"
+    r"something\s+(?:we|the\s+company)\s+(?:can\s+)?(?:offer|provide|do))\b",
+    re.I,
+)
 
 _VISA_YES_RE = re.compile(
     r"visa\s*sponsor|sponsor.*visa|relocation\s*(support|assist|package)"
     r"|work\s*permit\s*(support|assist|provid)"
     r"|immigration\s*(support|assist)"
-    r"|we\s*sponsor"
-    r"|sponsorship\s*(available|offered|provided)",
+    r"|we\s*(do|can|will)\s*(provide|offer)\s*(visa\s*)?sponsorship"
+    r"|sponsorship\s*(is\s*)?(available|offered|provided)",
     re.I,
 )
 
-# 2026-09: rebuilt on top of the shared NO_SPONSORSHIP_RE (see that
-# regex's own comment for the real, live bug this fixes — a job whose JD
-# literally said "visa sponsorship is not available" was being reported
-# as SPONSORING, the exact opposite of what it said, because the old
-# "(not|un)available" fragment here required "not" and "available" to be
-# one unbroken word with no space). The old unconditional "must be
-# authorized/eligible to work" (no country window at all) is REMOVED —
-# it was flagging genuinely global-friendly phrasing like "must be
-# authorized to work in your country of residence" as visa_sponsorship
-# = "no", the same false-positive class already fixed for location
-# classification but left unfixed here until now. Uses the same shared,
-# windowed _MUST_BE_AUTHORIZED_RESTRICTED_RE fragment as
-# _HARD_RESTRICTION_RE so the two can't drift apart again.
-_VISA_NO_RE = re.compile(
-    NO_SPONSORSHIP_RE.pattern
-    + r"|(no|not|unable|cannot|can\'t|won\'t|will\s*not)\s*(provide\s*)?"
-    r"(visa\s*sponsor|sponsor.*visa|work\s*permit|immigration\s*sponsor)"
-    r"|" + _MUST_BE_AUTHORIZED_RESTRICTED_RE
-    + r"|without\s*(visa\s*)?sponsor",
-    re.I,
-)
+
+def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
+    """True if any sentence/line in `text` mentions the sponsorship/work-
+    permit topic AND carries negation or unavailability language
+    somewhere in that same sentence, in any order or distance apart."""
+    if not text:
+        return False
+    for sentence in _SPONSOR_SENTENCE_SPLIT_RE.split(text):
+        if not _SPONSOR_TOPIC_RE.search(sentence):
+            continue
+        if _SPONSOR_NEGATION_RE.search(sentence) or _SPONSOR_UNAVAILABLE_RE.search(sentence):
+            return True
+    return False
 
 
 def detect_visa_sponsorship(job: dict) -> str:
@@ -1534,8 +1183,26 @@ def detect_visa_sponsorship(job: dict) -> str:
     if not text.strip():
         return "unknown"
 
-    if _VISA_NO_RE.search(text):
+    if _sponsorship_sentence_has_negative_signal(text):
         return "no"
     if _VISA_YES_RE.search(text):
         return "yes"
     return "unknown"
+
+
+def has_hard_no_sponsorship_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's title/
+    description contain an explicit "we won't/can't sponsor" (or
+    equivalent) statement? Used to force NO_MATCH in location
+    classification regardless of what the location field says or what
+    the AI stage might otherwise decide — a company-wide "we hire
+    globally" claim doesn't change the fact that THIS specific posting
+    told applicants it needs existing work authorization with no
+    sponsorship. Running this before the AI stage also means these
+    clear-cut cases never depend on the AI getting it right (or even
+    running successfully) at all — see _keyword_classify_location_detail
+    for where this is wired in, and the module comment above
+    _sponsorship_sentence_has_negative_signal for the real false negative
+    this closes."""
+    text = (job.get("description_snippet") or "") + " " + (job.get("title") or "")
+    return _sponsorship_sentence_has_negative_signal(text)
