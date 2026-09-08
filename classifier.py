@@ -1018,7 +1018,7 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     return batches
 
 
-def ai_classify_locations(jobs: list[dict]) -> list[str]:
+def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     """
     Send ambiguous jobs (bare "Remote") to AI for location classification.
     Uses LOCATION_PROVIDERS (Gemini + OpenAI) concurrently.
@@ -1026,9 +1026,23 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     Jobs are round-robin split across providers, batched per provider's
     context window, and all batches run concurrently.
 
-    Returns list of 'match_global', 'match_africa', 'no_match', or
-    'uncertain' in same order. On rate limit/failure: defaults to
-    'uncertain' (include with flag).
+    Returns a list of (label, provider_name) tuples in the same order as
+    `jobs` — label is one of 'match_global', 'match_africa', 'no_match',
+    or 'uncertain'; provider_name is whichever LOCATION_PROVIDERS entry
+    actually produced that label (None if every provider failed/never
+    ran for that job, e.g. a client-creation error). On rate limit/
+    failure: defaults to ('uncertain', None) (include with flag).
+
+    2026-09: fixed to actually return tuples — crawl_i.py's
+    filter_locations() and crawl_ii.py's _filter_locations() have both
+    always unpacked this as `(label, provider_name)` (to track which
+    provider classified each job, avoiding a separate round-robin
+    re-derivation that could drift out of sync), but this function was
+    still returning bare label strings, which crashed identically in
+    both callers with "too many values to unpack (expected 2)" — a
+    length-N string doesn't unpack into 2 values unless N happens to be
+    2. Caught live via a production crawl_i.py run once the location
+    filter actually sent unsure jobs to the AI stage.
     """
     if not jobs:
         return []
@@ -1070,7 +1084,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
     log.info(f"Location classification: {len(jobs)} jobs → {len(all_work)} batches "
              f"across {len(providers)} providers ({provider_summary})")
 
-    results = ["uncertain"] * len(jobs)
+    results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
 
     # Run all batches concurrently
     with ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -1084,16 +1098,17 @@ def ai_classify_locations(jobs: list[dict]) -> list[str]:
             try:
                 batch_results = future.result()
                 for j, label in enumerate(batch_results):
-                    results[orig_indices[j]] = label
+                    results[orig_indices[j]] = (label, pname)
             except Exception as e:
                 log.error(f"Location classification error ({pname}): {e}")
 
-    classified = sum(1 for r in results if r != "uncertain")
+    labels = [label for label, _ in results]
+    classified = sum(1 for label in labels if label != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
-             f"({results.count('match_global')} match_global, "
-             f"{results.count('match_africa')} match_africa, "
-             f"{results.count('no_match')} no_match, "
-             f"{results.count('uncertain')} uncertain/unclassified)")
+             f"({labels.count('match_global')} match_global, "
+             f"{labels.count('match_africa')} match_africa, "
+             f"{labels.count('no_match')} no_match, "
+             f"{labels.count('uncertain')} uncertain/unclassified)")
 
     return results
 
