@@ -55,10 +55,16 @@ jobadder — jobadder's "Nothing here I'm afraid..." page was found to be
 plausibly the SAME message a real empty board shows, an explicitly
 UNSAFE signal — folkshr, adp). Rows on unverifiable platforms, plus
 brassring/successfactors (JS-rendered, no scraper at all — see
-ats_scrapers.py's SCRAPERS dict) and ycombinator (a job-board aggregator,
-not a per-company ATS — see discovery.py's URL_TO_SLUG comment), are
-left completely untouched by this engine and only counted (as
-"unverified") and logged.
+ats_scrapers.py's SCRAPERS dict) are left completely untouched by this
+engine and only counted (as "unverified") and logged. ("ycombinator" was
+also in this bucket until 2026-09, when discovery.py's URL_TO_SLUG entry
+that used to mis-resolve YC/workatastartup.com URLs into a fake
+"ycombinator" ATS was removed at the user's request — it's a job-board
+aggregator, never a real per-company ATS, and that entry was only ever
+producing permanently-unscrapable rows. Any pre-existing archive_i rows
+with ats='ycombinator' from before that fix are stale and were cleaned
+up directly in Supabase rather than left for this engine to (never)
+verify.)
 
 SAFETY MODEL (a wrong delete here is real, silent, permanent data loss):
   - report-only is the DEFAULT — run this with no flags and it only logs
@@ -341,7 +347,13 @@ _UNVERIFIABLE_ATS = {
     "adp",                 # no live customer example could be found/reached to confirm any rule
     "brassring",          # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
     "successfactors",     # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
-    "ycombinator",        # job-board aggregator, not a per-company ATS slug (see discovery.py)
+    # "ycombinator" removed 2026-09 along with discovery.py's URL_TO_SLUG
+    # entry for it — it was never a real ATS (job-board aggregator), that
+    # entry only ever produced permanently-unscrapable rows, and it can
+    # no longer be produced at all going forward. Kept here as long as
+    # any stale pre-fix rows existed would have been harmless (falls
+    # through to "unverified", same as before) — removed once those rows
+    # were cleaned up directly in Supabase.
 }
 
 
