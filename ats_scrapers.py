@@ -100,6 +100,22 @@ _TEMPLATE_TOKEN_RE = re.compile(r"%[A-Z][A-Z0-9_]{2,}%")
 # percent signs ("50% remote") are left untouched.
 _SYMBOL_GARBAGE_RE = re.compile(r"[^\w\s]{3,}")
 
+# <script>/<style>/<noscript> TAG CONTENTS, not just the tags — the plain
+# "<[^>]+>" strip below only removes the tags themselves, so without this
+# a page's minified JS/CSS body text used to leak straight into the
+# "cleaned" description as noise (real complaint: garbled symbol-heavy
+# junk showing up in what's sent to the AI/regex classifiers).
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.I | re.DOTALL)
+
+# Invisible Unicode characters (zero-width space/non-joiner/joiner, LTR/
+# RTL marks, BOM, soft hyphen) some sites use for copy-protection or that
+# leak in from bad encoding. These render as nothing but still sit inside
+# words — "spon​sor" with a hidden ZWSP mid-word — which can silently
+# break keyword/regex matching (visa-sponsorship detection included)
+# without being visible in any log or manual spot-check. Stripped
+# entirely (not replaced with a space) since they're truly zero-width.
+_ZERO_WIDTH_RE = re.compile(r"[​‌‍‎‏﻿­]")
+
 
 def _snippet(html_or_text: str, max_chars: int = 30_000) -> str:
     """Strip HTML, decode entities, drop ATS template/encoding junk, and cap length.
@@ -114,8 +130,12 @@ def _snippet(html_or_text: str, max_chars: int = 30_000) -> str:
     """
     if not html_or_text:
         return ""
-    text = re.sub(r"<[^>]+>", " ", html_or_text)
+    text = _SCRIPT_STYLE_RE.sub(" ", html_or_text)
+    text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
+    # Run again post-unescape — an entity can decode INTO a zero-width
+    # char (e.g. &#8203; = zero-width space) that wasn't there pre-decode.
+    text = _ZERO_WIDTH_RE.sub("", text)
     text = _TEMPLATE_TOKEN_RE.sub(" ", text)
     text = _SYMBOL_GARBAGE_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -3821,9 +3841,137 @@ def _fetch_taleo_description(job: dict) -> str:
     return ""
 
 
+# ── Generic description extraction — multi-method fallback chain ────────
+# 2026-09: rewritten after a real complaint that regex extraction wasn't
+# reliably getting the ENTIRE job description. Two separate problems
+# were found and fixed here:
+#   1. Priority order was backwards — the (short, SEO-blurb) meta
+#      description was tried BEFORE the full job-description container
+#      scan, so any page with both a meta description AND a much fuller
+#      real JD a few lines below it would silently short-circuit on the
+#      ~150-300 char blurb and never see the real content. Meta
+#      description is now tried dead last, only if every real-content
+#      method below finds nothing.
+#   2. Too few extraction methods, and the FIRST one to clear a 50-char
+#      floor won even if a much longer/better one was available further
+#      down the page. Now every method is tried, and the LONGEST
+#      resulting candidate is kept (still each individually gated at
+#      >50 chars, so a stray short div can't win by accident).
+# New methods added: JSON-LD now scans EVERY <script type="application/
+# ld+json"> block (a page often has several — breadcrumbs/org/website —
+# with the JobPosting one anywhere among them, not necessarily first)
+# and unwraps an "@graph" wrapper; embedded hydration JSON (__NEXT_DATA__/
+# __NUXT_DATA__/generic application/json script) is walked for a
+# description-shaped field, covering JS-rendered pages that still ship
+# their data server-side; itemprop="description" microdata; a broadened
+# container class/id list (many more real-world template names); and a
+# <main> fallback before giving up.
+
+_JSONLD_SCRIPT_RE = re.compile(
+    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.I | re.DOTALL,
+)
+
+
+def _extract_jsonld_description(html: str) -> str:
+    """Scan EVERY ld+json block (not just the first) for a JobPosting-
+    shaped object's description field, unwrapping one level of an
+    "@graph" wrapper (common in real-world schema.org markup)."""
+    for m in _JSONLD_SCRIPT_RE.finditer(html):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        expanded = []
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("@graph"), list):
+                expanded.extend(item["@graph"])
+            else:
+                expanded.append(item)
+        for item in expanded:
+            if isinstance(item, dict) and isinstance(item.get("description"), str) \
+                    and len(item["description"]) > 50:
+                return _snippet(item["description"])
+    return ""
+
+
+_DESC_JSON_SCRIPT_RE = re.compile(
+    r'<script[^>]*(?:id=["\']__NEXT_DATA__["\']|id=["\']__NUXT_DATA__["\']|'
+    r'type=["\']application/json["\'])[^>]*>(.*?)</script>',
+    re.I | re.DOTALL,
+)
+_DESC_KEY_RE = re.compile(
+    r"^(job)?description(html|text)?$|^jobdescription$|^body(html)?$", re.I
+)
+
+
+def _walk_for_description(obj, best: list, depth: int = 0) -> None:
+    """Recursively hunt an embedded hydration JSON blob for a
+    description-shaped string field, keeping the LONGEST one found —
+    some apps nest the real JD several levels deep under a
+    'job'/'posting'/'data' wrapper key. `best` is a 1-element list used
+    as a mutable accumulator across the recursion."""
+    if depth > 14:
+        return
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if isinstance(val, str) and len(val) > 80 and _DESC_KEY_RE.match(str(key)):
+                if len(val) > len(best[0]):
+                    best[0] = val
+            else:
+                _walk_for_description(val, best, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_for_description(item, best, depth + 1)
+
+
+def _extract_embedded_json_description(html: str) -> str:
+    """Level-2 fallback for JS-rendered pages: many React/Next/Nuxt career
+    pages still ship the real JD server-side inside a hydration JSON
+    blob even though the visible DOM is client-rendered."""
+    best = [""]
+    for m in _DESC_JSON_SCRIPT_RE.finditer(html):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        _walk_for_description(data, best)
+    return _snippet(best[0]) if best[0] else ""
+
+
+_ITEMPROP_DESC_RE = re.compile(
+    r'itemprop=["\']description["\'][^>]*>(.*?)</(?:div|section|span|p)>',
+    re.I | re.DOTALL,
+)
+
+# Broadened 2026-09: class OR id, many more real-world container naming
+# variants seen across ATS/careers-page templates (previously just
+# "job-description|job_description|description|posting-content|
+# job-details", which missed a lot of real templates).
+_CONTAINER_RE = re.compile(
+    r'(?:class|id)="[^"]*(?:job-description|job_description|jobdescription|'
+    r'job-details|job_details|jobdetails|posting-content|posting-description|'
+    r'careers?-detail|career-content|vacancy-description|job-body|job-content|'
+    r'description-content|content-description|opening-description|role-description)'
+    r'[^"]*"[^>]*>(.*?)</(?:div|section)',
+    re.I | re.DOTALL,
+)
+
+
 def _fetch_generic_description(job: dict) -> str:
-    """Generic description fetcher — loads the job URL and extracts
-    text from common HTML patterns (JSON-LD, meta description, body text).
+    """Generic description fetcher — loads the job URL and tries, IN
+    ORDER, every extraction method that's useful across real career-page
+    templates, then keeps the LONGEST usable result rather than stopping
+    at the first one that merely clears a length floor. See the module
+    comment above for the two real bugs this fixed (meta-description
+    tried too early, too few fallback methods).
     Also extracts location as a side-effect if job has no location."""
     url = job.get("url", "")
     if not url:
@@ -3841,21 +3989,47 @@ def _fetch_generic_description(job: dict) -> str:
         if loc:
             job["location"] = loc
 
-    # Try JSON-LD first
-    ld_match = re.search(
-        r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
-        html, re.I
-    )
-    if ld_match:
-        try:
-            import json
-            ld = json.loads(ld_match.group(1))
-            if isinstance(ld, dict) and ld.get("description"):
-                return _snippet(ld["description"])
-        except Exception:
-            pass
+    candidates = []
 
-    # Try meta description (handle both attribute orders)
+    ld_desc = _extract_jsonld_description(html)
+    if ld_desc:
+        candidates.append(ld_desc)
+
+    embedded_desc = _extract_embedded_json_description(html)
+    if embedded_desc:
+        candidates.append(embedded_desc)
+
+    itemprop_match = _ITEMPROP_DESC_RE.search(html)
+    if itemprop_match:
+        text = _snippet(itemprop_match.group(1))
+        if len(text) > 50:
+            candidates.append(text)
+
+    container_match = _CONTAINER_RE.search(html)
+    if container_match:
+        text = _snippet(container_match.group(1))
+        if len(text) > 50:
+            candidates.append(text)
+
+    article_match = re.search(r'<article[^>]*>(.*?)</article>', html, re.DOTALL | re.I)
+    if article_match:
+        text = _snippet(article_match.group(1))
+        if len(text) > 50:
+            candidates.append(text)
+
+    if not candidates:
+        main_match = re.search(r'<main[^>]*>(.*?)</main>', html, re.DOTALL | re.I)
+        if main_match:
+            text = _snippet(main_match.group(1))
+            if len(text) > 50:
+                candidates.append(text)
+
+    if candidates:
+        return max(candidates, key=len)
+
+    # Last resort ONLY: short SEO meta description. Never the real JD
+    # (usually ~150-300 chars) — reached only when every method above
+    # found nothing at all.
     for meta_pat in [
         r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
         r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']description["\']',
@@ -3868,17 +4042,6 @@ def _fetch_generic_description(job: dict) -> str:
             desc = desc.replace("&nbsp;", " ").replace("&#160;", " ")
             if len(desc) > 50:
                 return _snippet(desc)
-
-    # Try common job description containers
-    for pattern in [
-        r'class="[^"]*(?:job-description|job_description|description|posting-content|job-details)[^"]*"[^>]*>(.*?)</(?:div|section)',
-        r'<article[^>]*>(.*?)</article>',
-    ]:
-        match = re.search(pattern, html, re.DOTALL | re.I)
-        if match:
-            text = _snippet(match.group(1))
-            if len(text) > 50:
-                return text
 
     return ""
 
@@ -4273,6 +4436,47 @@ def _fetch_generic_form_questions(url: str) -> list[dict]:
     return _parse_form_elements(r.text)
 
 
+def _generic_form_url_candidates(url: str) -> list[str]:
+    """2026-09: several ATS platforms (and plenty of individual white-
+    label tenants on ones we DO have a dedicated fetcher for) simply
+    serve their real application form at the plain job-posting URL with
+    "/apply" or "/application" appended — no documented API, no special
+    convention, just that. A handful of platforms below only ever tried
+    the bare listing URL and nothing else, so a tenant using this common
+    pattern was silently missed even though the actual form was one
+    cheap extra request away. Returns the bare URL first (still worth
+    trying — some platforms DO render the form on the listing page
+    itself), then the "/apply" and "/application" variants, de-duplicated
+    and order-preserving."""
+    if not url:
+        return []
+    base = url.rstrip("/")
+    candidates = [url]
+    if not base.endswith(("/apply", "/application", "/applications/new", "/apply/")):
+        candidates.append(base + "/apply")
+        candidates.append(base + "/application")
+    seen = set()
+    out = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _fetch_generic_form_questions_multi(url: str) -> list[dict]:
+    """Same as _fetch_generic_form_questions, but tries the bare URL,
+    then the common "/apply" and "/application" conventions in turn,
+    stopping at the first candidate that yields ANY signal. Use this
+    instead of the single-URL version for any platform/tenant with no
+    other known convention — see _generic_form_url_candidates."""
+    for candidate in _generic_form_url_candidates(url):
+        found = _fetch_generic_form_questions(candidate)
+        if found:
+            return found
+    return []
+
+
 # ── Level 1/2: Greenhouse (public API) ──
 
 def _fetch_greenhouse_questions(job: dict) -> str:
@@ -4574,6 +4778,11 @@ def _fetch_zoho_questions(job: dict) -> str:
         questions = _find_embedded_questions(r.text)
         if not questions:
             questions = _parse_form_elements(r.text)
+    if not questions:
+        # 2026-09: fall back to the "/apply"/"/application" convention —
+        # the bonus embedded-JSON pass above was only ever confirmed on
+        # the listing page itself, not every org's apply flow.
+        questions = _fetch_generic_form_questions_multi(url)
     return _format_auth_questions(questions)
 
 
@@ -4614,7 +4823,7 @@ def _fetch_oracle_cloud_hcm_questions(job: dict) -> str:
             pass
 
     if not questions:
-        questions = _fetch_generic_form_questions(url)
+        questions = _fetch_generic_form_questions_multi(url)
     return _format_auth_questions(questions)
 
 
@@ -4648,19 +4857,22 @@ def _fetch_rippling_questions(job: dict) -> str:
     if not url:
         return ""
     apply_url = url.rstrip("/") + "/apply"
-    return _format_auth_questions(_fetch_generic_form_questions(apply_url))
+    found = _fetch_generic_form_questions(apply_url)
+    if not found:
+        found = _fetch_generic_form_questions(url.rstrip("/") + "/application")
+    return _format_auth_questions(found)
 
 
 def _fetch_bamboohr_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
 def _fetch_icims_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
 def _fetch_workday_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
 def _fetch_personio_questions(job: dict) -> str:
@@ -4682,7 +4894,7 @@ def _fetch_personio_questions(job: dict) -> str:
 
 
 def _fetch_joincom_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
 def _fetch_taleo_questions(job: dict) -> str:
@@ -4704,7 +4916,7 @@ def _fetch_taleo_questions(job: dict) -> str:
 
 
 def _fetch_paylocity_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
 # ── SmartRecruiters ──
@@ -4716,7 +4928,7 @@ def _fetch_paylocity_questions(job: dict) -> str:
 # none configured). Best-effort DOM fallback only.
 
 def _fetch_smartrecruiters_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions(job.get("url", "")))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
 # ── Jobvite ──
@@ -4731,7 +4943,10 @@ def _fetch_jobvite_questions(job: dict) -> str:
     if not url:
         return ""
     apply_url = url.rstrip("/") + "/apply"
-    return _format_auth_questions(_fetch_generic_form_questions(apply_url))
+    found = _fetch_generic_form_questions(apply_url)
+    if not found:
+        found = _fetch_generic_form_questions(url.rstrip("/") + "/application")
+    return _format_auth_questions(found)
 
 
 # ── Dispatch table: source_ats (as stored on job dicts) → fetcher ──
