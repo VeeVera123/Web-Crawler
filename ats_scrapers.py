@@ -3431,10 +3431,15 @@ SCRAPERS = {
     #             and full descriptions. No plain-HTTP path exists, and
     #             adding a headless browser conflicts with this project's
     #             established architecture. Excluded.
-    # YCombinator (Work at a Startup) moved to job_board_scrapers.py —
-    # it's a multi-company job AGGREGATOR (like RemoteOK/Jobicy), not a
-    # single-company ATS, so it belongs in the job-boards pipeline, not
-    # keyed by per-company slug here. See scrape_ycombinator() there.
+    # YCombinator (Work at a Startup) — NOT an ATS. It's a multi-company
+    # job AGGREGATOR (like RemoteOK/Jobicy were), not a single-company
+    # ATS, so it was never keyed by per-company slug here. 2026-09: the
+    # job_board_scrapers.py file this used to point readers to (and the
+    # scrape_ycombinator() it mentioned) was disabled and removed
+    # entirely in an earlier cleanup — there is no YC scraper anywhere in
+    # this project anymore, and discovery.py's URL_TO_SLUG no longer
+    # resolves YC/workatastartup.com URLs to a fake "ycombinator" ATS
+    # either (that was producing permanently-unscrapable archive_i rows).
 }
 
 
