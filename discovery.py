@@ -426,6 +426,29 @@ SKIP_SLUGS = {
 # URL → SLUG CONVERTERS (OpenPostings stores full URLs)
 # ══════════════════════════════════════════════════════════
 
+# 2026-09: the ONLY real Greenhouse job-board hosts — exactly the 4 host
+# patterns queried in CC_PLATFORM_PATTERNS["greenhouse"]. Kept as an exact
+# allowlist rather than the old "greenhouse.io" in host substring check,
+# which also matched Greenhouse's own marketing/corporate site
+# (www.greenhouse.io and bare greenhouse.io) — confirmed live (2026-09)
+# that generic marketing pages there (e.g. /contact, /about, /users —
+# the client login portal) were being fed through this same extractor by
+# other discovery sources that scan arbitrary company websites
+# (resolve_candidate_page_to_ats_slug, node.py's _detect_ats_hits), each
+# one's first path segment silently stored as a fake "company slug"
+# ("contact", "about", "users", ...). A substring check on the host was
+# never safe here — it also matches any unrelated host that merely
+# CONTAINS the string "greenhouse.io" anywhere (e.g. "notgreenhouse.io").
+# An exact-host allowlist has no such failure mode and doesn't lose any
+# real coverage: every legitimate board/embed URL for this platform lives
+# on one of these 4 hosts, so a URL on any other host was never a real
+# per-company board to begin with.
+_GREENHOUSE_BOARD_HOSTS = frozenset({
+    "boards.greenhouse.io", "boards.eu.greenhouse.io",
+    "job-boards.greenhouse.io", "job-boards.eu.greenhouse.io",
+})
+
+
 def _url_to_slug_greenhouse(url: str) -> str | None:
     """Handles TWO distinct real-world URL families, confirmed via live
     search results (boards.greenhouse.io/embed/job_board/js?for=vaco,
@@ -441,10 +464,15 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
          query param instead. Previously mishandled: parts[0]="embed"
          was returned as if it were the company, silently corrupting
          every Greenhouse-embedding company onto one fake ('greenhouse',
-         'embed') row (see SKIP_SLUGS comment)."""
+         'embed') row (see SKIP_SLUGS comment).
+
+    Host check is an exact allowlist (_GREENHOUSE_BOARD_HOSTS), not a
+    substring match — see that constant's comment for why the old
+    substring check was letting marketing-site pages like
+    www.greenhouse.io/contact through as fake company slugs."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if "greenhouse.io" not in host:
+    if host not in _GREENHOUSE_BOARD_HOSTS:
         return None
     path = parsed.path.strip("/")
     if path.startswith("embed/"):
@@ -1713,8 +1741,8 @@ CC_PLATFORM_PATTERNS = {
     # 2026-09: added boards.eu.greenhouse.io — Greenhouse's EU-data-residency
     # board host, confirmed live (boards.eu.greenhouse.io/embed/job_board/
     # js?for=interpetrolsa) and already anticipated by _url_to_slug_greenhouse's
-    # own docstring — the extractor's substring host check already handles
-    # it, only this query pattern was missing.
+    # own docstring — the extractor's _GREENHOUSE_BOARD_HOSTS allowlist
+    # already includes it, only this query pattern was missing.
     # 2026-09: added job-boards.greenhouse.io(+.eu) — Greenhouse's newer
     # "Job Boards 2.0" hosted-board domain, confirmed real and CURRENTLY
     # GROWING (Greenhouse's own support docs describe a legacy
@@ -1724,9 +1752,12 @@ CC_PLATFORM_PATTERNS = {
     # missing an increasing share of current/future Greenhouse customers,
     # not just a handful of edge cases — kept the legacy boards.* patterns
     # too since that domain still carries huge historical volume and isn't
-    # fully retired. _url_to_slug_greenhouse's substring host check
-    # ("greenhouse.io" in host) already matches this domain with no
-    # extractor change needed.
+    # fully retired. _url_to_slug_greenhouse's _GREENHOUSE_BOARD_HOSTS
+    # allowlist already includes this domain, no extractor change needed.
+    # (2026-09: that allowlist replaced an earlier "greenhouse.io" in host
+    # substring check, which also matched Greenhouse's own marketing site
+    # and produced fake slugs like "contact"/"about"/"users" — see
+    # _GREENHOUSE_BOARD_HOSTS' comment.)
     "greenhouse": ["boards.greenhouse.io/*", "boards.eu.greenhouse.io/*",
                    "job-boards.greenhouse.io/*", "job-boards.eu.greenhouse.io/*"],
     # 2026-09: added jobs.eu.lever.co — Lever's own EU-hosted board domain,
