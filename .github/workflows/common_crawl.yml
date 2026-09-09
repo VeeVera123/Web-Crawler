@@ -20,23 +20,23 @@ on:
   workflow_dispatch:
     inputs:
       crawl_partition:
-        description: "Starting partition (e.g. CC-MAIN-2026-34). Blank = latest. Ignored if crawl_list is set."
+        description: "Starting partition. Blank = latest"
         required: false
         default: ""
       partitions:
-        description: "How many partitions, walking backward from the start. Ignored if crawl_list is set."
+        description: "How many partitions to crawl"
         required: false
         default: "1"
       crawl_list:
-        description: "Exact partitions instead, comma-separated. Overrides crawl_partition/partitions."
+        description: "Exact partitions instead (comma-separated)"
         required: false
         default: ""
       start_file_index:
-        description: "Manual override: skip this many files into the first partition. Blank = auto-resume from checkpoint."
+        description: "Skip this many files. Blank = auto-resume"
         required: false
         default: ""
       shard_count:
-        description: "Parallel shards to split the crawl across"
+        description: "Parallel shards"
         required: false
         default: "10"
       concurrency:
@@ -44,11 +44,11 @@ on:
         required: false
         default: "700"
       run_time_minutes:
-        description: "Each shard self-stops after this many minutes"
+        description: "Self-stop after this many minutes"
         required: false
         default: "330"
       loop_runs:
-        description: "Loop until done — auto-start the next run when files are left"
+        description: "Auto-run again if files are left"
         type: boolean
         required: false
         default: false
