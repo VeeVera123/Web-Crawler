@@ -239,7 +239,11 @@ jobs:
           # reset_seed is always forced false here — the whole point of the
           # loop is resuming from what's already checkpointed; looping with
           # reset_seed=true would wipe progress every single iteration.
+          # --repo is required: this job has no checkout step (nothing else
+          # it does needs the repo contents), so gh has no local git context
+          # to infer the repo from otherwise.
           gh workflow run "workable.yml" \
+            --repo "${{ github.repository }}" \
             -f run_seed=true \
             -f release_tag="${{ github.event.inputs.release_tag || 'workable-seed-data' }}" \
             -f seed_shard_count="$SHARD_COUNT" \
