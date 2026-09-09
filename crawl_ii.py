@@ -697,7 +697,7 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             # (now returned directly by ai_classify_locations — see its
             # docstring) instead of the literal string "ai", which is what
             # this used to hardcode regardless of whether keyword/regex,
-            # Gemini, or OpenAI (or now NVIDIA) made the call. Matches
+            # Gemini, OpenAI, or NVIDIA made the call. Matches
             # crawl_i.py's filter_locations, which already did this right.
             clearance = provider_name or "ai"
             if label == "match_global":
