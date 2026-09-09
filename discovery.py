@@ -2637,7 +2637,7 @@ def fetch_latmay_slugs(hf_shard: int | None = None, hf_total_shards: int | None 
     return slugs_by_ats
 
 
-def fetch_edwarddgao_slugs(time_budget_minutes: int = 300, hf_shard: int | None = None,
+def fetch_edwarddgao_slugs(time_budget_minutes: int = 270, hf_shard: int | None = None,
                             hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
     """edwarddgao/open-apply-jobs — 31M+ individual job-posting rows
     across 375 Parquet shards. Only `apply_url` is ever read — every
@@ -2694,10 +2694,36 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 300, hf_shard: int | None 
 
         try:
             with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+                download_timed_out = False
                 with requests.get(file_url, timeout=300, stream=True) as r:
                     r.raise_for_status()
                     for chunk in r.iter_content(chunk_size=1 << 20):
                         tmp.write(chunk)
+                        # 2026-09: the between-files check above only fires
+                        # once a whole file is done — a single slow/large
+                        # Parquet download (network-bound, no fixed size
+                        # cap) could otherwise run well past budget_seconds
+                        # unnoticed and get hard-killed by GitHub's own job
+                        # timeout with a bare KeyboardInterrupt, losing
+                        # nothing extra (this partial file was never
+                        # counted anyway) but skipping the graceful-stop
+                        # log line and, more importantly, leaving zero
+                        # margin for the Supabase upsert that runs AFTER
+                        # this function returns (see --edwarddgao-time-
+                        # budget-minutes' default vs. this source's job
+                        # timeout). Checking here — cheap, one
+                        # time.monotonic() call per 1MB chunk — lets a
+                        # stuck-mid-download file abandon itself instead.
+                        if budget_seconds and (time.monotonic() - start) >= budget_seconds:
+                            download_timed_out = True
+                            break
+                if download_timed_out:
+                    log.info(f"Edward H.F{shard_note}: time budget reached mid-download "
+                              f"of file {file_i + 1}/{len(file_urls)} — stopping "
+                              f"gracefully, keeping {processed:,} rows' worth of "
+                              f"progress (this in-flight file's partial download is "
+                              f"discarded, not counted).")
+                    break
                 tmp.flush()
 
                 pf = pq.ParquetFile(tmp.name)
@@ -3517,11 +3543,16 @@ def main():
              "no sharding).",
     )
     parser.add_argument(
-        "--edwarddgao-time-budget-minutes", type=int, default=300,
+        "--edwarddgao-time-budget-minutes", type=int, default=270,
         help="Self-stop gracefully after this many minutes downloading/"
              "resolving Edward H.F's 375 Parquet shards, keeping whatever "
-             "was resolved so far (default: 300; 0 = no budget, run to "
-             "full completion — see fetch_edwarddgao_slugs docstring).",
+             "was resolved so far (default: 270, deliberately 30min under "
+             "Discovery.yml's 300min job timeout — this function returning "
+             "isn't the end of the run, upsert_to_supabase() still has to "
+             "write everything resolved so far afterward, so the internal "
+             "budget needs real margin before GitHub's hard kill, not the "
+             "same number; 0 = no budget, run to full completion — see "
+             "fetch_edwarddgao_slugs docstring).",
     )
     parser.add_argument(
         "--hf-shard", type=int, default=None,
