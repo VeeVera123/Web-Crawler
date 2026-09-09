@@ -1,8 +1,8 @@
 """
 Two-stage classifier — multi-provider architecture.
 
-Role classification:  Cerebras + Groq (free tiers, concurrent)
-Location classification: Gemini + OpenAI GPT-4.1 nano (concurrent)
+Role classification:     Cerebras + Groq + NVIDIA NIM (free tiers, concurrent)
+Location classification: Gemini + OpenAI GPT-4.1 nano + NVIDIA NIM (concurrent)
 
 Falls back to single-provider mode if only LLM_PROVIDER is set.
 
@@ -11,7 +11,18 @@ Falls back to single-provider mode if only LLM_PROVIDER is set.
 
 Then a separate location filter:
   Stage 3 — keyword check for Africa/Global locations
-  Stage 4 — AI for ambiguous locations (OpenAI only)
+  Stage 4 — AI for ambiguous locations (multi-provider concurrent)
+
+2026-09: cross-provider failover. Each stage's work is still split
+round-robin across its providers up front (see ai_classify_roles()/
+ai_classify_locations()), but now if one provider's batch fails outright
+(exhausts its own MAX_RETRIES=3 attempts, or its client can't be built),
+that batch's items are reassigned across the OTHER providers for that
+stage and retried once, instead of immediately defaulting to
+False/'uncertain'. With three providers per stage, "one fails" genuinely
+means "the other two pick it up" — this is what NVIDIA was re-added
+alongside (see config.py) rather than as a lone third option that just
+adds more capacity.
 """
 
 import re
@@ -24,7 +35,11 @@ import geo
 log = logging.getLogger(__name__)
 
 # ── Provider-specific AI client setup ─────────────────────
-MAX_RETRIES = 4
+# 3 attempts per provider (not more) before a batch is considered that
+# provider's failure and handed to the other providers for the same
+# stage — see the module docstring's "cross-provider failover" note and
+# _run_batches_with_failover() below.
+MAX_RETRIES = 3
 RETRY_BASE_DELAY = 5  # seconds
 
 
@@ -288,15 +303,33 @@ def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[lis
     return batches
 
 
+def _get_role_client(provider: dict):
+    client = _role_clients.get(provider["name"])
+    if not client:
+        try:
+            client = _make_client(provider)
+            _role_clients[provider["name"]] = client
+        except Exception as e:
+            log.error(f"Cannot create client for {provider['name']}: {e}")
+            return None
+    return client
+
+
 def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     """Send ambiguous titles to AI for role classification.
 
-    Multi-provider mode: splits titles across Cerebras/Groq,
+    Multi-provider mode: splits titles across Cerebras/Groq/NVIDIA,
     batches per provider's context window, runs all concurrently.
 
     Single-provider fallback: uses whichever provider is configured.
 
-    Returns {title: is_relevant}. On failure: defaults to False (exclude).
+    Cross-provider failover: if a provider's batch fails outright (after
+    its own MAX_RETRIES=3 attempts inside _ai_call, or its client can't be
+    built), that batch's titles are reassigned across the OTHER providers
+    and retried once before giving up on them — see the module docstring.
+
+    Returns {title: is_relevant}. On failure of every provider for a
+    title: defaults to False (exclude).
     """
     if not titles:
         return {}
@@ -326,14 +359,14 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
         p_titles = provider_titles[p["name"]]
         if not p_titles:
             continue
-        client = _role_clients.get(p["name"])
+        client = _get_role_client(p)
         if not client:
-            try:
-                client = _make_client(p)
-                _role_clients[p["name"]] = client
-            except Exception as e:
-                log.error(f"Cannot create client for {p['name']}: {e}")
-                continue
+            # Provider unusable from the start (bad key, client-creation
+            # error) — treat its whole slice as failed immediately so it
+            # goes through the same failover path as a mid-run failure,
+            # instead of silently dropping these titles.
+            all_work.append((p, None, p_titles))
+            continue
         batches = _build_role_batches(p_titles, max_chars=p["max_batch_chars"])
         for batch in batches:
             all_work.append((p, client, batch))
@@ -345,23 +378,73 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
              f"across {len(providers)} providers ({provider_summary})")
 
     results = {}
+    failed_batches = []  # [(failed_provider_name, batch_titles), ...]
 
-    # Run ALL batches concurrently (each provider's batches interleave)
-    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        future_map = {}
-        for provider, client, batch in all_work:
-            f = pool.submit(_classify_role_batch, batch, provider, client)
-            future_map[f] = (provider["name"], batch)
+    def _run_round(work):
+        with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+            future_map = {}
+            for provider, client, batch in work:
+                if client is None:
+                    failed_batches.append((provider["name"], batch))
+                    continue
+                f = pool.submit(_classify_role_batch, batch, provider, client)
+                future_map[f] = (provider["name"], batch)
 
-        for future in as_completed(future_map):
-            pname, batch = future_map[future]
-            try:
-                batch_results = future.result()
-                results.update(batch_results)
-            except Exception as e:
-                log.error(f"Role classification error ({pname}): {e}")
+            for future in as_completed(future_map):
+                pname, batch = future_map[future]
+                try:
+                    batch_results = future.result()
+                    results.update(batch_results)
+                except Exception as e:
+                    log.error(f"Role classification error ({pname}): {e}")
+                    failed_batches.append((pname, batch))
+
+    _run_round(all_work)
+
+    # ── Failover: reassign each failed provider's batch to the OTHER
+    # providers for this stage and retry once. Only one failover round —
+    # this is "the other providers pick it up", not an endless cascade. ──
+    if failed_batches and len(providers) > 1:
+        retry_work = []
+        for failed_pname, batch in failed_batches:
+            survivors = [p for p in providers if p["name"] != failed_pname]
+            if not survivors:
                 for t in batch:
-                    results[t] = False
+                    results.setdefault(t, False)
+                continue
+            log.warning(
+                f"Role classification: {failed_pname} failed on a "
+                f"{len(batch)}-title batch — reassigning to "
+                f"{', '.join(p['name'] for p in survivors)}"
+            )
+            sub_assignments = {p["name"]: [] for p in survivors}
+            for i, title in enumerate(batch):
+                p = survivors[i % len(survivors)]
+                sub_assignments[p["name"]].append(title)
+            for p in survivors:
+                p_titles = sub_assignments[p["name"]]
+                if not p_titles:
+                    continue
+                client = _get_role_client(p)
+                if not client:
+                    retry_work.append((p, None, p_titles))
+                    continue
+                for sub_batch in _build_role_batches(p_titles, max_chars=p["max_batch_chars"]):
+                    retry_work.append((p, client, sub_batch))
+
+        failed_batches = []
+        if retry_work:
+            _run_round(retry_work)
+        # Anything that failed AGAIN on the failover round is defaulted —
+        # no second failover cascade.
+        for _pname, batch in failed_batches:
+            for t in batch:
+                results.setdefault(t, False)
+
+    # Any title never touched by any provider at all (shouldn't happen,
+    # but matches the old function's "always return every title" contract)
+    for t in titles:
+        results.setdefault(t, False)
 
     return results
 
@@ -1026,20 +1109,38 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     return batches
 
 
+def _get_location_client(provider: dict):
+    client = _location_clients.get(provider["name"])
+    if not client:
+        try:
+            client = _make_client(provider)
+            _location_clients[provider["name"]] = client
+        except Exception as e:
+            log.error(f"Cannot create location client for {provider['name']}: {e}")
+            return None
+    return client
+
+
 def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     """
     Send ambiguous jobs (bare "Remote") to AI for location classification.
-    Uses LOCATION_PROVIDERS (Gemini + OpenAI) concurrently.
+    Uses LOCATION_PROVIDERS (Gemini + OpenAI + NVIDIA) concurrently.
 
     Jobs are round-robin split across providers, batched per provider's
     context window, and all batches run concurrently.
 
+    Cross-provider failover: if a provider's batch fails outright (after
+    its own MAX_RETRIES=3 attempts inside _ai_call, or its client can't be
+    built), that batch's jobs are reassigned across the OTHER providers
+    and retried once before falling back to 'uncertain' — see the module
+    docstring.
+
     Returns a list of (label, provider_name) tuples in the same order as
     `jobs` — label is one of 'match_global', 'match_africa', 'no_match',
     or 'uncertain'; provider_name is whichever LOCATION_PROVIDERS entry
-    actually produced that label (None if every provider failed/never
-    ran for that job, e.g. a client-creation error). On rate limit/
-    failure: defaults to ('uncertain', None) (include with flag).
+    actually produced that label (None if every provider failed for that
+    job, including the failover round). On failure: defaults to
+    ('uncertain', None) (include with flag).
 
     2026-09: fixed to actually return tuples — crawl_i.py's
     filter_locations() and crawl_ii.py's _filter_locations() have both
@@ -1064,27 +1165,23 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         provider_assignments[p["name"]].append((i, job))
 
     # ── Build batches per provider ──
-    all_work = []  # (provider, client, [(orig_idx, job)...])
+    all_work = []  # (provider, client, [(orig_idx, job)...], batch_jobs)
     for p in providers:
         assigned = provider_assignments[p["name"]]
         if not assigned:
             continue
-        client = _location_clients.get(p["name"])
+        client = _get_location_client(p)
         if not client:
-            try:
-                client = _make_client(p)
-                _location_clients[p["name"]] = client
-            except Exception as e:
-                log.error(f"Cannot create location client for {p['name']}: {e}")
-                continue
-        # Build batches from assigned jobs
+            # Whole slice unusable from the start — route through the same
+            # failure/failover path as a mid-run failure below.
+            all_work.append((p, None, [idx for idx, _ in assigned], [job for _, job in assigned]))
+            continue
         assigned_jobs = [job for _, job in assigned]
         assigned_indices = [idx for idx, _ in assigned]
         batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"])
         for start_idx, batch in batches:
-            # Map batch start_idx back to original indices
             batch_orig_indices = assigned_indices[start_idx:start_idx + len(batch)]
-            all_work.append((p, client, batch, batch_orig_indices))
+            all_work.append((p, client, batch_orig_indices, batch))
 
     provider_summary = ", ".join(
         f"{p['name']}:{len(provider_assignments[p['name']])}" for p in providers
@@ -1093,22 +1190,66 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
              f"across {len(providers)} providers ({provider_summary})")
 
     results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
+    failed_batches = []  # [(failed_provider_name, orig_indices, batch_jobs), ...]
 
-    # Run all batches concurrently
-    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        future_map = {}
-        for provider, client, batch, orig_indices in all_work:
-            f = pool.submit(_classify_location_batch, batch, provider, client)
-            future_map[f] = (provider["name"], batch, orig_indices)
+    def _run_round(work):
+        with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+            future_map = {}
+            for provider, client, orig_indices, batch in work:
+                if client is None:
+                    failed_batches.append((provider["name"], orig_indices, batch))
+                    continue
+                f = pool.submit(_classify_location_batch, batch, provider, client)
+                future_map[f] = (provider["name"], orig_indices, batch)
 
-        for future in as_completed(future_map):
-            pname, batch, orig_indices = future_map[future]
-            try:
-                batch_results = future.result()
-                for j, label in enumerate(batch_results):
-                    results[orig_indices[j]] = (label, pname)
-            except Exception as e:
-                log.error(f"Location classification error ({pname}): {e}")
+            for future in as_completed(future_map):
+                pname, orig_indices, batch = future_map[future]
+                try:
+                    batch_results = future.result()
+                    for j, label in enumerate(batch_results):
+                        results[orig_indices[j]] = (label, pname)
+                except Exception as e:
+                    log.error(f"Location classification error ({pname}): {e}")
+                    failed_batches.append((pname, orig_indices, batch))
+
+    _run_round(all_work)
+
+    # ── Failover: reassign each failed provider's jobs to the OTHER
+    # providers for this stage and retry once — one round only. ──
+    if failed_batches and len(providers) > 1:
+        retry_work = []
+        for failed_pname, orig_indices, batch in failed_batches:
+            survivors = [p for p in providers if p["name"] != failed_pname]
+            if not survivors:
+                continue  # results already default to ('uncertain', None)
+            log.warning(
+                f"Location classification: {failed_pname} failed on a "
+                f"{len(batch)}-job batch — reassigning to "
+                f"{', '.join(p['name'] for p in survivors)}"
+            )
+            sub_assignments = {p["name"]: [] for p in survivors}  # name -> [(orig_idx, job)]
+            for i, (orig_idx, job) in enumerate(zip(orig_indices, batch)):
+                p = survivors[i % len(survivors)]
+                sub_assignments[p["name"]].append((orig_idx, job))
+            for p in survivors:
+                assigned = sub_assignments[p["name"]]
+                if not assigned:
+                    continue
+                client = _get_location_client(p)
+                assigned_jobs = [job for _, job in assigned]
+                assigned_indices = [idx for idx, _ in assigned]
+                if not client:
+                    retry_work.append((p, None, assigned_indices, assigned_jobs))
+                    continue
+                for start_idx, sub_batch in _build_dynamic_batches(assigned_jobs, p["max_batch_chars"]):
+                    sub_orig_indices = assigned_indices[start_idx:start_idx + len(sub_batch)]
+                    retry_work.append((p, client, sub_orig_indices, sub_batch))
+
+        failed_batches = []
+        if retry_work:
+            _run_round(retry_work)
+        # Anything that failed AGAIN on the failover round stays
+        # ('uncertain', None) — no second failover cascade.
 
     labels = [label for label, _ in results]
     classified = sum(1 for label in labels if label != "uncertain")
