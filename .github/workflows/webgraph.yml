@@ -26,19 +26,19 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Common Crawl webgraph release name, e.g. cc-main-2025-mar-apr-may — check https://commoncrawl.org/blog for the current one"
+        description: "Common Crawl webgraph release name"
         required: true
       release_tag:
-        description: "GitHub Release tag to publish the reduced CSV to"
+        description: "Release tag to publish to"
         required: false
         default: "webgraph-domain-tiers"
       dry_run:
-        description: "Parse + log a sample only, don't publish. Always run this first against a new release."
+        description: "Preview only, don't publish"
         required: false
         type: boolean
         default: true
       lookup_domains:
-        description: "Calibration mode: comma-separated domains (e.g. heli.technology,example.com) to look up their real rank instead of building/publishing the tiered CSV. Leave blank for the normal seed flow."
+        description: "Look up these domains' rank instead of publishing (comma-separated)"
         required: false
         default: ""
 
