@@ -1,0 +1,74 @@
+name: Workable
+
+# jobs.workable.com's visible search page never paginates for a plain
+# fetch, but a real, public, unauthenticated JSON API sits behind it
+# (found via live network capture, not guessed):
+# GET https://jobs.workable.com/api/v1/jobs?pageToken=... — no query =
+# the WHOLE board (170k+ jobs, confirmed), real cursor pagination, and
+# each job already embeds its company's real website directly (no
+# per-company page fetch needed). This probe pages straight through that
+# feed and hands the companies to node.py — same as every other probe
+# here. Checkpointed by page token on crawl_checkpoints, so each run
+# resumes further into the feed automatically; when the feed runs out,
+# the checkpoint clears and the next run starts over from the top.
+# Stoppable the same way Discovery/Common Crawl are: cancel the run.
+on:
+  workflow_dispatch:
+    inputs:
+      pages_per_run:
+        description: "Pages (20 jobs each) to scan this run, resuming from the checkpoint"
+        required: false
+        default: "200"
+      concurrency:
+        description: "Companies crawled in parallel"
+        required: false
+        default: "700"
+      time_budget_minutes:
+        description: "Crawl phase self-stops after this many minutes"
+        required: false
+        default: "60"
+      seed_time_budget_minutes:
+        description: "Separate budget for the jobs-API paging phase"
+        required: false
+        default: "20"
+      reset:
+        description: "Force a full restart from the top of the feed, ignoring the checkpoint"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: workable-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests python-dotenv
+
+      - name: Run Workable probe
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          ARGS=(--pages-per-run "${{ github.event.inputs.pages_per_run || '200' }}" \
+                --concurrency "${{ github.event.inputs.concurrency || '700' }}" \
+                --time-budget-minutes "${{ github.event.inputs.time_budget_minutes || '60' }}" \
+                --seed-time-budget-minutes "${{ github.event.inputs.seed_time_budget_minutes || '20' }}")
+          if [ "${{ github.event.inputs.reset }}" = "true" ]; then
+            ARGS+=(--reset)
+          fi
+          ulimit -n 65536   # matches common_crawl.yml — high --concurrency can exceed the runner's default 1024 fd limit
+          # 2026-09: `exec` (see people_data_labs.yml) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          exec python "Workable/workable_probe.py" "${ARGS[@]}"
