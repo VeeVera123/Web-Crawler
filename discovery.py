@@ -1415,7 +1415,18 @@ URL_TO_SLUG = {
     "oracle_cloud_hcm": _url_to_slug_oracle_cloud,
     "brassring": _url_to_slug_brassring,
     "teamtailor": _url_to_slug_teamtailor,
-    "successfactors": _url_to_slug_successfactors,
+    # "successfactors": _url_to_slug_successfactors — REMOVED 2026-09.
+    #    Genuinely, permanently blocked, not just "no scraper yet": 4
+    #    independent live SuccessFactors career-site hosts (including the
+    #    exact /xi/ui/pages/careersite/api/v1/jobs path ats_scrapers.py's
+    #    scrape_successfactors targets) all returned ROBOTS_DISALLOWED, and
+    #    the API host/path varies per SAP data center/tenant (15+ known),
+    #    so there's no single stable pattern even ignoring robots.txt — see
+    #    scrape_successfactors's own docstring in ats_scrapers.py. Was still
+    #    slug-discovery-only here (feeding archive_i with rows crawl_i.py
+    #    could never scrape) — node.py's _detect_ats_hits imports this same
+    #    URL_TO_SLUG, so removing it here also stops node.py's live crawlers
+    #    from ever flagging a SuccessFactors career page again.
     "breezyhr": _url_to_slug_breezyhr,
     # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
     "hrmdirect": _url_to_slug_hrmdirect,
@@ -1440,7 +1451,14 @@ URL_TO_SLUG = {
     "flatchr": _url_to_slug_flatchr,
     "jobylon": _url_to_slug_jobylon,
     "homerun": _url_to_slug_homerun,
-    "occupop": _url_to_slug_occupop,
+    # "occupop": _url_to_slug_occupop — REMOVED 2026-09. Genuinely blocked,
+    #    not just "no scraper yet": every checked customer subdomain
+    #    ({slug}.occupop-careers.com) is a JS-rendered SPA shell with zero
+    #    job data in raw HTML, and the only known API (api.occupop.com/
+    #    rest/jobs) requires a Bearer token (confirmed live 403), no public
+    #    unauthenticated path found — see scrape_occupop's own docstring in
+    #    ats_scrapers.py. Same reasoning/effect as successfactors' removal
+    #    just above: stops node.py's live crawlers from flagging these too.
     # New (2026-09): slug-discovery only, see the block comment above these
     # three functions — no scraper/SUPPORTED_ATS entry yet.
     "dayforce": _url_to_slug_dayforce,
