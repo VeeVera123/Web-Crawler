@@ -9,17 +9,38 @@ name: Workable
 # workable_seed.py's module docstring for the full research.
 #
 # Two-stage pipeline, same shape as people_data_labs.yml/bigpicture.yml/
-# opendata.yml:
+# opendata.yml — with one addition on top of that shape: the seed stage
+# is ITSELF sharded (see below), since a single sequential seed run hit a
+# real 429 (Too Many Requests) wall at ~400 pages, twice, at very
+# different paging speeds (73s and 293s) — a per-runner quota, not a
+# burst-rate limit, that only spreading the work across multiple
+# runners (each its own IP) actually fixes. See workable_seed.py's
+# module docstring for the full research (why page-range sharding is
+# impossible, why location= query-space sharding is the real fix, the
+# disclosed coverage caveat, and the 24-hour Retry-After bug already
+# fixed there).
 #
-#   seed:  pages through the whole public jobs feed (see workable_seed.py),
-#          uploads the resulting company CSV as a single GitHub Release
-#          asset named "Workable". Manual, occasional — not part of the
-#          daily schedule. Small enough (thousands, not millions, of rows)
-#          to need no chunking the way PDL's dataset does.
-#
-#   crawl: downloads that Release asset, shards the crawl across N jobs —
-#          same node.py engine, same Quality Index gate, as every other
-#          probe here.
+#   seed:           N shards, each pages ONE bucket of countries (see
+#                   workable_seed.py's bucket_locations() — shard 0 is
+#                   United States alone, the rest round-robin the other
+#                   121 countries + Remote) and uploads its own partial
+#                   CSV as a build artifact. Auto-resumes per-shard from
+#                   its own Supabase checkpoint (crawl_checkpoints table,
+#                   source="workable_seed") — no more manual Restart
+#                   Token. Manual/occasional, not part of the daily
+#                   schedule.
+#   seed-finalize:  downloads every shard's partial CSV, merges +
+#                   dedupes them by domain into one workable_companies.csv,
+#                   and publishes THAT as a single GitHub Release asset
+#                   named "Workable" — same stable shape the crawl stage
+#                   already expects, so crawl.yml/the crawl job below
+#                   never needs to know sharding happened upstream.
+#   crawl:          downloads that Release asset, shards the CRAWL across
+#                   its own N jobs — same node.py engine, same Quality
+#                   Index gate, as every other probe here. Independent
+#                   shard_count from the seed stage's — the two are
+#                   sharded for different reasons (seed: dodge a 429
+#                   quota wall; crawl: parallelize checking companies).
 on:
   workflow_dispatch:
     inputs:
@@ -32,28 +53,37 @@ on:
         description: "Release tag to use"
         required: false
         default: "workable-seed-data"
-      restart_token:
-        description: "Resume seed from this token. Blank = start over"
+      seed_shard_count:
+        description: "Seed shards (shard 0 = US alone, rest split remaining countries)"
         required: false
-        default: ""
+        default: "8"
+      seed_time_budget_minutes:
+        description: "Each seed shard self-stops after this many minutes"
+        required: false
+        default: "330"
       request_delay_seconds:
         description: "Pause between pages, in seconds"
         required: false
         default: "0.5"
+      reset_seed:
+        description: "Force every seed shard to restart from the top, ignoring its checkpoint"
+        required: false
+        type: boolean
+        default: false
       shard_count:
-        description: "Parallel shards"
+        description: "Parallel crawl shards"
         required: false
         default: "10"
       concurrency:
-        description: "Companies crawled in parallel per shard"
+        description: "Companies crawled in parallel per crawl shard"
         required: false
         default: "700"
       run_time_minutes:
-        description: "Self-stop after this many minutes"
+        description: "Crawl phase self-stops after this many minutes"
         required: false
         default: "330"
       restart_index:
-        description: "Resume override per shard. Blank = auto-resume. 0 = full restart"
+        description: "Resume override per crawl shard. Blank = auto-resume. 0 = full restart"
         required: false
         default: ""
 
@@ -62,10 +92,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  seed:
+  prepare-seed-matrix:
     if: ${{ github.event.inputs.run_seed == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # the hard ceiling — this step cannot be sharded (sequential cursor pagination)
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build seed shard-index matrix from seed_shard_count input
+        id: build
+        run: |
+          SHARD_COUNT="${{ github.event.inputs.seed_shard_count || '8' }}"
+          MATRIX_JSON=$(python3 -c "
+          import json
+          shard_count = int('$SHARD_COUNT')
+          print(json.dumps({'include': [{'shard': s} for s in range(shard_count)]}))
+          ")
+          echo "seed_shard_count: $SHARD_COUNT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+  seed:
+    needs: prepare-seed-matrix
+    if: ${{ github.event.inputs.run_seed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false   # one shard's 429/timeout shouldn't cancel the others
+      matrix: ${{ fromJson(needs.prepare-seed-matrix.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,34 +130,78 @@ jobs:
       - name: Install dependencies
         run: pip install requests python-dotenv
 
-      - name: "Resume: download this run's own prior partial output"
-        if: ${{ github.event.inputs.restart_token != '' }}
+      - name: "Page this shard's location bucket (shard ${{ matrix.shard }}/${{ github.event.inputs.seed_shard_count || '8' }})"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          TAG="${{ github.event.inputs.release_tag || 'workable-seed-data' }}"
-          if gh release download "$TAG" --pattern "workable_companies.csv" --dir . 2>/dev/null; then
-            echo "Downloaded prior partial output: $(wc -l < workable_companies.csv) lines"
-          else
-            echo "No prior Release asset found for tag $TAG — starting a fresh lap despite Restart Token being set."
+          RESET_ARGS=()
+          if [ "${{ github.event.inputs.reset_seed }}" = "true" ]; then
+            RESET_ARGS=(--reset)
           fi
+          exec python "Workable/workable_seed.py" \
+            --output "workable_shard_${{ matrix.shard }}.csv" \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ github.event.inputs.seed_shard_count || '8' }} \
+            --time-budget-minutes ${{ github.event.inputs.seed_time_budget_minutes || '330' }} \
+            --request-delay-seconds ${{ github.event.inputs.request_delay_seconds || '0.5' }} \
+            "${RESET_ARGS[@]}"
 
-      - name: Page jobs.workable.com's public jobs API
+      - name: Upload this shard's partial CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: workable-seed-shard-${{ matrix.shard }}
+          path: workable_shard_${{ matrix.shard }}.csv
+          retention-days: 14
+          if-no-files-found: error
+
+  seed-finalize:
+    needs: seed
+    if: ${{ always() && github.event.inputs.run_seed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download every shard's partial CSV
+        uses: actions/download-artifact@v4
+        with:
+          pattern: workable-seed-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge + dedupe every shard's CSV by domain
         run: |
-          python "Workable/workable_seed.py" \
-            --output workable_companies.csv \
-            --start-token "${{ github.event.inputs.restart_token }}" \
-            --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
-            --request-delay-seconds ${{ github.event.inputs.request_delay_seconds || '0.5' }}
+          python3 -c "
+          import csv
+          import glob
 
-      - name: Upload to Release (replacing any existing asset on this tag)
+          seen = set()
+          rows = []
+          for path in sorted(glob.glob('shards/workable_shard_*.csv')):
+              with open(path, newline='', encoding='utf-8') as f:
+                  reader = csv.reader(f)
+                  header = next(reader, None)
+                  for row in reader:
+                      if len(row) < 2 or not row[1] or row[1] in seen:
+                          continue
+                      seen.add(row[1])
+                      rows.append(row)
+              print(f'{path}: {sum(1 for _ in open(path)) - 1} rows')
+
+          with open('workable_companies.csv', 'w', newline='', encoding='utf-8') as f:
+              writer = csv.writer(f)
+              writer.writerow(['name', 'domain'])
+              writer.writerows(rows)
+          print(f'Merged total: {len(rows)} unique companies -> workable_companies.csv')
+          "
+
+      - name: Publish merged CSV to Release (replacing any existing asset on this tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.inputs.release_tag || 'workable-seed-data' }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
             --title "Workable" \
-            --notes "Company seed data from jobs.workable.com's public jobs API — see Workable/workable_seed.py. Regenerated $(date -u +%Y-%m-%d)."
+            --notes "Company seed data from jobs.workable.com's public jobs API — see Workable/workable_seed.py. Merged from ${{ github.event.inputs.seed_shard_count || '8' }} location-bucketed shards. Regenerated $(date -u +%Y-%m-%d)."
           gh release upload "$TAG" workable_companies.csv --clobber
 
   prepare-matrix:
@@ -113,7 +209,7 @@ jobs:
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
-      - name: Build shard-index matrix from shard_count input
+      - name: Build crawl shard-index matrix from shard_count input
         id: build
         run: |
           SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
@@ -126,7 +222,7 @@ jobs:
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
   crawl:
-    needs: [seed, prepare-matrix]
+    needs: [seed-finalize, prepare-matrix]
     if: ${{ always() && github.event.inputs.run_seed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
