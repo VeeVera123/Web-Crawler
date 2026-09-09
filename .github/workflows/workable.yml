@@ -24,36 +24,36 @@ on:
   workflow_dispatch:
     inputs:
       run_seed:
-        description: "Check to seed only (page the jobs API + upload). Leave unchecked to crawl only, using what's already on the Release."
+        description: "Seed only (skip crawling)"
         required: false
         type: boolean
         default: false
       release_tag:
-        description: "GitHub Release tag to upload to / download from"
+        description: "Release tag to use"
         required: false
         default: "workable-seed-data"
       restart_token:
-        description: "Seed only: resume an in-progress lap from this page token (from a prior 'Restart Token' log line). Blank = start a fresh lap."
+        description: "Resume seed from this token. Blank = start over"
         required: false
         default: ""
       request_delay_seconds:
-        description: "Seed only: pause (seconds) after each page — a real run hit a 429 rate limit at ~400 pages. On top of automatic retry, this slows the pace to make hitting it less likely."
+        description: "Pause between pages, in seconds"
         required: false
         default: "0.5"
       shard_count:
-        description: "Crawl stage: parallel shards"
+        description: "Parallel shards"
         required: false
         default: "10"
       concurrency:
-        description: "Crawl stage: companies crawled in parallel per shard"
+        description: "Companies crawled in parallel per shard"
         required: false
         default: "700"
       run_time_minutes:
-        description: "Self-stop after this many minutes — applies to whichever stage this run does (seed OR crawl, never both in one run)"
+        description: "Self-stop after this many minutes"
         required: false
         default: "330"
       restart_index:
-        description: "Crawl stage: per-shard resume override. Blank (default) = each shard auto-resumes from its own Supabase checkpoint. 0 = force a full restart on every shard, ignoring checkpoints."
+        description: "Resume override per shard. Blank = auto-resume. 0 = full restart"
         required: false
         default: ""
 
