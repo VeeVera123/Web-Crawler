@@ -265,6 +265,10 @@ jobs:
       - name: Download every shard's partial CSV from the shard-partials Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no checkout step (nothing else here needs the repo
+          # contents), so gh has no local git context to infer the repo
+          # from — GH_REPO tells it explicitly, same fix as reloop's --repo.
+          GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p shards
           gh release download workable-seed-shards --pattern "workable_shard_*.csv" --dir shards
@@ -298,6 +302,7 @@ jobs:
       - name: Publish merged CSV to Release (replacing any existing asset on this tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${{ github.event.inputs.release_tag || 'workable-seed-data' }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
