@@ -118,8 +118,8 @@ jobs:
           - source: commoncrawl
             name: common crawl 3
             extra_args: "--cc-shard 2 --cc-total-shards 3"
-          - source: wayback_adp
-            name: wayback_adp
+          - source: wayback
+            name: wayback
           - source: latmay
             name: Latmay H.F
           - source: icims_hrjobs
