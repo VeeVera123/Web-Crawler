@@ -1511,103 +1511,12 @@ def scrape_teamtailor(slug: str) -> list[dict]:
     return unique_jobs
 
 
-# ── SAP SuccessFactors ─────────────────────────────────
-
-def scrape_successfactors(slug: str) -> list[dict]:
-    """SAP SuccessFactors career site scraper.
-    Slug format: 'instance|company_key' (e.g. 'performancemanager5.successfactors.eu|companyKey').
-    Uses the career site JSON API at /xi/ui/pages/careersite/api/v1/jobs."""
-    parts = slug.split("|")
-    if len(parts) != 2:
-        log.debug(f"Invalid SuccessFactors slug format: {slug} (expected 'instance|company_key')")
-        return []
-
-    instance, company_key = parts
-    base_url = f"https://{instance}"
-    api_url = f"{base_url}/xi/ui/pages/careersite/api/v1/jobs"
-
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-    }
-
-    all_jobs = []
-    offset = 0
-    limit = 20
-
-    while True:
-        params = {
-            "company": company_key,
-            "offset": offset,
-            "limit": limit,
-        }
-
-        r = _get(api_url, params=params, headers=headers)
-        if not r:
-            log.debug(f"SuccessFactors: API request failed for {slug} offset={offset}")
-            break
-
-        try:
-            data = r.json()
-        except Exception as e:
-            log.debug(f"SuccessFactors: JSON parse failed for {slug}: {e}")
-            break
-
-        results = data.get("results", data.get("jobRequisitions", []))
-        if not results:
-            # Try alternate response shape
-            results = data.get("d", {}).get("results", [])
-        if not results:
-            break
-
-        for req in results:
-            title = req.get("jobTitle", req.get("externalTitle", ""))
-            job_id = req.get("jobReqId", req.get("id", ""))
-            location = req.get("location", req.get("primaryLocation", ""))
-            department = req.get("department", req.get("division", ""))
-            desc_html = req.get("jobDescription", req.get("externalDescription", ""))
-            employment_type = req.get("employmentType", req.get("scheduleType", ""))
-
-            desc = _snippet(desc_html) if desc_html else ""
-            salary = _extract_salary(desc) if desc else ""
-
-            # Build job URL
-            job_url = f"{base_url}/career?company={company_key}&career_job_req_id={job_id}&career_ns=job_listing_summary"
-
-            # Try to extract country from location
-            country = ""
-            if location:
-                loc_parts = [p.strip() for p in location.split(",")]
-                if len(loc_parts) >= 2:
-                    country = loc_parts[-1]
-
-            all_jobs.append({
-                "title": str(title).strip(),
-                "url": job_url,
-                "company": company_key.replace("-", " ").replace("_", " ").title(),
-                "location": location,
-                "country": country,
-                "department": department,
-                "workplace_type": "",
-                "employment_type": employment_type,
-                "salary": salary,
-                "description_snippet": desc,
-                "source_ats": "SAP SuccessFactors",
-                "slug": slug,
-            })
-
-        # Check pagination
-        total = data.get("total", data.get("totalCount", 0))
-        if total and len(all_jobs) >= total:
-            break
-        if len(results) < limit:
-            break
-
-        offset += limit
-        time.sleep(random.uniform(0.3, 1.0))
-
-    return all_jobs
-
+# SAP SuccessFactors: confirmed genuinely blocked (robots.txt disallow on
+# every checked live host + no stable single API path across SAP data
+# centers) — no scraper here anymore. See Main/BLACKLISTED_ATS.md for the
+# full evidence; not registered in SCRAPERS below or in discovery.py's
+# SUPPORTED_ATS. Its ~866 already-discovered archive_i rows were deleted
+# 2026-09 (dead weight — could never be scraped into real job data).
 
 # ── BreezyHR ────────────────────────────────────────────
 
@@ -3348,23 +3257,11 @@ def scrape_homerun(slug: str) -> list[dict]:
     return jobs
 
 
-# ── Occupop ─────────────────────────────────────────────
-
-def scrape_occupop(slug: str) -> list[dict]:
-    """Occupop (Ireland) — NOT CURRENTLY WORKING, kept for reference only
-    (see SCRAPERS dict below — deliberately NOT registered there, same as
-    scrape_successfactors). Every checked customer subdomain
-    ({slug}.occupop-careers.com) served an empty 'Loading...' SPA shell
-    with zero job data in the raw HTML; the official API
-    (api.occupop.com/rest/jobs) requires a Bearer token (confirmed via a
-    live 403 response) and no public unauthenticated endpoint was found.
-    This function is a placeholder that always returns [] until either a
-    real public API is found or a headless-browser network trace
-    uncovers whatever XHR call the SPA itself makes — see SUPPORTED_ATS's
-    comment in discovery.py for the full writeup."""
-    log.debug(f"Occupop: scraping not yet implemented (JS-rendered SPA, no public API) — {slug}")
-    return []
-
+# Occupop (Ireland): confirmed JS-rendered SPA shell with zero job data in
+# raw HTML; the only known API requires a Bearer token (live 403). No
+# scraper here anymore — see Main/BLACKLISTED_ATS.md for the full
+# evidence. Its ~34 already-discovered archive_i rows were deleted
+# 2026-09 (dead weight — could never be scraped into real job data).
 
 SCRAPERS = {
     "rippling": scrape_rippling,
@@ -3405,32 +3302,11 @@ SCRAPERS = {
     "flatchr": scrape_flatchr,
     "jobylon": scrape_jobylon,
     "homerun": scrape_homerun,
-    # "occupop": scrape_occupop — NOT registered. See scrape_occupop's own
-    #    docstring: every checked customer subdomain is a JS-rendered SPA
-    #    shell with zero job data in raw HTML, and the only known API
-    #    requires a Bearer token (confirmed via live 403). Also correctly
-    #    left out of discovery.py's SUPPORTED_ATS — shipping a registered
-    #    scraper here that always returns [] would silently look like a
-    #    working platform. Revisit if a public API or headless-browser
-    #    approach is added later.
-    # ── DISABLED (confirmed live, 2026-09) ──
-    # "successfactors": scrape_successfactors — CONFIRMED genuinely blocked,
-    #    not just an unverified guess: WebFetch against 4 independent live
-    #    SuccessFactors career-site hosts (career5/8/10.successfactors.*,
-    #    performancemanager4.successfactors.com), including the exact
-    #    /xi/ui/pages/careersite/api/v1/jobs path this scraper targets,
-    #    returned ROBOTS_DISALLOWED on every single request. Independently
-    #    corroborated: SuccessFactors career sites render client-side from
-    #    an OData call, and the exact API host/path varies per SAP data
-    #    center/tenant (15+ known data centers), so even ignoring
-    #    robots.txt this isn't a single stable pattern. Stays excluded.
-    # "ukg": — robots.txt disallow on recruiting.ultipro.com; every real
-    #          URL we could verify also served an "unsupported browser"
-    #          fallback page instead of real content. Excluded.
-    # "phenom": — confirmed client-side-JS-only rendering for both listings
-    #             and full descriptions. No plain-HTTP path exists, and
-    #             adding a headless browser conflicts with this project's
-    #             established architecture. Excluded.
+    # No scraper exists for occupop, successfactors, ukg, or phenom — all
+    # 4 confirmed genuinely unscrapeable (robots.txt disallow, JS-only
+    # rendering, or an auth-gated API with no public alternative). Full
+    # evidence for each: Main/BLACKLISTED_ATS.md. That doc is the single
+    # place this list lives now — don't re-add per-platform detail here.
     # YCombinator (Work at a Startup) — NOT an ATS. It's a multi-company
     # job AGGREGATOR (like RemoteOK/Jobicy were), not a single-company
     # ATS, so it was never keyed by per-company slug here. 2026-09: the
