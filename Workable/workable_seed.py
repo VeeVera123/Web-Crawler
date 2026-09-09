@@ -91,6 +91,19 @@ _HTTP_TIMEOUT = 20
 _HEADERS = {"Accept": "application/json", "User-Agent": "Mozilla/5.0 (compatible; job-scanner-probe/1.0)"}
 PROGRESS_EVERY_PAGES = 250  # pages between progress log lines
 
+# 2026-09: a real run hit a 429 (Too Many Requests) after 400 pages at
+# ~5.5 pages/sec (~73s of sustained requests) — confirmed live, not
+# guessed. Retries with backoff (honoring a Retry-After header if the API
+# sends one) instead of treating a single 429 as a hard stop, since that
+# would otherwise force a manual Restart Token resume roughly every ~400
+# pages — ~20+ manual resumes to finish one ~8,500-page lap. Only a 429
+# retries; every other failure (network error, other HTTP status, bad
+# JSON) still fails the page immediately, same as before, since those
+# aren't a "slow down" signal and retrying them blindly could mask a real
+# problem (e.g. a changed API shape).
+_MAX_429_RETRIES = 6
+_BASE_BACKOFF_SECONDS = 5   # backs off 5s, 10s, 15s, 20s, 25s, 30s absent a Retry-After header
+
 
 def _err(e: Exception) -> str:
     """Same fix as opendata_seed.py's/bigpicture_seed.py's/
@@ -101,27 +114,57 @@ def _err(e: Exception) -> str:
 
 
 def _fetch_jobs_page(page_token: str | None) -> dict | None:
-    """One page (20 jobs) of the public jobs feed. None on any failure
-    (network error, bad JSON, non-200) so the caller can stop this run's
-    paging cleanly and log a resume token."""
+    """One page (20 jobs) of the public jobs feed. Retries a 429 (rate
+    limited) with backoff — see the 2026-09 note above — up to
+    _MAX_429_RETRIES times. Returns None on any failure that isn't a
+    retryable 429 (network error, bad JSON, other non-200) or once 429
+    retries are exhausted, so the caller can stop this run's paging
+    cleanly and log a resume token."""
+    token_note = '<start>' if not page_token else page_token[:12] + '...'
     params = {"pageToken": page_token} if page_token else {}
-    try:
-        r = requests.get(_JOBS_API, params=params, headers=_HEADERS, timeout=_HTTP_TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.warning(f"  page fetch failed (token={'<start>' if not page_token else page_token[:12] + '...'}): {_err(e)}")
-        return None
+    for attempt in range(_MAX_429_RETRIES + 1):
+        try:
+            r = requests.get(_JOBS_API, params=params, headers=_HEADERS, timeout=_HTTP_TIMEOUT)
+            if r.status_code == 429:
+                if attempt >= _MAX_429_RETRIES:
+                    log.warning(f"  still rate-limited (429) after {_MAX_429_RETRIES} retries "
+                                f"(token={token_note}) — giving up on this page")
+                    return None
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after) if retry_after else _BASE_BACKOFF_SECONDS * (attempt + 1)
+                except ValueError:
+                    wait = _BASE_BACKOFF_SECONDS * (attempt + 1)
+                log.warning(f"  rate-limited (429, token={token_note}) — waiting {wait:.0f}s "
+                            f"before retry {attempt + 1}/{_MAX_429_RETRIES}")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            log.warning(f"  page fetch failed (token={token_note}): {_err(e)}")
+            return None
+    return None
 
 
 def page_and_filter(output_path: str, start_token: str | None = None,
-                     time_budget_minutes: int = 0) -> tuple[int, bool, str | None]:
+                     time_budget_minutes: int = 0, request_delay_seconds: float = 0.0
+                     ) -> tuple[int, bool, str | None]:
     """Pages the public jobs feed from start_token (None = top of feed),
     writing unique {name, domain} rows to output_path. Returns (kept,
     stopped_early, resume_token): resume_token is what to pass back in as
     --start-token to continue this SAME lap (None means either the lap
     finished, or nothing was paged yet — both cases correctly resume from
-    the top on the next run)."""
+    the top on the next run).
+
+    request_delay_seconds: an optional fixed pause after each successful
+    page, on top of _fetch_jobs_page's own 429 backoff-and-retry. That
+    retry logic recovers automatically once rate-limited; this is a
+    proactive throttle to make hitting the limit at all less likely in the
+    first place. 0 (default) — this is a real, observed limit (a live run
+    hit a 429 after 400 pages at ~5.5 pages/sec), but its exact
+    threshold/window isn't characterized, so no nonzero default is baked
+    in without more evidence; set it explicitly if 429s keep recurring."""
     resuming = bool(start_token) and os.path.exists(output_path)
     file_mode = "a" if resuming else "w"
     log.info(f"Paging jobs.workable.com's public jobs API — "
@@ -183,6 +226,9 @@ def page_and_filter(output_path: str, start_token: str | None = None,
                     log.info(f"  ...{pages:,} pages ({pages / max(elapsed, 0.001):.1f}/sec), "
                              f"{kept:,} new companies written so far")
 
+                if request_delay_seconds:
+                    time.sleep(request_delay_seconds)
+
                 token = data.get("nextPageToken")
                 if not token:
                     log.info(f"Reached the end of the jobs feed after {pages:,} page(s) this run — "
@@ -210,9 +256,14 @@ def main():
     parser.add_argument("--time-budget-minutes", type=int, default=0,
                          help="Self-stop gracefully after this many minutes and log a Restart Token. "
                               "0 = no internal budget (run until the whole feed is scanned once).")
+    parser.add_argument("--request-delay-seconds", type=float, default=0.0,
+                         help="Fixed pause after each page, on top of the automatic 429 backoff/retry — "
+                              "a proactive throttle to make hitting the rate limit less likely in the "
+                              "first place. 0 (default) = no extra pause.")
     args = parser.parse_args()
 
-    kept, stopped_early, resume_token = page_and_filter(args.output, args.start_token, args.time_budget_minutes)
+    kept, stopped_early, resume_token = page_and_filter(
+        args.output, args.start_token, args.time_budget_minutes, args.request_delay_seconds)
 
     if kept == 0 and not stopped_early:
         log.error("No rows written — aborting with a non-zero exit so the CI job shows red "
