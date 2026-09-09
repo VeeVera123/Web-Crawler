@@ -4,43 +4,62 @@ name: Workable
 # fetch, but a real, public, unauthenticated JSON API sits behind it
 # (found via live network capture, not guessed):
 # GET https://jobs.workable.com/api/v1/jobs?pageToken=... — no query =
-# the WHOLE board (170k+ jobs, confirmed), real cursor pagination, and
+# the WHOLE board (~170k jobs, confirmed), real cursor pagination, and
 # each job already embeds its company's real website directly. See
 # workable_seed.py's module docstring for the full research.
 #
 # Two-stage pipeline, same shape as people_data_labs.yml/bigpicture.yml/
-# opendata.yml — with one addition on top of that shape: the seed stage
-# is ITSELF sharded (see below), since a single sequential seed run hit a
-# real 429 (Too Many Requests) wall at ~400 pages, twice, at very
-# different paging speeds (73s and 293s) — a per-runner quota, not a
-# burst-rate limit, that only spreading the work across multiple
-# runners (each its own IP) actually fixes. See workable_seed.py's
-# module docstring for the full research (why page-range sharding is
-# impossible, why location= query-space sharding is the real fix, the
-# disclosed coverage caveat, and the 24-hour Retry-After bug already
-# fixed there).
+# opendata.yml — with two additions on top of that shape:
 #
-#   seed:           N shards, each pages ONE bucket of countries (see
-#                   workable_seed.py's bucket_locations() — shard 0 is
-#                   United States alone, the rest round-robin the other
-#                   121 countries + Remote) and uploads its own partial
-#                   CSV as a build artifact. Auto-resumes per-shard from
-#                   its own Supabase checkpoint (crawl_checkpoints table,
-#                   source="workable_seed") — no more manual Restart
-#                   Token. Manual/occasional, not part of the daily
-#                   schedule.
-#   seed-finalize:  downloads every shard's partial CSV, merges +
-#                   dedupes them by domain into one workable_companies.csv,
-#                   and publishes THAT as a single GitHub Release asset
-#                   named "Workable" — same stable shape the crawl stage
-#                   already expects, so crawl.yml/the crawl job below
-#                   never needs to know sharding happened upstream.
-#   crawl:          downloads that Release asset, shards the CRAWL across
-#                   its own N jobs — same node.py engine, same Quality
-#                   Index gate, as every other probe here. Independent
-#                   shard_count from the seed stage's — the two are
-#                   sharded for different reasons (seed: dodge a 429
-#                   quota wall; crawl: parallelize checking companies).
+#   1. The seed stage is ITSELF sharded, scoped to the same 18 countries
+#      People Data Labs already targets (see workable_seed.py's
+#      WORK_UNITS) — United States split 3 ways (remote/hybrid/on_site,
+#      a real verified partition), every other country its own unit,
+#      weighted-bin-packed across however many shards you ask for so no
+#      shard ends up wildly bigger than another (see
+#      workable_seed.py's _bin_pack_units and its module docstring for
+#      the full research, including a state-level split that was TESTED
+#      and found unsafe).
+#   2. RELOOP (2026-09, same shape as Common Crawl's — see
+#      common_crawl.yml's own header comment): a seed shard can stop
+#      mid-bucket (time budget, or the real per-runner 429 quota wall —
+#      see workable_seed.py's docstring), leaving a Supabase checkpoint
+#      behind. `loop_seed` makes the `reloop` job re-dispatch this same
+#      workflow (run_seed again, same shard settings) the moment any
+#      shard's checkpoint survives a run, until every shard reports
+#      clean. Each shard resumes BOTH its own page cursor (Supabase
+#      checkpoint) AND its own already-downloaded partial company rows
+#      (a small per-shard Release asset it re-downloads/re-uploads every
+#      run — see the "shard-partials" steps below), so nothing already
+#      written is redone or lost across the loop's separate workflow
+#      dispatches (unlike a build artifact, a Release asset survives
+#      between independent runs).
+#
+#   seed:           N shards, each pages its own weighted bucket of
+#                   (location, workplace) units and uploads its own
+#                   partial CSV to a small internal "shard partials"
+#                   Release (tag: workable-seed-shards). Manual/
+#                   occasional, not part of the daily schedule.
+#   reloop:         only runs when loop_seed is checked — re-dispatches
+#                   this workflow automatically if any shard's Supabase
+#                   checkpoint is still there after the run.
+#   seed-finalize:  once the seed stage reports fully done (no reloop
+#                   needed, or loop_seed was off to begin with),
+#                   downloads every shard's partial CSV from the
+#                   shard-partials Release, merges + dedupes them by
+#                   domain into one workable_companies.csv, and
+#                   publishes THAT as a single GitHub Release asset
+#                   named "Workable" — the same stable shape the crawl
+#                   stage already expects.
+#   crawl:          downloads that Release asset, shards the CRAWL
+#                   across its own N jobs — same node.py engine, same
+#                   Quality Index gate, as every other probe here.
+#                   Independent shard_count from the seed stage's — the
+#                   two are sharded for different reasons (seed: dodge a
+#                   429 quota wall + balance load; crawl: parallelize
+#                   checking companies). A crawl-only dispatch
+#                   (run_seed unchecked) never touches the seed/reloop/
+#                   seed-finalize jobs at all.
 on:
   workflow_dispatch:
     inputs:
@@ -50,11 +69,11 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: "Release tag to use"
+        description: "Release tag for the final merged company CSV"
         required: false
         default: "workable-seed-data"
       seed_shard_count:
-        description: "Seed shards (shard 0 = US alone, rest split remaining countries)"
+        description: "Seed shards (US always gets 3, the rest weighted by real size)"
         required: false
         default: "8"
       seed_time_budget_minutes:
@@ -66,7 +85,12 @@ on:
         required: false
         default: "0.5"
       reset_seed:
-        description: "Force every seed shard to restart from the top, ignoring its checkpoint"
+        description: "Force every seed shard to restart from the top, ignoring its checkpoint and prior partial output"
+        required: false
+        type: boolean
+        default: false
+      loop_seed:
+        description: "Auto re-run the seed stage until every shard finishes its bucket"
         required: false
         type: boolean
         default: false
@@ -90,6 +114,10 @@ on:
 concurrency:
   group: workable-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write   # reloop needs this to dispatch the next loop run
 
 jobs:
   prepare-seed-matrix:
@@ -130,7 +158,24 @@ jobs:
       - name: Install dependencies
         run: pip install requests python-dotenv
 
-      - name: "Page this shard's location bucket (shard ${{ matrix.shard }}/${{ github.event.inputs.seed_shard_count || '8' }})"
+      - name: "Reset: clear the shard-partials Release (shard 0 only, once)"
+        if: ${{ matrix.shard == 0 && github.event.inputs.reset_seed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete workable-seed-shards --yes 2>/dev/null || echo "no shard-partials Release to clear — fine"
+
+      - name: "Resume: download this shard's own prior partial output"
+        if: ${{ github.event.inputs.reset_seed != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release download workable-seed-shards --pattern "workable_shard_${{ matrix.shard }}.csv" --dir . 2>/dev/null; then
+            echo "Resumed from a prior partial: $(wc -l < workable_shard_${{ matrix.shard }}.csv) lines"
+          else
+            echo "No prior partial for this shard — starting fresh."
+          fi
+
+      - name: "Page this shard's assigned units (shard ${{ matrix.shard }}/${{ github.event.inputs.seed_shard_count || '8' }})"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -147,26 +192,78 @@ jobs:
             --request-delay-seconds ${{ github.event.inputs.request_delay_seconds || '0.5' }} \
             "${RESET_ARGS[@]}"
 
-      - name: Upload this shard's partial CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: workable-seed-shard-${{ matrix.shard }}
-          path: workable_shard_${{ matrix.shard }}.csv
-          retention-days: 14
-          if-no-files-found: error
+      - name: "Upload this shard's partial CSV to the shard-partials Release"
+        if: ${{ always() && hashFiles(format('workable_shard_{0}.csv', matrix.shard)) != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view workable-seed-shards >/dev/null 2>&1 || gh release create workable-seed-shards \
+            --title "Workable seed — per-shard partials (internal)" \
+            --notes "Not the final dataset — see the '${{ github.event.inputs.release_tag || 'workable-seed-data' }}' Release for the merged CSV. One file per seed shard, re-uploaded every run so a reloop/resume never loses already-fetched rows."
+          gh release upload workable-seed-shards "workable_shard_${{ matrix.shard }}.csv" --clobber
+
+  reloop:
+    needs: seed
+    if: ${{ always() && github.event.inputs.run_seed == 'true' && github.event.inputs.loop_seed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      looped: ${{ steps.check.outputs.looped }}
+    steps:
+      - name: Check every shard's checkpoint and re-dispatch if any are left
+        id: check
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A checkpoint row surviving past this run means that shard
+          # stopped mid-bucket (time budget, or a 429 wall) with units
+          # still left — see workable_seed.py's run_seed_shard(), which
+          # only clears its row on a clean full-bucket finish. Filtered to
+          # THIS run's own seed_shard_count so a leftover row from a
+          # differently-sized past run never triggers a spurious loop.
+          SHARD_COUNT="${{ github.event.inputs.seed_shard_count || '8' }}"
+          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.workable_seed&shard_count=eq.$SHARD_COUNT&select=shard_index" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "Shards with a remaining checkpoint: $REMAINING"
+
+          if [ "$REMAINING" = "0" ]; then
+            echo "Every seed shard finished its bucket — not looping."
+            echo "looped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Shards left unfinished — dispatching the next loop run."
+          echo "looped=true" >> "$GITHUB_OUTPUT"
+          # reset_seed is always forced false here — the whole point of the
+          # loop is resuming from what's already checkpointed; looping with
+          # reset_seed=true would wipe progress every single iteration.
+          gh workflow run "workable.yml" \
+            -f run_seed=true \
+            -f release_tag="${{ github.event.inputs.release_tag || 'workable-seed-data' }}" \
+            -f seed_shard_count="$SHARD_COUNT" \
+            -f seed_time_budget_minutes="${{ github.event.inputs.seed_time_budget_minutes || '330' }}" \
+            -f request_delay_seconds="${{ github.event.inputs.request_delay_seconds || '0.5' }}" \
+            -f reset_seed=false \
+            -f loop_seed=true \
+            -f shard_count="${{ github.event.inputs.shard_count || '10' }}" \
+            -f concurrency="${{ github.event.inputs.concurrency || '700' }}" \
+            -f run_time_minutes="${{ github.event.inputs.run_time_minutes || '330' }}" \
+            -f restart_index="${{ github.event.inputs.restart_index }}"
 
   seed-finalize:
-    needs: seed
-    if: ${{ always() && github.event.inputs.run_seed == 'true' }}
+    needs: [seed, reloop]
+    if: ${{ always() && github.event.inputs.run_seed == 'true' && needs.reloop.outputs.looped != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Download every shard's partial CSV
-        uses: actions/download-artifact@v4
-        with:
-          pattern: workable-seed-shard-*
-          path: shards
-          merge-multiple: true
+      - name: Download every shard's partial CSV from the shard-partials Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p shards
+          gh release download workable-seed-shards --pattern "workable_shard_*.csv" --dir shards
 
       - name: Merge + dedupe every shard's CSV by domain
         run: |
@@ -201,7 +298,7 @@ jobs:
           TAG="${{ github.event.inputs.release_tag || 'workable-seed-data' }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
             --title "Workable" \
-            --notes "Company seed data from jobs.workable.com's public jobs API — see Workable/workable_seed.py. Merged from ${{ github.event.inputs.seed_shard_count || '8' }} location-bucketed shards. Regenerated $(date -u +%Y-%m-%d)."
+            --notes "Company seed data from jobs.workable.com's public jobs API — see Workable/workable_seed.py. Merged from ${{ github.event.inputs.seed_shard_count || '8' }} weighted shards across the 18 target countries. Regenerated $(date -u +%Y-%m-%d)."
           gh release upload "$TAG" workable_companies.csv --clobber
 
   prepare-matrix:
