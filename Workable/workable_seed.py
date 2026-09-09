@@ -20,10 +20,9 @@ gesture in a live browser:
 
     GET https://jobs.workable.com/api/v1/jobs?pageToken=...
 
-  - No query/location param = the WHOLE board (170,032 jobs at
-    verification time). `nextPageToken` is real cursor pagination
-    (verified: page 2 returns a genuinely different, non-overlapping job
-    set, not a repeat).
+  - No query/location param = the WHOLE board (~170k jobs at verification
+    time). `nextPageToken` is real cursor pagination (verified: page 2
+    returns a genuinely different, non-overlapping job set, not a repeat).
   - Each job object already embeds `company.website` — the real external
     site — directly in the response. No per-company page visit, no
     JSON-LD scraping needed.
@@ -45,36 +44,81 @@ The page cursor ITSELF can't be sharded — decoding a real token shows it's
 an Elasticsearch-style "search-after" cursor (the previous page's exact
 score/timestamp/ID), which by design can't jump to an arbitrary page
 without having walked every page before it. So sharding here means
-splitting the QUERY SPACE instead of the page range. Verified live: the
-API's `location` param is a REAL, honored filter (`location=Germany`
-returns 3,809 vs 169,919 unfiltered — a genuinely different, non-ignored
-number, unlike `country` or `page` which are silently no-ops). Workable's
-own sitemap.xml lists 122 real countries it segments jobs by (see
-LOCATIONS below, live-extracted from https://jobs.workable.com/sitemap.xml
-— not guessed), plus "Remote" as its own real, working value.
+splitting the QUERY SPACE instead of the page range.
 
-Country sizes are wildly uneven — a live sample found the United States
-alone at 69,816 of ~170k total (~41%), vs Canada at 7,025 and Remote at
-512 — so United States gets its OWN dedicated shard (shard 0) rather than
-swamping whatever shard it landed in; every other shard round-robins the
-remaining 121 countries + Remote. See bucket_locations().
+SCOPE NARROWED TO THE 18 PDL-SUPPORTED COUNTRIES (2026-09, second
+rewrite): the first sharded version bucketed all 122 real countries from
+Workable's sitemap.xml. That's more than this project actually needs —
+People Data Labs/people_data_labs_probe.py's DEFAULT_COUNTRIES already
+defines the 18 countries this project actually targets (hand-picked,
+English-language-friendly markets with a real base of companies). Reusing
+that same 18-country scope here means Workable's seed only ever pages
+countries this project will actually crawl companies in.
 
-HONEST COVERAGE CAVEAT (sharded mode only): the plain no-filter mode
-(shard_count <= 1) is the only one confirmed to see literally the whole
-board — every job, regardless of whether it has a recognizable single-
-country location tag. Location-bucketed sharding (shard_count > 1) is a
-disclosed tradeoff: a job posting with no clear single-country tag (fully
-remote-and-unspecified, multi-country, etc.) might not surface under ANY
-location bucket. This hasn't been exhaustively measured (that would need
-summing every one of the 123 buckets' totals against the unfiltered total
-— expensive to verify live without risking another rate-limit wall) — real
-parallelism to dodge a confirmed 24-hour throttle is traded for a small,
-unquantified completeness gap. Not every one of the 122 country names
-below has been individually round-tripped through the live API either
-(that alone would be ~122 extra requests); a shard whose assigned location
-returns a suspicious totalSize of 0 logs a warning rather than silently
-treating "0" as "this country really has no postings," since a spelling
-mismatch would look identical.
+TWO REAL, LIVE-VERIFIED FILTERS (both confirmed additive, not fuzzy —
+see below for one that ISN'T safe):
+  - `location=<Country Name>` — confirmed safe for the 18 target
+    countries: fetched each of their real totalSize values live
+    (2026-09) and their sum (105,454) is comfortably less than the
+    unfiltered board total (~169,955), consistent with 18 of 122
+    countries and no overlap between them.
+  - `workplace=remote|hybrid|on_site` — confirmed genuinely exhaustive
+    and non-overlapping for United States specifically: live totals were
+    remote=13,546, hybrid=10,567, on_site=45,732, and those three sum to
+    EXACTLY 69,845 — the plain `location=United States` total at the same
+    moment. This is a real second axis, used ONLY to split United States
+    (by far the largest of the 18 — 66% of their combined total) into 3
+    independently-pageable sub-buckets, each with its own cursor.
+
+ONE THING TESTED AND FOUND *NOT* SAFE, WORTH RECORDING SO IT ISN'T
+RE-TRIED: US STATE NAMES (e.g. `location=California`) are NOT a safe
+splitting axis, despite returning distinct-looking non-zero numbers.
+Live-verified two red flags: (1) a completely made-up location string
+(`location=NotARealState12345`) returned ~169,948 — almost the ENTIRE
+unfiltered board, not 0 — meaning an unrecognized `location` value
+silently falls back to "no filter" rather than "no match", so a wrong
+state name would silently double-count instead of failing loudly; (2)
+summing just 10 major US states' totals came to ~78,470, MORE than the
+entire United States total (~69,845) at the same moment — real states
+overlap/fuzzy-match rather than partition cleanly (Workable's own
+sitemap.xml has no state-level search URLs either — only country-level
+and a handful of SEO category pages — confirming states aren't a real
+taxonomy dimension on this site, just a text field that happens to
+substring-match). `workplace` was checked the same way and passed both
+tests (unknown values return 0 exactly, not a fallback; the 3 real values
+sum to exactly the baseline) — the difference is why one is used here and
+the other isn't.
+
+Country sizes among the 18 are wildly uneven (United States alone is
+69,845 of their 105,454 combined total — 66%), so instead of naive
+round-robin (which ignores size and would badly overload whatever shard
+drew the US), shards are built with a real weighted greedy bin-pack
+(largest-first, each unit assigned to the currently-lightest shard) using
+these live-sampled totals — see WORK_UNITS and _bin_pack_units(). United
+States is represented as 3 separate weighted units (remote/hybrid/
+on_site, see above) rather than 1, so the bin-packer can actually spread
+its load across multiple shards instead of being forced to dedicate one
+whole shard to it regardless of shard_count.
+
+HONEST CAVEATS:
+  - The weights baked into WORK_UNITS are a real live sample taken during
+    this rewrite (2026-09), not a live lookup on every run — Workable's
+    board changes day to day, so the actual split will drift slightly
+    from these weights over time. This only affects how evenly shards
+    are BALANCED (a stale weight might load one shard a bit more than
+    another) — it does NOT affect correctness/completeness, since every
+    unit is still paged to full exhaustion regardless of its assumed
+    weight.
+  - This intentionally covers ONLY the 18 PDL-matched countries, not the
+    whole ~170k-job board. That's a deliberate scope match to this
+    project's existing target-country list, not an accidental gap — see
+    the module's SCOPE NARROWED section above. Pass --shard-count 1 (or
+    leave it at the default) for the old, still-available whole-board
+    mode with no location/workplace filtering at all.
+  - A shard whose assigned bucket's totalSize comes back 0 logs a
+    warning rather than silently treating that as "really empty", since
+    (per the state-name lesson above) a wrong/renamed value could look
+    identical to a real zero.
 
 RESUME MODEL (2026-09, changed from a manual Restart Token to real
 Supabase checkpointing): each shard is its own stable (source="workable_seed",
@@ -86,16 +130,16 @@ synchronous script, not async, and doesn't need node.py's crawling
 machinery) — it talks to the same `crawl_checkpoints` Supabase table
 directly via a few small sync helpers below. Checkpoint state is
 {"loc_index": int, "token": str|None} — which of this shard's assigned
-locations is in progress, and where in that location's own page cursor —
-stored as JSON text in the table's `partition` column (a generic nullable
-text column, not literally Common-Crawl-specific despite the name).
+units is in progress, and where in that unit's own page cursor — stored
+as JSON text in the table's `partition` column (a generic nullable text
+column, not literally Common-Crawl-specific despite the name).
 resume_offset holds a running "companies written so far in this shard's
 current pass" count, informational only. Auto-resumes by default; --reset
 clears the checkpoint and starts this shard's bucket over from the top.
 
 Usage:
     python workable_seed.py --output workable_companies.csv
-    python workable_seed.py --shard-index 1 --shard-count 12 --output shard1.csv
+    python workable_seed.py --shard-index 1 --shard-count 8 --output shard1.csv
 """
 import argparse
 import csv
@@ -137,8 +181,8 @@ _BASE_BACKOFF_SECONDS = 5     # backs off 5s, 10s, 15s, 20s, 25s, 30s absent a R
 # confirmed live, not guessed. A GitHub Actions job gets killed at
 # 350-360min regardless, so obeying that literally just wastes the whole
 # run doing nothing. Anything bigger than this cap gives up this page (and
-# location) now instead of actually sleeping that long — the checkpoint
-# lets a LATER run pick back up.
+# unit) now instead of actually sleeping that long — the checkpoint lets a
+# LATER run pick back up.
 _MAX_BACKOFF_SECONDS = 60
 
 # ── SOURCE_LABEL / Supabase checkpoint plumbing (sync, no node.py import —
@@ -148,59 +192,73 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 CHECKPOINT_TABLE = "crawl_checkpoints"
 
-# United States gets its own dedicated shard — by far the single biggest
-# location (see module docstring). Every other shard round-robins the rest.
 _US_LOCATION = "United States"
 
-# Real, live-extracted (2026-09) from https://jobs.workable.com/sitemap.xml's
-# /search/{country-slug}/... URLs — 122 countries. Display names are the
-# plain English form the API's `location` filter expects (spot-verified for
-# several, e.g. Germany/United States/Canada/India/United Kingdom — see
-# module docstring's coverage caveat for the ones not individually
-# round-tripped).
-LOCATIONS = [
-    "Afghanistan", "Albania", "Algeria", "Argentina", "Armenia", "Australia",
-    "Austria", "Azerbaijan", "Bahamas", "Bahrain", "Bangladesh", "Belarus",
-    "Belgium", "Bolivia", "Bosnia and Herzegovina", "Brazil", "Bulgaria",
-    "Burkina Faso", "Cameroon", "Canada", "Chile", "Colombia", "Costa Rica",
-    "Ivory Coast", "Croatia", "Cyprus", "Czech Republic", "DR Congo",
-    "Denmark", "Dominican Republic", "Ecuador", "Egypt", "El Salvador",
-    "Estonia", "Fiji", "Finland", "France", "Gabon", "Georgia", "Germany",
-    "Ghana", "Greece", "Hong Kong", "Hungary", "India", "Indonesia", "Iraq",
-    "Ireland", "Iran", "Israel", "Italy", "Jamaica", "Japan", "Jordan",
-    "Kazakhstan", "Kenya", "Kuwait", "Latvia", "Lebanon", "Lithuania",
-    "Luxembourg", "Madagascar", "Malaysia", "Maldives", "Malta", "Mauritius",
-    "Mexico", "Moldova", "Morocco", "Mozambique", "Namibia", "Nepal",
-    "Netherlands", "New Zealand", "Nicaragua", "Nigeria", "Norway", "Oman",
-    "Pakistan", "Panama", "Papua New Guinea", "China", "Peru", "Philippines",
-    "Poland", "Portugal", "Puerto Rico", "Qatar", "Congo", "Romania",
-    "Russia", "Rwanda", "Saudi Arabia", "Senegal", "Serbia", "Singapore",
-    "Slovakia", "Slovenia", "Somalia", "South Africa", "South Korea",
-    "Spain", "Sri Lanka", "Sweden", "Switzerland", "Taiwan", "Thailand",
-    "North Macedonia", "Trinidad and Tobago", "Tunisia", "Turkey", "Uganda",
-    "Ukraine", "United Arab Emirates", "United Kingdom", "Tanzania",
-    _US_LOCATION, "Uruguay", "Uzbekistan", "Venezuela", "Vietnam", "Zambia",
+# Real, live-sampled (2026-09) totalSize per unit, from location=<country>
+# and location=United States&workplace=<value> — see module docstring for
+# how each of these was verified additive/non-overlapping. Used ONLY to
+# balance the bin-pack (_bin_pack_units) — never to decide whether to page
+# a unit, only how shards are grouped. A unit is (location, workplace);
+# workplace is None for a whole-country unit.
+#
+# Country list matches People Data Labs/people_data_labs_probe.py's
+# DEFAULT_COUNTRIES exactly (this project's existing 18-country target
+# scope), display-named the way Workable's own `location` filter expects.
+WORK_UNITS: list[tuple[tuple[str, str | None], int]] = [
+    ((_US_LOCATION, "on_site"), 45732),
+    ((_US_LOCATION, "remote"), 13546),
+    ((_US_LOCATION, "hybrid"), 10567),
+    (("United Kingdom", None), 10151),
+    (("Canada", None), 7025),
+    (("Germany", None), 3809),
+    (("Australia", None), 3287),
+    (("Singapore", None), 2859),
+    (("France", None), 1637),
+    (("Netherlands", None), 1451),
+    (("Denmark", None), 1023),
+    (("Ireland", None), 975),
+    (("Belgium", None), 895),
+    (("Sweden", None), 597),
+    (("Norway", None), 492),
+    (("New Zealand", None), 420),
+    (("Austria", None), 420),
+    (("Finland", None), 357),
+    (("Luxembourg", None), 167),
+    (("Iceland", None), 48),
 ]
 
 
-def bucket_locations(shard_index: int, shard_count: int) -> list[str | None]:
+def _bin_pack_units(units: list[tuple[tuple[str, str | None], int]],
+                     shard_count: int) -> list[list[tuple[str, str | None]]]:
+    """Greedy largest-first bin-pack: sort units by weight descending, each
+    goes to whichever shard currently has the smallest running total. With
+    real weights this balances actual paging work per shard far better than
+    round-robin-by-count, without needing every shard to get an equal
+    NUMBER of units. Deterministic — every shard computes the same full
+    partition independently (no coordination needed) and just reads out
+    its own index. shard_count > len(units) is handled by simply leaving
+    the extra shards with an empty bucket (nothing to do, not an error)."""
+    buckets: list[list[tuple[str, str | None]]] = [[] for _ in range(shard_count)]
+    loads = [0] * shard_count
+    for unit, weight in sorted(units, key=lambda u: -u[1]):
+        i = loads.index(min(loads))
+        buckets[i].append(unit)
+        loads[i] += weight
+    return buckets
+
+
+def bucket_locations(shard_index: int, shard_count: int) -> list[tuple[str | None, str | None]]:
     """This shard's slice of the query space to page through, each entry
-    independently — see module docstring for the full reasoning.
-
-    shard_count <= 1: [None] — the original, fully-verified-complete mode:
-    one sequential pass with NO location filter at all (the whole board).
-
-    shard_count > 1: shard 0 = ["United States"] alone. Every other shard
-    round-robins the remaining 121 countries + "Remote" across
-    (shard_count - 1) buckets."""
+    independently — a list of (location, workplace) tuples; either half
+    can be None. shard_count <= 1 returns [(None, None)] — the original,
+    fully-verified-complete mode: one sequential pass with no filters at
+    all (the whole board, not scoped to the 18 target countries). For
+    shard_count > 1, see _bin_pack_units()/WORK_UNITS above."""
     if shard_count <= 1:
-        return [None]
-    if shard_index == 0:
-        return [_US_LOCATION]
-    others = [loc for loc in LOCATIONS if loc != _US_LOCATION] + ["Remote"]
-    bucket_count = shard_count - 1
-    bucket_i = shard_index - 1
-    return [loc for i, loc in enumerate(others) if i % bucket_count == bucket_i]
+        return [(None, None)]
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError(f"shard_index {shard_index} out of range for shard_count {shard_count}")
+    return _bin_pack_units(WORK_UNITS, shard_count)[shard_index]
 
 
 def _err(e: Exception) -> str:
@@ -213,7 +271,7 @@ def _err(e: Exception) -> str:
 
 def _load_seed_checkpoint(shard_index: int, shard_count: int) -> dict | None:
     """{"loc_index": int, "token": str|None}, or None if never checkpointed
-    (start this shard's bucket from location 0, top of feed)."""
+    (start this shard's bucket from unit 0, top of feed)."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -262,17 +320,27 @@ def _clear_seed_checkpoint(shard_index: int, shard_count: int) -> None:
         log.warning(f"  couldn't clear seed checkpoint (non-fatal): {_err(e)}")
 
 
-def _fetch_jobs_page(page_token: str | None, location: str | None = None) -> dict | None:
+def _unit_note(location: str | None, workplace: str | None) -> str:
+    if not location:
+        return "<no filter>"
+    return f"{location} [{workplace}]" if workplace else location
+
+
+def _fetch_jobs_page(page_token: str | None, location: str | None = None,
+                      workplace: str | None = None) -> dict | None:
     """One page (20 jobs) of the public jobs feed, optionally filtered to
-    one location= value. Retries a 429 with backoff (see module docstring)
-    up to _MAX_429_RETRIES times, capped at _MAX_BACKOFF_SECONDS. Returns
-    None on any failure that isn't a retryable-and-recoverable 429, so the
-    caller can move on (stop this location, or this run) cleanly."""
+    one location= and/or workplace= value (see module docstring for why
+    each is safe). Retries a 429 with backoff up to _MAX_429_RETRIES times,
+    capped at _MAX_BACKOFF_SECONDS. Returns None on any failure that isn't
+    a retryable-and-recoverable 429, so the caller can move on (stop this
+    unit, or this run) cleanly."""
     token_note = '<start>' if not page_token else page_token[:12] + '...'
-    loc_note = location or '<no filter>'
+    unit_note = _unit_note(location, workplace)
     params = {}
     if location:
         params["location"] = location
+    if workplace:
+        params["workplace"] = workplace
     if page_token:
         params["pageToken"] = page_token
     for attempt in range(_MAX_429_RETRIES + 1):
@@ -281,7 +349,7 @@ def _fetch_jobs_page(page_token: str | None, location: str | None = None) -> dic
             if r.status_code == 429:
                 if attempt >= _MAX_429_RETRIES:
                     log.warning(f"  still rate-limited (429) after {_MAX_429_RETRIES} retries "
-                                f"(location={loc_note}, token={token_note}) — giving up on this page")
+                                f"(unit={unit_note}, token={token_note}) — giving up on this page")
                     return None
                 retry_after = r.headers.get("Retry-After")
                 try:
@@ -289,49 +357,51 @@ def _fetch_jobs_page(page_token: str | None, location: str | None = None) -> dic
                 except ValueError:
                     wait = _BASE_BACKOFF_SECONDS * (attempt + 1)
                 if wait > _MAX_BACKOFF_SECONDS:
-                    log.warning(f"  rate-limited (429, location={loc_note}, token={token_note}) — server "
+                    log.warning(f"  rate-limited (429, unit={unit_note}, token={token_note}) — server "
                                 f"asked for a {wait:.0f}s wait, longer than this script will ever sleep "
                                 f"for ({_MAX_BACKOFF_SECONDS}s cap) — giving up on this page now instead.")
                     return None
-                log.warning(f"  rate-limited (429, location={loc_note}, token={token_note}) — waiting "
+                log.warning(f"  rate-limited (429, unit={unit_note}, token={token_note}) — waiting "
                             f"{wait:.0f}s before retry {attempt + 1}/{_MAX_429_RETRIES}")
                 time.sleep(wait)
                 continue
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            log.warning(f"  page fetch failed (location={loc_note}, token={token_note}): {_err(e)}")
+            log.warning(f"  page fetch failed (unit={unit_note}, token={token_note}): {_err(e)}")
             return None
     return None
 
 
-def page_one_location(writer: "csv._writer", seen_domains: set[str], location: str | None,
+def page_one_location(writer: "csv._writer", seen_domains: set[str],
+                       location: str | None, workplace: str | None,
                        start_token: str | None, deadline: float | None,
                        request_delay_seconds: float) -> tuple[int, str | None, bool]:
-    """Pages ONE location bucket from start_token (None = top of that
-    bucket's own feed) until it's exhausted, the deadline (a
+    """Pages ONE (location, workplace) unit from start_token (None = top of
+    that unit's own feed) until it's exhausted, the deadline (a
     time.monotonic() value, or None) passes, or a page fetch fails.
-    Returns (kept, next_token, location_done): next_token is None either
-    because the location finished (location_done=True) or nothing was
-    paged yet; a shard moves on to its next location once location_done."""
+    Returns (kept, next_token, unit_done): next_token is None either
+    because the unit finished (unit_done=True) or nothing was paged yet; a
+    shard moves on to its next unit once unit_done."""
     kept = 0
     pages = 0
     token = start_token
-    location_done = False
-    total_for_location = None
+    unit_done = False
+    total_for_unit = None
+    unit_note = _unit_note(location, workplace)
     while True:
         if deadline and time.monotonic() >= deadline:
             break
-        data = _fetch_jobs_page(token, location)
+        data = _fetch_jobs_page(token, location, workplace)
         if data is None:
             break
         pages += 1
-        if total_for_location is None:
-            total_for_location = data.get("totalSize")
-            if location and total_for_location == 0:
-                log.warning(f"  location={location!r} returned totalSize=0 — this might be a spelling "
-                            f"mismatch against Workable's own naming rather than a real empty country; "
-                            f"see module docstring's coverage caveat.")
+        if total_for_unit is None:
+            total_for_unit = data.get("totalSize")
+            if (location or workplace) and total_for_unit == 0:
+                log.warning(f"  unit={unit_note} returned totalSize=0 — this might be a naming "
+                            f"mismatch against Workable's own filter values rather than a real empty "
+                            f"unit; see module docstring's caveats.")
         for job in data.get("jobs") or []:
             company = job.get("company") or {}
             website = company.get("website")
@@ -345,30 +415,38 @@ def page_one_location(writer: "csv._writer", seen_domains: set[str], location: s
             kept += 1
 
         if pages % PROGRESS_EVERY_PAGES == 0:
-            log.info(f"  ...[{location or 'no filter'}] {pages:,} pages, {kept:,} new companies so far")
+            log.info(f"  ...[{unit_note}] {pages:,} pages, {kept:,} new companies so far")
 
         if request_delay_seconds:
             time.sleep(request_delay_seconds)
 
         token = data.get("nextPageToken")
         if not token:
-            location_done = True
+            unit_done = True
             break
-    return kept, (None if location_done else token), location_done
+    return kept, (None if unit_done else token), unit_done
 
 
 def run_seed_shard(output_path: str, shard_index: int, shard_count: int,
                     time_budget_minutes: int = 0, request_delay_seconds: float = 0.0,
                     reset: bool = False) -> tuple[int, bool]:
-    """Works through this shard's assigned locations (bucket_locations),
-    resuming from this shard's own Supabase checkpoint unless reset=True.
-    Returns (kept, stopped_early). stopped_early=False means every location
-    in this shard's bucket was fully paged this run (the checkpoint is
-    cleared); True means the time budget or a page failure stopped it
+    """Works through this shard's assigned (location, workplace) units
+    (bucket_locations), resuming from this shard's own Supabase checkpoint
+    unless reset=True. Returns (kept, stopped_early). stopped_early=False
+    means every unit in this shard's bucket was fully paged this run (the
+    checkpoint is cleared) OR this shard's bucket was empty to begin with
+    (shard_count exceeded the number of real work units — nothing to do,
+    not an error); True means the time budget or a page failure stopped it
     mid-bucket (the checkpoint is left in place for the next run)."""
     bucket = bucket_locations(shard_index, shard_count)
     label = f"[shard {shard_index}/{shard_count}]" if shard_count > 1 else ""
-    log.info(f"── Workable seed {label} — {len(bucket)} location(s) this bucket ──")
+
+    if not bucket:
+        log.info(f"── Workable seed {label} — no units assigned (shard_count exceeds the real "
+                 f"work-unit count) — nothing to do this shard ──")
+        return 0, False
+
+    log.info(f"── Workable seed {label} — {len(bucket)} unit(s) this bucket ──")
 
     if reset:
         log.info("  --reset — forcing a full restart of this shard's bucket, ignoring any checkpoint")
@@ -381,7 +459,8 @@ def run_seed_shard(output_path: str, shard_index: int, shard_count: int,
     start_token = state.get("token") if state else None
     resuming = state is not None
     if resuming:
-        log.info(f"  resuming: location {loc_index + 1}/{len(bucket)} ({bucket[loc_index]!r}), "
+        resume_loc, resume_wp = bucket[loc_index]
+        log.info(f"  resuming: unit {loc_index + 1}/{len(bucket)} ({_unit_note(resume_loc, resume_wp)}), "
                  f"token={'<start>' if not start_token else start_token[:12] + '...'}")
 
     file_mode = "a" if (resuming and os.path.exists(output_path)) else "w"
@@ -411,19 +490,19 @@ def run_seed_shard(output_path: str, shard_index: int, shard_count: int,
             if deadline and time.monotonic() >= deadline:
                 stopped_early = True
                 break
-            location = bucket[i]
-            kept, next_token, location_done = page_one_location(
-                writer, seen_domains, location, tok, deadline, request_delay_seconds)
+            location, workplace = bucket[i]
+            kept, next_token, unit_done = page_one_location(
+                writer, seen_domains, location, workplace, tok, deadline, request_delay_seconds)
             total_kept += kept
-            if location_done:
-                log.info(f"  [{location or 'no filter'}] done — {kept:,} new companies this pass")
+            if unit_done:
+                log.info(f"  [{_unit_note(location, workplace)}] done — {kept:,} new companies this pass")
                 i += 1
                 tok = None
                 _save_seed_checkpoint(shard_index, shard_count, {"loc_index": i, "token": None}, total_kept)
             else:
                 stopped_early = True
-                log.warning(f"  [{location or 'no filter'}] stopped mid-lap after {kept:,} new companies "
-                            f"this run — resuming here next time.")
+                log.warning(f"  [{_unit_note(location, workplace)}] stopped mid-lap after {kept:,} new "
+                            f"companies this run — resuming here next time.")
                 _save_seed_checkpoint(shard_index, shard_count, {"loc_index": i, "token": next_token}, total_kept)
                 break
 
@@ -444,9 +523,10 @@ def main():
     parser.add_argument("--shard-index", type=int, default=0,
                          help="Which shard this run is (0-based). Default 0.")
     parser.add_argument("--shard-count", type=int, default=1,
-                         help="Total shards. 1 (default) = no location sharding — one sequential pass "
-                              "over the whole board, the fully-verified-complete mode. >1 splits by "
-                              "location (see module docstring's coverage caveat).")
+                         help="Total shards. 1 (default) = no filtering — one sequential pass over the "
+                              "WHOLE global board, the original fully-verified-complete mode. >1 splits "
+                              "by (location, workplace) unit across the 18 PDL-target countries, weighted "
+                              "by real sampled size (see WORK_UNITS/_bin_pack_units in the module docstring).")
     parser.add_argument("--time-budget-minutes", type=int, default=0,
                          help="Self-stop gracefully after this many minutes. 0 = no internal budget "
                               "(run until this shard's whole bucket is scanned once).")
@@ -461,7 +541,8 @@ def main():
     kept, stopped_early = run_seed_shard(args.output, args.shard_index, args.shard_count,
                                           args.time_budget_minutes, args.request_delay_seconds, args.reset)
 
-    if kept == 0 and not stopped_early:
+    bucket_was_empty = len(bucket_locations(args.shard_index, args.shard_count)) == 0
+    if kept == 0 and not stopped_early and not bucket_was_empty:
         log.error("No rows written — aborting with a non-zero exit so the CI job shows red "
                   "instead of silently uploading an empty/missing Release asset.")
         sys.exit(1)
