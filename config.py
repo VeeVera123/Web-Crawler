@@ -1,14 +1,17 @@
 """
 Configuration — multi-provider architecture.
 
-Role classification:  Cerebras + Groq + NVIDIA NIM running concurrently
-  (all three free tiers — NVIDIA added 2026-09)
-Location classification: Gemini + OpenAI + NVIDIA NIM running concurrently
-  (Gemini free, OpenAI paid, NVIDIA NIM free — added 2026-09)
+Role classification:     Cerebras + Groq + NVIDIA NIM, running concurrently
+Location classification: Gemini + OpenAI + NVIDIA NIM, running concurrently
 
-NVIDIA NIM is the one provider used for BOTH stages — see its comment in
-_ROLE_PROVIDER_DEFS below for why that's safe (one shared per-name
-throttle clock, not two independent 40 RPM budgets against one account).
+2026-09: re-added NVIDIA (NVIDIA_API_KEY, NIM's OpenAI-compatible API at
+integrate.api.nvidia.com) as a third provider for BOTH stages. Together
+with the failover in classifier.py's ai_classify_roles()/
+ai_classify_locations() — if one of the three providers for a stage fails
+its batch after 3 attempts, the other two split and retry that batch's
+items before anything is defaulted — this means either stage can survive
+any single provider being down or rate-limited, not just Cerebras/Groq or
+Gemini/OpenAI individually failing.
 
 Changed 2026-08: role classification moved off Gemini (was Gemini + Groq)
 onto Cerebras + Groq. Gemini was previously doing double duty — every
@@ -81,11 +84,11 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 # Base, single-process-safe intervals for shared-free-tier-key providers.
 # These get multiplied by AI_RATE_SHARDS below so N concurrent processes
 # collectively stay under the same quota one process was tuned against.
-# Verified against each provider's own docs (2026-08) — all four are
-# ORG/PROJECT-scoped quotas, not per-process or per-API-key, so N processes
-# sharing one key genuinely do divide one pool between them (confirming
-# the AI_RATE_SHARDS fair-share approach is the right model here, not an
-# over-cautious one):
+# Verified against each provider's own docs/pricing pages (2026-08/2026-09)
+# — all five are ORG/PROJECT-scoped (or, for NVIDIA, per-API-key) quotas,
+# not per-process, so N processes sharing one key genuinely do divide one
+# pool between them (confirming the AI_RATE_SHARDS fair-share approach is
+# the right model here, not an over-cautious one):
 #   Cerebras (inference-docs.cerebras.ai/support/rate-limits) — Free Trial:
 #     5 RPM / 30K TPM / 1M TPD, org-wide. RPM is the binding constraint by
 #     far, so batches should be as LARGE as the TPM/context budget allows —
@@ -106,26 +109,33 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     already runs at ~12% of the confirmed limit even at 9 concurrent
 #     shards — left unchanged since OpenAI isn't the provider with a
 #     reported rate-limit problem, but there's real headroom if needed later.
+#   NVIDIA NIM (build.nvidia.com / integrate.api.nvidia.com): no single
+#     published per-model free-tier number — NVIDIA's own docs say limits
+#     are model/account-specific — but ~40 RPM shared across the whole key
+#     (not per-model) is the figure consistently reported for NIM-hosted
+#     chat models as of 2026-09. Treated as a single pool shared by BOTH
+#     the role and location NVIDIA entries below (same provider name
+#     "nvidia", same key), since that's what's actually true of the quota.
 _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single process
 _GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 calls/min
                                   # (6K TPM, 75% of cap — was 30s/2-calls-min, doubled
                                   # throughput while keeping a real safety margin)
 _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verify your
                                   # own account at aistudio.google.com/rate-limit)
-_NVIDIA_BASE_INTERVAL = 1.5   # ~40 RPM free tier (community-confirmed on
-                              # NVIDIA's own dev forum, not a published SLA —
-                              # see the location-provider comment below for
-                              # the full sourcing note). Defined here (not
-                              # down by the location providers) because
-                              # 2026-09 added NVIDIA to BOTH role and
-                              # location classification, sharing ONE
-                              # NVIDIA_API_KEY/account quota across both
-                              # stages — see the role-provider entry below
-                              # for how that sharing is actually enforced.
+# NVIDIA NIM (integrate.api.nvidia.com) — no single published per-model RPM;
+# NVIDIA's own docs say free-tier limits are model/account-specific, but the
+# commonly reported free-tier figure across NIM-hosted chat models is ~40
+# RPM, SHARED ACROSS THE WHOLE KEY (not per-model) — this matters here
+# because the SAME NVIDIA_API_KEY is used for both role and location
+# classification below, so both stages' calls draw from one 40 RPM pool,
+# not two separate ones. 60/40 = 1.5s/call single-process baseline.
+_NVIDIA_BASE_INTERVAL = 1.5
 
 # ── Role classification providers (free tiers, concurrent) ──
-# Cerebras + Groq — moved off Gemini 2026-08, see module docstring for why.
-# NVIDIA NIM added 2026-09 (also serves location classification below).
+# Cerebras + Groq + NVIDIA NIM. Cerebras/Groq moved off Gemini 2026-08 (see
+# module docstring); NVIDIA re-added 2026-09 as the third leg so a single
+# provider going down/rate-limited doesn't stall role classification —
+# ai_classify_roles() fails over a dead provider's batch to the other two.
 _ROLE_PROVIDER_DEFS = [
     # Cerebras: gpt-oss-120b, confirmed live/non-deprecated (2026-08). Free
     # tier is 5 RPM ORG-WIDE — the tightest budget of any provider here —
@@ -148,26 +158,15 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # NVIDIA NIM, added 2026-09 at explicit user request: role titles are
-    # short, so this doesn't need the huge-context model — reuses the same
-    # nemotron-3-super-120b-a12b as location classification below (one
-    # already-verified model instead of introducing a second unverified
-    # one). IMPORTANT: this is the SAME provider name ("nvidia") as the
-    # location-classification entry further down, and classifier.py's
-    # _last_call_times throttle is keyed by provider NAME, not by which
-    # classification stage called it — so a role-classification nvidia
-    # call and a location-classification nvidia call in the same process
-    # share ONE clock and naturally respect a combined ~40 RPM budget
-    # across both stages, rather than each stage getting its own 40 RPM
-    # and doubling real usage against the one account/key. No extra code
-    # needed for that — it falls out of _ai_call's existing per-name
-    # throttle dict.
+    # NVIDIA NIM: Llama 3.1 70B Instruct — real, currently-hosted NIM model,
+    # 128K context. Titles are short, so batches stay modest (12K chars)
+    # even though the model's context window is much larger.
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
-        "nvidia/nemotron-3-super-120b-a12b",
+        "meta/llama-3.1-70b-instruct",
         "https://integrate.api.nvidia.com/v1",
-        max_batch_chars=100_000,     # titles are short — no need for the full 200K used for locations
+        max_batch_chars=12_000,
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
@@ -175,12 +174,10 @@ _ROLE_PROVIDER_DEFS = [
 ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
 
 # ── Location classification providers (concurrent) ──
-# Location needs the smartest models — Gemini (1M context, free) + OpenAI (paid)
-# + NVIDIA NIM (free, added 2026-09 — also serves role classification above,
-# see that entry's comment on why one shared _NVIDIA_BASE_INTERVAL clock is
-# correct for both). Gemini serves ONLY this stage (role classification
-# moved off it in 2026-08), roughly halving its total call volume across a
-# full run.
+# Gemini (1M context, free) + OpenAI (paid) + NVIDIA NIM. Gemini serves
+# ONLY this stage (role classification moved off it, see module docstring),
+# roughly halving its total call volume across a full run. NVIDIA re-added
+# 2026-09 as the third leg here too — same failover as role classification.
 _LOCATION_PROVIDER_DEFS = [
     # Gemini: 1M context, ~15 RPM free tier (see note above on why this
     # isn't a hard-confirmed current number)
@@ -205,50 +202,18 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=300_000,     # 400K - 100K breathing space
         min_call_interval=5.0,       # Tier 1: ~12 req/min
     ),
-    # NVIDIA NIM (build.nvidia.com): free, no credit card, explicitly
-    # "unlimited API requests without daily limits" per NVIDIA's own free-
-    # tier page (phone verification exists specifically to gate that
-    # against abuse, not to cap real usage) — confirmed by the user
-    # directly quoting that page. RPM still applies: ~40 RPM is the
-    # community-confirmed baseline from NVIDIA's own dev forum ("I have
-    # reached the default rate limit of 40 Requests Per Minute") — no
-    # published SLA, treat as a working baseline. Chosen over OpenRouter's
-    # free tier, whose daily cap (50/day with no prior spend, 1,000/day
-    # only after $10 lifetime credit purchase) is too small here.
-    #
-    # base_url below is live-confirmed 2026-09 (fetched the actual GET
-    # /v1/models listing from https://integrate.api.nvidia.com/v1 — NVIDIA's
-    # real, current NIM catalog, not a third-party guide).
-    #
-    # 2026-09 CORRECTION: this provider originally pointed at
-    # nemotron-4-340b-instruct (present in that catalog, and a plain
-    # instruct model — no reasoning-preamble risk) without checking its
-    # context window. Checked after the fact: it's a 2024-era model with
-    # only a 4,096-token context (confirmed via its own Hugging Face
-    # README and OpenRouter's listing, matching each other) — far too
-    # small for this pipeline's location-classification batches
-    # (max_batch_chars up to 200K chars, ~50K+ tokens, deliberately sized
-    # for full, untruncated job descriptions — see
-    # _classify_location_batch's docstring on why). Every real batch
-    # would have overflowed it and either errored or silently truncated
-    # descriptions server-side.
-    #
-    # Replaced with nemotron-3-super-120b-a12b: also confirmed present in
-    # the same live /v1/models listing, a newer (Nemotron 3, not 4)
-    # non-reasoning instruct-style model (no "-reasoning" suffix, unlike
-    # e.g. nemotron-3-nano-omni-30b-a3b-reasoning in the same catalog —
-    # same direct-answer shape as Gemini/OpenAI here), and a context
-    # window corroborated by two independent sources: NVIDIA's own
-    # research page (research.nvidia.com/labs/nemotron/Nemotron-3-Super,
-    # "up to 1M tokens") and OpenRouter's model listing ("262,144 token
-    # context window" as actually served) — either figure comfortably
-    # covers this pipeline's batches with room to spare.
+    # NVIDIA NIM: same key/model/quota pool as the role-classification entry
+    # above ("nvidia" — deliberately the same provider name, so classifier.py's
+    # per-provider throttle correctly treats both stages' NVIDIA calls as
+    # sharing ONE real 40 RPM quota, not two independent ones). Location
+    # descriptions are much longer than role titles, so this entry gets a
+    # bigger batch budget than the role one above.
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
-        "nvidia/nemotron-3-super-120b-a12b",
+        "meta/llama-3.1-70b-instruct",
         "https://integrate.api.nvidia.com/v1",
-        max_batch_chars=200_000,     # well inside the confirmed 262K-token+ window
+        max_batch_chars=80_000,
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
