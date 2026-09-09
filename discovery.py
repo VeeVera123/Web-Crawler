@@ -1,8 +1,9 @@
 """
 Discovery — Supabase as Single Source of Truth
 =====================================================
-Pulls company slugs from multiple sources and upserts them
-into the Supabase slug_registry table.
+Pulls company slugs from multiple sources and upserts them into
+Supabase's archive_i table (renamed from slug_registry a while back —
+see node.py's ARCHIVE_I_TABLE comment).
 
 Sources:
   1. Feashliaa GitHub (50k+ slugs for 6 platforms — greenhouse,
@@ -16,7 +17,10 @@ Sources:
      platform-sharded matrix jobs in discovery.yml — see
      fetch_commoncrawl_slugs docstring for why, and --cc-shard/
      --cc-total-shards below)
-  5. Wayback Machine CDX (ADP-only supplemental discovery)
+  5. Wayback Machine CDX (cross-platform supplemental discovery — every
+     platform with a CC_PLATFORM_PATTERNS entry, not just ADP; see
+     fetch_wayback_slugs docstring. Originally ADP-only, generalized
+     2026-09.)
   6. Y Combinator — REMOVED 2026-09 (see main()'s Source 6 comment).
      fetch_yc_slugs() itself is left defined/unused.
   7. Latmay H.F (huggingface.co/datasets/latmay/ats-career-page-urls —
@@ -74,7 +78,7 @@ per-company fetches), so sharding by source is the natural split here —
 there's no single flat pool of "work items" to hash-shard the way main.py
 splits ATS boards across its matrix.
 
-The daily scanner reads from Supabase slug_registry — no local .txt files
+The daily scanner reads from Supabase archive_i — no local .txt files
 needed.
 
 Usage:
@@ -83,7 +87,7 @@ Usage:
     python discovery.py --source kalil         # kalil0321 only
     python discovery.py --source openpostings  # OpenPostings only
     python discovery.py --source commoncrawl   # Common Crawl only
-    python discovery.py --source wayback_adp   # Wayback CDX (ADP) only
+    python discovery.py --source wayback       # Wayback CDX (all platforms) only
     python discovery.py --source latmay        # Latmay H.F (Hugging Face) only
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source theirstack    # TheirStack only
@@ -292,37 +296,36 @@ SUPPORTED_ATS = {
     # Pinpoint (UK), Flatchr (France), Jobylon (Nordics), Homerun
     # (Netherlands). All 5 confirmed to have a genuinely working scraper
     # (server-rendered HTML or a real public JSON API — see
-    # ats_scrapers.py for each). Occupop (Ireland) deliberately NOT added
-    # here — see the BLACKLISTED comment below.
+    # ats_scrapers.py for each).
     "pageup", "pinpoint", "flatchr", "jobylon", "homerun",
+    # FIXED 2026-09: these 7 all had a real, working, REGISTERED scraper in
+    # ats_scrapers.py's SCRAPERS dict already (confirmed live: archive_i
+    # holds 17,368 adp rows, 1,064 jobvite, 1,048 jobadder, 537 brassring,
+    # 390 folkshr, 314 avature, 132 eploy — all discovered via Common
+    # Crawl/URL_TO_SLUG, which don't gate on SUPPORTED_ATS) but were never
+    # added to this set. The only real-world effect of that gap:
+    # fetch_openpostings_slugs() is the one source that DOES gate on
+    # SUPPORTED_ATS (its slugs_by_ats dict is pre-seeded from this set),
+    # so any of these 7 tagged in OpenPostings' own dataset were being
+    # silently dropped rather than upserted. brassring specifically was
+    # also still wrongly listed as "blacklisted" below even though it was
+    # re-enabled (see ats_scrapers.py's scrape_brassring docstring: the
+    # real root cause was missing session priming, not JS-rendering/auth/
+    # robots) — that stale blacklist entry is why this whole gap went
+    # unnoticed.
+    "adp", "brassring", "jobvite", "jobadder", "folkshr", "avature", "eploy",
 }
 
-# Eploy / Folks HR / JobAdder / Jobvite / ADP / Avature (added 2026-08) are
-# NOT in SUPPORTED_ATS yet: none of them appear in the OpenPostings dataset
-# this file enriches from, and JobAdder/ADP additionally need composite
-# slugs (client_id|board, cid|ccId) that a single URL has no way to fully
-# encode. Their slugs currently have to be added to slug_registry by hand
-# (or via discover_slugs.py, if/when Common Crawl query patterns are added
-# for them) — they scrape fine once a slug row exists, this file just
-# doesn't discover new ones for them yet.
-
-# BLACKLISTED — scrapers exist but don't work (robots.txt / JS-rendered):
-# brassring, successfactors
-# occupop (2026-09): every checked customer subdomain
-# ({slug}.occupop-careers.com) is a JS-rendered SPA shell with zero job
-# data in the raw HTML — no confirmed public unauthenticated API (the
-# official api.occupop.com/rest/jobs endpoint requires a Bearer token,
-# confirmed via a live 403). Genuinely not scrapeable with this project's
-# plain-HTTP architecture without further investigation (e.g. a headless-
-# browser network trace to find whatever XHR call the SPA itself makes).
-# Kept OUT of SUPPORTED_ATS on purpose rather than shipping a scraper that
-# would silently return zero jobs for every real company.
-# ycombinator (2026-09): NOT an ATS at all — Work at a Startup is a
-# multi-company job-board aggregator. job_board_scrapers.py (which used
-# to house it as an aggregator source) was disabled and removed entirely
-# in an earlier cleanup, so there is no YC code path left anywhere in
-# this project — not here, not in URL_TO_SLUG, not in SCRAPERS. Kept out
-# of SUPPORTED_ATS permanently, not just "for now".
+# The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
+# disallow, JS-only rendering, or an auth-gated API with no public
+# alternative) are documented in ONE place now: Main/BLACKLISTED_ATS.md.
+# Don't add per-platform detail back here — that file is the single source
+# of truth for "why can't we scrape this."
+#
+# ycombinator: NOT an ATS at all (a multi-company job-board aggregator, not
+# a single-company ATS) — a different kind of exclusion than the 4 above,
+# so it isn't in that doc. There is no YC code path left anywhere in this
+# project — not here, not in URL_TO_SLUG, not in SCRAPERS.
 
 # Map OpenPostings ATS names → our ATS keys
 # Map OpenPostings ATS names → our ATS keys (case-insensitive lookup below)
@@ -369,15 +372,28 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "flatchr": "flatchr",
     "jobylon": "jobylon",
     "homerun": "homerun",
-    # "occupop" deliberately NOT mapped here — occupop is not in
-    # SUPPORTED_ATS (no working scraper yet, see that comment), and
+    # 2026-09: added now that all 7 joined SUPPORTED_ATS (see that set's
+    # comment for why) — a real working scraper exists for each. These
+    # label-string variants follow the same defensive-alias pattern as
+    # every other entry above, but — unlike those — haven't been
+    # individually confirmed against OpenPostings' actual live ATS_name
+    # values for these 7 specifically. Harmless either way: an unmatched
+    # variant just means those rows keep falling through to "unmapped ATS"
+    # in the log, same as today; it can't cause a wrong match.
+    "adp": "adp", "adp workforce now": "adp", "workforce now": "adp",
+    "brassring": "brassring", "ibm brassring": "brassring", "kenexa brassring": "brassring",
+    "jobvite": "jobvite",
+    "jobadder": "jobadder", "job adder": "jobadder",
+    "folkshr": "folkshr", "folks hr": "folkshr",
+    "avature": "avature",
+    "eploy": "eploy",
+    # occupop deliberately NOT mapped — occupop is NOT in SUPPORTED_ATS
+    # (confirmed unscrapeable, see Main/BLACKLISTED_ATS.md), and
     # fetch_openpostings_slugs()'s slugs_by_ats dict is only pre-seeded
     # with SUPPORTED_ATS keys — mapping an ATS name here that isn't in
-    # SUPPORTED_ATS would KeyError the very first time OpenPostings
-    # actually contains an Occupop row. Add this mapping back once/if a
-    # working scraper lands and occupop joins SUPPORTED_ATS.
-    # Disabled platforms (kept for reference):
-    # "brassring", "successfactors"
+    # SUPPORTED_ATS would KeyError the first time OpenPostings actually
+    # contains an Occupop row.
+    # successfactors/ukg/phenom: same reasoning — see Main/BLACKLISTED_ATS.md.
     # "ycombinator" intentionally not mapped — see SUPPORTED_ATS comment
     # above (not a real ATS, no code path left in this project at all).
 }
@@ -773,36 +789,11 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
     return None
 
 
-def _url_to_slug_successfactors(url: str) -> str | None:
-    """2026-09: confirmed live archive_i rows with a trailing space baked
-    into the stored slug (e.g. "career8.successfactors.com|management ")
-    — root cause: `company_key`/`path_match.group(1)` were never
-    stripped, so a source URL with a raw (technically invalid, but real-
-    world-common) unencoded space in its query string carried that space
-    straight through into the stored slug. .strip() added at every return
-    point that builds a slug from external input."""
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    sf_domains = (".successfactors.com", ".successfactors.eu", ".sapsf.com", ".sapsf.eu")
-    if any(host.endswith(d) for d in sf_domains):
-        # Try ?company= param first
-        qs = parse_qs(parsed.query)
-        company_key = None
-        for k, v in qs.items():
-            if k.lower() == "company" and v:
-                company_key = v[0]
-        if company_key:
-            return f"{host}|{company_key.strip()}"
-        # Fallback: extract subdomain as instance
-        instance = host.split(".")[0]
-        if instance and instance not in SKIP_SLUGS:
-            # Try extracting company from path
-            path_match = re.search(r"/career\?company=([^&]+)", url)
-            if path_match:
-                return f"{instance}|{path_match.group(1).strip()}"
-            return instance
-    return None
-
+# SuccessFactors: no extractor here anymore — confirmed genuinely
+# unscrapeable (see Main/BLACKLISTED_ATS.md). node.py's _ATS_VENDOR_DOMAINS
+# still lists its host suffixes on purpose (a different job: correctly
+# classifying a page as "ATS-related, not in-house" regardless of whether
+# this project can scrape it) — that list is NOT affected by this removal.
 
 def _url_to_slug_breezyhr(url: str) -> str | None:
     parsed = urlparse(url)
@@ -1317,24 +1308,11 @@ def _url_to_slug_homerun(url: str) -> str | None:
     return None
 
 
-def _url_to_slug_occupop(url: str) -> str | None:
-    """Extract slug from Occupop URLs (Ireland).
-    Pattern: {company-slug}.occupop-careers.com/... — NOT occupop.com,
-    which now redirects to cezannehr.com post-rebrand ("Cezanne
-    Recruitment, powered by Occupop"). NOTE (2026-09): every checked
-    customer page on this domain is a JS-rendered SPA shell with zero
-    job data in the raw HTML and no confirmed public API — this
-    converter is kept so slugs can still be discovered/stored, but see
-    scrape_occupop's docstring for the real scraping-feasibility gap."""
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if not host.endswith(".occupop-careers.com"):
-        return None
-    slug = host[: -len(".occupop-careers.com")].lower()
-    if slug and slug not in SKIP_SLUGS and slug != "www":
-        return slug
-    return None
-
+# Occupop: no extractor here anymore — confirmed genuinely unscrapeable
+# (see Main/BLACKLISTED_ATS.md). node.py's _ATS_VENDOR_DOMAINS still lists
+# occupop-careers.com on purpose (a different job: correctly classifying a
+# page as "ATS-related, not in-house" regardless of scrapeability) — that
+# list is NOT affected by this removal.
 
 # 2026-09: Dayforce / Getro / JazzHR added — the top 3 platforms by volume
 # in the latmay/ats-career-page-urls HF dataset (2181/1804/1325 rows
@@ -1415,18 +1393,11 @@ URL_TO_SLUG = {
     "oracle_cloud_hcm": _url_to_slug_oracle_cloud,
     "brassring": _url_to_slug_brassring,
     "teamtailor": _url_to_slug_teamtailor,
-    # "successfactors": _url_to_slug_successfactors — REMOVED 2026-09.
-    #    Genuinely, permanently blocked, not just "no scraper yet": 4
-    #    independent live SuccessFactors career-site hosts (including the
-    #    exact /xi/ui/pages/careersite/api/v1/jobs path ats_scrapers.py's
-    #    scrape_successfactors targets) all returned ROBOTS_DISALLOWED, and
-    #    the API host/path varies per SAP data center/tenant (15+ known),
-    #    so there's no single stable pattern even ignoring robots.txt — see
-    #    scrape_successfactors's own docstring in ats_scrapers.py. Was still
-    #    slug-discovery-only here (feeding archive_i with rows crawl_i.py
-    #    could never scrape) — node.py's _detect_ats_hits imports this same
-    #    URL_TO_SLUG, so removing it here also stops node.py's live crawlers
-    #    from ever flagging a SuccessFactors career page again.
+    # successfactors/ukg/phenom: no entry — confirmed unscrapeable, see
+    # Main/BLACKLISTED_ATS.md. Kept out of here on purpose: node.py's
+    # _detect_ats_hits shares this same dict, so an entry here would keep
+    # flagging pages as this platform with no way to ever turn that into
+    # real job data.
     "breezyhr": _url_to_slug_breezyhr,
     # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
     "hrmdirect": _url_to_slug_hrmdirect,
@@ -1451,14 +1422,8 @@ URL_TO_SLUG = {
     "flatchr": _url_to_slug_flatchr,
     "jobylon": _url_to_slug_jobylon,
     "homerun": _url_to_slug_homerun,
-    # "occupop": _url_to_slug_occupop — REMOVED 2026-09. Genuinely blocked,
-    #    not just "no scraper yet": every checked customer subdomain
-    #    ({slug}.occupop-careers.com) is a JS-rendered SPA shell with zero
-    #    job data in raw HTML, and the only known API (api.occupop.com/
-    #    rest/jobs) requires a Bearer token (confirmed live 403), no public
-    #    unauthenticated path found — see scrape_occupop's own docstring in
-    #    ats_scrapers.py. Same reasoning/effect as successfactors' removal
-    #    just above: stops node.py's live crawlers from flagging these too.
+    # occupop: no entry — confirmed unscrapeable, see Main/BLACKLISTED_ATS.md
+    # and the comment just above (successfactors) for the same reasoning.
     # New (2026-09): slug-discovery only, see the block comment above these
     # three functions — no scraper/SUPPORTED_ATS entry yet.
     "dayforce": _url_to_slug_dayforce,
@@ -1587,6 +1552,59 @@ def fetch_kalil_slugs() -> dict[str, dict[str, str]]:
     log.info(f"kalil0321 total: {total} slugs across "
              f"{sum(1 for s in slugs_by_ats.values() if s)} platforms")
     return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE: iCIMS HR Jobs (centralized multi-tenant board)
+# ══════════════════════════════════════════════════════════
+
+_ICIMS_HRJOBS_API = "https://hrjobs.icims.com/api/jobs"
+
+
+def fetch_icims_hrjobs_slugs(max_pages: int = 500) -> dict[str, dict[str, str]]:
+    """hrjobs.icims.com — iCIMS's own centralized board for HR-professional
+    roles across its customer base (NOT all iCIMS customers/industries —
+    a narrower vertical board, confirmed live via its page copy: "iCIMS
+    customers are hiring... for HR professionals"). Real, public,
+    unauthenticated, paginated JSON — confirmed live via Chrome network
+    capture, not guessed: GET .../api/jobs?page=N&sortBy=relevance&
+    descending=false&internal=false, no auth, 10 jobs/page, no page-count
+    field (stop condition is an empty page). Each entry's data.apply_url
+    is a real careers-{company}.icims.com/jobs/{id}/... URL — exactly the
+    subdomain shape _url_to_slug_icims already parses, so this reuses that
+    converter as-is rather than re-deriving a slug locally.
+
+    2026-09: added — a much cheaper way to catch NEW iCIMS customers than
+    waiting for them to surface via Common Crawl/HTTP Archive: iCIMS's own
+    board lists them directly."""
+    converter = URL_TO_SLUG["icims"]
+    found: dict[str, str] = {}
+    page = 1
+    while page <= max_pages:
+        try:
+            r = requests.get(_ICIMS_HRJOBS_API, params={
+                "page": page, "sortBy": "relevance", "descending": "false", "internal": "false",
+            }, timeout=30)
+            r.raise_for_status()
+            jobs = r.json().get("jobs") or []
+        except Exception as e:
+            log.warning(f"iCIMS HR Jobs: page {page} failed, stopping: {e}")
+            break
+        if not jobs:
+            break
+        for entry in jobs:
+            data = entry.get("data") or {}
+            url = data.get("apply_url")
+            name = data.get("brand") or data.get("hiring_organization") or ""
+            if not url:
+                continue
+            slug = converter(url)
+            if slug:
+                found[slug] = name
+        page += 1
+
+    log.info(f"iCIMS HR Jobs: {len(found)} slugs across {page - 1} page(s)")
+    return {"icims": found}
 
 
 # ══════════════════════════════════════════════════════════
@@ -1864,13 +1882,9 @@ CC_PLATFORM_PATTERNS = {
     # specific customer's URL happens to use.
     "brassring": ["*.brassring.com/TGnewUI/*"],
     # SuccessFactors deliberately has NO Common Crawl pattern — confirmed
-    # 2026-09 still genuinely blocked from scraping (SAP's own Career Site
-    # Builder architecture renders job listings client-side via an OData
-    # call, not present in the initial HTML; no evidence this has changed).
-    # Discovering SuccessFactors slugs via Common Crawl would be pure
-    # wasted effort while the scraper itself can't turn them into job
-    # data — see ats_scrapers.py's scrape_successfactors comment for why
-    # it's blacklisted. Revisit only if that scraping blocker is ever lifted.
+    # unscrapeable (see Main/BLACKLISTED_ATS.md), so discovering its slugs
+    # would be pure wasted effort. Also means it has no Wayback CDX
+    # pattern either, since fetch_wayback_slugs reuses this exact dict.
     # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon — all 4 have a
     # real shared-domain URL shape to query for. Homerun deliberately has
     # NO entry here — its customers run on their OWN domain (jobs.
@@ -2042,19 +2056,29 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
 
 
 # ══════════════════════════════════════════════════════════
-# WAYBACK MACHINE CDX — ADP-only supplemental discovery
+# WAYBACK MACHINE CDX — cross-platform supplemental discovery
 # ══════════════════════════════════════════════════════════
 #
-# ADP is a bad fit for Common Crawl: most customers embed their board via
-# a JS web component (<recruitment-current-openings cid=... ccid=...>)
-# rather than a plain <a href>, so a link-following crawler like CC never
-# sees a URL to follow. The Wayback Machine's CDX index is a different,
-# broader, independently-sourced index (it also ingests URLs via Google
-# Sitemaps, third-party "Save Page Now" submissions, etc.), so it can
-# have snapshots of the actual workforcenow.adp.com recruitment.html
-# pages themselves even when Common Crawl has none — and those URLs
-# already carry cid/ccId directly in the query string, so no HTML
-# fetching or parsing is needed at all, just the CDX index lookup.
+# Originally built ADP-only: ADP is a bad fit for Common Crawl, since most
+# customers embed their board via a JS web component
+# (<recruitment-current-openings cid=... ccid=...>) rather than a plain
+# <a href>, so a link-following crawler like CC never sees a URL to
+# follow. The Wayback Machine's CDX index is a different, broader,
+# independently-sourced index (it also ingests URLs via Google Sitemaps,
+# third-party "Save Page Now" submissions, etc.), so it can have
+# snapshots of a platform's real board pages even when Common Crawl has
+# none.
+#
+# GENERALIZED 2026-09: there's no reason that benefit is ADP-specific —
+# this now runs the exact SAME real, already-vetted URL patterns Common
+# Crawl discovery uses (CC_PLATFORM_PATTERNS) through Wayback's CDX index
+# for every platform that has one, extracting slugs with the exact same
+# extractors (CC_EXTRACTORS) Common Crawl already uses. No new patterns
+# were guessed for this — it's the identical query list, just pointed at
+# a second, independent index. This naturally still excludes whatever
+# CC_PLATFORM_PATTERNS itself excludes (occupop/successfactors/homerun
+# have no entry there, each for its own documented reason — see that
+# dict), so this doesn't need its own separate exclusion list.
 #
 # The CDX API (web.archive.org/cdx/search/cdx) is IA's own documented,
 # public, purpose-built endpoint for exactly this kind of targeted
@@ -2063,14 +2087,15 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
 # web.archive.org/robots.txt live before every run rather than assume.
 
 WAYBACK_CDX_URL = "http://web.archive.org/cdx/search/cdx"
-_ADP_WAYBACK_PATTERNS = [
-    "workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html*",
-    # Legacy (deprecated 2026-06-26) family — no longer serves job content,
-    # but Wayback may still have snapshots from before the sunset, and its
-    # redirect chain resolves client= to a real modern cid — see
-    # _url_to_slug_adp_discovery.
-    "workforcenow.adp.com/jobs/apply/posting.html*",
-]
+# ADP's own patterns, still called out by name here since the legacy
+# family below needs its own explanation — CC_PLATFORM_PATTERNS["adp"]
+# holds these same two entries verbatim, this isn't a second definition
+# to keep in sync, just documenting WHY they look the way they do:
+#   "workforcenow.adp.com/mascsr/*"                    — modern cid/ccId family
+#   "workforcenow.adp.com/jobs/apply/posting.html*"    — legacy (deprecated
+# 2026-06-26) family — no longer serves job content, but Wayback may still
+# have snapshots from before the sunset, and its redirect chain resolves
+# client= to a real modern cid — see _url_to_slug_adp_discovery.
 
 _ROBOTS_UA = "ATS-Global-Scanner/1.0"
 
@@ -2236,35 +2261,54 @@ def _fetch_wayback_cdx_urls(pattern: str, page_limit: int) -> list[str]:
     return urls
 
 
-def fetch_wayback_adp_slugs(limit: int = 5000) -> dict[str, set[str]]:
-    """Query the Wayback Machine CDX index for archived ADP career pages
-    (both the modern cid/ccId family and the deprecated legacy client=
-    family) and extract cid|ccId slugs — modern URLs parse directly from
-    the query string, legacy ones resolve via one live redirect-follow
-    each (capped, see _ADP_LEGACY_RESOLVE_CAP). `limit` is now the
-    PER-PAGE size for CDX's resumeKey pagination, not a hard overall cap —
-    see _fetch_wayback_cdx_urls for why the old flat-limit version was
-    silently truncating on high-volume patterns."""
-    slugs: set[str] = set()
+def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None) -> dict[str, set[str]]:
+    """Query the Wayback Machine CDX index for archived career-page URLs
+    across every ATS platform that has a CC_PLATFORM_PATTERNS entry, and
+    extract slugs with the matching CC_EXTRACTORS parser — the exact same
+    patterns/extractors Common Crawl discovery uses, just against a
+    second, independent index (see the module header comment above for
+    why that's worth doing at all, not just for ADP).
+
+    `limit` is the PER-PAGE size for CDX's resumeKey pagination, not a
+    hard overall cap — see _fetch_wayback_cdx_urls for why the old
+    flat-limit version was silently truncating on high-volume patterns.
+    `platforms` restricts which ATS keys to query (default: every key in
+    CC_PLATFORM_PATTERNS) — lets a future shard split this the same way
+    Common Crawl's own discovery is sharded (--cc-shard/--cc-total-shards)
+    if this ever gets expensive enough to need it; unsharded by default."""
+    slugs_by_ats: dict[str, set[str]] = {}
 
     if not _robots_allows("https://web.archive.org", "/cdx/"):
         log.warning("Wayback CDX: /cdx/ disallowed by web.archive.org/robots.txt "
-                     "(or robots.txt unreachable) — skipping ADP Wayback discovery.")
-        return {"adp": slugs}
+                     "(or robots.txt unreachable) — skipping Wayback discovery entirely.")
+        return slugs_by_ats
 
-    for pattern in _ADP_WAYBACK_PATTERNS:
-        log.info(f"Wayback CDX: querying archived snapshots of {pattern}")
-        urls = _fetch_wayback_cdx_urls(pattern, limit)
-        log.info(f"  Wayback CDX: {len(urls)} archived snapshot URLs")
+    target_platforms = platforms if platforms is not None else list(CC_PLATFORM_PATTERNS.keys())
+    for ats in target_platforms:
+        patterns = CC_PLATFORM_PATTERNS.get(ats)
+        extractor = CC_EXTRACTORS.get(ats)
+        if not patterns or not extractor:
+            continue
 
-        for url in urls:
-            slug = _url_to_slug_adp_discovery(url)
-            if slug:
-                slugs.add(slug)
+        slugs: set[str] = set()
+        for pattern in patterns:
+            log.info(f"Wayback CDX: querying archived snapshots of {pattern}")
+            urls = _fetch_wayback_cdx_urls(pattern, limit)
+            log.info(f"  Wayback CDX: {len(urls)} archived snapshot URLs")
 
-    if slugs:
-        log.info(f"  adp: {len(slugs)} companies from Wayback Machine")
-    return {"adp": slugs}
+            for url in urls:
+                try:
+                    slug = extractor(url)
+                except Exception:
+                    continue
+                if slug:
+                    slugs.add(slug)
+
+        if slugs:
+            log.info(f"  {ats}: {len(slugs)} companies from Wayback Machine")
+            slugs_by_ats[ats] = slugs
+
+    return slugs_by_ats
 
 
 # ══════════════════════════════════════════════════════════
@@ -3475,16 +3519,18 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Discovery: populate Supabase slug_registry from 7 sources"
+        description="Discovery: populate Supabase archive_i from 9 active sources"
     )
     parser.add_argument(
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
-                 "wayback_adp", "theirstack", "httparchive",
-                 "latmay", "edwarddgao", "all"],
+                 "wayback", "theirstack", "httparchive",
+                 "latmay", "edwarddgao", "icims_hrjobs", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
-             "2026-09 — see the module docstring.",
+             "2026-09 — see the module docstring. 'wayback_adp' renamed "
+             "to 'wayback' 2026-09 when this source was generalized to "
+             "every ATS platform, not just ADP.",
     )
     parser.add_argument(
         "--crawls", type=int, default=6,
@@ -3670,22 +3716,20 @@ def main():
         else:
             grand_total += cc_total
 
-    # Source 5: Wayback Machine CDX (ADP-only — see fetch_wayback_adp_slugs
-    # docstring for why ADP specifically needs a second discovery source)
-    if args.source in ("wayback_adp", "all"):
-        log.info("\n--- WAYBACK MACHINE CDX (ADP-only supplemental discovery) ---")
-        wb_slugs = fetch_wayback_adp_slugs()
+    # Source 5: Wayback Machine CDX — generalized 2026-09 to every platform
+    # with a CC_PLATFORM_PATTERNS entry, not just ADP (see
+    # fetch_wayback_slugs' docstring and the module header comment above it)
+    if args.source in ("wayback", "all"):
+        log.info("\n--- WAYBACK MACHINE CDX (cross-platform supplemental discovery) ---")
+        wb_slugs = fetch_wayback_slugs()
         wb_total = sum(len(s) for s in wb_slugs.values())
-        log.info(f"Wayback CDX total: {wb_total} slugs")
+        log.info(f"Wayback CDX total: {wb_total} slugs across {len(wb_slugs)} platforms")
 
         if not args.dry_run:
-            # 2026-09: "wayback_adp" isn't in archive_i's own source CHECK
-            # constraint (only the bare "wayback" is, matching 2,910 real
-            # historical rows already written under that label before this
-            # source's --source flag was renamed to wayback_adp) — writing
-            # "wayback_adp" here would fail the constraint on every row
-            # even after the table-name fix above. "wayback" it is, to
-            # match both the constraint and this source's own prior data.
+            # "wayback" matches archive_i's own source CHECK constraint
+            # (2,910+ real historical rows already written under this label
+            # from the original ADP-only version — unchanged by this
+            # generalization, still the right value).
             upserted = upsert_to_supabase(wb_slugs, source="wayback",
                                            dry_run=args.dry_run)
             grand_total += upserted
@@ -3716,6 +3760,19 @@ def main():
             grand_total += upserted
         else:
             grand_total += lm_total
+
+    # Source: iCIMS HR Jobs (hrjobs.icims.com — centralized multi-tenant
+    # board, HR-professional roles across iCIMS's customer base)
+    if args.source in ("icims_hrjobs", "all"):
+        log.info("\n--- ICIMS HR JOBS (hrjobs.icims.com centralized board) ---")
+        ihr_slugs = fetch_icims_hrjobs_slugs()
+        ihr_total = sum(len(s) for s in ihr_slugs.values())
+        if not args.dry_run:
+            upserted = upsert_to_supabase(ihr_slugs, source="icims_hrjobs",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ihr_total
 
     # Source 8: Edward H.F (huggingface.co/datasets/edwarddgao/open-apply-jobs
     # — 31M+ individual job postings, apply_url resolved through URL_TO_SLUG)
