@@ -240,12 +240,13 @@ def _rpc(fn: str, params: dict, limit: int = 1000) -> list[dict]:
     raise SupabaseFetchError(f"RPC {fn} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
 
-# ── Slug Registry ────────────────────────────────────────
+# ── archive_i (formerly slug_registry) ───────────────────
 
 def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -> int:
     """
-    Upsert slugs into slug_registry. Each slug is (ats, slug_value).
-    Returns count of rows upserted.
+    Upsert slugs into archive_i (formerly slug_registry — kept this
+    function name since every caller already uses it). Each slug is
+    (ats, slug_value). Returns count of rows upserted.
     """
     if not slugs:
         return 0
@@ -283,7 +284,7 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
             # Without the response body, a CHECK-constraint rejection (e.g.
             # an unrecognized `source` value — this is exactly what silently
             # dropped every job_board_discovery slug before the
-            # slug_registry_source_check migration) looks identical to a
+            # archive_i_source_check migration) looks identical to a
             # transient network error in the logs. Always surface it.
             body = f" — response: {r.text[:500]}" if r is not None else ""
             log.error(f"Failed to upsert slug batch (source={source}): {e}{body}")
@@ -296,7 +297,7 @@ def resolve_oracle_slug(old_slug: str, new_slug: str) -> bool:
     """
     Cache a discovered Oracle Cloud HCM domain/site by replacing a legacy
     short-tenant slug (e.g. 'eeho' or 'eeho|CX_1') with its resolved form
-    (e.g. 'eeho.fa.us2|CX_1') in slug_registry.
+    (e.g. 'eeho.fa.us2|CX_1') in archive_i.
 
     scrape_oracle_cloud_hcm() has to brute-force up to 11 regions to find a
     legacy tenant's real domain — expensive and slow. Once discovered, the
