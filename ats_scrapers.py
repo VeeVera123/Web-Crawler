@@ -2742,10 +2742,39 @@ def scrape_adp(slug: str) -> list[dict]:
             countries = geo.extract_countries(location)
             country = ", ".join(sorted(countries))
 
-            job_url = (
+            # 2026-09: job["url"] used to just BE this raw JSON API endpoint
+            # — confirmed live (reported by the user, then reproduced) that
+            # opening it in a browser dumps the raw JSON response, not a
+            # usable job page. The real human-facing career-center page is
+            # a different path entirely (recruitment.html, an SPA), and it
+            # deep-links to one job via a `jobId` query param — confirmed
+            # live that `jobId` is the requisition's ExternalJobID (a small
+            # numeric string in customFieldGroup.stringFields), NOT itemID
+            # (the opaque GUID-shaped ID this API otherwise keys on): e.g.
+            # itemID '9201144516913_1' had ExternalJobID '567183', and
+            # .../recruitment.html?...&jobId=567183 opened that exact job.
+            api_detail_url = (
                 f"https://workforcenow.adp.com/mascsr/default/careercenter/public/"
                 f"events/staffing/v1/job-requisitions/{req_id}?cid={cid}&ccId={cc_id}"
             )
+            external_job_id = ""
+            for sf in (item.get("customFieldGroup") or {}).get("stringFields", []):
+                if isinstance(sf, dict) and (sf.get("nameCode") or {}).get("codeValue") == "ExternalJobID":
+                    external_job_id = (sf.get("stringValue") or "").strip()
+                    break
+            if external_job_id:
+                job_url = (
+                    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/"
+                    f"recruitment.html?cid={cid}&ccId={cc_id}&lang=en_US"
+                    f"&selectedMenuKey=CareerCenter&jobId={external_job_id}"
+                )
+            else:
+                # No ExternalJobID found (not confirmed to ever actually
+                # happen live, but the field is populated by ADP itself,
+                # not guaranteed) — fall back to the raw API URL rather
+                # than emit a jobId=-less link that can't possibly resolve
+                # to the right posting.
+                job_url = api_detail_url
 
             jobs.append({
                 "title": str(title).strip(),
@@ -2760,6 +2789,12 @@ def scrape_adp(slug: str) -> list[dict]:
                 "description_snippet": "",  # filled by _fetch_adp_description
                 "source_ats": "ADP",
                 "slug": slug,
+                # Internal only — NOT a real job-schema field, dropped by
+                # supabase_handler._build_row's explicit whitelist before
+                # any DB write. _fetch_adp_description needs the raw API
+                # endpoint (which has requisitionDescription); job["url"]
+                # is now the human-facing page instead, which isn't JSON.
+                "_adp_api_detail_url": api_detail_url,
             })
 
         if len(items) < limit:
@@ -3681,12 +3716,18 @@ def _fetch_smartrecruiters_description(job: dict) -> str:
 
 def _fetch_adp_description(job: dict) -> str:
     """Fetch full description from ADP's per-requisition DETAIL endpoint.
-    scrape_adp() already builds job["url"] as this exact detail URL
-    (.../job-requisitions/{itemID}?cid=...&ccId=...) — confirmed live to
-    return the same fields as the list endpoint PLUS one extra field,
-    requisitionDescription (raw HTML: intro, duties, requirements,
-    benefits, etc.), which does NOT exist on the list endpoint at all."""
-    url = job.get("url", "")
+    scrape_adp() stashes this exact detail URL
+    (.../job-requisitions/{itemID}?cid=...&ccId=...) in the internal
+    '_adp_api_detail_url' key — confirmed live to return the same fields
+    as the list endpoint PLUS one extra field, requisitionDescription (raw
+    HTML: intro, duties, requirements, benefits, etc.), which does NOT
+    exist on the list endpoint at all.
+
+    2026-09: job["url"] itself is no longer this API endpoint — it's now
+    the human-facing recruitment.html career-center page (see scrape_adp),
+    which isn't JSON at all, so this function reads the stashed internal
+    URL instead of job["url"]."""
+    url = job.get("_adp_api_detail_url", "")
     if not url:
         return ""
     r = _get(url, headers={
