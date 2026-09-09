@@ -15,36 +15,36 @@ on:
   workflow_dispatch:
     inputs:
       run_seed:
-        description: "Check to seed only (download+filter+upload). Leave unchecked to crawl only, using what's already on the Release."
+        description: "Seed only (skip crawling)"
         required: false
         type: boolean
         default: false
       release_tag:
-        description: "GitHub Release tag to upload to / download from"
+        description: "Release tag to use"
         required: false
         default: "bigpicture-companies"
       restart_id:
-        description: "Seed only: resume from this row number (from a prior 'Restart ID' log line). 0 = start over."
+        description: "Resume seed from this row. 0 = start over"
         required: false
         default: "0"
       min_size:
-        description: "Crawl stage: min employee count for a no-ATS company to enter archive_ii (doesn't affect which companies get crawled). 0 = no filter."
+        description: "Min employee count for archive_ii. 0 = no filter"
         required: false
         default: "100"
       shard_count:
-        description: "Crawl stage: parallel shards"
+        description: "Parallel shards"
         required: false
         default: "15"
       concurrency:
-        description: "Crawl stage: companies crawled in parallel per shard"
+        description: "Companies crawled in parallel per shard"
         required: false
         default: "400"
       run_time_minutes:
-        description: "Self-stop after this many minutes — applies to whichever stage this run does (seed OR crawl, never both in one run)"
+        description: "Self-stop after this many minutes"
         required: false
         default: "330"
       restart_index:
-        description: "Crawl stage: per-shard resume override. Blank (default) = each shard auto-resumes from its own Supabase checkpoint. 0 = force a full restart on every shard, ignoring checkpoints."
+        description: "Resume override per shard. Blank = auto-resume. 0 = full restart"
         required: false
         default: ""
 
