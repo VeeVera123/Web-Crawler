@@ -1747,7 +1747,8 @@ async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows:
 # no manual bookkeeping across N shards required.
 
 async def save_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
-                                 shard_count: int, resume_offset: int) -> None:
+                                 shard_count: int, resume_offset: int,
+                                 partition: str | None = None) -> None:
     """Upserts this shard's progress. Best-effort: a failed write just
     means a future resume falls back to an earlier batch boundary, never
     data loss (the archive_i/archive_ii rows for that batch are already
@@ -1761,13 +1762,22 @@ async def save_crawl_checkpoint(session: aiohttp.ClientSession, source: str, sha
     common_crawl_probe.py's files_done_before) — 'companies_done' holding
     a file count was confusing on sight. 'resume_offset' describes what
     the field actually IS regardless of source: the position/offset a
-    resumed run should skip ahead to, whatever unit that source counts in."""
+    resumed run should skip ahead to, whatever unit that source counts in.
+
+    2026-09: added `partition` (nullable) — Common Crawl's own reloop fix.
+    Before this, only a `partition_num == 1` call site ever ran, so a
+    multi-partition run (--partitions > 1) that stopped mid-partition-2+
+    left a stale partition-1 checkpoint behind; a resumed run would then
+    skip the WRONG number of files into whatever partition it started at.
+    OpenData/PDL/BigPicture never pass this (stays NULL) — a plain company
+    count has no partition concept to disambiguate."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
                "Prefer": "resolution=merge-duplicates"}
     row = {"source": source, "shard_index": shard_index, "shard_count": shard_count,
-           "resume_offset": resume_offset, "updated_at": datetime.now(timezone.utc).isoformat()}
+           "resume_offset": resume_offset, "partition": partition,
+           "updated_at": datetime.now(timezone.utc).isoformat()}
     try:
         async with session.post(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
                                  params={"on_conflict": "source,shard_index,shard_count"},
@@ -1800,6 +1810,33 @@ async def load_crawl_checkpoint(session: aiohttp.ClientSession, source: str, sha
     except Exception as e:
         log.warning(f"  couldn't load crawl checkpoint (starting this shard from 0): {e}")
         return 0
+
+
+async def load_crawl_checkpoint_with_partition(session: aiohttp.ClientSession, source: str,
+                                                shard_index: int, shard_count: int
+                                                ) -> tuple[str | None, int]:
+    """Same lookup as load_crawl_checkpoint, but also returns `partition` —
+    for Common Crawl's multi-partition resume (see save_crawl_checkpoint's
+    2026-09 note). A separate function rather than changing
+    load_crawl_checkpoint's return shape: OpenData/PDL/BigPicture's 3
+    existing callers want a plain int and have no reason to care about a
+    column that's always NULL for them."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None, 0
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    params = {"source": f"eq.{source}", "shard_index": f"eq.{shard_index}",
+              "shard_count": f"eq.{shard_count}", "select": "partition,resume_offset"}
+    try:
+        async with session.get(f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}", headers=headers,
+                                params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+            data = await r.json()
+            if not data:
+                return None, 0
+            return data[0].get("partition"), data[0]["resume_offset"]
+    except Exception as e:
+        log.warning(f"  couldn't load crawl checkpoint (starting this shard from 0): {e}")
+        return None, 0
 
 
 async def clear_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
