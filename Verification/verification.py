@@ -39,32 +39,44 @@ above, alone) — scrape_board() can itself return an empty list on a
 transient scrape error, so an "empty" count is a best-effort read, not
 an authoritative one, while "dead" always is.
 
-WHY 18 OF 26 ATS PLATFORMS, NOT ALL: 2026-08, four parallel research
+WHY 19 OF 26 ATS PLATFORMS, NOT ALL: 2026-08, four parallel research
 passes empirically tested real vs fake slugs against every SCRAPERS-
 registered platform's actual endpoint (WebFetch against live real and
 obviously-fake slugs, cross-checked against each platform's own docs).
-18 platforms have a confirmed-safe, structurally distinct "does not
-exist" signal. 8 do not (see _UNVERIFIABLE_ATS below) — either the
+19 platforms have a confirmed-safe, structurally distinct "does not
+exist" signal. 7 do not (see _UNVERIFIABLE_ATS below) — either the
 platform returns an identical-looking response for "doesn't exist" and
 "real board, 0 jobs" (oracle_cloud_hcm, confirmed empirically: a real
 empty tenant returns the exact same 200+empty-array shape a nonexistent
 one would), the check requires JS/POST semantics no lightweight HTTP
-probe can safely replicate (workday, smartrecruiters, taleo), or no
-live example could be found/reached to confirm a rule at all (breezyhr,
-jobadder — jobadder's "Nothing here I'm afraid..." page was found to be
-plausibly the SAME message a real empty board shows, an explicitly
-UNSAFE signal — folkshr, adp). Rows on unverifiable platforms, plus
-brassring/successfactors (JS-rendered, no scraper at all — see
-ats_scrapers.py's SCRAPERS dict) are left completely untouched by this
-engine and only counted (as "unverified") and logged. ("ycombinator" was
-also in this bucket until 2026-09, when discovery.py's URL_TO_SLUG entry
-that used to mis-resolve YC/workatastartup.com URLs into a fake
-"ycombinator" ATS was removed at the user's request — it's a job-board
-aggregator, never a real per-company ATS, and that entry was only ever
-producing permanently-unscrapable rows. Any pre-existing archive_i rows
-with ats='ycombinator' from before that fix are stale and were cleaned
-up directly in Supabase rather than left for this engine to (never)
-verify.)
+probe can safely replicate (workday — confirmed 2026-09 that, unlike
+Taleo below, a fake Workday tenant subdomain resolves anyway to the same
+shared per-instance load balancer, so DNS doesn't help here either;
+smartrecruiters — the one documented safe check needs api.smartrecruiters.com,
+which robots.txt disallows, confirmed live 2026-09, not just "suspected"),
+or no live example could be found/reached to confirm a rule at all
+(breezyhr, jobadder — jobadder's "Nothing here I'm afraid..." page was
+found to be plausibly the SAME message a real empty board shows, an
+explicitly UNSAFE signal — folkshr, adp). Taleo moved OUT of this bucket
+2026-09 — confirmed live (plain DNS lookups, not proxied through any
+fetch tool) that it's genuinely subdomain-per-tenant like avature/eploy,
+so a nonexistent tenant's subdomain simply doesn't resolve; see
+_verify_taleo's docstring for the exact evidence, including one archive_i
+row that DNS-check already flagged as a real, currently-dead tenant. Rows
+on unverifiable platforms, plus successfactors (JS-rendered, no scraper
+at all — see ats_scrapers.py's SCRAPERS dict; NOT brassring, which DOES
+have a working scraper — see BLACKLISTED_ATS.md and SCRAPERS, brassring
+was re-enabled 2026-09 and is only in _UNVERIFIABLE_ATS for lack of a
+confirmed dead-signal, same as workday/smartrecruiters/etc, not for lack
+of a scraper) are left completely untouched by this engine and only
+counted (as "unverified") and logged. ("ycombinator" was also in this
+bucket until 2026-09, when discovery.py's URL_TO_SLUG entry that used to
+mis-resolve YC/workatastartup.com URLs into a fake "ycombinator" ATS was
+removed at the user's request — it's a job-board aggregator, never a real
+per-company ATS, and that entry was only ever producing permanently-
+unscrapable rows. Any pre-existing archive_i rows with ats='ycombinator'
+from before that fix are stale and were cleaned up directly in Supabase
+rather than left for this engine to (never) verify.)
 
 SAFETY MODEL (a wrong delete here is real, silent, permanent data loss):
   - report-only is the DEFAULT — run this with no flags and it only logs
@@ -88,19 +100,43 @@ scanner, but NOT the same sharding mechanism): this file runs as N
 parallel shards (--shard-index/--shard-count), each writing its own JSON
 summary (--summary-out). Unlike main.py's hash-based sharding (which
 needs the WHOLE slug list in memory to hash-partition it), each shard
-here fetches ONLY its own ~1/N slice of rows directly from Supabase — a
-cheap COUNT query first, then a server-side Range-based slice ordered by
-id (see fetch_rows). This matters: an earlier version fetched the ENTIRE
-table in every shard and threw away the other (N-1)/N client-side, so N
-shards collectively pulled N times the table's actual size from Supabase
-at once — confirmed real 2026-08 as the cause of a 20-shard run seeing
-GETs and DELETEs alike time out ("increased errors" on Supabase's own
-side). A separate finalize pass (--summarize DIR) then reads every
-shard's JSON summary out of that directory and prints ONE combined
-report — total active/empty/dead/unverified counts across all shards —
-mirroring how main.py's `--finalize` step runs once after every shard
-has finished. See verification.yml for how the two are wired together
-in CI.
+here fetches ONLY its own slice of rows directly from Supabase, filtered
+server-side (see fetch_rows) — never the whole table pulled down and
+thrown away client-side. An earlier version did exactly that (fetch
+everything, keep only 1/N), so N shards collectively pulled N times the
+table's actual size from Supabase at once — confirmed real 2026-08 as the
+cause of a 20-shard run seeing GETs and DELETEs alike time out ("increased
+errors" on Supabase's own side).
+
+2026-09: the per-shard slice itself was ALSO changed, after a real,
+confirmed problem with the first fix above. That version split by
+absolute row POSITION in id-ascending order (a cheap COUNT query, then a
+Range header on that ordered result) — each shard got a contiguous ~1/N
+chunk of the table. That's an even split of ROW COUNT, but not of actual
+WORK: archive_i rows on the ~10 platforms in _UNVERIFIABLE_ATS get zero
+network calls (instant skip, just counted), while every other row gets a
+real HTTP check with retries. Verified directly against live Supabase
+data (2026-09): platform inserts happen in large single-source bursts,
+not evenly interleaved by id, so a contiguous position slice can land
+almost entirely inside one burst — measured proportions of unverifiable
+rows across the 20 shards ranged from 0% to ~88%, which is exactly why
+some shards finished in ~1 minute and others ran 30-60+ minutes on the
+same shard_count/concurrency. Now sharded instead by a stored, indexed
+`shard_bucket` generated column (`id % 1000` — see the migration this
+depends on, run manually since Supabase schema migrations from this tool
+are classifier-blocked in this environment) — a shard takes every bucket
+where `bucket % shard_count == shard_index`. Because 1000 is far smaller
+than any real insertion burst, this samples uniformly across every burst
+(and therefore every platform) regardless of where in the id sequence
+that burst landed, so each shard gets a proportional mix of
+verifiable/unverifiable rows — and, as a side effect, no COUNT query is
+needed anymore (one filtered fetch instead of COUNT-then-Range).
+
+A separate finalize pass (--summarize DIR) then reads every shard's JSON
+summary out of that directory and prints ONE combined report — total
+active/empty/dead/unverified counts across all shards — mirroring how
+main.py's `--finalize` step runs once after every shard has finished. See
+verification.yml for how the two are wired together in CI.
 
 NOTE ON CEREBRAS_API_KEY: this file imports ats_scrapers.scrape_board()
 for the active/empty split above, which transitively imports Main/
@@ -334,18 +370,26 @@ def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
 # Left completely untouched — never checked, never deleted, only counted.
 # See the module docstring above for why each one is here.
 _UNVERIFIABLE_ATS = {
-    "workday",           # SPA + POST-based API; no reliable GET-based signal found
-    "smartrecruiters",   # docs suggest a 404, but shared-domain API is robots-gated
-                          # and couldn't be empirically re-confirmed live
+    "workday",           # SPA + POST-based API; no reliable GET-based signal found.
+                          # CONFIRMED 2026-09: unlike Taleo below, a fake Workday
+                          # tenant subdomain resolves anyway (shared per-instance
+                          # load balancer, not tenant-specific DNS) — no DNS shortcut here.
+    "smartrecruiters",   # CONFIRMED live 2026-09: the one documented safe check needs
+                          # api.smartrecruiters.com, which robots.txt disallows outright
+                          # (fetch tooling itself refuses the URL for this reason).
     "breezyhr",           # no live customer example could be found/reached to confirm any rule
-    "taleo",              # host unreachable from this research pass (env/network limitation)
+    # "taleo" MOVED OUT 2026-09 — confirmed subdomain-per-tenant (same DNS-
+    # only signal as avature/eploy below); see _verify_taleo's docstring.
     "oracle_cloud_hcm",   # CONFIRMED UNSAFE: a real, empty tenant returns the exact same
                           # 200 + {"items":[],"count":0} shape a nonexistent one plausibly would
     "jobadder",           # CONFIRMED UNSAFE: "Nothing here I'm afraid..." could be the same
                           # message a real, empty board shows — no way to distinguish
     "folkshr",            # no live customer example could be found/reached to confirm any rule
     "adp",                 # no live customer example could be found/reached to confirm any rule
-    "brassring",          # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
+    "brassring",          # NOT lack of a scraper (it has one, re-enabled 2026-09 — see
+                          # SCRAPERS/BLACKLISTED_ATS.md) — purely lack of a confirmed
+                          # dead-signal, not yet researched live. A real candidate for
+                          # future work, same class as breezyhr/folkshr/adp above.
     "successfactors",     # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
     # "ycombinator" removed 2026-09 along with discovery.py's URL_TO_SLUG
     # entry for it — it was never a real ATS (job-board aggregator), that
@@ -517,6 +561,37 @@ async def _verify_eploy(session: aiohttp.ClientSession, slug: str) -> bool:
         session, f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx")
 
 
+async def _verify_taleo(session: aiohttp.ClientSession, slug: str) -> bool:
+    """2026-09: moved out of _UNVERIFIABLE_ATS after confirming Taleo is
+    subdomain-per-tenant, same DNS-only-signal pattern as avature/eploy
+    above. Taleo slugs are 'company|section' or 'company|section|portal_id'
+    (see ats_scrapers.scrape_taleo) — {company} is the actual DNS
+    subdomain, e.g. 'harristeeter|jobbs' -> harristeeter.taleo.net.
+
+    Confirmed live via plain DNS lookups (not proxied through aiohttp,
+    to rule out anything client-side): a real, currently-active tenant
+    (harristeeter.taleo.net, and an independent public example,
+    valero.taleo.net) resolves to a real taleo.net load-balancer IP every
+    time, while a deliberately fabricated subdomain never resolves
+    (NXDOMAIN) — and, notably, one slug already sitting in archive_i
+    ('dlapiper|ex') also came back NXDOMAIN, consistent with that row
+    being a genuinely dead tenant this engine simply couldn't detect
+    before this fix. The earlier '_UNVERIFIABLE_ATS' note ("host
+    unreachable from this research pass") was this environment's own
+    fetch tooling having flaky DNS behavior against *.taleo.net
+    specifically, not evidence about Taleo itself — a plain `getent
+    hosts`-style lookup was completely consistent across repeats.
+
+    NOT the same signal as Workday, despite both being ostensibly
+    subdomain-per-tenant: checked live (2026-09) and a deliberately fake
+    Workday tenant subdomain (*.wdN.myworkdayjobs.com) resolves anyway,
+    to the same shared load-balancer IP every real tenant on that wdN
+    instance uses — Workday's DNS is NOT tenant-specific, so this same
+    trick does not apply there. Workday stays in _UNVERIFIABLE_ATS."""
+    company = slug.split("|", 1)[0]
+    return await _dns_dead_check(session, f"https://{company}.taleo.net/")
+
+
 ARCHIVE_II_VERIFIERS = {
     "bamboohr": _verify_bamboohr,
     "icims": _verify_icims,
@@ -536,6 +611,7 @@ ARCHIVE_II_VERIFIERS = {
     "jobvite": _verify_jobvite,
     "avature": _verify_avature,
     "eploy": _verify_eploy,
+    "taleo": _verify_taleo,
 }
 
 
@@ -686,9 +762,9 @@ async def verify_archive_ii_row(session: aiohttp.ClientSession, row: dict) -> bo
 # one-off 401 with zero retry, exactly the failure mode main.py's own
 # SupabaseFetchError docstring describes happening to it before this fix.
 _RETRYABLE_STATUSES = {401, 403, 429, 500, 502, 503, 504}
-# 4 -> 6 (2026-08): a COUNT query failure blocks the ENTIRE shard from doing
-# any work at all (see _get_count) — worth spending more retry budget on
-# than an ordinary per-row check would need. _MAX_RETRY_WAIT caps the
+# 4 -> 6 (2026-08): a Supabase GET failure blocks the ENTIRE shard from
+# doing any work at all (see fetch_rows) — worth spending more retry budget
+# on than an ordinary per-row check would need. _MAX_RETRY_WAIT caps the
 # exponential backoff so this doesn't itself balloon into a multi-minute
 # wait per attempt (2^5 * 2.0 would be 64s uncapped).
 MAX_HTTP_RETRIES = 6
@@ -749,52 +825,62 @@ async def _get_with_retries(session: aiohttp.ClientSession, url: str, headers: d
     raise VerificationFetchError(f"GET {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
 
-async def _get_count(session: aiohttp.ClientSession, table: str, headers: dict, params: dict) -> int:
-    """Cheap COUNT via Prefer: count=exact on a single-row request — reads
-    the real total straight out of the Content-Range response header
-    (e.g. '0-0/186494'), no need to pull any actual rows to get it."""
-    url = f"{node.SUPABASE_URL}/rest/v1/{table}"
-    count_headers = {**headers, "Range": "0-0", "Prefer": "count=exact"}
-    last_error = None
-    for attempt in range(MAX_HTTP_RETRIES):
-        try:
-            async with session.get(url, headers=count_headers, params=params,
-                                    timeout=_GET_TIMEOUT) as r:
-                if r.status in _RETRYABLE_STATUSES and attempt < MAX_HTTP_RETRIES - 1:
-                    wait = _backoff_wait(attempt)
-                    await asyncio.sleep(wait)
-                    continue
-                r.raise_for_status()
-                content_range = r.headers.get("Content-Range", "")
-                return int(content_range.split("/")[-1])
-        except Exception as e:
-            last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-            if attempt < MAX_HTTP_RETRIES - 1:
-                wait = _backoff_wait(attempt)
-                await asyncio.sleep(wait)
-    raise VerificationFetchError(f"COUNT {url} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
+# 2026-09: bucket count backing the `shard_bucket` generated column
+# (`id % 1000`, see the migration this depends on — Main/BLACKLISTED_ATS.md's
+# neighbor, VERIFICATION_SHARD_BUCKET_MIGRATION.sql, has the exact SQL to run
+# manually). 1000 is far larger than shard_count ever realistically is
+# (default 20), so bucket%shard_count still spreads each shard's buckets
+# evenly across the full 0-999 range, and far smaller than any real
+# insertion burst (thousands of rows), so each bucket already samples
+# every burst near-uniformly. Must match the modulus used in the DDL.
+_SHARD_BUCKET_MODULUS = 1000
+
+
+def _shard_buckets(shard_index: int, shard_count: int) -> list[int]:
+    """Every bucket (0..999) this shard owns: bucket % shard_count == shard_index.
+    Empty only if shard_count > _SHARD_BUCKET_MODULUS and shard_index falls
+    past the last real bucket — not a realistic case at shard_count=20, but
+    handled explicitly rather than silently mis-sharding."""
+    return [b for b in range(_SHARD_BUCKET_MODULUS) if b % shard_count == shard_index]
 
 
 async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
                       ats_filter: str | None, limit: int | None,
                       shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
-    """Fetches rows ordered by id, optionally restricted to ONE contiguous
-    shard's row range (computed server-side from a COUNT query — see
-    _get_count). This is deliberately NOT "fetch everything, then keep only
-    this shard's rows in Python": confirmed real 2026-08 — with the old
-    fetch-everything approach, N parallel shards each independently
-    downloaded the ENTIRE table (every shard re-paginating through all
-    ~186K rows just to discard (N-1)/N of them), so N shards put N times
-    the load on Supabase's REST endpoint that the actual work needed. That
-    matches exactly what was observed: GETs and DELETEs alike timing out
-    ("increased errors" on Supabase's own side) under a 20-shard run. This
-    version has each shard fetch ONLY its own ~1/N slice directly, so total
-    aggregate row-fetch volume across all shards is ~1x the table, not Nx.
-    `order=id.asc` is required for this to be correct at all — without a
-    stable order, two separate Range-paginated requests (whether within
-    one shard's own pagination, or across different shards' independent
-    slices) aren't guaranteed to return consistent results, which could
-    silently skip or duplicate rows."""
+    """Fetches rows ordered by id, optionally restricted to ONE shard's
+    slice via the stored `shard_bucket` column (`id % 1000` — see
+    _SHARD_BUCKET_MODULUS/_shard_buckets above). This is deliberately NOT
+    "fetch everything, then keep only this shard's rows in Python":
+    confirmed real 2026-08 — with that approach, N parallel shards each
+    independently downloaded the ENTIRE table (every shard re-paginating
+    through all ~186K rows just to discard (N-1)/N of them), so N shards
+    put N times the load on Supabase's REST endpoint that the actual work
+    needed. This version has each shard fetch ONLY its own rows directly,
+    via a `shard_bucket=in.(...)` filter, so total aggregate row-fetch
+    volume across all shards is ~1x the table, not Nx — and no COUNT query
+    is needed up front either (a filtered fetch already returns exactly
+    this shard's rows, whatever the current total happens to be).
+
+    2026-09: replaced the previous "contiguous absolute row-position"
+    slice (a COUNT query, then a Range header on the id-ordered result —
+    each shard got a fixed ~1/N chunk by ROW COUNT). That was an even
+    split of row count, not of actual work: verified live that platform
+    inserts happen in large single-source bursts, not evenly interleaved
+    by id, so a contiguous chunk could land almost entirely inside one
+    burst — some shards ended up 0% "unverifiable" (every row needs a real
+    network check) and others ~88% (nearly the whole shard is a free
+    instant skip), which is why wall-clock time varied by well over an
+    order of magnitude across shards at the same shard_count/concurrency.
+    `shard_bucket` fixes this because 1000 buckets is far smaller than any
+    real insertion burst, so bucketing by `id % 1000` samples uniformly
+    across every burst (and therefore every platform) regardless of where
+    in the id sequence that burst landed — each shard gets a proportional
+    mix instead of whatever its contiguous chunk happened to contain.
+
+    `order=id.asc` is still applied for stable pagination — without a
+    stable order, two separate Range-paginated requests within this same
+    shard's own multi-page fetch aren't guaranteed to return consistent
+    results, which could silently skip or duplicate rows."""
     rows = []
     page_size = 1000
     headers = {"apikey": node.SUPABASE_KEY, "Authorization": f"Bearer {node.SUPABASE_KEY}"}
@@ -802,37 +888,27 @@ async def fetch_rows(session: aiohttp.ClientSession, table: str, select: str,
     if ats_filter:
         params["ats"] = f"eq.{ats_filter}"
 
-    start_offset = 0
-    end_offset = None  # exclusive upper bound on absolute row position; None = no shard cap
     if shard_count:
-        total = await _get_count(session, table, headers, params)
-        shard_size = -(-total // shard_count)  # ceil division
-        start_offset = shard_index * shard_size
-        end_offset = min(start_offset + shard_size, total)
-        if start_offset >= total:
-            return []  # more shards than rows — this shard legitimately gets nothing
+        buckets = _shard_buckets(shard_index, shard_count)
+        if not buckets:
+            return []  # shard_count > _SHARD_BUCKET_MODULUS and this index owns no bucket
+        params["shard_bucket"] = f"in.({','.join(str(b) for b in buckets)})"
 
-    offset = start_offset
+    offset = 0
     while True:
         if limit is not None and len(rows) >= limit:
             rows = rows[:limit]
             break
         page_end = offset + page_size - 1
-        if end_offset is not None:
-            page_end = min(page_end, end_offset - 1)
-            if offset > page_end:
-                break
         page_headers = {**headers, "Range": f"{offset}-{page_end}"}
         batch = await _get_with_retries(session, f"{node.SUPABASE_URL}/rest/v1/{table}",
                                          page_headers, params)
         if not batch:
             break
         rows.extend(batch)
-        if len(batch) < (page_end - offset + 1):
+        if len(batch) < page_size:
             break
-        offset = page_end + 1
-        if end_offset is not None and offset >= end_offset:
-            break
+        offset += page_size
     return rows
 
 
@@ -980,11 +1056,11 @@ def _empty_counts_ii() -> dict:
 
 async def _stagger_shard_start(shard_index: int | None, shard_count: int | None) -> None:
     """GitHub Actions matrix jobs for the same workflow typically start
-    within a few seconds of each other — with N shards, that's N COUNT
-    queries (see _get_count) all landing on Supabase in the same instant,
-    right as this run's very first request. Spreading each shard's first
-    request out by a small, index-proportional delay turns that burst into
-    a rolling ramp instead, cutting the odds of the exact bootstrapping
+    within a few seconds of each other — with N shards, that's N filtered
+    fetch_rows requests all landing on Supabase in the same instant, right
+    as this run's very first request. Spreading each shard's first request
+    out by a small, index-proportional delay turns that burst into a
+    rolling ramp instead, cutting the odds of the exact bootstrapping
     request (which blocks the WHOLE shard if it fails — see fetch_rows)
     getting caught in a self-inflicted thundering herd."""
     if not shard_count or shard_index is None:
