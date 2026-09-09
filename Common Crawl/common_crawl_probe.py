@@ -222,7 +222,7 @@ def _query_file_rows(con, fpath: str, tld_filter: str, shard_clause: str) -> lis
 
 
 def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shard_count: int | None,
-                             start_file_index: int = 0):
+                             resume_partition: str | None = None, resume_file_index: int = 0):
     """Streams hostnames across one or more partitions, ONE FILE AT A
     TIME — yields (crawl_name, partition_num, total_partitions, file_num,
     total_files, hosts). Sharding happens IN THE SQL query (hash() %
@@ -233,7 +233,16 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
     the query for file N+1 runs WHILE the caller is off crawling file N's
     hosts (real network I/O, seconds), instead of the two happening one
     after the other. `.result()` on an already-finished future returns
-    instantly, so this only ever helps and never adds latency."""
+    instantly, so this only ever helps and never adds latency.
+
+    2026-09: `resume_partition`/`resume_file_index` replace the old
+    'always skip start_file_index files into partitions[0]' assumption —
+    see run_host_crawl's RESUME comment for why that was wrong for any
+    --partitions > 1 run. Every partition BEFORE resume_partition in the
+    list is skipped entirely (already fully done on a prior run); the
+    resume_partition itself skips resume_file_index files; every
+    partition AFTER it runs from file 0 as normal. resume_partition=None
+    means no skip at all (a genuinely fresh run)."""
     con = _get_duckdb_connection()
     if con is None:
         return
@@ -247,32 +256,55 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
     shard_clause = f"AND (hash(url_host_name) % {shard_count}) = {shard_index}" if sharded else ""
     query_timeout = 300
 
+    # Skip any partition strictly before the checkpointed one outright —
+    # they were already fully crawled on a prior run in this chain.
+    skip_prefix = True if resume_partition else False
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as prefetch_pool:
         for partition_num, crawl_name in enumerate(partitions, start=1):
+            if skip_prefix:
+                if crawl_name == resume_partition:
+                    skip_prefix = False
+                else:
+                    log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} "
+                             f"— already fully done (checkpoint resumes at {resume_partition!r}), skipping ──")
+                    continue
             log.info(f"── Partition {partition_num}/{len(partitions)}: {crawl_name} ──")
             files = _list_partition_files(crawl_name)
-            if partition_num == 1 and start_file_index:
-                skipped = files[:start_file_index]
-                files = files[start_file_index:]
-                log.info(f"  starting at file {start_file_index}: skipping {len(skipped)} already-done file(s)")
+            this_partition_start = resume_file_index if crawl_name == resume_partition else 0
+            total_files = len(files)  # ORIGINAL count, before slicing — see file_num note below
+            if this_partition_start:
+                skipped = files[:this_partition_start]
+                files = files[this_partition_start:]
+                log.info(f"  resuming at file {this_partition_start}: skipping {len(skipped)} already-done file(s)")
             log.info(f"  {len(files)} file(s) to scan" + (f" — shard {shard_index}/{shard_count}" if sharded else ""))
 
             total_dead_skipped = 0
             total_hosts = 0
             next_future = prefetch_pool.submit(_query_file_rows, con, files[0], tld_filter, shard_clause) if files else None
-            for file_num, fpath in enumerate(files, start=1):
+            # start=this_partition_start+1, NOT 1 — file_num must stay the
+            # ABSOLUTE position within crawl_name's full file list so a
+            # checkpoint saved as (crawl_name, file_num) means exactly
+            # "file_num files of THIS partition done," with no adjustment
+            # needed by the caller. Yielding a post-slice-relative 1-based
+            # index here (the pre-2026-09 behavior) was fine when only
+            # partition 1 was ever resumable, but silently wrong for any
+            # later partition once resume applies to any partition in the
+            # list, not just the first.
+            for file_num, fpath in enumerate(files, start=this_partition_start + 1):
                 try:
                     rows = next_future.result(timeout=query_timeout)
                 except concurrent.futures.TimeoutError:
-                    log.warning(f"  file {file_num}/{len(files)}: query timed out — skipping.")
+                    log.warning(f"  file {file_num}/{total_files}: query timed out — skipping.")
                     rows = []
                 except Exception as e:
-                    log.warning(f"  file {file_num}/{len(files)}: query failed — skipping: {e}")
+                    log.warning(f"  file {file_num}/{total_files}: query failed — skipping: {e}")
                     rows = []
                 # Kick the NEXT file's query off immediately — it runs in
                 # the background while this file's hosts get crawled below.
-                next_future = (prefetch_pool.submit(_query_file_rows, con, files[file_num], tld_filter, shard_clause)
-                               if file_num < len(files) else None)
+                next_i = file_num - this_partition_start  # index into the (sliced) `files` list
+                next_future = (prefetch_pool.submit(_query_file_rows, con, files[next_i], tld_filter, shard_clause)
+                               if next_i < len(files) else None)
 
                 # Dedup is PER-FILE only, not cross-run — a persistent `seen`
                 # set would regrow to the same OOM-risk size the streaming fix
@@ -294,9 +326,9 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
                     file_hosts.append(host)
                 total_dead_skipped += dead_skipped
                 total_hosts += len(file_hosts)
-                log.info(f"  file {file_num}/{len(files)}: {len(file_hosts)} live hosts (of {len(rows)} "
+                log.info(f"  file {file_num}/{total_files}: {len(file_hosts)} live hosts (of {len(rows)} "
                          f"candidates, {dead_skipped} dead-skipped) — {total_hosts} seeded so far")
-                yield crawl_name, partition_num, len(partitions), file_num, len(files), file_hosts
+                yield crawl_name, partition_num, len(partitions), file_num, total_files, file_hosts
 
 
 SOURCE_LABEL = "common_crawl_probe"
@@ -336,33 +368,51 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     total_hosts_seen = 0
     partitions_completed = 0
     last_partition_name = partitions[0]
-    files_done_before = 0
+    resume_partition: str | None = None
+    resume_file_index = 0
     resumable = shard_index is not None and shard_count is not None
 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
             # RESUME: same checkpoint table opendata_probe.py/
             # people_data_labs_probe.py use, keyed by (source, shard_index,
-            # shard_count) — see module docstring's RESUME section. Only
-            # tracks position within the FIRST requested partition, same
-            # limitation --start-file-index always had.
+            # shard_count) — see module docstring's RESUME section.
+            #
+            # 2026-09: now tracks (partition, file index WITHIN that
+            # partition), not just a bare file count assumed to be inside
+            # partitions[0] — a --partitions > 1 (or --crawl-list) run that
+            # stopped mid-partition-2+ used to leave a stale partition-1
+            # checkpoint behind, so a resumed run skipped the WRONG number
+            # of files into whatever partition it started at. This is also
+            # what makes the reloop (common_crawl.yml's `loop_runs`) safe
+            # to chain across an arbitrary number of partitions, not just
+            # a single one.
             if resumable:
                 if start_file_index == 0:
                     log.info("  --start-file-index 0 — forcing a full restart of this shard, clearing any checkpoint")
                     await node.clear_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count)
                 elif start_file_index:
-                    files_done_before = start_file_index
-                    log.info(f"  --start-file-index {files_done_before} (manual override) — skipping ahead")
+                    # Manual override stays single-partition, same as
+                    # before — an explicit --start-file-index is a human
+                    # saying "start THIS run at file N of the first
+                    # requested partition," not a multi-partition-aware
+                    # resume (that's what the checkpoint-driven path below
+                    # is for).
+                    resume_partition, resume_file_index = partitions[0], start_file_index
+                    log.info(f"  --start-file-index {resume_file_index} (manual override) — "
+                             f"skipping ahead in {resume_partition}")
                 else:
-                    files_done_before = await node.load_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count)
-                    if files_done_before:
-                        log.info(f"  resuming from checkpoint: {files_done_before} file(s) already completed "
-                                 f"in this shard on a prior run — skipping straight past them")
+                    resume_partition, resume_file_index = await node.load_crawl_checkpoint_with_partition(
+                        session, SOURCE_LABEL, shard_index, shard_count)
+                    if resume_partition:
+                        log.info(f"  resuming from checkpoint: {resume_file_index} file(s) already completed "
+                                 f"in {resume_partition} on a prior run — skipping straight past them")
             elif start_file_index:
-                files_done_before = start_file_index
+                resume_partition, resume_file_index = partitions[0], start_file_index
 
             for partition_name, partition_num, total_partitions, file_num, total_files, file_hosts \
-                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count, files_done_before):
+                    in iter_seed_hosts_by_file(partitions, shard_index, shard_count,
+                                                resume_partition, resume_file_index):
                 last_partition_name = partition_name
                 if time.monotonic() - crawl_start >= time_budget_seconds:
                     time_budget_hit = True
@@ -387,9 +437,13 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 if file_time_hit:
                     time_budget_hit = True
                     break
-                if partition_num == 1 and resumable:
+                if resumable:
+                    # Checkpoint after EVERY partition now, not just the
+                    # first — file_num is already absolute within
+                    # partition_name (see iter_seed_hosts_by_file), so no
+                    # offset arithmetic is needed here.
                     await node.save_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count,
-                                                      files_done_before + file_num)
+                                                      file_num, partition=partition_name)
                 if file_num == total_files:
                     partitions_completed = partition_num
             if not time_budget_hit and resumable:
