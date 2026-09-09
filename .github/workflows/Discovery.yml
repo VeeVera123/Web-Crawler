@@ -6,13 +6,7 @@ on:
   workflow_dispatch:       # manual trigger
     inputs:
       timeout_minutes:
-        description: >-
-          Per-job timeout in minutes. Default 300 matches discovery.py's own
-          --httparchive-resolve-budget-minutes default, so a normal run's
-          HTTP Archive shards can use their full internal time budget
-          without GitHub killing the job out from under them first (see the
-          2026-09 note on the discover job below). Raise this for a manual
-          run that needs more headroom; scheduled runs always use 300.
+        description: "Per-job timeout, in minutes"
         required: false
         default: "300"
 
@@ -128,6 +122,8 @@ jobs:
             name: wayback_adp
           - source: latmay
             name: Latmay H.F
+          - source: icims_hrjobs
+            name: iCIMS HR Jobs
           - source: edwarddgao
             name: Edward H.F 1
             extra_args: "--hf-shard 0 --hf-total-shards 3"
