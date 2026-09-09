@@ -102,7 +102,17 @@ PROGRESS_EVERY_PAGES = 250  # pages between progress log lines
 # aren't a "slow down" signal and retrying them blindly could mask a real
 # problem (e.g. a changed API shape).
 _MAX_429_RETRIES = 6
-_BASE_BACKOFF_SECONDS = 5   # backs off 5s, 10s, 15s, 20s, 25s, 30s absent a Retry-After header
+_BASE_BACKOFF_SECONDS = 5     # backs off 5s, 10s, 15s, 20s, 25s, 30s absent a Retry-After header
+# 2026-09: a real run's Retry-After header came back as 86400 (24 HOURS) —
+# confirmed live, not guessed. A GitHub Actions job gets killed at
+# 350-360min regardless, so obeying that literally (the original bug: a
+# script.sleep(86400) inside a job that can't live that long) just wastes
+# the whole run doing nothing. Anything bigger than this cap is treated as
+# "give up this page now" instead of actually sleeping that long — the
+# Restart Token mechanism already exists precisely to let a LATER run
+# (minutes/hours from now, whenever the user or the schedule fires it)
+# pick back up, which is the right way to wait out a long throttle.
+_MAX_BACKOFF_SECONDS = 60
 
 
 def _err(e: Exception) -> str:
@@ -135,6 +145,12 @@ def _fetch_jobs_page(page_token: str | None) -> dict | None:
                     wait = float(retry_after) if retry_after else _BASE_BACKOFF_SECONDS * (attempt + 1)
                 except ValueError:
                     wait = _BASE_BACKOFF_SECONDS * (attempt + 1)
+                if wait > _MAX_BACKOFF_SECONDS:
+                    log.warning(f"  rate-limited (429, token={token_note}) — server asked for a "
+                                f"{wait:.0f}s wait, longer than this script will ever sleep for "
+                                f"({_MAX_BACKOFF_SECONDS}s cap) — giving up on this page now instead. "
+                                f"Re-run later (or let the schedule) to pick up from the Restart Token.")
+                    return None
                 log.warning(f"  rate-limited (429, token={token_note}) — waiting {wait:.0f}s "
                             f"before retry {attempt + 1}/{_MAX_429_RETRIES}")
                 time.sleep(wait)
