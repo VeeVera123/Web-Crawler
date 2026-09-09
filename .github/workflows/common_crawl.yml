@@ -5,25 +5,36 @@ name: Common Crawl
 # separate seed step. Country is detected when found but never filters
 # (most rows have no country). Streams one Parquet file at a time so
 # memory stays bounded regardless of how many partitions run.
+#
+# 2026-09: RELOOP — a partition can carry ~900 files, more than one
+# GitHub Actions job can chew through inside its own timeout. Check
+# "Loop until done" and finalize re-dispatches this same workflow the
+# moment a run stops with files left, using each shard's own Supabase
+# checkpoint (source, shard_index, shard_count, partition, resume_offset
+# — see common_crawl_probe.py/node.py) to pick up exactly where it left
+# off — no manual bookkeeping between runs. Stoppable the same way
+# Discovery is: cancel the run (or just don't let the next one start) —
+# the loop is nothing but one normal, individually-cancellable dispatch
+# triggering the next.
 on:
   workflow_dispatch:
     inputs:
       crawl_partition:
-        description: "Starting partition (e.g. CC-MAIN-2026-34). Blank = auto-detect the latest. Ignored if crawl_list is set."
+        description: "Starting partition (e.g. CC-MAIN-2026-34). Blank = latest. Ignored if crawl_list is set."
         required: false
         default: ""
       partitions:
-        description: "How many partitions to crawl, walking backward from the start. Ignored if crawl_list is set."
+        description: "How many partitions, walking backward from the start. Ignored if crawl_list is set."
         required: false
         default: "1"
       crawl_list:
-        description: "Comma-separated exact partitions instead, e.g. CC-MAIN-2026-34,CC-MAIN-2025-18. Overrides crawl_partition/partitions."
+        description: "Exact partitions instead, comma-separated. Overrides crawl_partition/partitions."
         required: false
         default: ""
       start_file_index:
-        description: "Skip this many files in the first partition before starting"
+        description: "Manual override: skip this many files into the first partition. Blank = auto-resume from checkpoint."
         required: false
-        default: "0"
+        default: ""
       shard_count:
         description: "Parallel shards to split the crawl across"
         required: false
@@ -33,19 +44,29 @@ on:
         required: false
         default: "700"
       run_time_minutes:
-        description: "Each shard self-stops after this many minutes (shared across all its requested partitions)"
+        description: "Each shard self-stops after this many minutes"
         required: false
         default: "330"
+      loop_runs:
+        description: "Loop until done — auto-start the next run when files are left"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: common-crawl-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write   # finalize needs this to dispatch the next loop run
 
 jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
+      resolved_partition: ${{ steps.resolve.outputs.resolved_partition }}
     steps:
       - name: Build shard-index matrix from shard_count input
         id: build
@@ -58,6 +79,27 @@ jobs:
           ")
           echo "shard_count: $SHARD_COUNT  |  total jobs: $SHARD_COUNT"
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
+      # 2026-09: resolve "blank = latest" to a CONCRETE partition name
+      # exactly once here, instead of letting every shard (and, on a
+      # looped run, every later dispatch) independently re-detect
+      # "latest" — Common Crawl only ships a new monthly partition every
+      # few weeks, but a multi-day loop chain crossing that boundary
+      # would otherwise silently start crawling a different partition
+      # list mid-chain. Ignored (and left blank) when crawl_list is set,
+      # since that's already a concrete, unambiguous list.
+      - name: Resolve starting partition (blank -> latest, pinned)
+        id: resolve
+        if: github.event.inputs.crawl_list == ''
+        run: |
+          python3 -c "
+          import json, urllib.request
+          pinned = '${{ github.event.inputs.crawl_partition }}'
+          with urllib.request.urlopen('https://index.commoncrawl.org/collinfo.json', timeout=30) as r:
+              names = [row['id'] for row in json.load(r) if row.get('id', '').startswith('CC-MAIN-')]
+          resolved = pinned if pinned in names else (names[0] if names else pinned)
+          print(f'resolved_partition={resolved}')
+          " >> "$GITHUB_OUTPUT"
 
   crawl:
     needs: prepare-matrix
@@ -93,8 +135,21 @@ jobs:
           CRAWL_ARGS=()
           if [ -n "${{ github.event.inputs.crawl_list }}" ]; then
             CRAWL_ARGS=(--crawl-list "${{ github.event.inputs.crawl_list }}")
-          elif [ -n "${{ github.event.inputs.crawl_partition }}" ]; then
-            CRAWL_ARGS=(--crawl "${{ github.event.inputs.crawl_partition }}")
+          else
+            # Use prepare-matrix's pinned resolved_partition, not the raw
+            # (possibly blank) input — see that job's "Resolve starting
+            # partition" step for why every shard needs the SAME concrete
+            # name, not each independently re-detecting "latest".
+            CRAWL_ARGS=(--crawl "${{ needs.prepare-matrix.outputs.resolved_partition }}")
+          fi
+          # start_file_index is a MANUAL override only — blank (the
+          # default) omits the flag entirely so common_crawl_probe.py's
+          # own default (None) kicks in and auto-resumes from this
+          # shard's Supabase checkpoint. This is also what makes the
+          # reloop's re-dispatch (see the finalize job) work: it never
+          # sets start_file_index, so every looped run auto-resumes.
+          if [ -n "${{ github.event.inputs.start_file_index }}" ]; then
+            CRAWL_ARGS+=(--start-file-index "${{ github.event.inputs.start_file_index }}")
           fi
 
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
@@ -104,6 +159,41 @@ jobs:
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
             --partitions ${{ github.event.inputs.partitions || '1' }} \
             --concurrency ${{ github.event.inputs.concurrency || '700' }} \
-            --start-file-index ${{ github.event.inputs.start_file_index || '0' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
             "${CRAWL_ARGS[@]}"
+
+  finalize:
+    needs: [prepare-matrix, crawl]
+    if: always() && github.event.inputs.loop_runs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for remaining checkpoints and re-dispatch if any
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A checkpoint row surviving past this run means that shard
+          # stopped on its time budget with files still left (a clean
+          # finish always clears its own row — see
+          # common_crawl_probe.py's run_host_crawl). ANY row left across
+          # ANY shard means the overall crawl of the requested
+          # partition(s) isn't done yet.
+          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&select=shard_index" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "Shards with a remaining checkpoint: $REMAINING"
+
+          if [ "$REMAINING" = "0" ]; then
+            echo "All requested partition(s) fully covered — not looping."
+            exit 0
+          fi
+
+          echo "Files left — dispatching the next loop run."
+          gh workflow run "common_crawl.yml" \
+            -f crawl_partition="${{ needs.prepare-matrix.outputs.resolved_partition }}" \
+            -f partitions="${{ github.event.inputs.partitions || '1' }}" \
+            -f crawl_list="${{ github.event.inputs.crawl_list }}" \
+            -f shard_count="${{ github.event.inputs.shard_count || '10' }}" \
+            -f concurrency="${{ github.event.inputs.concurrency || '700' }}" \
+            -f run_time_minutes="${{ github.event.inputs.run_time_minutes || '330' }}" \
+            -f loop_runs=true
