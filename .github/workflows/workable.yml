@@ -116,7 +116,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write  # seed/seed-finalize/crawl all create/upload/download Release assets
   actions: write   # reloop needs this to dispatch the next loop run
 
 jobs:
