@@ -2665,7 +2665,12 @@ def fetch_latmay_slugs(hf_shard: int | None = None, hf_total_shards: int | None 
         all_urls.extend(table.column("canonical_url").to_pylist())
 
     shard_note = ""
-    if hf_total_shards:
+    # hf_total_shards defaults to 1 ("no sharding") on the CLI, while
+    # hf_shard defaults to None — so gating on hf_total_shards alone
+    # crashed here (None * shard_size) whenever --source latmay was run
+    # standalone without an explicit --hf-shard. Sharding only actually
+    # applies when a shard index was given.
+    if hf_total_shards and hf_shard is not None:
         shard_size = -(-len(all_urls) // hf_total_shards)  # ceil division
         start_i = hf_shard * shard_size
         end_i = min(start_i + shard_size, len(all_urls))
@@ -2731,7 +2736,11 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 270, hf_shard: int | None 
         return {}
 
     shard_note = ""
-    if hf_total_shards:
+    # Same guard fix as fetch_latmay_slugs above: hf_total_shards defaults
+    # to 1 ("no sharding") while hf_shard defaults to None, so gating on
+    # hf_total_shards alone crashed (None * shard_size) whenever
+    # --source edwarddgao was run standalone without --hf-shard.
+    if hf_total_shards and hf_shard is not None:
         shard_size = -(-len(file_urls) // hf_total_shards)  # ceil division
         start_i = hf_shard * shard_size
         end_i = min(start_i + shard_size, len(file_urls))
@@ -3652,7 +3661,7 @@ def main():
     log.info("=" * 60)
     log.info("DISCOVERY — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
-    log.info("           + Wayback CDX (ADP) + Latmay H.F + Edward H.F")
+    log.info("           + Wayback CDX (all ATS) + Latmay H.F + Edward H.F")
     log.info("           + TheirStack + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
