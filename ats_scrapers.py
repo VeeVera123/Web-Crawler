@@ -1630,22 +1630,32 @@ def scrape_breezyhr(slug: str) -> list[dict]:
     return jobs
 
 
-# ── ApplyToJob (REMOVED 2026-08 — dead code, kept for reference only) ──
+# ── JazzHR (formerly "ApplyToJob"; REMOVED 2026-08, REVIVED 2026-09) ──
 #
-# No longer wired into SCRAPERS/DESCRIPTION_FETCHERS/QUESTION_FETCHERS
-# below. Removed because a live posting requiring US work authorization
+# 2026-08 removal reason: a live posting requiring US work authorization
 # ("Client Engagement Representative — Remote") got past the classifier
-# despite ApplyToJob being registered for full-description enrichment via
-# _fetch_generic_description — the generic JD fetch wasn't reliably
-# catching real disqualifying language on this platform's pages, and
-# ApplyToJob (JazzHR) is a small long-tail ATS, not worth debugging
-# further. Its GitHub Actions matrix slot was reassigned; see
-# job_board_scrapers.py's scrape_jobicy for the replacement approach
-# (Jobicy widened to cover full-JD remote CSM/AM discovery instead).
+# despite this platform being registered for full-description enrichment
+# via _fetch_generic_description — the generic JD fetch wasn't reliably
+# catching real disqualifying language on this platform's pages.
+#
+# 2026-09 revival reasoning: the listing scraper below was never the
+# problem (it's unchanged from 2026-08) — the failure was downstream, in
+# JD enrichment + eligibility detection. Both of those have since been
+# rewritten for unrelated reasons: _fetch_generic_description gained
+# JSON-LD/embedded-JSON/itemprop/container fallbacks it didn't have
+# before (see its own docstring), and classifier.py's
+# detect_visa_sponsorship was rewritten 2026-09 specifically citing the
+# same shape of miss ("must be authorized to work in the US; not able to
+# sponsor visas" reading as globally-open) as the bug it fixed. Reviving
+# on the strength of those two independently-documented fixes — could NOT
+# live-verify this exact combination on a real JazzHR posting this session
+# (no browser tool connected, direct fetch to applytojob.com blocked from
+# this sandbox). Spot-check early output for eligibility-language leaks.
+# See discovery.py's SUPPORTED_ATS comment for the same history.
 
-def scrape_applytojob(slug: str) -> list[dict]:
-    """ApplyToJob (JazzHR) — HTML scrape, parses job listings.
-    Slug is the company subdomain (e.g. 'acme').
+def scrape_jazzhr(slug: str) -> list[dict]:
+    """JazzHR (formerly branded ApplyToJob) — HTML scrape, parses job
+    listings. Slug is the company subdomain (e.g. 'acme').
     Extracts location from fa-map-marker icons. Deduplicates by title."""
     company_name = slug.replace("-", " ").title()
     base_url = f"https://{slug}.applytojob.com"
@@ -1708,7 +1718,7 @@ def scrape_applytojob(slug: str) -> list[dict]:
                 "employment_type": "",
                 "salary": "",
                 "description_snippet": "",
-                "source_ats": "ApplyToJob",
+                "source_ats": "JazzHR",
                 "slug": slug,
             })
 
@@ -1737,7 +1747,7 @@ def scrape_applytojob(slug: str) -> list[dict]:
                     "employment_type": "",
                     "salary": "",
                     "description_snippet": "",
-                    "source_ats": "ApplyToJob",
+                    "source_ats": "JazzHR",
                     "slug": slug,
                 })
 
@@ -1767,7 +1777,7 @@ def scrape_applytojob(slug: str) -> list[dict]:
                     "employment_type": "",
                     "salary": "",
                     "description_snippet": "",
-                    "source_ats": "ApplyToJob",
+                    "source_ats": "JazzHR",
                     "slug": slug,
                 })
 
@@ -3222,75 +3232,16 @@ def scrape_jobylon(slug: str) -> list[dict]:
     return jobs
 
 
-# ── Homerun ─────────────────────────────────────────────
-
-def scrape_homerun(slug: str) -> list[dict]:
-    """Homerun (Netherlands) — no usable public API without a Bearer
-    token, but not needed: job data is embedded directly in the
-    server-rendered HTML as an HTML-entity-encoded JSON blob in a Vue
-    'v-bind' attribute:
-      <job-list v-bind="{&quot;content&quot;:{&quot;vacancies&quot;:
-      [...],&quot;departments&quot;:[...],&quot;job_types&quot;:[...],
-      &quot;locations&quot;:[...]}}">
-
-    Slug is the customer's own full hostname (e.g. 'jobs.acme.com') —
-    Homerun customers run on their OWN domain, not a shared subdomain."""
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(f"https://{slug}/", headers=headers)
-    if not r:
-        return []
-
-    attr_match = re.search(
-        r'<job-list[^>]+v-bind="([^"]+)"', r.text, re.I
-    )
-    if not attr_match:
-        log.debug(f"Homerun: no <job-list v-bind> attribute found for {slug}")
-        return []
-
-    try:
-        content = json.loads(unescape(attr_match.group(1))).get("content", {})
-    except Exception as e:
-        log.debug(f"Homerun: JSON parse failed for {slug}: {e}")
-        return []
-
-    vacancies = content.get("vacancies", [])
-    if not isinstance(vacancies, list):
-        return []
-
-    departments = {d.get("id"): d.get("name", "") for d in content.get("departments", []) if isinstance(d, dict)}
-    locations = {l.get("id"): l.get("name", "") for l in content.get("locations", []) if isinstance(l, dict)}
-    job_types = {j.get("id"): j.get("name", "") for j in content.get("job_types", []) if isinstance(j, dict)}
-
-    company_name = slug.replace("jobs.", "", 1).split(".")[0].replace("-", " ").title()
-
-    jobs = []
-    for v in vacancies:
-        if not isinstance(v, dict):
-            continue
-        title = v.get("title", "")
-        job_url = v.get("url", "")
-        if job_url and not job_url.startswith("http"):
-            job_url = f"https://{slug}{job_url}" if job_url.startswith("/") else f"https://{slug}/{job_url}"
-        if not job_url:
-            job_url = f"https://{slug}/"
-
-        jobs.append({
-            "title": str(title).strip(),
-            "url": job_url,
-            "company": company_name,
-            "location": locations.get(v.get("location_id"), ""),
-            "country": "",
-            "department": departments.get(v.get("department_id"), ""),
-            "workplace_type": "",
-            "employment_type": job_types.get(v.get("job_type_id"), ""),
-            "salary": "",
-            "description_snippet": "",
-            "source_ats": "Homerun",
-            "slug": slug,
-        })
-
-    return jobs
-
+# REMOVED 2026-09: scrape_homerun. Its extractor in discovery.py
+# (_url_to_slug_homerun) matched ANY "jobs.*" subdomain as a Homerun
+# customer, but Homerun customers actually run on their own domain with
+# no shared vendor suffix — live verification (WebFetch on 4 sampled
+# archive_i "homerun" rows: jobs.hireart.com, jobs.cambly.com,
+# jobs.wrkhq.com, jobs.we-mng.com) found 0 of 4 were actually Homerun
+# installations (an Ashby customer, a WordPress site, a login portal, and
+# a redirect to an unrelated company). 11,892 archive_i rows and 0 real
+# jobs ever scraped. See discovery.py's SUPPORTED_ATS removal comment and
+# Main/BLACKLISTED_ATS.md for the full writeup.
 
 # Occupop (Ireland): confirmed JS-rendered SPA shell with zero job data in
 # raw HTML; the only known API requires a Bearer token (live 403). No
@@ -3311,7 +3262,7 @@ SCRAPERS = {
     "smartrecruiters": scrape_smartrecruiters,
     "teamtailor": scrape_teamtailor,
     "breezyhr": scrape_breezyhr,
-    # "applytojob": scrape_applytojob,  # REMOVED 2026-08 — see module notes below
+    "jazzhr": scrape_jazzhr,  # REVIVED 2026-09 — see module notes above scrape_jazzhr
     "personio": scrape_personio,
     "joincom": scrape_joincom,
     # ── Newly enabled (confirmed working) ──
@@ -3331,12 +3282,13 @@ SCRAPERS = {
     # 2026-09: re-enabled — see scrape_brassring's docstring for the real
     # root cause (missing session priming, not JS-rendering/auth/robots).
     "brassring": scrape_brassring,
-    # ── New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon / Homerun ──
+    # ── New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon ──
+    # (Homerun removed 2026-09 — see the removal comment above scrape_homerun's
+    # former location for the verified evidence.)
     "pageup": scrape_pageup,
     "pinpoint": scrape_pinpoint,
     "flatchr": scrape_flatchr,
     "jobylon": scrape_jobylon,
-    "homerun": scrape_homerun,
     # No scraper exists for occupop, successfactors, ukg, or phenom — all
     # 4 confirmed genuinely unscrapeable (robots.txt disallow, JS-only
     # rendering, or an auth-gated API with no public alternative). Full
@@ -4029,7 +3981,7 @@ DESCRIPTION_FETCHERS = {
     "SmartRecruiters": _fetch_smartrecruiters_description,
     "Taleo": _fetch_taleo_description,
     "BreezyHR": _fetch_generic_description,
-    # "ApplyToJob": _fetch_generic_description,  # REMOVED 2026-08 — see module notes below
+    "JazzHR": _fetch_generic_description,  # REVIVED 2026-09 — see scrape_jazzhr's module notes
     "HRMDirect": _fetch_generic_description,
     "Paylocity": _fetch_generic_description,
     "Oracle Cloud HCM": _fetch_generic_description,
@@ -4651,16 +4603,17 @@ def _fetch_breezyhr_questions(job: dict) -> str:
     return _format_auth_questions(questions)
 
 
-# ── Level 3 (server-rendered, predictable DOM): ApplyToJob (JazzHR) ──
-# Verified live: classic server-rendered form (legacy "TheResumator" DOM
-# survives in JazzHR white-label pages). Custom questions sit in
-# div.job-form-fields, each with a
+# ── Level 3 (server-rendered, predictable DOM): JazzHR (formerly branded
+# ApplyToJob) — REVIVED 2026-09, see scrape_jazzhr's module notes ──
+# Verified live (prior to the 2026-08 removal): classic server-rendered
+# form (legacy "TheResumator" DOM survives in JazzHR white-label pages).
+# Custom questions sit in div.job-form-fields, each with a
 # <label id="resumator-questionnaire-q{ID}-label"> and a matching
 # #resumator-questionnaire-q{ID} input/select/textarea. Required questions
 # have a trailing "*" in the label text. The scraped job listing URL is
 # already the apply page itself — no URL transform needed.
 
-def _fetch_applytojob_questions(job: dict) -> str:
+def _fetch_jazzhr_questions(job: dict) -> str:
     url = job.get("url", "")
     if not url:
         return ""
@@ -5006,7 +4959,7 @@ QUESTION_FETCHERS = {
     "SmartRecruiters": _fetch_smartrecruiters_questions,
     "Teamtailor": _fetch_teamtailor_questions,
     "BreezyHR": _fetch_breezyhr_questions,
-    # "ApplyToJob": _fetch_applytojob_questions,  # REMOVED 2026-08 — see module notes below
+    "JazzHR": _fetch_jazzhr_questions,  # REVIVED 2026-09 — see module notes above the function
     "HRMDirect": _fetch_hrmdirect_questions,
     "ADP": _fetch_adp_questions,
     "Zoho": _fetch_zoho_questions,
