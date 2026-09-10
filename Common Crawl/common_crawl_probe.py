@@ -66,13 +66,25 @@ import os
 import sys
 import time
 from collections import Counter
+from datetime import datetime
 
 import aiohttp
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # Crawler/, for node.py
+# 2026-09 bug fix: this used to insert ONLY _ROOT (Crawler/) itself, which
+# does not contain node.py — node.py lives in Crawler/Main/. Verified by
+# reproducing the exact real repo layout (Crawler/Main/node.py,
+# Crawler/Common Crawl/common_crawl_probe.py) and running this file from
+# Crawler/ the same way common_crawl.yml does: `import node` failed with
+# ModuleNotFoundError every time. Every sibling probe (opendata_probe.py,
+# people_data_labs_probe.py, bigpicture_probe.py, github_org_probe.py)
+# already inserts BOTH _ROOT and os.path.join(_ROOT, "Main") for exactly
+# this reason — this file was just missing the second one.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Crawler/
+sys.path.insert(0, _ROOT)
+sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for node.py/discovery.py
 import node  # noqa: E402
 
 log = logging.getLogger("common_crawl_probe")
@@ -338,7 +350,16 @@ _BANNER = "=" * 60
 async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: int | None,
                           shard_count: int | None, concurrency: int,
                           time_budget_minutes: int, crawl_list: list[str] | None = None,
-                          start_file_index: int | None = None) -> None:
+                          start_file_index: int | None = None, campaign: str | None = None,
+                          reset_stats: bool = False) -> None:
+    """campaign (2026-09): identifies this whole crawl request (one
+    starting partition + --partitions count + --crawl-list, computed once
+    by common_crawl.yml's prepare-matrix job and passed through unchanged
+    to every shard and every loop redispatch of it) for the cumulative
+    cross-run stats accumulator — see node.flush_stat_tallies/
+    fetch_cumulative_stats. None (the default) means "don't bother" — a
+    manual/local run without --campaign just skips the flush, same as
+    before this existed, no behavior change for that case."""
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(_BANNER)
     log.info(f"COMMON CRAWL — starting{label}")
@@ -374,6 +395,9 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+            if reset_stats and campaign:
+                log.info(f"  --reset-stats given — wiping cumulative tallies for campaign {campaign!r}")
+                await node.reset_stat_tallies(session, SOURCE_LABEL, campaign)
             # RESUME: same checkpoint table opendata_probe.py/
             # people_data_labs_probe.py use, keyed by (source, shard_index,
             # shard_count) — see module docstring's RESUME section.
@@ -423,6 +447,14 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 if not file_hosts:
                     continue
                 total_hosts_seen += len(file_hosts)
+                # Snapshot BEFORE this file's crawl — see the flush just
+                # below. Copying `stats` (a Counter, cheap: a few dozen
+                # keys) rather than mutating a second running total avoids
+                # ANY risk of this new bookkeeping perturbing crawl_batch's
+                # own use of the SAME `stats` object (rate calc, hit-rate
+                # logging) — it's purely read-only here.
+                stats_before = dict(stats)
+                found_rows_len_before = len(found_rows)
                 # 2026-09, REVISED: Common Crawl carries no employee-count/
                 # size signal — see opendata_probe.py's identical comment/
                 # fix. capture_inhouse=True now, so this source feeds
@@ -434,6 +466,26 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                     SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                     time_budget_minutes, batch_size=2000, unit_label="hosts",
                     capture_inhouse=True)
+                if campaign:
+                    # This file's OWN contribution only — every scalar key
+                    # `stats` gained/changed since stats_before, plus the
+                    # per-hit platform/country breakdown for just the rows
+                    # THIS file added (found_rows[found_rows_len_before:]),
+                    # plus how many live hosts this file seeded. Flushed
+                    # once per file (same cadence as the checkpoint save
+                    # below) — cheap, and means a mid-file crash (like the
+                    # native segfault this was built to survive) only ever
+                    # loses that one file's numbers, never anything already
+                    # completed.
+                    deltas = {k: v - stats_before.get(k, 0) for k, v in stats.items()
+                              if v != stats_before.get(k, 0)}
+                    new_rows = found_rows[found_rows_len_before:]
+                    for ats_hit in (r["ats"] for r in new_rows):
+                        deltas[f"platform__{ats_hit}"] = deltas.get(f"platform__{ats_hit}", 0) + 1
+                    for country_hit in (r["country"] or "unknown" for r in new_rows):
+                        deltas[f"country__{country_hit}"] = deltas.get(f"country__{country_hit}", 0) + 1
+                    deltas["hosts_seeded"] = deltas.get("hosts_seeded", 0) + len(file_hosts)
+                    await node.flush_stat_tallies(session, SOURCE_LABEL, campaign, deltas)
                 if file_time_hit:
                     time_budget_hit = True
                     break
@@ -453,48 +505,53 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     finally:
         parse_pool.shutdown(wait=True)
 
-    total_hits = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
-    hosts_n = max(stats["companies_attempted"], 1)
-
-    log.info("")
-    log.info(_BANNER)
-    log.info(f"COMMON CRAWL — summary{label}")
-    log.info(_BANNER)
-    log.info(f"  status:      {'STOPPED EARLY — time budget reached mid-' + last_partition_name if time_budget_hit else 'complete — all requested partitions covered'}")
-    log.info(f"  partitions:  {partitions_completed}/{len(partitions)} fully covered ({partitions})")
-    log.info(f"  hosts:       {stats['companies_attempted']} attempted, {total_hosts_seen} seeded")
-    log.info(f"  time:        {elapsed:.0f}s of {time_budget_seconds:.0f}s budget, {rate:.1f} hosts/sec avg")
-    log.info("")
-    log.info("  accuracy:")
-    log.info(f"    ATS hits found:  {total_hits} ({total_hits / hosts_n * 100:.2f}% of hosts attempted)")
-    log.info(f"    with country:    {total_hits - stats['written_without_country']} "
-             f"({(1 - stats['written_without_country'] / max(total_hits, 1)) * 100:.1f}% of hits)")
-    log.info(f"    no ATS found:    {stats['dropped_no_ats']} ({stats['dropped_no_ats'] / hosts_n * 100:.1f}%)")
-    log.info(f"    unreachable:     {stats['homepage_unreachable']} ({stats['homepage_unreachable'] / hosts_n * 100:.1f}%)")
-    if total_hits:
-        log.info("")
-        log.info("  hits by tier:")
-        log.info(f"    homepage:     {stats['hits_from_homepage']} ({stats['hits_from_homepage'] / total_hits * 100:.1f}%)")
-        log.info(f"    career_path:  {stats['hits_from_career_path']} ({stats['hits_from_career_path'] / total_hits * 100:.1f}%)")
-        log.info(f"    sitemap:      {stats['hits_from_sitemap']} ({stats['hits_from_sitemap'] / total_hits * 100:.1f}%)")
     ats_breakdown = Counter(r["ats"] for r in found_rows)
-    if ats_breakdown:
-        log.info("")
-        log.info("  hits by platform:")
-        for ats, n in ats_breakdown.most_common():
-            log.info(f"    {ats}: {n}")
     country_breakdown = Counter(r["country"] or "unknown" for r in found_rows)
-    if country_breakdown:
-        log.info("")
-        log.info("  hits by country:")
-        for country, n in country_breakdown.most_common():
-            log.info(f"    {country}: {n}")
+    status_line = ("STOPPED EARLY — time budget reached mid-" + last_partition_name if time_budget_hit
+                   else "complete — all requested partitions covered")
+    log.info(f"  partitions:  {partitions_completed}/{len(partitions)} fully covered ({partitions})")
     # 2026-09: Common Crawl has no size signal of its own — every
     # archive_ii acceptance here went through the Quality Index gate
     # (capture_inhouse=True, no capture_inhouse_domains set), same as
-    # OpenData — see node.log_quality_index_summary's docstring.
-    log.info("")
-    node.log_quality_index_summary(stats)
+    # OpenData — see node.log_quality_index_summary's docstring (called
+    # inside log_crawl_summary below).
+    node.log_crawl_summary(f"summary{label}", stats, ats_breakdown, country_breakdown, status_line,
+                            hosts_attempted=stats["companies_attempted"], hosts_seeded=total_hosts_seen,
+                            elapsed_seconds=elapsed, rate_per_sec=rate, time_budget_seconds=time_budget_seconds)
+
+
+async def summarize_campaign(campaign: str, status_line: str) -> None:
+    """Reads back every tally this campaign has accumulated across every
+    shard and every loop redispatch (see node.fetch_cumulative_stats) and
+    prints it with the exact same formatter run_host_crawl's own per-run
+    summary uses (node.log_crawl_summary) — the true end-to-end picture,
+    from the very first file of the very first partition to whatever's
+    been flushed so far. Deliberately takes NO position on whether the
+    campaign is actually finished — that's a checkpoint-table question
+    (does ANY shard still have a remaining checkpoint?), which
+    common_crawl.yml's finalize job already answers for its own looping
+    decision; it passes the resulting status_line straight through here
+    rather than this function re-deriving it a second, possibly
+    inconsistent way."""
+    connector = node.new_connector()
+    async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+        stats, platform_counts, country_counts, first_seen, last_seen = await node.fetch_cumulative_stats(
+            session, SOURCE_LABEL, campaign)
+    if not stats and not platform_counts and not country_counts:
+        log.warning(f"No cumulative stats found for campaign {campaign!r} — nothing to summarize "
+                    f"(never run, or --reset-stats wiped it and nothing has flushed since).")
+        return
+    elapsed_seconds = None
+    if first_seen and last_seen:
+        try:
+            span = (datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                    - datetime.fromisoformat(first_seen.replace("Z", "+00:00")))
+            elapsed_seconds = span.total_seconds()
+        except ValueError:
+            pass  # cosmetic only — a bad timestamp format just omits the time line, nothing else depends on it
+    node.log_crawl_summary(f"CUMULATIVE — campaign {campaign!r}", stats, platform_counts, country_counts,
+                            status_line, hosts_attempted=stats.get("companies_attempted", 0),
+                            hosts_seeded=stats.get("hosts_seeded"), elapsed_seconds=elapsed_seconds)
 
 
 def main():
@@ -519,12 +576,42 @@ def main():
     parser.add_argument("--shard-count", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=node.CRAWL_CONCURRENCY)
     parser.add_argument("--time-budget-minutes", type=int, default=node.TIME_BUDGET_MINUTES)
+    parser.add_argument("--campaign", type=str, default=None,
+                         help="Identifies this whole crawl request for the cumulative cross-run stats "
+                              "accumulator (see node.flush_stat_tallies). common_crawl.yml computes this "
+                              "once and passes it to every shard/loop redispatch unchanged. Omit for a "
+                              "manual/local run — cumulative tallying is simply skipped, same as before "
+                              "this existed.")
+    parser.add_argument("--reset-stats", action="store_true",
+                         help="Wipe this --campaign's cumulative tallies before starting (requires "
+                              "--campaign). Explicit, opt-in only — never set by a loop redispatch, same "
+                              "as --start-file-index 0 for checkpoints. A fresh top-level dispatch that "
+                              "wants a clean count (not mixed with an older run of the same partitions) "
+                              "should pass this once, on that first dispatch only.")
+    parser.add_argument("--summarize-campaign", type=str, default=None, metavar="CAMPAIGN",
+                         help="Skip crawling entirely — just read back and print CAMPAIGN's cumulative "
+                              "stats so far (see node.fetch_cumulative_stats), then exit. Used by "
+                              "common_crawl.yml's finalize job once a campaign has no shards left with a "
+                              "remaining checkpoint, but also safe to run any time for a progress check.")
+    parser.add_argument("--summary-status-line", type=str,
+                         default="progress so far — campaign may still be running",
+                         help="Only used with --summarize-campaign: the status line to print (the caller "
+                              "— e.g. finalize's own checkpoint check — knows whether the campaign is "
+                              "actually complete; this function doesn't re-derive that itself).")
     args = parser.parse_args()
     crawl_list = [c.strip() for c in args.crawl_list.split(",") if c.strip()] if args.crawl_list else None
 
+    if args.summarize_campaign:
+        asyncio.run(summarize_campaign(args.summarize_campaign, args.summary_status_line))
+        return
+
+    if args.reset_stats and not args.campaign:
+        parser.error("--reset-stats requires --campaign")
+
     asyncio.run(run_host_crawl(args.crawl, args.partitions, args.shard_index, args.shard_count,
                                 args.concurrency, args.time_budget_minutes, crawl_list=crawl_list,
-                                start_file_index=args.start_file_index))
+                                start_file_index=args.start_file_index, campaign=args.campaign,
+                                reset_stats=args.reset_stats))
 
 
 if __name__ == "__main__":
