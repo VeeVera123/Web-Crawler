@@ -547,14 +547,30 @@ def _url_to_slug_ashby(url: str) -> str | None:
     URL still percent-encoded, and this was stored as-is. unquote() here
     normalizes it to the real org name (matching what a browser/API
     consumer would see), so this stops silently doubling up storage for
-    the same company under an encoded vs. would-be-decoded spelling."""
+    the same company under an encoded vs. would-be-decoded spelling.
+
+    2026-09 fix: host check was a bare `"ashbyhq.com" in host` substring,
+    which also matched ashbyhq.com's own bare marketing/corporate domain —
+    verified live this session (ashbyhq.com is Ashby's corporate site;
+    jobs.ashbyhq.com/<org> is the real, sole customer-board pattern,
+    confirmed against jobs.ashbyhq.com/ramp). That let short path segments
+    off Ashby's own marketing pages (blog slugs, redirect stubs) get
+    stored as if they were real customer org slugs — live archive_i rows
+    included bare 1-2 character "slugs" like "D", "ha", "og", "up", "fr".
+    Restricted to the real subdomain, same pattern as the Greenhouse/Lever
+    fixes; also added the shared _looks_like_real_slug guard used by
+    every sibling extractor, for the asset-filename/hash-shaped garbage
+    it catches (it does not screen for short garbage by itself — length
+    alone isn't a safe cutoff here since real short slugs exist, e.g.
+    "0x", "ai", "g2")."""
     parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if "ashbyhq.com" in host:
-        parts = parsed.path.strip("/").split("/")
-        slug = unquote(parts[0]) if parts and parts[0] else None
-        if slug and slug.lower() not in SKIP_SLUGS:
-            return slug
+    host = (parsed.hostname or "").lower()
+    if host != "jobs.ashbyhq.com":
+        return None
+    parts = parsed.path.strip("/").split("/")
+    slug = unquote(parts[0]) if parts and parts[0] else None
+    if slug and slug.lower() not in SKIP_SLUGS and _looks_like_real_slug(slug):
+        return slug
     return None
 
 
