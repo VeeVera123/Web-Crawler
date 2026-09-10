@@ -52,6 +52,11 @@ on:
         type: boolean
         required: false
         default: false
+      reset_stats:
+        description: "Wipe this campaign's cumulative stats before starting (fresh count, not mixed with an older run of the same partitions). Never set this on a loop's own redispatch."
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: common-crawl-${{ github.ref }}
@@ -67,6 +72,7 @@ jobs:
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
       resolved_partition: ${{ steps.resolve.outputs.resolved_partition }}
+      campaign: ${{ steps.campaign.outputs.campaign }}
     steps:
       - name: Build shard-index matrix from shard_count input
         id: build
@@ -100,6 +106,46 @@ jobs:
           resolved = pinned if pinned in names else (names[0] if names else pinned)
           print(f'resolved_partition={resolved}')
           " >> "$GITHUB_OUTPUT"
+
+      # 2026-09: one stable id for this whole crawl request — every shard
+      # and every loop redispatch of it passes the SAME string to
+      # common_crawl_probe.py's --campaign, so their cumulative stat
+      # flushes (see node.flush_stat_tallies) all land in the same bucket
+      # regardless of which shard or which loop iteration produced them.
+      # Computed here (not re-derived independently in the crawl job AND
+      # the finalize job) so there is exactly one place this logic lives —
+      # two separately-written bash expressions computing "the same"
+      # string is exactly how they'd eventually drift apart. Always runs
+      # (no `if`), unlike the "resolve" step above, since a --crawl-list
+      # request still needs a campaign id even though it skips that step.
+      - name: Compute this request's campaign id
+        id: campaign
+        run: |
+          if [ -n "${{ github.event.inputs.crawl_list }}" ]; then
+            echo "campaign=list::${{ github.event.inputs.crawl_list }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "campaign=start::${{ steps.resolve.outputs.resolved_partition }}::${{ github.event.inputs.partitions || '1' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 2026-09: done HERE, once, rather than letting every one of the
+      # crawl job's up-to-20 parallel shards each call --reset-stats on
+      # its own startup — `crawl` depends on this whole job finishing
+      # first, so this is guaranteed to complete before any shard can
+      # possibly flush its first file's stats. Doing the reset per-shard
+      # instead would race: whichever shard's own reset call happened to
+      # run AFTER a faster sibling shard's first flush would silently wipe
+      # that sibling's already-flushed numbers back to zero.
+      - name: Reset this campaign's cumulative stats, if requested
+        if: github.event.inputs.reset_stats == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "--reset-stats requested — wiping cumulative tallies for campaign '${{ steps.campaign.outputs.campaign }}'"
+          curl -sS -X POST "$SUPABASE_URL/rest/v1/rpc/reset_stat_tallies" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"p_source\": \"common_crawl_probe\", \"p_campaign\": \"${{ steps.campaign.outputs.campaign }}\"}"
 
   crawl:
     needs: prepare-matrix
@@ -151,6 +197,11 @@ jobs:
           if [ -n "${{ github.event.inputs.start_file_index }}" ]; then
             CRAWL_ARGS+=(--start-file-index "${{ github.event.inputs.start_file_index }}")
           fi
+          # NOTE: reset_stats is deliberately NOT passed as --reset-stats
+          # here — prepare-matrix's own "Reset this campaign's cumulative
+          # stats" step already did it exactly once, before any shard in
+          # this matrix could start (see that step's comment for why doing
+          # it per-shard here instead would race).
 
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
           # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
@@ -160,14 +211,32 @@ jobs:
             --partitions ${{ github.event.inputs.partitions || '1' }} \
             --concurrency ${{ github.event.inputs.concurrency || '700' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
+            --campaign "${{ needs.prepare-matrix.outputs.campaign }}" \
             "${CRAWL_ARGS[@]}"
 
   finalize:
     needs: [prepare-matrix, crawl]
-    if: always() && github.event.inputs.loop_runs == 'true'
+    # 2026-09: now ALWAYS runs (used to be gated on loop_runs=='true', so
+    # a plain non-looped dispatch never got a summary at all — see the
+    # "Print cumulative summary so far" step below, which every dispatch
+    # now reaches). Looping itself is still opt-in: the redispatch step
+    # further down only fires when loop_runs=='true' AND files are left.
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install aiohttp aiodns selectolax requests python-dotenv
+
       - name: Check for remaining checkpoints and re-dispatch if any
+        id: checkpoints
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -189,9 +258,18 @@ jobs:
           REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&shard_count=eq.$SHARD_COUNT&select=shard_index" \
             -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
           echo "Shards with a remaining checkpoint: $REMAINING"
+          echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
 
           if [ "$REMAINING" = "0" ]; then
+            echo "status_line=FINAL — every requested partition fully covered, across every shard and every loop iteration" >> "$GITHUB_OUTPUT"
             echo "All requested partition(s) fully covered — not looping."
+            exit 0
+          fi
+
+          echo "status_line=IN PROGRESS — $REMAINING/$SHARD_COUNT shard(s) still have files left" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event.inputs.loop_runs }}" != "true" ]; then
+            echo "Files left, but loop_runs is off — not auto-redispatching (run again manually, or with Loop until done checked)."
             exit 0
           fi
 
@@ -210,3 +288,24 @@ jobs:
             -f concurrency="${{ github.event.inputs.concurrency || '700' }}" \
             -f run_time_minutes="${{ github.event.inputs.run_time_minutes || '330' }}" \
             -f loop_runs=true
+            # reset_stats deliberately omitted -> defaults to false on the
+            # redispatch, same as workable.yml's reset_seed=false-during-
+            # loop rule: a mid-chain loop iteration must never re-wipe a
+            # campaign's already-flushed cumulative stats.
+
+      # 2026-09: the very last file of the very last partition, from
+      # every shard, across every loop iteration this campaign has ever
+      # run — this step is what actually prints that. It runs every time
+      # finalize runs (looped or not), reading back whatever's
+      # accumulated in crawl_stat_tallies so far (see
+      # node.fetch_cumulative_stats); status_line above already says
+      # plainly whether that's the true final total or a snapshot with
+      # shards still in flight.
+      - name: Print cumulative summary so far
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python "Common Crawl/common_crawl_probe.py" \
+            --summarize-campaign "${{ needs.prepare-matrix.outputs.campaign }}" \
+            --summary-status-line "${{ steps.checkpoints.outputs.status_line }}"
