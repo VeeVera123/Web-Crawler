@@ -179,7 +179,14 @@ jobs:
           # common_crawl_probe.py's run_host_crawl). ANY row left across
           # ANY shard means the overall crawl of the requested
           # partition(s) isn't done yet.
-          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&select=shard_index" \
+          #
+          # Filtered to THIS run's own shard_count, same as workable.yml's
+          # reloop job — otherwise a leftover row from a differently-sized
+          # past run (e.g. an old shard_count=10 crawl) would inflate this
+          # count and could trigger a loop even when every shard from the
+          # CURRENT request has already finished.
+          SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
+          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&shard_count=eq.$SHARD_COUNT&select=shard_index" \
             -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
           echo "Shards with a remaining checkpoint: $REMAINING"
 
@@ -189,11 +196,17 @@ jobs:
           fi
 
           echo "Files left — dispatching the next loop run."
+          # --repo is required: this job has no checkout step (nothing
+          # else it does needs the repo contents), so gh has no local git
+          # context to infer the repo from otherwise — without this it
+          # fails with "fatal: not a git repository" and the loop silently
+          # stops re-dispatching (same fix as workable.yml's reloop job).
           gh workflow run "common_crawl.yml" \
+            --repo "${{ github.repository }}" \
             -f crawl_partition="${{ needs.prepare-matrix.outputs.resolved_partition }}" \
             -f partitions="${{ github.event.inputs.partitions || '1' }}" \
             -f crawl_list="${{ github.event.inputs.crawl_list }}" \
-            -f shard_count="${{ github.event.inputs.shard_count || '10' }}" \
+            -f shard_count="$SHARD_COUNT" \
             -f concurrency="${{ github.event.inputs.concurrency || '700' }}" \
             -f run_time_minutes="${{ github.event.inputs.run_time_minutes || '330' }}" \
             -f loop_runs=true
