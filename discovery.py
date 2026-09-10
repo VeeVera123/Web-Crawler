@@ -265,7 +265,6 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
                              # relying on the shared pageuppeople.com
                              # career-site domain)
     "jobylon": "Jobylon",   # scriptSrc: *.jobylon.com
-    "homerun": "Homerun",   # js globals: homerunI18n / homerunPrivacySettings
     # Pinpoint, Flatchr, Occupop: checked, NO fingerprint found under any
     # plausible name (including "Cezanne" for Occupop, post-rebrand) —
     # left out entirely rather than guessed at, per this dict's own rule.
@@ -283,21 +282,50 @@ SUPPORTED_ATS = {
     "greenhouse", "lever", "ashby", "bamboohr", "icims", "workday",
     "rippling", "workable", "recruitee", "smartrecruiters",
     "teamtailor", "breezyhr", "personio", "joincom",
-    # REMOVED 2026-08: applytojob — see ats_scrapers.py's ApplyToJob
-    # section header for why (JD enrichment wasn't reliably catching
-    # disqualifying US-eligibility language; small long-tail ATS, not
-    # worth debugging further; replaced by widening Jobicy instead).
+    # REVIVED 2026-09 as "jazzhr" (was "applytojob", REMOVED 2026-08): the
+    # listing scraper itself (ats_scrapers.scrape_jazzhr) was never the
+    # problem — it's a straightforward HTML scrape that was working fine.
+    # The 2026-08 removal was because JD-enrichment via the then-current
+    # _fetch_generic_description wasn't reliably surfacing real US-work-
+    # authorization language, and the visa-sponsorship detector it fed
+    # into had its own false-negative bug — the exact harmonyworks.com
+    # "must be authorized to work in the US; not able to sponsor visas"
+    # case that slipped through. Both of those have since been rewritten
+    # for unrelated reasons: _fetch_generic_description gained JSON-LD/
+    # embedded-JSON/itemprop/container fallbacks (see its docstring), and
+    # detect_visa_sponsorship in classifier.py was rewritten 2026-09
+    # specifically citing that harmonyworks.com case as the bug it fixed.
+    # Could not live-verify this specific combination end-to-end on a real
+    # JazzHR posting this session (no browser tool connected, direct fetch
+    # to applytojob.com blocked from this sandbox) — reviving on the
+    # strength of those two independently-documented fixes, not a guess.
+    # Spot-check early scraped JazzHR output for eligibility-language leaks.
+    "jazzhr",
     # Newly enabled (confirmed working via test_blacklisted_ats.py):
     "taleo", "oracle_cloud_hcm", "paylocity", "hrmdirect", "zoho",
     # Fixed (2026-08) — was blacklisted with wrong URL/API assumptions,
     # now scrapes correctly (see ats_scrapers.py):
     "softgarden",
     # New (2026-09) — PageUp (AU/NZ, HIGHEST priority of this batch),
-    # Pinpoint (UK), Flatchr (France), Jobylon (Nordics), Homerun
-    # (Netherlands). All 5 confirmed to have a genuinely working scraper
-    # (server-rendered HTML or a real public JSON API — see
-    # ats_scrapers.py for each).
-    "pageup", "pinpoint", "flatchr", "jobylon", "homerun",
+    # Pinpoint (UK), Flatchr (France), Jobylon (Nordics). All 4 confirmed
+    # to have a genuinely working scraper (server-rendered HTML or a real
+    # public JSON API — see ats_scrapers.py for each).
+    #
+    # REMOVED 2026-09: "homerun" — its extractor's only signal was "any
+    # host starting with jobs." (Homerun customers run on their own
+    # domain, not a shared subdomain, so there was never a real vendor
+    # pattern to match against). Confirmed live this session that this
+    # was catching mostly non-Homerun pages: of 5 sampled archive_i
+    # "homerun" rows, 0 were actually Homerun — jobs.cambly.com is an
+    # in-house landing page that itself links out to Ashby
+    # (jobs.ashbyhq.com/Cambly), jobs.hireart.com redirects to an
+    # unrelated login portal, jobs.wrkhq.com redirects to a completely
+    # different company's site, jobs.we-mng.com is a WordPress+JobSearch-
+    # plugin board with zero live listings. 11,892 archive_i rows and 0
+    # ever reached the `jobs` table. Removed everywhere: this set, the
+    # extractor function, ats_scrapers.py's scraper, and the stale
+    # archive_i rows (see BLACKLISTED_ATS.md for the full writeup).
+    "pageup", "pinpoint", "flatchr", "jobylon",
     # FIXED 2026-09: these 7 all had a real, working, REGISTERED scraper in
     # ats_scrapers.py's SCRAPERS dict already (confirmed live: archive_i
     # holds 17,368 adp rows, 1,064 jobvite, 1,048 jobadder, 537 brassring,
@@ -346,9 +374,12 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "breezyhr": "breezyhr",
     "breezy": "breezyhr",
     "breezy hr": "breezyhr",
-    # "applytojob"/"apply to job" removed 2026-08 (ATS retired, see
-    # SUPPORTED_ATS comment above) — no longer mapped, so any OpenPostings
-    # row tagged ApplyToJob is naturally filtered out downstream.
+    # "applytojob"/"apply to job" re-mapped to "jazzhr" 2026-09 (revived —
+    # see SUPPORTED_ATS comment above). OpenPostings' own platform list
+    # still uses the "ApplyToJob" name, so both raw variants map here.
+    "applytojob": "jazzhr",
+    "apply to job": "jazzhr",
+    "jazzhr": "jazzhr",
     "personio": "personio",
     "joincom": "joincom",
     "join": "joincom",
@@ -371,7 +402,6 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "pinpoint": "pinpoint",
     "flatchr": "flatchr",
     "jobylon": "jobylon",
-    "homerun": "homerun",
     # 2026-09: added now that all 7 joined SUPPORTED_ATS (see that set's
     # comment for why) — a real working scraper exists for each. These
     # label-string variants follow the same defensive-alias pattern as
@@ -833,18 +863,11 @@ def _url_to_slug_breezyhr(url: str) -> str | None:
     return None
 
 
-# REMOVED 2026-08: ApplyToJob retired (see SUPPORTED_ATS comment) — no
-# longer registered in URL_TO_SLUG/CC_PLATFORM_PATTERNS/CC_EXTRACTORS
-# below. Function kept, unused, only in case it's ever needed for
-# reference.
-def _url_to_slug_applytojob(url: str) -> str | None:
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if "applytojob.com" in host:
-        slug = host.replace(".applytojob.com", "").lower()
-        if slug and slug not in SKIP_SLUGS and slug != "www":
-            return slug
-    return None
+# REMOVED 2026-09: this stale reference copy of the old (2026-08-retired)
+# ApplyToJob extractor. Superseded by _url_to_slug_jazzhr below (added
+# 2026-09, already registered in URL_TO_SLUG) — same platform, same host
+# suffix, but with the _looks_like_real_slug guard this old copy lacked.
+# See SUPPORTED_ATS's 2026-09 JazzHR revival comment for the full history.
 
 
 def _url_to_slug_hrmdirect(url: str) -> str | None:
@@ -1295,45 +1318,18 @@ def _url_to_slug_jobylon(url: str) -> str | None:
     return None
 
 
-def _url_to_slug_homerun(url: str) -> str | None:
-    """Extract slug from Homerun URLs (Netherlands).
-    Unlike most platforms here, Homerun customers run on their OWN
-    domain (conventionally jobs.{company-domain}, e.g.
-    jobs.acme.com) rather than a shared {company}.homerun.co subdomain
-    — there is no company-name segment to parse out of the URL at all,
-    so the full hostname itself IS the slug (this is safe: node.py/
-    ats_scrapers.py only ever use this slug to reconstruct the same
-    hostname when fetching, never to look up a shared-domain subdomain).
-    Only matches hosts that actually look like a Homerun careers site
-    (a 'jobs.' subdomain) to avoid capturing an unrelated URL that just
-    happens to flow through this converter.
-
-    2026-09: found (via the new Latmay H.F/Edward H.F sources' own unit
-    tests) to be over-broad enough to steal Dayforce's
-    jobs.dayforcehcm.com — the ONE OTHER platform in this file that
-    also happens to use a 'jobs.' subdomain, but on a SHARED vendor
-    domain (dayforcehcm.com), not each customer's own domain the way
-    Homerun actually works. Since URL_TO_SLUG is iterated in
-    insertion order and this entry comes before "dayforce" in the
-    dict, every dayforce URL was silently resolving to a bogus
-    "homerun" slug (the literal hostname jobs.dayforcehcm.com) instead
-    of ever reaching _url_to_slug_dayforce — a real, pre-existing bug,
-    not something introduced by the new sources; it just took a URL
-    outside this file's earlier live-crawl code paths (which happened
-    to never hit this specific host) to surface it. Excluding the one
-    known shared-domain collision here is the minimal, safe fix —
-    _url_to_slug_dayforce's own host check already requires the exact
-    jobs.dayforcehcm.com host, so nothing about Dayforce resolution
-    depends on this exclusion, only Homerun's false-positive on it."""
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if not host or host in SKIP_SLUGS:
-        return None
-    if host.startswith("jobs.") and host != "jobs.dayforcehcm.com":
-        slug = host
-        if slug not in SKIP_SLUGS:
-            return slug
-    return None
+# REMOVED 2026-09: _url_to_slug_homerun. Its only signal was "any host
+# starting with jobs." — Homerun customers run on their own domain, not a
+# shared subdomain, so there was never a real vendor-specific pattern to
+# match. Confirmed live this session that this was catching mostly
+# non-Homerun pages (see SUPPORTED_ATS's 2026-09 removal comment above for
+# the concrete evidence) — removed everywhere: URL_TO_SLUG, SUPPORTED_ATS,
+# ats_scrapers.py's scraper, and the stale archive_i rows.
+# Its false-positive collision with Dayforce's jobs.dayforcehcm.com (the
+# other platform sharing a "jobs." prefix, but on ONE shared vendor
+# domain rather than each customer's own) no longer needs a guard now
+# that this function is gone — _url_to_slug_dayforce below matches only
+# that exact host regardless.
 
 
 # Occupop: no extractor here anymore — confirmed genuinely unscrapeable
@@ -1350,16 +1346,28 @@ def _url_to_slug_homerun(url: str) -> str | None:
 #   Dayforce: jobs.dayforcehcm.com/api/geo/associated, /api/geo/e0229, ...
 #   Getro:    getro.getro.com/, 1up.getro.com/, 3m.getro.com/, ...
 #   JazzHR:   l2t.applytojob.com/, 10xhealthsystem.applytojob.com/, ...
-# These three are SLUG-DISCOVERY ONLY for now — none are in SUPPORTED_ATS,
-# and no ats_scrapers.py scraper was added for them. Dayforce/Getro are
-# brand new here and would need their own real job-listing-API research
-# (this dataset only confirms the CAREERS-PAGE URL shape, not the
+# Dayforce and Getro are SLUG-DISCOVERY ONLY for now — neither is in
+# SUPPORTED_ATS, and no ats_scrapers.py scraper was added for either.
+# Both are brand new here and would need their own real job-listing-API
+# research (this dataset only confirms the CAREERS-PAGE URL shape, not the
 # underlying jobs API) before a scraper could be written responsibly.
-# JazzHR is a special case: it's the SAME platform as the old "applytojob"
-# entry removed 2026-08 (see SUPPORTED_ATS comment above) — that removal
-# was for a JD-enrichment/US-eligibility-filtering reliability problem in
-# the SCRAPER, not the URL pattern, so re-enabling scraping here would
-# resurrect that same known issue unless it's actually fixed first.
+# Dayforce's real job-listing API was researched 2026-09 (see
+# ats_scrapers.py's Dayforce section header) but NOT wired up — the
+# response schema of the candidate-portal search API this session found
+# (jobs.dayforcehcm.com/api/geo/<tenant>/jobposting/search, POST-only)
+# could not be verified live (no browser tool connected this session,
+# direct fetch blocked from this sandbox); Ceridian's officially
+# documented JobFeeds REST API was also found and would avoid the schema-
+# guessing problem entirely, but it lives on www.dayforcehcm.com, whose
+# robots.txt disallows the whole site — off-limits per this project's
+# robots.txt policy regardless of technical feasibility.
+# JazzHR was revived 2026-09 — it's the SAME platform as the old
+# "applytojob" entry removed 2026-08 (see SUPPORTED_ATS comment above),
+# and IS now in SUPPORTED_ATS: that removal was a JD-enrichment/US-
+# eligibility-filtering reliability problem, not a URL-pattern problem,
+# and the two things responsible for it have both since been rewritten
+# for unrelated reasons — see SUPPORTED_ATS's revival comment for the
+# full evidence trail.
 def _url_to_slug_dayforce(url: str) -> str | None:
     """Dayforce (Ceridian) — ALL customers share one domain
     (jobs.dayforcehcm.com); the tenant code is the last /api/geo/{tenant}
@@ -1444,12 +1452,13 @@ URL_TO_SLUG = {
     "jobvite": _url_to_slug_jobvite,
     "adp": _url_to_slug_adp,
     "avature": _url_to_slug_avature,
-    # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon / Homerun / Occupop
+    # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon / Occupop
     "pageup": _url_to_slug_pageup,
     "pinpoint": _url_to_slug_pinpoint,
     "flatchr": _url_to_slug_flatchr,
     "jobylon": _url_to_slug_jobylon,
-    "homerun": _url_to_slug_homerun,
+    # homerun: REMOVED 2026-09 — see the removal comment right above
+    # _url_to_slug_dayforce below (its extractor used to live here).
     # occupop: no entry — confirmed unscrapeable, see Main/BLACKLISTED_ATS.md
     # and the comment just above (successfactors) for the same reasoning.
     # New (2026-09): slug-discovery only, see the block comment above these
@@ -1805,7 +1814,10 @@ CC_PLATFORM_PATTERNS = {
     # purely a CDX query-pattern widening.
     "teamtailor": ["*.teamtailor.com/jobs*", "*.teamtailor.com/*/jobs*"],
     "breezyhr": ["*.breezy.hr/*"],
-    # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
+    # "jazzhr" (formerly "applytojob", removed 2026-08) revived 2026-09 —
+    # see SUPPORTED_ATS comment above. Subdomain-per-tenant, same as
+    # breezyhr above — any path under the tenant's host is a real board.
+    "jazzhr": ["*.applytojob.com/*"],
     "personio": ["*.jobs.personio.de/*", "*.jobs.personio.com/*"],
     "joincom": ["join.com/companies/*/jobs*", "join.com/companies/*"],
     # Newly enabled platforms:
@@ -1917,13 +1929,12 @@ CC_PLATFORM_PATTERNS = {
     # would be pure wasted effort. Also means it has no Wayback CDX
     # pattern either, since fetch_wayback_slugs reuses this exact dict.
     # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon — all 4 have a
-    # real shared-domain URL shape to query for. Homerun deliberately has
-    # NO entry here — its customers run on their OWN domain (jobs.
-    # {company-domain}), not a shared *.homerun.co subdomain, so there is
-    # no single host pattern to query Common Crawl for; Occupop also has
-    # NO entry here — same reasoning as SuccessFactors above (confirmed
-    # JS-rendered SPA, no working scraper yet, so discovering slugs for it
-    # would be wasted effort until that's fixed).
+    # real shared-domain URL shape to query for. Occupop has NO entry
+    # here — same reasoning as SuccessFactors above (confirmed JS-rendered
+    # SPA, no working scraper yet, so discovering slugs for it would be
+    # wasted effort until that's fixed). Homerun (also never entered here)
+    # was removed from this project entirely 2026-09 — see SUPPORTED_ATS's
+    # removal comment above for why.
     "pageup": ["careers.pageuppeople.com/*"],
     "pinpoint": ["*.pinpointhq.com/*"],
     "flatchr": ["*.flatchr.io/*", "careers.flatchr.io/company/*"],
@@ -1949,10 +1960,11 @@ CC_EXTRACTORS = {
     "rippling": _url_to_slug_rippling,
     "teamtailor": _url_to_slug_teamtailor,
     "breezyhr": _url_to_slug_breezyhr,
-    # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above. Kept
-    # in sync with CC_PLATFORM_PATTERNS above (these two dicts must always
+    # "jazzhr" revived 2026-09 — see SUPPORTED_ATS comment above. Kept in
+    # sync with CC_PLATFORM_PATTERNS above (these two dicts must always
     # match keys — see the CC_EXTRACTORS KeyError incident earlier this
     # project for why a mismatch here crashes the whole Common Crawl run).
+    "jazzhr": _url_to_slug_jazzhr,
     "personio": _url_to_slug_personio,
     "joincom": _url_to_slug_joincom,
     # Newly enabled platforms:
@@ -1975,7 +1987,8 @@ CC_EXTRACTORS = {
     # together, matching keys as this dict's own comment above requires.
     "brassring": _url_to_slug_brassring,
     # New (2026-09) — kept in sync with CC_PLATFORM_PATTERNS above (no
-    # Homerun/Occupop entries here either — see that dict's comment):
+    # Occupop entry here either — see that dict's comment; Homerun never
+    # had one here and was removed from this project entirely 2026-09):
     "pageup": _url_to_slug_pageup,
     "pinpoint": _url_to_slug_pinpoint,
     "flatchr": _url_to_slug_flatchr,
@@ -2107,9 +2120,10 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
 # extractors (CC_EXTRACTORS) Common Crawl already uses. No new patterns
 # were guessed for this — it's the identical query list, just pointed at
 # a second, independent index. This naturally still excludes whatever
-# CC_PLATFORM_PATTERNS itself excludes (occupop/successfactors/homerun
-# have no entry there, each for its own documented reason — see that
-# dict), so this doesn't need its own separate exclusion list.
+# CC_PLATFORM_PATTERNS itself excludes (occupop/successfactors have no
+# entry there, each for its own documented reason — see that dict; homerun
+# was removed entirely 2026-09, see SUPPORTED_ATS's removal comment), so
+# this doesn't need its own separate exclusion list.
 #
 # The CDX API (web.archive.org/cdx/search/cdx) is IA's own documented,
 # public, purpose-built endpoint for exactly this kind of targeted
