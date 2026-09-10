@@ -25,6 +25,7 @@ import re
 import signal
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
@@ -104,6 +105,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 ARCHIVE_I_TABLE = "archive_i"  # was slug_registry — the trusted, actually-scraped-daily list.
 ARCHIVE_II_TABLE = "archive_ii"  # was archive_iii — in-house/unsupported career pages.
 CHECKPOINT_TABLE = "crawl_checkpoints"  # 2026-08: per-shard resume — see save/load/clear_crawl_checkpoint below.
+STAT_TALLY_TABLE = "crawl_stat_tallies"  # 2026-09: cross-run/cross-shard/cross-loop cumulative stats — see flush/fetch/reset_stat_tallies below.
 # 2026-08 restructure: the OLD archive_ii (an ATS-match staging/quarantine
 # table that a separate verify step promoted into slug_registry) is GONE —
 # dropped entirely. ATS hits now write directly to ARCHIVE_I_TABLE with no
@@ -1858,6 +1860,184 @@ async def clear_crawl_checkpoint(session: aiohttp.ClientSession, source: str, sh
                     f"run might unnecessarily skip ahead once): {e}")
 
 
+# ── cross-run cumulative stats ──────────────────────────────────────────
+# 2026-09: every shard process here is ephemeral (a single GitHub Actions
+# job) and a full crawl chains across many independent loop redispatches
+# over potentially several days (see common_crawl.yml's reloop) — no
+# single process ever sees the whole campaign's numbers. These three
+# functions are the shared, durable accumulator: flush_stat_tallies adds
+# ONE file's/batch's worth of deltas (best-effort, same "non-fatal on
+# failure" philosophy as the checkpoint functions above — a dropped flush
+# loses that one increment from the final total, never crashes the
+# crawl); fetch_cumulative_stats reads the running totals back for a
+# "whole campaign so far" report; reset_stat_tallies is an explicit,
+# opt-in wipe for one campaign, never called automatically by a loop
+# redispatch. See CUMULATIVE_STATS_MIGRATION.sql for the table + the
+# increment_stat_tallies/reset_stat_tallies SQL functions this relies on
+# (a plain PostgREST upsert can only REPLACE a row's value on conflict,
+# not add to it — an atomic "count = count + delta" needs a real SQL
+# function, not achievable over REST alone).
+
+async def flush_stat_tallies(session: aiohttp.ClientSession, source: str, campaign: str,
+                              deltas: dict[str, int]) -> None:
+    """Adds `deltas` (metric name -> this-call's-own delta, NOT a running
+    total) to campaign's running tallies in one atomic round trip. Silently
+    returns if `deltas` is empty — callers are expected to have already
+    dropped zero-valued keys, but an empty dict is a harmless no-op rather
+    than a wasted request either way."""
+    if not deltas:
+        return
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+               "Content-Type": "application/json"}
+    payload = {
+        "p_source": source, "p_campaign": campaign,
+        "p_deltas": [{"metric": k, "delta": v} for k, v in deltas.items()],
+    }
+    try:
+        async with session.post(f"{SUPABASE_URL}/rest/v1/rpc/increment_stat_tallies", headers=headers,
+                                 json=payload, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+    except Exception as e:
+        log.warning(f"  couldn't flush {len(deltas)} cumulative stat(s) for campaign {campaign!r} "
+                    f"(non-fatal — the final cumulative summary will just undercount by this much): {e}")
+
+
+async def fetch_cumulative_stats(session: aiohttp.ClientSession, source: str,
+                                  campaign: str) -> tuple[dict[str, int], "Counter", "Counter", str | None, str | None]:
+    """Reads back every tally row for (source, campaign) and splits it
+    into: a flat stats dict (everything reconstructible the same shape as
+    node.py's in-memory `stats` Counter — safe to hand straight to
+    log_quality_index_summary/log_crawl_summary), a platform-hit Counter
+    (from "platform__<ats>" rows), a country-hit Counter (from
+    "country__<country>" rows), and the earliest/latest `updated_at` seen
+    across every row (a proxy for when this campaign's counting started/
+    was last active — NOT a real "crawl start time", since a row is only
+    created the first time that particular metric is ever flushed).
+    Returns ({}, Counter(), Counter(), None, None) on any fetch failure or
+    if the campaign has no rows yet — the caller (a --summarize-campaign
+    run) treats that as "nothing to report" rather than crashing."""
+    empty = ({}, Counter(), Counter(), None, None)
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return empty
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    params = {"source": f"eq.{source}", "campaign": f"eq.{campaign}",
+              "select": "metric,count,updated_at", "limit": "10000"}
+    try:
+        async with session.get(f"{SUPABASE_URL}/rest/v1/{STAT_TALLY_TABLE}", headers=headers,
+                                params=params, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+            rows = await r.json()
+    except Exception as e:
+        log.warning(f"  couldn't fetch cumulative stats for campaign {campaign!r}: {e}")
+        return empty
+    if not rows:
+        return empty
+    stats: dict[str, int] = {}
+    platform_counts: Counter = Counter()
+    country_counts: Counter = Counter()
+    timestamps = [row["updated_at"] for row in rows if row.get("updated_at")]
+    for row in rows:
+        metric, count = row["metric"], row["count"]
+        if metric.startswith("platform__"):
+            platform_counts[metric[len("platform__"):]] += count
+        elif metric.startswith("country__"):
+            country_counts[metric[len("country__"):]] += count
+        else:
+            stats[metric] = stats.get(metric, 0) + count
+    first_seen = min(timestamps) if timestamps else None
+    last_seen = max(timestamps) if timestamps else None
+    return stats, platform_counts, country_counts, first_seen, last_seen
+
+
+async def reset_stat_tallies(session: aiohttp.ClientSession, source: str, campaign: str) -> None:
+    """Explicit, opt-in wipe of one campaign's cumulative tallies — mirrors
+    the existing '0 forces a full restart' convention discovery.py/
+    common_crawl_probe.py already use for --start-file-index. Never called
+    automatically by a loop redispatch (same as workable.yml's
+    reset_seed=false-during-loop rule): only a human explicitly passing
+    --reset-stats triggers this."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+               "Content-Type": "application/json"}
+    payload = {"p_source": source, "p_campaign": campaign}
+    try:
+        async with session.post(f"{SUPABASE_URL}/rest/v1/rpc/reset_stat_tallies", headers=headers,
+                                 json=payload, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            r.raise_for_status()
+        log.info(f"  cumulative stats for campaign {campaign!r} reset (--reset-stats).")
+    except Exception as e:
+        log.warning(f"  couldn't reset cumulative stats for campaign {campaign!r}: {e}")
+
+
+def log_crawl_summary(label: str, stats: dict, platform_counts: "Counter", country_counts: "Counter",
+                       status_line: str, hosts_attempted: int, hosts_seeded: int | None = None,
+                       elapsed_seconds: float | None = None, rate_per_sec: float | None = None,
+                       time_budget_seconds: float | None = None) -> None:
+    """Shared summary formatter — used both for one shard's own end-of-run
+    log (a single process's slice of work) and for a fully cumulative
+    report spanning every loop/shard/partition of a whole campaign (see
+    fetch_cumulative_stats above). One function so the two can never
+    silently drift apart in what they report or how a percentage is
+    computed — both read the exact same counters the exact same way.
+
+    hosts_attempted/hosts_seeded/elapsed_seconds/rate_per_sec are passed
+    in rather than pulled from `stats` because their meaning differs
+    between the two callers (a per-run elapsed time is meaningful on its
+    own; summed across 20 parallel shards it would wildly overstate the
+    campaign's real wall-clock duration — see common_crawl_probe.py's
+    --summarize-campaign for how it computes a real wall-clock span
+    instead)."""
+    total_hits = (stats.get("hits_from_homepage", 0) + stats.get("hits_from_career_path", 0)
+                  + stats.get("hits_from_sitemap", 0))
+    hosts_n = max(hosts_attempted, 1)
+    written_without_country = stats.get("written_without_country", 0)
+    banner = "=" * 60
+    log.info("")
+    log.info(banner)
+    log.info(f"COMMON CRAWL — {label}")
+    log.info(banner)
+    log.info(f"  status:      {status_line}")
+    seeded_note = f", {hosts_seeded:,} seeded" if hosts_seeded is not None else ""
+    log.info(f"  hosts:       {hosts_attempted:,} attempted{seeded_note}")
+    if elapsed_seconds is not None:
+        rate = rate_per_sec if rate_per_sec is not None else (
+            hosts_attempted / elapsed_seconds if elapsed_seconds > 0 else 0.0)
+        budget_note = f" of {time_budget_seconds:.0f}s budget" if time_budget_seconds is not None else ""
+        log.info(f"  time:        {elapsed_seconds:.0f}s{budget_note}, {rate:.1f} hosts/sec avg")
+    log.info("")
+    log.info("  accuracy:")
+    log.info(f"    ATS hits found:  {total_hits:,} ({total_hits / hosts_n * 100:.2f}% of hosts attempted)")
+    log.info(f"    with country:    {total_hits - written_without_country:,} "
+             f"({(1 - written_without_country / max(total_hits, 1)) * 100:.1f}% of hits)")
+    log.info(f"    no ATS found:    {stats.get('dropped_no_ats', 0):,} "
+             f"({stats.get('dropped_no_ats', 0) / hosts_n * 100:.1f}%)")
+    log.info(f"    unreachable:     {stats.get('homepage_unreachable', 0):,} "
+             f"({stats.get('homepage_unreachable', 0) / hosts_n * 100:.1f}%)")
+    if total_hits:
+        log.info("")
+        log.info("  hits by tier:")
+        for tier_key, tier_label in (("hits_from_homepage", "homepage"),
+                                      ("hits_from_career_path", "career_path"),
+                                      ("hits_from_sitemap", "sitemap")):
+            n = stats.get(tier_key, 0)
+            log.info(f"    {tier_label}:     {n:,} ({n / total_hits * 100:.1f}%)")
+    if platform_counts:
+        log.info("")
+        log.info("  hits by platform:")
+        for ats, n in platform_counts.most_common():
+            log.info(f"    {ats}: {n:,}")
+    if country_counts:
+        log.info("")
+        log.info("  hits by country:")
+        for country, n in country_counts.most_common():
+            log.info(f"    {country}: {n:,}")
+    log.info("")
+    log_quality_index_summary(stats)
+
+
 # ── shared batch driver ───────────────────────────────────────────────────
 
 # 2026-08: the time budget used to only be checked BETWEEN batches, right
@@ -2051,6 +2231,16 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                     duplicates_collapsed += 1
                     continue
                 seen_keys.add(key)
+                if not country:
+                    # 2026-09 bug fix: this counter was read (in every
+                    # caller's end-of-run "with country: N%" summary line)
+                    # but never actually incremented anywhere, so that line
+                    # always silently reported 100% regardless of the real
+                    # number of hits written with no country. This is the
+                    # one place a hit's country is decided as final before
+                    # it's ever written to archive_i, so it's the right
+                    # place to count it.
+                    stats["written_without_country"] += 1
                 batch_rows.append({
                     "ats": ats, "slug": slug, "source_hostname": matched_url[:250],
                     "root_domain": domain, "country": country, "discovery_method": discovery_method,
