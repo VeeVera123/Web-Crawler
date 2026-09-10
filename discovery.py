@@ -440,6 +440,11 @@ SKIP_SLUGS = {
     "api", "www", "app", "static", "assets", "cdn", "docs", "help",
     "support", "blog", "login", "register", "test", "demo", "example",
     "staging", "dev", "sandbox", "admin", "",
+    # 2026-09: confirmed real archive_i row — ats.rippling.com/careers/jobs
+    # is Rippling's OWN careers page (bare "careers"), not a customer
+    # board; real customer boards on this platform always compound it
+    # ("routeware-careers", "asc-careers", ...), never use it bare.
+    "careers",
     # Defense-in-depth (2026-08): these are literal PATH SEGMENTS from
     # known widget/embed/API URL families, not real company slugs. A
     # converter that blindly trusts path.split("/")[0] without first
@@ -647,23 +652,50 @@ _ASSET_FILENAME_RE = re.compile(
     re.I,
 )
 _BARE_HEX_HASH_RE = re.compile(r"^[0-9a-f]{16,64}$", re.I)
+# 2026-09: confirmed via real archive_i rows (_url_to_slug_rippling) —
+# ats.rippling.com/{locale}/{company}/jobs puts the locale code where
+# Pattern 1 blindly grabs parts[0], so a locale-prefixed board URL stored
+# the LOCALE as the "company slug" instead. 12 confirmed real rows: de-DE,
+# en-AU, en-CA, en-GB, en-US, es-ES, fr-CA, fr-FR, nl-NL, pl-PL, pt-BR,
+# pt-PT. Added here (not just in the Rippling extractor) because a real
+# company slug matching this exact 2-letter or 2-letter-hyphen-2-letter
+# shape is not a realistic collision for any extractor that uses this
+# shared guard.
+_LOCALE_CODE_RE = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
 
 
 def _looks_like_real_slug(candidate: str) -> bool:
-    """Shared guard for path-segment-based extractors: rejects the two
-    confirmed-in-production shapes of "this isn't a company slug, it's an
-    asset" — a filename with a known static-asset extension, or a bare
-    hex hash/id with no extension at all (e.g. a CDN object key)."""
+    """Shared guard for path-segment-based extractors: rejects the
+    confirmed-in-production shapes of "this isn't a company slug" — a
+    filename with a known static-asset extension, a bare hex hash/id with
+    no extension at all (e.g. a CDN object key), or a bare locale code
+    (e.g. "en-US") picked up from a locale-prefixed path."""
     if not candidate:
         return False
     if _ASSET_FILENAME_RE.search(candidate):
         return False
     if _BARE_HEX_HASH_RE.match(candidate):
         return False
+    if _LOCALE_CODE_RE.match(candidate):
+        return False
     return True
 
 
 def _url_to_slug_rippling(url: str) -> str | None:
+    """2026-09 fix: two confirmed real archive_i contamination sources,
+    both from bare host.replace()/parts[0] not accounting for cases where
+    there's no real per-company segment to find:
+    (1) host == "rippling.com" exactly (no subdomain at all) survived
+        Pattern 2's `.replace(".rippling.com", "")` unchanged (that
+        substring isn't present without a leading-dot subdomain), so the
+        literal marketing domain got stored as slug "rippling.com" itself.
+        Now requires an actual subdomain to be present first.
+    (2) ats.rippling.com/{locale}/{company}/jobs (e.g. .../en-US/acme/jobs)
+        put the locale code in parts[0], which Pattern 1 took
+        unconditionally as "the company" — 12 confirmed real locale-code
+        rows (en-US, nl-NL, de-DE, ...). Now caught by
+        _looks_like_real_slug's locale-code rejection.
+    """
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "rippling.com" in host:
@@ -675,11 +707,15 @@ def _url_to_slug_rippling(url: str) -> str | None:
                 and parts[0].lower() not in SKIP_SLUGS
                 and _looks_like_real_slug(parts[0])):
             return parts[0]
-        # Pattern 2: {company}.rippling.com (subdomain-based)
-        slug = host.replace(".rippling.com", "").lower()
-        if (slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "ats")
-                and _looks_like_real_slug(slug)):
-            return slug
+        # Pattern 2: {company}.rippling.com (subdomain-based) — host must
+        # actually HAVE a subdomain (bare "rippling.com" has none, so the
+        # replace() below would otherwise leave the literal domain intact
+        # and it would sail through as a fake "slug").
+        if host != "rippling.com":
+            slug = host.replace(".rippling.com", "").lower()
+            if (slug and slug not in SKIP_SLUGS and slug not in ("www", "app", "ats")
+                    and _looks_like_real_slug(slug)):
+                return slug
     return None
 
 
