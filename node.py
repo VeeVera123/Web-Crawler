@@ -290,6 +290,17 @@ def target_countries_geo_form(style_countries: set[str]) -> set[str]:
 _URL_RE = re.compile(r'https?://[^\s"\'<>\\`]{4,300}', re.I)
 _MAX_CANDIDATE_URLS_PER_PAGE = 4000
 
+# Greenhouse's official URL shortener (grnh.se) — used across social
+# reshares and many job aggregators. Unlike every other URL_TO_SLUG
+# converter, a grnh.se link carries no tenant slug itself (it's an opaque
+# redirect) — resolving it needs a real HTTP fetch, not string parsing, so
+# it can't just be added to URL_TO_SLUG/_detect_ats_hits like the rest.
+# robots.txt on grnh.se disallows only /embed/ — confirmed live 2026-09 —
+# so a bare short link (grnh.se/<code>) is fair game; the regex excludes
+# /embed/ explicitly anyway, as a second guard.
+_GRNH_SE_RE = re.compile(r'https?://grnh\.se/(?!embed/)[A-Za-z0-9]+', re.I)
+_MAX_GRNH_SE_PER_PAGE = 3  # opportunistic bonus signal, not worth unbounded latency
+
 # _URL_RE stops at a literal quote but not an HTML-encoded one (&quot;)
 # or a curly/smart quote — both show up right after a URL sitting inside
 # an already-entity-escaped JS/JSON blob, and can run on for hundreds of
@@ -1398,6 +1409,33 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
         return None
 
 
+async def _resolve_grnh_se_hits(session: aiohttp.ClientSession, html: str,
+                                 stats: dict) -> list[tuple[str, str, str]]:
+    """Greenhouse short links (grnh.se) resolve via a real HTTP redirect —
+    reuses _fetch_page (already follows redirects, honors MAX_PAGE_BYTES/
+    REQUEST_TIMEOUT, and updates stats the same way every other fetch in
+    this file does) rather than a bespoke HEAD request. Capped at
+    _MAX_GRNH_SE_PER_PAGE resolutions per page — see that constant's
+    comment. Best-effort: a dead/broken short link just yields no hit,
+    same as any other failed fetch."""
+    hits: list[tuple[str, str, str]] = []
+    seen_short_urls: set[str] = set()
+    for short_url in _GRNH_SE_RE.findall(html):
+        if short_url in seen_short_urls:
+            continue
+        if len(seen_short_urls) >= _MAX_GRNH_SE_PER_PAGE:
+            break
+        seen_short_urls.add(short_url)
+        page = await _fetch_page(session, short_url, stats)
+        if not page:
+            continue
+        resolved_url, _ = page
+        slug = URL_TO_SLUG["greenhouse"](resolved_url)
+        if slug:
+            hits.append(("greenhouse", slug, resolved_url))
+    return hits
+
+
 async def _fetch_sitemap(session: aiohttp.ClientSession, origin: str, stats: dict):
     """Tier 3: guessed paths (SITEMAP_INDEX_PATHS). Tier 4, only if those
     both miss: robots.txt's `Sitemap:` directive — the actual standard way
@@ -1496,6 +1534,13 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                 parse_pool, _parse_detect, html_, url_, target_geo_countries)
             if country and best_country is None:
                 best_country, best_method = country, method
+            # grnh.se short links need a live HTTP redirect to resolve, so
+            # they can't run through _parse_detect's pure-string
+            # URL_TO_SLUG converters in the thread pool — resolved here
+            # instead, in the async context that actually has `session`.
+            grnh_hits = await _resolve_grnh_se_hits(session, html_, stats)
+            if grnh_hits:
+                hits = _collapse_hits([hits, grnh_hits])
             return hits, text_len, has_hiring_vocab
 
         hits, _, _ = await _detect(html, final_url)
