@@ -216,12 +216,23 @@ jobs:
 
   finalize:
     needs: [prepare-matrix, crawl]
-    # 2026-09: now ALWAYS runs (used to be gated on loop_runs=='true', so
-    # a plain non-looped dispatch never got a summary at all — see the
-    # "Print cumulative summary so far" step below, which every dispatch
-    # now reaches). Looping itself is still opt-in: the redispatch step
-    # further down only fires when loop_runs=='true' AND files are left.
-    if: always()
+    # 2026-09: runs on success OR failure (used to be gated on
+    # loop_runs=='true', so a plain non-looped dispatch never got a
+    # summary at all — see the "Print cumulative summary so far" step
+    # below, which every non-cancelled dispatch now reaches). Looping
+    # itself is still opt-in: the redispatch step further down only fires
+    # when loop_runs=='true' AND files are left.
+    #
+    # 2026-09 fix: was `always()`, which also ran finalize when the user
+    # manually cancelled the run — a cancelled shard never gets to clear
+    # its own crawl_checkpoints row (same as a time-budget stop), so the
+    # checkpoint-check step below saw "files left" and redispatched a
+    # whole new run the user had just tried to stop. `!cancelled()` keeps
+    # finalize running on success AND on a real failure (e.g. the exit-139
+    # segfault case this was built for) while skipping it entirely when
+    # the run was cancelled — cancelled() is true here both for a direct
+    # cancel and for `crawl` being cancelled as this job's dependency.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
