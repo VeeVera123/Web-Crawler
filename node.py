@@ -563,10 +563,10 @@ _ATS_VENDOR_DOMAINS = (
     # Occupop included even though it has no working scraper yet (see
     # discovery.py's SUPPORTED_ATS comment) — a page on occupop-careers.com
     # is still ATS-related, not in-house, regardless of whether this
-    # project can currently scrape it. Homerun deliberately NOT added
-    # here — its customers run on their OWN domain (jobs.{company-domain}),
-    # not a fixed vendor suffix, so there's nothing to list; a Homerun
-    # in-house-looking page will slip through this particular check.
+    # project can currently scrape it. (Homerun was never added here —
+    # its customers ran on their OWN domain, not a fixed vendor suffix —
+    # and was removed from this project entirely 2026-09; see discovery.py's
+    # SUPPORTED_ATS removal comment for the verified evidence.)
     "pageuppeople.com", "pinpointhq.com", "flatchr.io", "jobylon.com",
     "occupop-careers.com",
     # 2026-09: another round of well-known ATS/HCM vendor hosted-careers
