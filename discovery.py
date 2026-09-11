@@ -1329,7 +1329,31 @@ def _url_to_slug_pageup(url: str) -> str | None:
     PageUp's own robots.txt (matches a '/ci' disallow rule); the newer
     /{portalId}/fb/{lang} shape is not — prefer 'fb' when both are seen
     for the same portalId, but this extractor itself is shape-agnostic
-    and just returns whatever 'source' segment is actually in the URL."""
+    and just returns whatever 'source' segment is actually in the URL.
+
+    2026-09 fix: confirmed live via ~100 real archive_i rows that every
+    genuine PageUp portalId is a bare NUMERIC tenant code (820, 873,
+    1097, 1151, ...) — never an English word. Without this check, a
+    completely unrelated real-world path shape —
+    careers.pageuppeople.com/employees/{person-name} — false-positived
+    through undetected: "employees" is a fixed PageUp platform route (an
+    employee-directory/bio page, not a per-tenant careers board at all;
+    careers.pageuppeople.com/employees/ 404s on its own), and the actual
+    second path segment on every one of these was a person's first-name-
+    plus-last-initial (e.g. "damien-p", "celestine-h"), not a job-board
+    'source' tag. Over 60 confirmed-fake rows of this exact shape were
+    found live in production, all tagged 'employees|{name}', none a real
+    company. Requiring portal_id to be all-digits rejects this whole
+    class at the source instead of chasing each generic-word variant
+    individually.
+
+    NOTE: the 'source' segment deliberately does NOT go through the
+    shared _looks_like_real_slug() guard — that guard's locale-code
+    rejection (added for Rippling's locale-prefixed URLs) would reject
+    genuine PageUp source tags too, since real ones are routinely short
+    alphabetic codes shaped exactly like a locale ('cw', 'ci', 'fb') —
+    confirmed live: '1000|cw' etc. are real, already-captured production
+    rows. Only the SKIP_SLUGS check applies to source."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if "pageuppeople.com" not in host:
@@ -1337,8 +1361,7 @@ def _url_to_slug_pageup(url: str) -> str | None:
     parts = parsed.path.strip("/").split("/")
     if len(parts) >= 2 and parts[0] and parts[1]:
         portal_id, source = parts[0], parts[1]
-        if (portal_id.lower() not in SKIP_SLUGS and source.lower() not in SKIP_SLUGS
-                and _looks_like_real_slug(portal_id) and _looks_like_real_slug(source)):
+        if portal_id.isdigit() and source.lower() not in SKIP_SLUGS:
             return f"{portal_id}|{source}"
     return None
 
