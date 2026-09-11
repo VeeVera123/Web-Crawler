@@ -1945,10 +1945,25 @@ async def _upsert_rows(session: aiohttp.ClientSession, table: str, on_conflict: 
                     headers=headers, params={"on_conflict": on_conflict}, json=chunk,
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as r:
-                    if r.status >= 500:
+                    if r.status >= 400:
+                        # 2026-09: capture the response BODY for every
+                        # error status, not just >=500 — a 4xx (bad
+                        # request, constraint violation, etc.) used to
+                        # raise via r.raise_for_status() with only
+                        # "{status} {message} {url}" in the exception,
+                        # never the actual Postgres/PostgREST error detail
+                        # in the body, which is the one thing that would
+                        # actually explain WHY the write was rejected.
+                        # Confirmed live: a real archive_ii write failed
+                        # with nothing but "400 Bad Request" logged, giving
+                        # no way to diagnose the real cause without
+                        # guessing — this fix is what makes the NEXT
+                        # occurrence self-explanatory instead of a repeat
+                        # of that same blind guess.
                         last_err = f"{r.status} {await r.text()}"
-                        continue
-                    r.raise_for_status()
+                        if r.status >= 500:
+                            continue  # transient server error — worth retrying
+                        break  # 4xx — a retry won't fix a bad payload
                     return len(chunk)
             except Exception as e:
                 last_err = str(e)
