@@ -229,7 +229,7 @@ _JOB_LISTING_LINK_PHRASES = [
     "explore careers", "explore our careers", "explore jobs", "explore roles",
     "explore our roles", "explore open positions", "explore opportunities",
     "explore career opportunities", "explore all jobs", "explore current openings",
-    "explore job openings", "explore all positions", "explore open roles", "explore vacancies"
+    "explore job openings", "explore all positions", "explore open roles",
     "search jobs", "search openings", "search open positions", "search careers",
     "search all jobs", "search current openings", "search vacancies",
     "find a job", "find jobs", "find your next role", "find open positions",
@@ -1679,6 +1679,30 @@ async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession
     return results
 
 
+async def detect_page_hits(session: aiohttp.ClientSession, parse_pool: concurrent.futures.Executor,
+                            html: str, url: str, target_geo_countries: set[str],
+                            stats: dict) -> tuple[list[tuple[str, str, str]], str | None, str | None, int, bool]:
+    """Stateless core of crawl_one's per-page detection step (2026-09,
+    extracted so it can be shared with reclassify_archive_ii.py without
+    duplicating logic): runs _parse_detect in the thread pool, then merges
+    in any live grnh.se short-link resolution (needs a real HTTP redirect,
+    so it can't run inside _parse_detect's pure-string thread-pool call —
+    same reasoning as crawl_one's original inline version).
+
+    Returns (hits, country, method, text_len, has_hiring_vocab) — crawl_one's
+    local _detect wrapper additionally tracks best_country/best_method
+    across a whole domain crawl (nonlocal state this function has no need
+    for, since a reclassifier call only ever looks at one already-known
+    page at a time)."""
+    loop = asyncio.get_running_loop()
+    hits, country, method, text_len, has_hiring_vocab = await loop.run_in_executor(
+        parse_pool, _parse_detect, html, url, target_geo_countries)
+    grnh_hits = await _resolve_grnh_se_hits(session, html, stats)
+    if grnh_hits:
+        hits = _collapse_hits([hits, grnh_hits])
+    return hits, country, method, text_len, has_hiring_vocab
+
+
 # ── the crawl ────────────────────────────────────────────────────────────
 
 async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, domain: str,
@@ -1735,17 +1759,10 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
 
         async def _detect(html_, url_):
             nonlocal best_country, best_method
-            hits, country, method, text_len, has_hiring_vocab = await loop.run_in_executor(
-                parse_pool, _parse_detect, html_, url_, target_geo_countries)
+            hits, country, method, text_len, has_hiring_vocab = await detect_page_hits(
+                session, parse_pool, html_, url_, target_geo_countries, stats)
             if country and best_country is None:
                 best_country, best_method = country, method
-            # grnh.se short links need a live HTTP redirect to resolve, so
-            # they can't run through _parse_detect's pure-string
-            # URL_TO_SLUG converters in the thread pool — resolved here
-            # instead, in the async context that actually has `session`.
-            grnh_hits = await _resolve_grnh_se_hits(session, html_, stats)
-            if grnh_hits:
-                hits = _collapse_hits([hits, grnh_hits])
             return hits, text_len, has_hiring_vocab
 
         hits, home_text_len, home_hiring_vocab = await _detect(html, final_url)
