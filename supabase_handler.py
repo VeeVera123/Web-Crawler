@@ -780,6 +780,48 @@ def touch_archive_ii_last_seen(website_urls: set[str]) -> int:
     return touched
 
 
+def delete_archive_ii_rows(website_urls: set[str]) -> int:
+    """Removes rows from archive_ii, keyed on website_url (archive_ii's
+    identity key — see write_career_pages_to_archive_ii). 2026-09, added
+    for reclassify_archive_ii.py: when a row's career page turns out to
+    actually belong to a known ATS (found via node.py's same detection
+    path node.py's crawl_one already uses), it gets promoted to archive_i
+    via write_ats_hits_to_archive_i and the now-redundant archive_ii row
+    is deleted here — otherwise it would sit in both tables forever,
+    double-counted and still fed to Crawl II's heuristic scraper for no
+    reason.
+
+    Mirrors touch_archive_ii_last_seen's style exactly (same chunking,
+    same headers/REST/http_requests plumbing) but issues a real DELETE
+    instead of a PATCH. A website_url with no matching row just deletes 0
+    rows — never an error — same as a PATCH touching 0 rows above."""
+    if not website_urls:
+        return 0
+    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
+    urls = list(website_urls)
+
+    CHUNK = 100  # URLs per DELETE call — same chunk size as the touch function above
+    deleted = 0
+    for i in range(0, len(urls), CHUNK):
+        chunk = urls[i:i + CHUNK]
+        try:
+            r = http_requests.delete(
+                f"{REST}/archive_ii", headers=headers,
+                params={"website_url": f"in.({','.join(chunk)})"},
+                timeout=60,
+            )
+            r.raise_for_status()
+            deleted += _content_range_count(r, len(chunk))
+        except Exception as e:
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f" | body: {resp.text[:500]}"
+            log.error(f"Supabase delete (archive_ii) failed for chunk of {len(chunk)}: {e}{detail}")
+    log.info(f"Deleted {deleted}/{len(website_urls)} promoted/stale rows from archive_ii")
+    return deleted
+
+
 # ── Job insertion ────────────────────────────────────────
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
