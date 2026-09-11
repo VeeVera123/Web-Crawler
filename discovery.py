@@ -589,15 +589,46 @@ def _url_to_slug_bamboohr(url: str) -> str | None:
     return None
 
 
+# 2026-09: real confirmed iCIMS customer subdomains, found live — the
+# original code only stripped a leading "careers-", but real customers
+# also use "jobs-" (jobs-selective.icims.com — the exact case that let a
+# real company's iCIMS backend go unrecognized: selective.com/careers
+# links to jobs.selective.com, which itself links to
+# jobs-selective.icims.com), "jobs1-"/"jobs2-" (jobs1-donohoe.icims.com),
+# and a 2-letter locale glued onto "careers" (encareers-cmh.icims.com,
+# uscareers-acuren.icims.com). \d* covers a trailing digit some of these
+# carry (jobs1-, jobs2-); the trailing "-" is required so a company whose
+# real name happens to START with one of these words (no separator) is
+# never touched — e.g. a hypothetical "jobsco.icims.com" keeps its full
+# name, since "jobsco" has no "-" after "jobs".
+_ICIMS_PORTAL_PREFIX_RE = re.compile(
+    r"^(?:[a-z]{2}careers\d*|careers\d*|career\d*|jobs\d*|hiring|employment|recruiting|talent)-",
+    re.I,
+)
+
+
 def _url_to_slug_icims(url: str) -> str | None:
+    """Pattern: {optional-portal-prefix-}{company}.icims.com — see
+    _ICIMS_PORTAL_PREFIX_RE's comment for the confirmed real prefixes.
+
+    2026-09 fix: host check was a bare `"icims.com" in host` substring,
+    same bug class as Rippling's — it also matched iCIMS's own bare
+    marketing domain (icims.com itself), which would have survived the
+    prefix-strip untouched and been stored as the literal slug
+    "icims.com". Switched to a suffix check (host.endswith(".icims.com")),
+    which excludes the bare root domain automatically — no special case
+    needed, unlike Rippling's fix (icims.com's own subdomain form always
+    has a leading dot to require). iCIMS's OWN careers hub
+    (careers.icims.com) is still separately caught by SKIP_SLUGS
+    containing "careers" (added during the Rippling fix)."""
     parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if "icims.com" in host:
-        # Pattern: careers-{slug}.icims.com or {slug}.icims.com
-        slug = host.replace(".icims.com", "").lower()
-        slug = re.sub(r"^careers-", "", slug)
-        if slug and slug not in SKIP_SLUGS:
-            return slug
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(".icims.com"):
+        return None
+    slug = host[:-len(".icims.com")]
+    slug = _ICIMS_PORTAL_PREFIX_RE.sub("", slug)
+    if slug and slug not in SKIP_SLUGS:
+        return slug
     return None
 
 
