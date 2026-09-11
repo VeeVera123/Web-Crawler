@@ -822,6 +822,64 @@ def delete_archive_ii_rows(website_urls: set[str]) -> int:
     return deleted
 
 
+def update_archive_ii_career_pages(updates: list[dict]) -> int:
+    """Updates career_page_url in place for existing archive_ii rows, keyed
+    on website_url. 2026-09, added for reclassify_archive_ii.py: when a row
+    has no known ATS but a better in-house page is found one hop away, this
+    is what points the row at it.
+
+    A real PATCH, NOT node.py's write_career_pages_to_archive_ii upsert —
+    confirmed live (2026-09) that upsert path hits the EXACT SAME bug class
+    already fixed once in touch_archive_ii_last_seen above: a website_url
+    read back from archive_ii that doesn't byte-for-byte match what's
+    actually stored (a stray normalization difference — www vs bare domain,
+    trailing slash, etc. — a real, pre-existing archive_ii data-quality
+    issue, not something this function can fix) makes PostgREST treat it as
+    a fresh row and fall back to an INSERT — and reclassify_archive_ii.py's
+    payload only ever carries {career_page_url, website_url}, so that
+    fallback INSERT violates archive_ii.discovery_method's NOT NULL
+    constraint and kills the WHOLE CHUNK's write, including every other,
+    perfectly matching row batched alongside it. (Confirmed via the actual
+    production error: "null value in column 'discovery_method' ... violates
+    not-null constraint", on rows the reclassifier never intended to
+    insert at all — only ever to update.)
+
+    A PATCH can't insert, so a genuinely-mismatched website_url just
+    updates 0 rows (countable, logged, harmless) instead of taking down
+    every other update batched with it. The one real cost: each row here
+    carries a DIFFERENT target career_page_url (unlike touch's single
+    shared timestamp or delete's single filter), so — unlike those two —
+    this can't be batched into one PATCH per chunk of 100 URLs; it's one
+    PATCH per row. Still cheap (a single-row filtered UPDATE) and only
+    runs once, after this shard's whole scan is already done."""
+    if not updates:
+        return 0
+    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
+    updated = 0
+    for row in updates:
+        website_url = row.get("website_url")
+        career_page_url = row.get("career_page_url")
+        if not website_url or not career_page_url:
+            continue
+        try:
+            r = http_requests.patch(
+                f"{REST}/archive_ii", headers=headers,
+                json={"career_page_url": career_page_url},
+                params={"website_url": f"eq.{website_url}"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            updated += _content_range_count(r, 1)
+        except Exception as e:
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f" | body: {resp.text[:500]}"
+            log.error(f"Supabase career_page_url update failed for {website_url}: {e}{detail}")
+    log.info(f"Updated career_page_url for {updated}/{len(updates)} archive_ii rows with a better in-house page")
+    return updated
+
+
 # ── Job insertion ────────────────────────────────────────
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
