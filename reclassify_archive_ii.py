@@ -26,8 +26,15 @@ exactly one of three things per row:
     needed) and delete the now-redundant row from archive_ii.
   - UPDATE: still no known ATS, but the follow-step turns up a longer/
     better-qualified in-house page than the one currently on file -> the
-    archive_ii row's career_page_url is updated in place (same upsert-on-
-    website_url path write_career_pages_to_archive_ii already uses).
+    archive_ii row's career_page_url is updated in place via a real PATCH
+    (supabase_handler.update_archive_ii_career_pages), NOT node.py's
+    write_career_pages_to_archive_ii upsert — confirmed live (2026-09) that
+    the upsert path hits archive_ii's existing website_url-normalization
+    data-quality issue (same bug class touch_archive_ii_last_seen was
+    already fixed for) and, since this script's update payload has no
+    discovery_method, a resulting fallback INSERT violates that column's
+    NOT NULL constraint and takes out the WHOLE CHUNK's write. See
+    update_archive_ii_career_pages's own docstring for the full story.
   - LEAVE ALONE: page unreachable, or nothing better found than what's
     already on file -> no write at all.
 
@@ -58,10 +65,10 @@ sys.path.insert(0, _MAIN_DIR)
 
 import node  # noqa: E402 — reuse detect_page_hits, _follow_career_listing_links,
              # _best_inhouse_candidate, _fetch_page, _collapse_hits, new_connector,
-             # new_parse_pool, write_ats_hits_to_archive_i, write_career_pages_to_archive_ii
+             # new_parse_pool, write_ats_hits_to_archive_i
 from supabase_handler import (  # noqa: E402
-    get_archive_ii_pages, delete_archive_ii_rows, SupabaseFetchError,
-    log_egress_summary,
+    get_archive_ii_pages, delete_archive_ii_rows, update_archive_ii_career_pages,
+    SupabaseFetchError, log_egress_summary,
 )
 
 logging.basicConfig(
@@ -242,8 +249,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
 
             written_archive_ii = 0
             if update_rows:
-                written_archive_ii = await node.write_career_pages_to_archive_ii(session, update_rows)
-                log.info(f"  → {written_archive_ii}/{len(update_rows)} archive_ii rows updated with a better in-house page")
+                written_archive_ii = update_archive_ii_career_pages(update_rows)
     finally:
         parse_pool.shutdown(wait=False)
 
