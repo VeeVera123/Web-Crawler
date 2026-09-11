@@ -37,6 +37,15 @@ Two independent extraction methods, tried in order, per archive_ii page:
      trusted. This confirmation fetch is the single biggest lever against
      letting junk in, and is deliberately not skipped to save requests.
 
+  3. (2026-09) If BOTH of the above find nothing, the page is checked for
+     an "Explore Roles"/"View All Jobs"-style outbound link — the sign of
+     a landing/stub page whose real listings sit one click away, possibly
+     on a different domain — via node._extract_job_listing_link_candidates
+     (the exact same detector/vocabulary node.py's own crawl uses). The
+     single best-scoring link found is followed and re-run through
+     methods 1 and 2 above. See extract_postings_from_page and
+     MAX_CAREER_LINK_FOLLOW for the bounds on this.
+
 Every surviving posting — from either method — still goes through the
 EXACT SAME role/location/visa classification funnel Crawl I uses
 (classifier.py: keyword_classify_role → ai_classify_roles,
@@ -113,6 +122,31 @@ CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "60"))
 TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_II_TIME_BUDGET_MINUTES", "300"))
 BATCH_SIZE = int(os.environ.get("CRAWL_II_BATCH_SIZE", "300"))  # pages per micro-batch before pushing
 MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches for one company
+
+# 2026-09: an archive_ii page that yields NOTHING via either JSON-LD or
+# the heuristic repeated-card detector is exactly the shape of a landing/
+# stub page whose real listings sit one click away behind a button
+# ("Explore Roles", "View All Jobs", ...) — the SAME gap node.py's
+# crawl_one fixed for its own tiers, now confirmed to affect a real,
+# already-captured slice of the 120k+ archive_ii pages this file
+# re-crawls every run. Reuses node.py's shared link-candidate detector
+# and phrase list verbatim (node._extract_job_listing_link_candidates) —
+# one vocabulary, not a second copy that could drift out of sync.
+#
+# Deliberately tighter than node.py's per-tier cap of 3: a followed page
+# here can ITSELF trigger up to MAX_HEURISTIC_CANDIDATES_PER_PAGE (25)
+# further detail-page fetches if it turns out to be a real heuristic-
+# shaped listings page — so each follow attempt already carries a much
+# bigger worst-case cost here than it does in node.py (where a followed
+# page is only ever detected against URL_TO_SLUG + hiring-vocab text, no
+# further fan-out). Capping at 1 (the single best-scoring candidate link)
+# keeps that worst case bounded to +1 request on a genuine dead end, and
+# +up to 26 on a genuine find — a real cost increase across 120k+ pages,
+# but a bounded and self-limiting one (a page with nothing worth
+# following costs exactly one extra parse, no extra network request).
+# Overridable via env var without a redeploy if a shard run shows the
+# added cost needs tuning against TIME_BUDGET_MINUTES/CRAWL_CONCURRENCY.
+MAX_CAREER_LINK_FOLLOW = int(os.environ.get("CRAWL_II_MAX_LINK_FOLLOW", "1"))
 
 
 # ── Sharding (same deterministic hash approach as crawl_i.py's _shard_of) ──
@@ -527,11 +561,13 @@ def _company_name_from_domain(website_url: str) -> str:
 
 # ── Per-page extraction ─────────────────────────────────────────────────
 
-async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                                      page: dict, stats: dict,
-                                      parse_pool: concurrent.futures.Executor) -> list[dict]:
-    """page: {"career_page_url","website_url"}. Returns candidate job dicts
-    — NOT yet role/location filtered, see _run_pipeline_ii for that.
+async def _extract_via_jsonld_or_heuristic(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                                            html: str, page_url: str, company: str, stats: dict,
+                                            parse_pool: concurrent.futures.Executor) -> list[dict]:
+    """The actual JSON-LD-then-heuristic extraction, factored out of
+    extract_postings_from_page so a page reached via the 2026-09 link-
+    follow step below gets IDENTICAL treatment to the original page —
+    not a second, potentially-drifting copy of the same logic.
 
     2026-08 — two real bottlenecks fixed here:
 
@@ -550,24 +586,16 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
        25 candidates. Now fetched concurrently via asyncio.gather (same
        per-fetch semaphore gating as before, just no longer serialized)."""
     loop = asyncio.get_running_loop()
-    async with sem:
-        fetched = await node._fetch_page(session, page["career_page_url"], stats)
-    if not fetched:
-        stats["page_unreachable"] += 1
-        return []
-    final_url, html = fetched
-    company = _company_name_from_domain(page["website_url"])
 
-    jsonld_jobs = await loop.run_in_executor(parse_pool, _extract_jsonld_jobs, html, final_url, company)
+    jsonld_jobs = await loop.run_in_executor(parse_pool, _extract_jsonld_jobs, html, page_url, company)
     if jsonld_jobs:
         stats["jsonld_pages"] += 1
         stats["jsonld_postings"] += len(jsonld_jobs)
         await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j) for j in jsonld_jobs))
         return jsonld_jobs
 
-    candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, final_url)
+    candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, page_url)
     if not candidates:
-        stats["no_postings_found"] += 1
         return []
     stats["heuristic_pages"] += 1
     candidates = candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
@@ -585,6 +613,64 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     stats["heuristic_postings"] += len(confirmed)
     await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j) for j in confirmed))
     return confirmed
+
+
+async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                                      page: dict, stats: dict,
+                                      parse_pool: concurrent.futures.Executor) -> list[dict]:
+    """page: {"career_page_url","website_url"}. Returns candidate job dicts
+    — NOT yet role/location filtered, see _run_pipeline_ii for that.
+
+    2026-09: if neither JSON-LD nor the heuristic detector finds ANYTHING
+    on this page, that's exactly the signature of a landing/stub page
+    whose real listings sit one click away behind a button ("Explore
+    Roles", "View All Jobs", ...) — confirmed to be a real, non-trivial
+    slice of archive_ii's 120k+ already-captured pages, same root cause
+    node.py's crawl_one fixed for its own discovery tiers. Follows the
+    single best-scoring candidate link (MAX_CAREER_LINK_FOLLOW — see its
+    comment for why this is intentionally tighter than node.py's cap of
+    3) found via node._extract_job_listing_link_candidates (the SAME
+    detector and phrase list node.py uses — one shared vocabulary, so
+    node.py and this file can never silently drift apart on what counts
+    as a "go look at jobs" link) and retries the IDENTICAL extraction on
+    whatever it finds. A dead end here costs exactly one extra parse (no
+    network request); a real find costs one extra fetch plus whatever
+    that page's own extraction needs — same bounded, best-effort pattern
+    as every other fetch in this pipeline."""
+    async with sem:
+        fetched = await node._fetch_page(session, page["career_page_url"], stats)
+    if not fetched:
+        stats["page_unreachable"] += 1
+        return []
+    final_url, html = fetched
+    company = _company_name_from_domain(page["website_url"])
+
+    postings = await _extract_via_jsonld_or_heuristic(session, sem, html, final_url, company, stats, parse_pool)
+    if postings:
+        return postings
+
+    loop = asyncio.get_running_loop()
+    link_candidates = await loop.run_in_executor(
+        parse_pool, node._extract_job_listing_link_candidates, html, final_url)
+    ranked = sorted(link_candidates, key=lambda kv: -kv[1])[:MAX_CAREER_LINK_FOLLOW]
+
+    for url, _score in ranked:
+        if url == final_url:
+            continue
+        async with sem:
+            followed = await node._fetch_page(session, url, stats)
+        stats["career_link_follow_attempted"] += 1
+        if not followed:
+            continue
+        followed_url, followed_html = followed
+        postings = await _extract_via_jsonld_or_heuristic(
+            session, sem, followed_html, followed_url, company, stats, parse_pool)
+        if postings:
+            stats["career_link_follow_found_postings"] += 1
+            return postings
+
+    stats["no_postings_found"] += 1
+    return []
 
 
 # ── Description-text global-hiring enrichment (2026-09, Crawl II only) ──
@@ -885,6 +971,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
         "page_unreachable": 0, "jsonld_pages": 0, "jsonld_postings": 0,
         "heuristic_pages": 0, "heuristic_postings": 0, "no_postings_found": 0,
         "apply_page_augmented": 0,
+        "career_link_follow_attempted": 0, "career_link_follow_found_postings": 0,
     }
     sem = asyncio.Semaphore(CRAWL_CONCURRENCY)
     connector = new_connector()
@@ -913,6 +1000,8 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     log.info(f"  Unreachable/no-signal: {stats['page_unreachable']} pages unreachable, "
              f"{stats['no_postings_found']} pages with no postings found")
     log.info(f"  Apply-page augmented: {stats['apply_page_augmented']} postings enriched with apply URL")
+    log.info(f"  Career-link follow: {stats['career_link_follow_attempted']} links followed, "
+             f"{stats['career_link_follow_found_postings']} of those pages had postings")
 
     log_egress_summary(label=f"crawl_ii shard {shard}/{total_shards}")
 
