@@ -191,6 +191,33 @@ async def _run_shard(shard: int, total_shards: int) -> None:
                 log.info(f"  ...{min(i + BATCH, len(rows))}/{len(rows)} rows checked "
                          f"({len(promote_website_urls)} to promote, {len(update_rows)} to update so far)")
 
+            # 2026-09 fix: dedupe by each write's own on_conflict key before
+            # sending. A single upsert command touching the same conflict
+            # key twice is a hard Postgres error ("ON CONFLICT DO UPDATE
+            # command cannot affect row a second time", 21000), not a
+            # per-row failure — it kills the WHOLE chunk. Unlike a normal
+            # crawl_one domain crawl (one company at a time, already
+            # internally deduped via _collapse_hits), this script processes
+            # thousands of INDEPENDENT archive_ii rows in one shard, so two
+            # different rows landing on the same (ats, slug) — e.g. two
+            # stray archive_ii entries for the same company under slightly
+            # different URLs — or, in principle, the same website_url
+            # appearing twice, is a real possibility here that the shared
+            # write helpers were never built to defend against. Confirmed
+            # live: this exact class of error is what caused shard 12/20's
+            # entire archive_i AND archive_ii write to fail after a
+            # otherwise-successful 6,031-row run.
+            if len(promote_hit_rows) != len({(r["ats"], r["slug"]) for r in promote_hit_rows}):
+                before = len(promote_hit_rows)
+                promote_hit_rows = list({(r["ats"], r["slug"]): r for r in promote_hit_rows}.values())
+                log.warning(f"  {before - len(promote_hit_rows)} duplicate (ats, slug) hit(s) collapsed "
+                            f"before writing to archive_i (same slug found via >1 archive_ii row)")
+            if len(update_rows) != len({r["website_url"] for r in update_rows}):
+                before = len(update_rows)
+                update_rows = list({r["website_url"]: r for r in update_rows}.values())
+                log.warning(f"  {before - len(update_rows)} duplicate website_url update(s) collapsed "
+                            f"before writing to archive_ii")
+
             written_archive_i = 0
             if promote_hit_rows:
                 written_archive_i = await node.write_ats_hits_to_archive_i(session, promote_hit_rows)
