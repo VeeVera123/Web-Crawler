@@ -229,7 +229,7 @@ _JOB_LISTING_LINK_PHRASES = [
     "explore careers", "explore our careers", "explore jobs", "explore roles",
     "explore our roles", "explore open positions", "explore opportunities",
     "explore career opportunities", "explore all jobs", "explore current openings",
-    "explore job openings", "explore all positions", "explore open roles",
+    "explore job openings", "explore all positions", "explore open roles", "explore vacancies"
     "search jobs", "search openings", "search open positions", "search careers",
     "search all jobs", "search current openings", "search vacancies",
     "find a job", "find jobs", "find your next role", "find open positions",
