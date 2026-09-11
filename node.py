@@ -197,6 +197,123 @@ def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
     words = [w for w in segments[-1].split("-") if w]
     return len(words) > max_words
 
+
+# 2026-09: real confirmed gap — infotech.com's /about/careers page (one of
+# CAREER_PATHS' own guesses) is a pure landing page; its actual listings
+# sit behind an "Explore Roles" button that goes to
+# recruiting.ultipro.ca/... — a completely different domain, never
+# fetched by anything above (homepage/CAREER_PATHS/sitemap only ever
+# fetch URLs this project builds itself; nothing follows a link found
+# INSIDE a fetched page's own HTML to reach a further page). See
+# _follow_career_listing_links below for the one-hop fix. Deliberately
+# wide phrase list — missing a real "Explore Roles"/"View All Jobs"
+# button silently drops every job behind it, so a false-positive follow
+# (one wasted, harmless fetch) is far cheaper than a false-negative skip
+# (a company's entire job list never captured). Distinct from
+# _STRONG_HIRING_PHRASES above: that list mostly describes a page's own
+# hiring content ("we're hiring", "join our team"); this one is phrases
+# someone would actually CLICK to go look at jobs elsewhere.
+_JOB_LISTING_LINK_PHRASES = [
+    "view all jobs", "view jobs", "view open positions", "view open roles",
+    "view careers", "view our jobs", "view our careers", "view our openings",
+    "view current openings", "view all openings", "view all roles", "view roles",
+    "view all vacancies", "view vacancies", "view all positions", "view positions",
+    "view job openings", "view current job openings", "view open jobs",
+    "see all jobs", "see open positions", "see open roles", "see our openings",
+    "see careers", "see all openings", "see current openings", "see all positions",
+    "see all vacancies", "see open jobs", "see job openings",
+    "browse jobs", "browse careers", "browse openings", "browse open positions",
+    "browse our jobs", "browse all jobs", "browse vacancies", "browse job openings",
+    "browse open roles", "browse current openings", "browse career opportunities",
+    "browse positions", "browse roles", "browse all positions",
+    "explore careers", "explore our careers", "explore jobs", "explore roles",
+    "explore our roles", "explore open positions", "explore opportunities",
+    "explore career opportunities", "explore all jobs", "explore current openings",
+    "explore job openings", "explore all positions", "explore open roles",
+    "search jobs", "search openings", "search open positions", "search careers",
+    "search all jobs", "search current openings", "search vacancies",
+    "find a job", "find jobs", "find your next role", "find open positions",
+    "find our openings", "find current openings", "find open roles",
+    "job board", "careers page", "our jobs", "our openings", "our careers",
+    "our current openings", "our open positions", "our open roles", "our vacancies",
+    "current openings", "current opportunities", "current vacancies",
+    "current job openings", "current job opportunities",
+    "open positions", "open roles", "job openings", "job opportunities",
+    "all open positions", "all open roles", "all current openings",
+    "all job openings", "all vacancies", "all positions", "all roles",
+    "latest openings", "latest jobs", "latest vacancies", "latest job openings",
+    "check out our openings", "check our openings", "check out our jobs",
+    "career opportunities", "join our team", "join the team",
+]
+_JOB_LISTING_LINK_RE = re.compile(
+    "|".join(re.escape(p) for p in set(_JOB_LISTING_LINK_PHRASES)), re.I)
+
+# Bounded PER TIER (all pages fetched at that tier combined), not per
+# page — keeps the added request cost predictable regardless of how many
+# of CAREER_PATHS' ~30 guesses happened to 200. Ranked by score first
+# (see _extract_job_listing_link_candidates), so if more real candidates
+# exist than this cap, the strongest signals win rather than an arbitrary
+# generic CTA crowding out a clearly job-shaped link.
+_MAX_CAREER_LINK_FOLLOW_PER_TIER = 3
+
+
+def _extract_job_listing_link_candidates(html: str, base_url: str) -> list[tuple[str, int]]:
+    """Finds outbound links on an already-fetched page that look like
+    they lead to an ACTUAL job-listings page from what is otherwise just
+    a landing/stub page — e.g. a "/careers" page whose real openings sit
+    one click away behind a button, possibly on a completely different
+    domain (an in-house build hosted elsewhere, or an unrecognized ATS
+    vendor). Two independent signals, EITHER sufficient on its own (a
+    real link rarely fails both, but a false negative here means an
+    entire company's jobs never get captured, so this errs toward
+    inclusion):
+      (1) visible link text — or aria-label/title, for icon-only buttons
+          — matches a phrase someone would click to go look at jobs
+          (_JOB_LISTING_LINK_RE)
+      (2) the link's own URL path matches CAREER_LIKE_RE (the same
+          job-shaped-path check already used for sitemap URLs), with the
+          same blog-post/sentence-slug false-positive exclusions already
+          proven out there
+    A link matching BOTH signals scores higher than one matching only
+    one, so ranking (done by the caller) prefers the strongest evidence
+    when the per-tier follow cap can't take every candidate. Returns
+    (url, score) pairs; never raises — a malformed page just yields no
+    candidates, same as every other best-effort parse in this file."""
+    candidates: dict[str, int] = {}
+    try:
+        tree = LexborHTMLParser(html)
+        for a_node in tree.css("a[href]"):
+            href = a_node.attributes.get("href")
+            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+            try:
+                url = _clean_extracted_url(urljoin(base_url, href))
+            except ValueError:
+                continue
+            if not url:
+                continue
+            text_sources = " ".join([
+                a_node.text(strip=True) or "",
+                a_node.attributes.get("aria-label") or "",
+                a_node.attributes.get("title") or "",
+            ])
+            score = 0
+            if _JOB_LISTING_LINK_RE.search(text_sources):
+                score += 1
+            path = urlparse(url).path
+            if (CAREER_LIKE_RE.search(path)
+                    and not _BLOG_LIKE_PATH_RE.search(path)
+                    and not _looks_like_sentence_slug(path)):
+                score += 1
+            if score == 0:
+                continue
+            if score > candidates.get(url, -1):
+                candidates[url] = score
+    except Exception:
+        pass  # a malformed page shouldn't kill the crawl of this company
+    return list(candidates.items())
+
+
 # archive_iii quality gate (2026-08): a career-path/sitemap fetch that
 # 200'd isn't automatically "a real career page" — plenty of sites soft-
 # redirect any unknown path back to the homepage with a 200 status, or
@@ -1474,6 +1591,94 @@ def _collapse_hits(hit_lists: list[list[tuple[str, str, str]]]) -> list[tuple[st
     return merged
 
 
+async def _gather_page_candidates(detect_fn, pages: list[tuple[str, str] | None]) -> list[dict]:
+    """Runs crawl_one's shared per-page detection (the `_detect` closure,
+    passed in as detect_fn) over a batch of already-fetched (url, html)
+    pairs and returns the candidate-dict shape used throughout crawl_one's
+    ATS/in-house tiers — INCLUDING the raw html (unlike before this was
+    factored out), since _follow_career_listing_links needs it to look
+    for a deeper "explore roles"-style link on pages that had no direct
+    hit. A None entry (a fetch that failed/timed out/wasn't HTML) is
+    silently skipped, same as every tier already did inline."""
+    out = []
+    for p in pages:
+        if not p:
+            continue
+        url, html_ = p
+        hits, text_len, has_hiring_vocab = await detect_fn(html_, url)
+        out.append({"url": url, "html": html_, "hits": hits,
+                     "text_len": text_len, "has_hiring_vocab": has_hiring_vocab})
+    return out
+
+
+async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession,
+                                        candidates: list[dict], already_fetched: set[str],
+                                        stats: dict) -> list[dict]:
+    """One bounded extra hop past landing/stub pages that had NO ATS hit,
+    looking for the actual job-listings page behind a button like
+    "Explore Roles" / "View All Jobs" — the exact gap that let a real
+    company (a /about/careers page linking out to a UKG board on a
+    completely different domain) get recorded with no jobs at all
+    despite genuinely having open roles, confirmed 2026-09.
+
+    Pools candidate links across EVERY page in `candidates` (not per
+    page) and takes the top-scoring _MAX_CAREER_LINK_FOLLOW_PER_TIER
+    overall, so the added cost stays predictable regardless of how many
+    pages this tier fetched. Cross-domain links are followed exactly as
+    readily as same-domain ones — the whole point is reaching content at
+    a location this project doesn't control (an in-house board on a
+    different subdomain, or hosted by a vendor entirely).
+
+    Each followed page gets:
+      (1) a direct URL_TO_SLUG check against the FINAL, redirect-resolved
+          URL — catches a same-site "apply" proxy link that 302s straight
+          to a known ATS board, the same pattern _resolve_grnh_se_hits
+          already uses for grnh.se, generalized to every known ATS; and
+      (2) the exact same detection (detect_fn) every other tier in
+          crawl_one uses on the page's own content — so a real ATS hit
+          reachable only through this link is merged in exactly like a
+          hit from any other tier, and a genuine in-house listings page
+          (more text, more hiring vocabulary) becomes another
+          _best_inhouse_candidate() contender.
+
+    `already_fetched` is shared and mutated across every tier of a single
+    crawl_one call — never re-fetches a URL this domain's crawl has
+    already tried anywhere (homepage, a CAREER_PATHS guess, a sitemap
+    page, or an earlier follow hop), and a followed link never gets
+    followed a second time from a later tier either. Best-effort
+    throughout: a dead link, a timeout, or a page that turns out to be
+    nothing just yields one fewer candidate, never an error — matching
+    every other fetch in this file."""
+    link_pool: dict[str, int] = {}
+    for c in candidates:
+        if c["hits"]:
+            continue  # already resolved via this page's own content — nothing to dig for
+        for url, score in _extract_job_listing_link_candidates(c["html"], c["url"]):
+            if url in already_fetched:
+                continue
+            if score > link_pool.get(url, -1):
+                link_pool[url] = score
+    ranked = sorted(link_pool.items(), key=lambda kv: -kv[1])[:_MAX_CAREER_LINK_FOLLOW_PER_TIER]
+
+    results = []
+    for url, _score in ranked:
+        already_fetched.add(url)
+        page = await _fetch_page(session, url, stats)
+        stats["career_link_follow_attempted"] += 1
+        if not page:
+            continue
+        resolved_url, page_html = page
+        already_fetched.add(resolved_url)
+        direct_hits = _detect_ats_hits({resolved_url})
+        page_hits, page_text_len, page_hiring_vocab = await detect_fn(page_html, resolved_url)
+        merged_hits = _collapse_hits([direct_hits, page_hits])
+        if merged_hits:
+            stats["career_link_follow_ats_hit"] += 1
+        results.append({"url": resolved_url, "html": page_html, "hits": merged_hits,
+                         "text_len": page_text_len, "has_hiring_vocab": page_hiring_vocab})
+    return results
+
+
 # ── the crawl ────────────────────────────────────────────────────────────
 
 async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, domain: str,
@@ -1543,7 +1748,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                 hits = _collapse_hits([hits, grnh_hits])
             return hits, text_len, has_hiring_vocab
 
-        hits, _, _ = await _detect(html, final_url)
+        hits, home_text_len, home_hiring_vocab = await _detect(html, final_url)
         if hits:
             stats["hits_from_homepage"] += 1
             stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
@@ -1552,24 +1757,54 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
 
         origin_parts = urlparse(final_url)
         origin = f"{origin_parts.scheme}://{origin_parts.netloc}"
+        # Shared across every tier below — never re-fetch a URL this
+        # domain's crawl has already tried anywhere (homepage, a
+        # CAREER_PATHS guess, a sitemap page, or an earlier follow hop).
+        already_fetched: set[str] = {final_url}
+
+        # 2026-09: before spending 30 guessed-path fetches, check whether
+        # the homepage ITSELF already links straight to the real listings
+        # via an "Explore Roles"/"View All Jobs"-style button — cheap (at
+        # most _MAX_CAREER_LINK_FOLLOW_PER_TIER extra fetches) and catches
+        # the exact real-world shape this was built for: a nav link
+        # straight to the real board, possibly on a completely different
+        # domain, that CAREER_PATHS' fixed guess list would never
+        # independently stumble onto. See _follow_career_listing_links.
+        homepage_as_candidate = [{"url": final_url, "html": html, "hits": [],
+                                   "text_len": home_text_len, "has_hiring_vocab": home_hiring_vocab}]
+        homepage_link_candidates = await _follow_career_listing_links(
+            _detect, session, homepage_as_candidate, already_fetched, stats)
+        merged = _collapse_hits([c["hits"] for c in homepage_link_candidates])
+        if merged:
+            stats["hits_from_homepage_link"] += 1
+            stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
+            return ([(ats, slug, url, domain, "homepage_link", best_country, best_method) for ats, slug, url in merged],
+                    None)
+
+        career_path_urls = [u for p in CAREER_PATHS
+                             if (u := urljoin(origin, p)) not in already_fetched]
         career_pages = await asyncio.gather(
-            *[_fetch_page(session, urljoin(origin, p), stats) for p in CAREER_PATHS])
-        career_candidates = []
+            *[_fetch_page(session, u, stats) for u in career_path_urls])
         for cp in career_pages:
-            if not cp:
-                continue
-            cp_url, cp_html = cp
-            cp_hits, cp_text_len, cp_hiring_vocab = await _detect(cp_html, cp_url)
-            career_candidates.append({"url": cp_url, "hits": cp_hits, "text_len": cp_text_len,
-                                       "has_hiring_vocab": cp_hiring_vocab})
+            if cp:
+                already_fetched.add(cp[0])
+        career_candidates = await _gather_page_candidates(_detect, career_pages)
         merged = _collapse_hits([c["hits"] for c in career_candidates])
+        if not merged:
+            # No direct hit anywhere in the guessed career paths either —
+            # try one hop past each of THEM too, same rationale as the
+            # homepage step above (a guessed page can be just as much of
+            # a landing/stub page as the homepage was).
+            career_candidates += await _follow_career_listing_links(
+                _detect, session, career_candidates, already_fetched, stats)
+            merged = _collapse_hits([c["hits"] for c in career_candidates])
         if merged:
             stats["hits_from_career_path"] += 1
             stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
             return ([(ats, slug, url, domain, "career_path", best_country, best_method) for ats, slug, url in merged],
                     None)
 
-        best_inhouse = _best_inhouse_candidate(career_candidates, origin)
+        best_inhouse = _best_inhouse_candidate(career_candidates + homepage_link_candidates, origin)
 
         sitemap = await _fetch_sitemap(session, origin, stats)
         if sitemap:
@@ -1584,18 +1819,19 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
             career_like = [u for u in loc_urls
                            if CAREER_LIKE_RE.search(u)
                            and not _BLOG_LIKE_PATH_RE.search(urlparse(u).path)
-                           and not _looks_like_sentence_slug(urlparse(u).path)]
+                           and not _looks_like_sentence_slug(urlparse(u).path)
+                           and u not in already_fetched]
             sm_pages = await asyncio.gather(
                 *[_fetch_page(session, u, stats) for u in career_like[:SITEMAP_MAX_FOLLOW]])
-            sitemap_candidates = []
             for sp in sm_pages:
-                if not sp:
-                    continue
-                sp_url, sp_html = sp
-                sp_hits, sp_text_len, sp_hiring_vocab = await _detect(sp_html, sp_url)
-                sitemap_candidates.append({"url": sp_url, "hits": sp_hits, "text_len": sp_text_len,
-                                            "has_hiring_vocab": sp_hiring_vocab})
+                if sp:
+                    already_fetched.add(sp[0])
+            sitemap_candidates = await _gather_page_candidates(_detect, sm_pages)
             merged = _collapse_hits([c["hits"] for c in sitemap_candidates])
+            if not merged:
+                sitemap_candidates += await _follow_career_listing_links(
+                    _detect, session, sitemap_candidates, already_fetched, stats)
+                merged = _collapse_hits([c["hits"] for c in sitemap_candidates])
             if merged:
                 stats["hits_from_sitemap"] += 1
                 stats["known_ats_found"] += 1  # -> archive_ii only, not archive_iii
