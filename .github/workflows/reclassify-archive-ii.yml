@@ -1,0 +1,71 @@
+name: Reclassify Archive II
+
+# One-off, manually-triggered cleanup pass (2026-09) — NOT scheduled, NOT
+# wired into crawl.yml or Discovery.yml. Re-visits every archive_ii row's
+# career_page_url through the exact same detection path node.py's crawl_one
+# uses (now shared via node.detect_page_hits/_follow_career_listing_links,
+# no duplicated logic) and either promotes it to archive_i (a known ATS was
+# found, directly or one hop away via a click-through link), updates its
+# archive_ii entry (a better in-house page was found), or leaves it alone.
+# See reclassify_archive_ii.py's module docstring for the full "why".
+#
+# No AI/LLM keys needed — this script only reuses node.py's HTML-based ATS
+# detection, never classifier.py, so only the Supabase secrets are set here.
+#
+# Run it from the Actions tab -> "Reclassify Archive II" -> "Run workflow",
+# picking how many shards to split archive_ii across. Re-run as many times
+# as you like — every row not promoted/updated this run is simply
+# re-checked next run, at no risk (idempotent: an already-fine archive_ii
+# row just gets re-confirmed and left alone).
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard_count:
+        description: "Number of shards to split archive_ii across"
+        required: false
+        default: "10"
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build shard-index matrix from shard_count input
+        id: build
+        run: |
+          SHARDS="${{ github.event.inputs.shard_count || '10' }}"
+          python3 -c "
+          import json
+          matrix = json.dumps({'include': [{'shard': s} for s in range(int('$SHARDS'))]})
+          print(f'matrix={matrix}')
+          " >> "$GITHUB_OUTPUT"
+          echo "shards: $SHARDS"
+
+  reclassify:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # one bad shard shouldn't cancel the rest
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: "Reclassify archive_ii — shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '10' }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python reclassify_archive_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.shard_count || '10' }}
