@@ -2105,6 +2105,107 @@ CC_EXTRACTORS = {
 }
 
 
+# ── Live pre-write dead-check for Common-Crawl/Wayback-sourced slugs
+# (2026-09) ─────────────────────────────────────────────────────────
+# Both fetch_commoncrawl_slugs() and fetch_wayback_slugs() below derive
+# every candidate (ats, slug) pair purely from a HISTORICAL URL INDEX —
+# Common Crawl's CDX index, or the Wayback Machine's CDX index — neither
+# one ever fetches the resulting board itself. A URL sitting in that
+# index from some past crawl date is no guarantee the board is still
+# there today. Real case this closes (2026-09): a Common-Crawl-indexed
+# https://boards.greenhouse.io/moonpay-style URL got written to
+# archive_i (source="common_crawl_probe"), but the company had since
+# moved off Greenhouse entirely — fetching that exact URL live now
+# returns Greenhouse's own "Page not found ... no longer active" page.
+# Every OTHER discovery source either fetches the page live moments
+# before recording a hit (node.py) or comes from a maintained, curated
+# feed (OpenPostings) — this dead-index problem is specific to CC/
+# Wayback, so the fix is scoped to just those two.
+#
+# For the handful of platforms with a cheap, safe, already-proven
+# existence check (mirrors verification.py's ARCHIVE_II_VERIFIERS —
+# same endpoints, same 404-means-dead interpretation, just called
+# synchronously here instead of via aiohttp), do that same check before
+# a CC/Wayback-derived slug is ever written. Anything confirmed dead
+# (404) is dropped outright; anything else — a real 200, a timeout, a
+# 5xx, any other ambiguous response — is KEPT, same conservative
+# "never delete on ambiguity" default verification.py itself uses.
+# Platforms not in this dict (no cheap safe check exists for them, same
+# reasoning as verification.py's _UNVERIFIABLE_ATS) pass through
+# unchecked, exactly as before this fix.
+def _cc_check_status(url: str) -> bool | None:
+    """True = confirmed alive (200). False = confirmed dead (404).
+    None = ambiguous (any other status or a network/timeout error) —
+    ambiguous is NEVER treated as dead."""
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": _ROBOTS_UA})
+        if r.status_code == 404:
+            return False
+        if r.status_code == 200:
+            return True
+        return None
+    except Exception:
+        return None
+
+
+def _cc_check_lever(slug: str) -> bool | None:
+    """Only DEAD if BOTH the main and EU endpoints confirm 404 — a real
+    board can legitimately live on either one, same as
+    verification.py's _verify_lever."""
+    results = [
+        _cc_check_status(f"https://api.lever.co/v0/postings/{slug}?mode=json"),
+        _cc_check_status(f"https://api.eu.lever.co/v0/postings/{slug}?mode=json"),
+    ]
+    if True in results:
+        return True
+    if all(r is False for r in results):
+        return False
+    return None
+
+
+_CC_LIVE_CHECK = {
+    "greenhouse": lambda slug: _cc_check_status(
+        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"),
+    "lever": _cc_check_lever,
+    "ashby": lambda slug: _cc_check_status(
+        f"https://api.ashbyhq.com/posting-api/job-board/{slug}"),
+    "workable": lambda slug: _cc_check_status(
+        f"https://apply.workable.com/api/v1/widget/accounts/{slug}"),
+    "rippling": lambda slug: _cc_check_status(
+        f"https://ats.rippling.com/api/v2/board/{slug}/jobs"),
+}
+
+
+def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str) -> dict:
+    """Applied to a CC/Wayback fetch_*_slugs() result right before it's
+    returned — see the module comment above _CC_LIVE_CHECK for why only
+    these two sources need this. `slugs_by_ats` values may be a set[str]
+    (no company name) or a dict[str, str] ({slug: name}); the returned
+    dict preserves whichever shape each ATS's value came in as."""
+    dropped = checked = 0
+    out = {}
+    for ats, slugs in slugs_by_ats.items():
+        checker = _CC_LIVE_CHECK.get(ats)
+        if not checker or not slugs:
+            out[ats] = slugs
+            continue
+        is_dict = isinstance(slugs, dict)
+        items = list(slugs.items()) if is_dict else [(s, "") for s in slugs]
+        kept = {}
+        for slug, name in items:
+            checked += 1
+            if checker(slug) is False:
+                dropped += 1
+            else:
+                kept[slug] = name
+            time.sleep(0.3)
+        out[ats] = kept if is_dict else set(kept)
+    if checked:
+        log.info(f"{label}: live pre-check confirmed {dropped}/{checked} candidate "
+                 f"slugs are already dead — dropped before ever reaching archive_i")
+    return out
+
+
 def get_latest_crawl_ids(n: int = 3) -> list[str]:
     try:
         r = requests.get(CC_COLLINFO, timeout=30)
@@ -2205,7 +2306,7 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
         if count:
             log.info(f"  {ats}: {count} companies from Common Crawl")
 
-    return slugs_by_ats
+    return _drop_dead_cc_slugs(slugs_by_ats, "Common Crawl")
 
 
 # ══════════════════════════════════════════════════════════
@@ -2462,7 +2563,7 @@ def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None) -
             log.info(f"  {ats}: {len(slugs)} companies from Wayback Machine")
             slugs_by_ats[ats] = slugs
 
-    return slugs_by_ats
+    return _drop_dead_cc_slugs(slugs_by_ats, "Wayback")
 
 
 # ══════════════════════════════════════════════════════════
