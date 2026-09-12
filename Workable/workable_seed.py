@@ -137,6 +137,17 @@ resume_offset holds a running "companies written so far in this shard's
 current pass" count, informational only. Auto-resumes by default; --reset
 clears the checkpoint and starts this shard's bucket over from the top.
 
+2026-09 fix: a shard that finishes its ENTIRE bucket now persists a DONE
+sentinel ({"loc_index": len(bucket), "token": None, "done": True}) rather
+than having its checkpoint row deleted outright — see
+_mark_seed_shard_done's docstring for the real, confirmed bug this closes
+(workable.yml's reloop re-dispatches every shard on every iteration, and
+a deleted row was indistinguishable from "never started," so an
+already-finished shard would silently restart its whole bucket from
+scratch on the next loop iteration, for as long as any OTHER shard still
+needed more loops). run_seed_shard() checks for this sentinel first and
+returns immediately, untouched, when present.
+
 Usage:
     python workable_seed.py --output workable_companies.csv
     python workable_seed.py --shard-index 1 --shard-count 8 --output shard1.csv
@@ -320,6 +331,37 @@ def _clear_seed_checkpoint(shard_index: int, shard_count: int) -> None:
         log.warning(f"  couldn't clear seed checkpoint (non-fatal): {_err(e)}")
 
 
+def _mark_seed_shard_done(shard_index: int, shard_count: int, bucket_len: int, total_written: int) -> None:
+    """2026-09 fix: a fully-finished shard now persists a DONE sentinel
+    ({"loc_index": bucket_len, "token": None, "done": True}) instead of
+    having its checkpoint row deleted outright.
+
+    CONFIRMED REAL BUG this closes: workable.yml's `reloop` job
+    re-dispatches the WHOLE seed workflow (every shard 0..shard_count-1,
+    same matrix every time) whenever ANY shard's checkpoint row is still
+    present after a run — it has no way to know WHICH shards already
+    finished, only whether the total remaining-row count is zero. Before
+    this fix, a finished shard's row was deleted outright, which is
+    indistinguishable from "this shard has never run at all" on the next
+    dispatch: run_seed_shard() saw state=None, resuming=False, opened its
+    output file in "w" mode (clobbering its own already-complete partial
+    CSV downloaded by the workflow's Resume step), and re-paged its ENTIRE
+    bucket from unit 0 all over again — for every already-finished shard,
+    on EVERY reloop iteration, for as long as even one other shard needed
+    more than one loop to finish (live-observed: with one slow/rate-
+    limited shard needing several loops, every OTHER shard kept fully
+    re-seeding itself each time, looking like an endless "starts over
+    after it's already done" loop). Keeping a DONE row lets
+    run_seed_shard() recognize "already finished, nothing to do" and
+    return instantly without touching its output file or paging anything.
+    workable.yml's reloop step is updated alongside this to only count a
+    checkpoint row as "remaining" when it is NOT marked done (see that
+    file's own comment), so the loop still correctly stops once every
+    real remaining shard is done."""
+    _save_seed_checkpoint(shard_index, shard_count,
+                           {"loc_index": bucket_len, "token": None, "done": True}, total_written)
+
+
 def _unit_note(location: str | None, workplace: str | None) -> str:
     if not location:
         return "<no filter>"
@@ -455,6 +497,13 @@ def run_seed_shard(output_path: str, shard_index: int, shard_count: int,
     else:
         state = _load_seed_checkpoint(shard_index, shard_count)
 
+    if state and state.get("done"):
+        log.info(f"── shard {label} — already fully completed a prior run (checkpoint marked "
+                 f"done) — nothing to do, not re-paging. Pass --reset (or delete this shard's "
+                 f"row in crawl_checkpoints: source='{SOURCE_LABEL}', shard_index={shard_index}, "
+                 f"shard_count={shard_count}) to force a genuine re-seed. ──")
+        return 0, False
+
     loc_index = state["loc_index"] if state else 0
     start_token = state.get("token") if state else None
     resuming = state is not None
@@ -509,7 +558,7 @@ def run_seed_shard(output_path: str, shard_index: int, shard_count: int,
     if not stopped_early:
         log.info(f"── shard {label} bucket fully done — {total_kept:,} new companies this run, "
                  f"{len(seen_domains):,} total in {output_path} ──")
-        _clear_seed_checkpoint(shard_index, shard_count)
+        _mark_seed_shard_done(shard_index, shard_count, len(bucket), len(seen_domains))
     else:
         log.warning(f"── shard {label} stopped early — {total_kept:,} new companies this run, "
                     f"checkpoint saved for next run ──")
