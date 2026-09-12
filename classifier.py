@@ -782,6 +782,15 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     if has_non_remote_workplace_type(job):
         return "no_match", None
 
+    # ── 0.75. HARD OVERRIDE: an affirmative country-specific work-
+    # authorization requirement (or a flagged work-auth/visa/sponsorship
+    # application question), independent of whether the posting also
+    # says anything about sponsorship. See has_hard_country_specific_
+    # auth_signal's docstring for the two real JazzHR postings this
+    # closes — one of which mentioned no "sponsor" wording at all. ──
+    if has_hard_country_specific_auth_signal(job):
+        return "no_match", None
+
     raw_loc = job.get("location", "")
     raw_country = job.get("country", "")
     if isinstance(raw_loc, list):
@@ -877,6 +886,37 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # is a job tied to a specific place (or places) with no explicit
     # broad-hiring signal, so it's rejected without going to the AI.
     return "no_match", None
+
+
+def _text_has_global_evidence(text: str) -> bool:
+    """Loose (no residue-stripping) check: does ANY of the same GLOBAL_
+    KEYWORDS/STANDALONE_GLOBAL_RE evidence used by the deterministic
+    location-field classifier appear anywhere in free-form text (title +
+    description)? Used only as a post-AI sanity check — see
+    ai_classify_locations' "Post-AI safety net" section — so it's
+    deliberately permissive (no requirement that the match be the ONLY
+    thing in the text, unlike the strict location-field residue check)."""
+    if not text:
+        return False
+    t = text.lower()
+    if STANDALONE_GLOBAL_RE.search(text.strip()):
+        return True
+    return any(rx.search(t) for rx in GLOBAL_RE)
+
+
+def _text_has_africa_or_emea_evidence(text: str) -> bool:
+    """Same idea as _text_has_global_evidence but for the Africa/EMEA
+    tier: literal 'Africa' (continent, excluding 'South Africa'), 2+
+    distinct African countries, or bare 'EMEA' anywhere in the text."""
+    if not text:
+        return False
+    t = text.lower()
+    africa_check = re.sub(r"\bsouth[\s\-]+africa\b", " ", t)
+    if re.search(r"\bafrica\b", africa_check):
+        return True
+    if len({m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(text)}) >= 2:
+        return True
+    return bool(re.search(r"\bemea\b", t))
 
 
 def keyword_classify_location(job: dict) -> str:
@@ -1251,6 +1291,40 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         # Anything that failed AGAIN on the failover round stays
         # ('uncertain', None) — no second failover cascade.
 
+    # ── Post-AI safety net (2026-09) ──────────────────────────────────
+    # Real case this closes: a JazzHR posting (starlims.applytojob.com/
+    # apply/tY0FHXuKkf/Account-Manager-Expansions) with a blank location
+    # field and a description containing NO global/worldwide/anywhere
+    # language whatsoever (confirmed via direct fetch of the live
+    # posting) was still returned as match_global by the AI stage,
+    # landing it at PRIORITY_GLOBAL — the highest-trust tier — with
+    # literally zero supporting evidence anywhere in the job's own text.
+    # PRIORITY_GLOBAL/PRIORITY_AFRICA are meant to mean "we have real
+    # positive evidence", so a match the AI itself can't back with any
+    # of the same keyword evidence the deterministic stage already
+    # trusts is downgraded to 'uncertain' rather than accepted at face
+    # value — this doesn't drop the job, it just stops an unsupported
+    # AI claim from outranking genuinely-confirmed matches. A job can
+    # still reach match_global/match_africa normally when the AI finds
+    # real evidence the keyword regexes don't happen to cover; this only
+    # catches the case where the AI's own verdict has NO textual backing
+    # at all.
+    for i, (label, provider_name) in enumerate(results):
+        if label not in ("match_global", "match_africa"):
+            continue
+        job = jobs[i]
+        text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
+        if label == "match_global" and not _text_has_global_evidence(text):
+            log.info(f"Downgrading unsupported match_global → uncertain for "
+                     f"{job.get('url', job.get('title', '?'))!r} (no global "
+                     f"keyword evidence in title/description)")
+            results[i] = ("uncertain", provider_name)
+        elif label == "match_africa" and not _text_has_africa_or_emea_evidence(text):
+            log.info(f"Downgrading unsupported match_africa → uncertain for "
+                     f"{job.get('url', job.get('title', '?'))!r} (no Africa/"
+                     f"EMEA keyword evidence in title/description)")
+            results[i] = ("uncertain", provider_name)
+
     labels = [label for label, _ in results]
     classified = sum(1 for label in labels if label != "uncertain")
     log.info(f"AI classified {classified}/{len(jobs)} locations "
@@ -1370,6 +1444,72 @@ def has_hard_no_sponsorship_signal(job: dict) -> bool:
     this closes."""
     text = (job.get("description_snippet") or "") + " " + (job.get("title") or "")
     return _sponsorship_sentence_has_negative_signal(text)
+
+
+# ── Country-specific work-authorization hard override (2026-09) ──────
+# Real cases this closes, both live JazzHR postings (confirmed via direct
+# fetch of the actual posting, 2026-09):
+#   1. americanincomelifeaokevinblomquist.applytojob.com/apply/he4qxTnPSB/...
+#      said "Must be legally authorized to work in the United States." —
+#      an AFFIRMATIVE authorization requirement with NO mention of the
+#      word "sponsor" anywhere, so has_hard_no_sponsorship_signal (which
+#      requires the sponsorship/work-permit TOPIC word to co-occur with
+#      negation in the same sentence) never fires on it at all. This
+#      posting was still classified location_priority=3 (kept, "unsure")
+#      instead of being excluded outright.
+#   2. Any JazzHR/other ATS posting whose application form has a
+#      screening question like "Are you legally authorized to work in
+#      the United States?" — ats_scrapers.py's enrich_application_
+#      questions() already detects exactly these (via its own
+#      _WORK_AUTH_RE) and appends them into description_snippet as
+#      "Application Question: ..." lines specifically so classification
+#      can see them, but nothing was actually checking for that marker
+#      as a hard signal — it was only ever extra context handed to the
+#      AI stage, which could (and did) still ignore it.
+# A country-specific work-authorization requirement is a STRONGER and
+# more literal signal than "no sponsorship" — plenty of real postings
+# never mention sponsorship at all and simply state the authorization
+# requirement as a plain fact. Per explicit product requirement: this
+# must force the job out of consideration entirely (no_match), not just
+# demote it to the "unsure" tier — a country-specific authorization
+# question/statement should never even reach PRIORITY_UNSURE, let alone
+# PRIORITY_GLOBAL.
+_COUNTRY_AUTH_RE = re.compile(
+    r"\b(?:must\s+(?:be|have|currently\s+be)\s+)?(?:currently\s+)?"
+    r"(?:legally\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+in\s+"
+    r"(?:the\s+)?(?:u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|"
+    r"united\s+kingdom|canada|australia|new\s+zealand|ireland|germany|"
+    r"european\s+union|\beu\b)\b"
+    r"|\b(?:us|u\.s\.|uk|u\.k\.|canadian|australian|british)\s+work\s+authoriz"
+    r"|\bwork\s+authoriz\w*\s+(?:in|for)\s+(?:the\s+)?(?:us|u\.s\.|usa|united\s+states|uk|canada|australia)\b"
+    r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?(?:us|usa|united\s+states|uk|canada|australia)\b"
+    r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states|uk|canada|australia)\b"
+    r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian)\s+work\s+(?:visa|permit)\b",
+    re.I,
+)
+
+# Marker ats_scrapers.py's enrich_application_questions() appends before
+# a work-authorization-flavored screening question (see its own
+# _WORK_AUTH_RE / _format_auth_questions) — every line carrying this
+# marker is, by construction, already known to be about authorization/
+# visa/sponsorship, so its mere presence is itself a hard signal
+# regardless of the exact wording used in that specific question.
+_APPLICATION_AUTH_QUESTION_MARKER = "Application Question:"
+
+
+def has_hard_country_specific_auth_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's description
+    (including any appended application-question text) or title contain
+    an AFFIRMATIVE country-specific work-authorization requirement, or a
+    work-authorization/visa/sponsorship screening question flagged by
+    enrich_application_questions()? Forces NO_MATCH — see the module
+    comment above _COUNTRY_AUTH_RE for the two real postings this closes.
+    """
+    desc = job.get("description_snippet") or ""
+    if _APPLICATION_AUTH_QUESTION_MARKER in desc:
+        return True
+    text = desc + " " + (job.get("title") or "")
+    return bool(_COUNTRY_AUTH_RE.search(text))
 
 
 # Disqualifying workplace_type tokens: a scraper-reported physical-presence
