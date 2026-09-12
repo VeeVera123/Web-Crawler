@@ -219,14 +219,34 @@ jobs:
         run: |
           # A checkpoint row surviving past this run means that shard
           # stopped mid-bucket (time budget, or a 429 wall) with units
-          # still left — see workable_seed.py's run_seed_shard(), which
-          # only clears its row on a clean full-bucket finish. Filtered to
-          # THIS run's own seed_shard_count so a leftover row from a
+          # still left — see workable_seed.py's run_seed_shard(). Filtered
+          # to THIS run's own seed_shard_count so a leftover row from a
           # differently-sized past run never triggers a spurious loop.
+          #
+          # 2026-09 FIX: a shard that fully finishes now persists a DONE
+          # sentinel row (partition contains "done": true — see
+          # workable_seed.py's _mark_seed_shard_done docstring for the
+          # real bug this closes) instead of having its row deleted
+          # outright. This step must NOT count a done row as "remaining",
+          # or the loop would never stop even once every shard is
+          # actually finished — so it now also selects `partition` and
+          # only counts rows whose state does NOT say done.
           SHARD_COUNT="${{ github.event.inputs.seed_shard_count || '8' }}"
-          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.workable_seed&shard_count=eq.$SHARD_COUNT&select=shard_index" \
-            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
-          echo "Shards with a remaining checkpoint: $REMAINING"
+          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.workable_seed&shard_count=eq.$SHARD_COUNT&select=shard_index,partition" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "
+          import json, sys
+          rows = json.load(sys.stdin)
+          remaining = 0
+          for row in rows:
+              try:
+                  state = json.loads(row.get('partition') or '{}')
+              except Exception:
+                  state = {}
+              if not state.get('done'):
+                  remaining += 1
+          print(remaining)
+          ")
+          echo "Shards with a remaining (not-yet-done) checkpoint: $REMAINING"
 
           if [ "$REMAINING" = "0" ]; then
             echo "Every seed shard finished its bucket — not looping."
