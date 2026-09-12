@@ -1116,7 +1116,23 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     # primary truncation point. 30,000 chars is large enough that no real
     # job description is ever actually cut off by it.
     MAX_DESC_CHARS = 30_000
-    MAX_JOBS_PER_BATCH = 120  # keeps AI response comfortably within token limits
+    # 120 -> 10 (2026-09, explicit user request): a batch of up to 120 jobs
+    # in one bulk "one-line-verdict-per-job" call is exactly the shape that
+    # let cheap/small models cut corners — this is the same call shape as
+    # the confirmed live failure where gpt-4.1-nano hallucinated a
+    # match_global verdict with zero supporting text anywhere in the job
+    # (see classifier.py's "Post-AI safety net" section in
+    # ai_classify_locations for the real posting this closes). A real run
+    # the same day this was raised had ~74 unsure jobs on Gemini/OpenAI and
+    # ~141 on NVIDIA — at 10/batch that's ~7-8 calls for Gemini/OpenAI and
+    # ~15 for NVIDIA per run, comfortably inside every provider's RPM
+    # budget (the tightest, Gemini's ~15 RPM / Cerebras-style throttling,
+    # still clears this with room to spare), in exchange for far more of
+    # the model's attention per job. Deliberately NOT applied to role
+    # classification (_build_role_batches, a separate function) — role
+    # verdicts are just a short title, not a full JD, so the same bulk-call
+    # risk doesn't apply there; left unchanged per explicit instruction.
+    MAX_JOBS_PER_BATCH = 10
 
     batches = []
     current_batch = []
