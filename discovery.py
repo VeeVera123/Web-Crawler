@@ -2163,6 +2163,124 @@ def _cc_check_lever(slug: str) -> bool | None:
     return None
 
 
+# ── 2026-09: extended to EVERY platform verification.py already has a
+# proven-safe check for (its ARCHIVE_II_VERIFIERS registry — 19
+# platforms total), not just the original 5. There was no technical
+# reason the other 14 were left out; sync ports of each verifier below,
+# faithful to the exact same signal verification.py's own async version
+# uses, just called synchronously here instead of via aiohttp. ──
+
+def _cc_check_subdomain_tenant(host: str, path: str = "/") -> bool | None:
+    """Sync mirror of the several verification.py checks (teamtailor,
+    recruitee, softgarden, zoho, hrmdirect, icims, personio) whose real
+    signal is: a dead tenant's subdomain request gets redirected AWAY
+    from that exact subdomain (bounced to the platform's own generic
+    marketing site), while a real tenant — even an empty one — always
+    resolves and stays on its own subdomain, 200 OK."""
+    try:
+        r = requests.get(f"https://{host}{path}", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA}, allow_redirects=True)
+    except Exception:
+        return None
+    final_host = urlparse(r.url).hostname or ""
+    if final_host != host:
+        return False  # bounced away — confirmed dead, same as verification.py
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_multi_host_tenant(hosts_paths: list) -> bool | None:
+    """For platforms whose tenant can live under more than one hostname
+    (iCIMS, Personio) — alive if EITHER resolves; dead only if BOTH
+    cleanly bounce away (never on a bare network error)."""
+    results = [_cc_check_subdomain_tenant(h, p) for h, p in hosts_paths]
+    if True in results:
+        return True
+    if all(r is False for r in results):
+        return False
+    return None
+
+
+def _cc_check_bamboohr(slug: str) -> bool | None:
+    host = f"{slug}.bamboohr.com"
+    try:
+        r = requests.get(f"https://{host}/careers/list", timeout=10, allow_redirects=True,
+                          headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    final_host = urlparse(r.url).hostname or ""
+    if final_host != host:
+        return False
+    if r.status_code != 200 or "application/json" not in r.headers.get("Content-Type", ""):
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    return True if isinstance(data, dict) and "result" in data else None
+
+
+def _cc_check_jobvite(slug: str) -> bool | None:
+    """A nonexistent Jobvite company 302s to jobvite.com's own support
+    page with a distinctive '?invalid=1' query param — a real board
+    (even an empty one) serves its own jobs page directly."""
+    try:
+        r = requests.get(f"https://jobs.jobvite.com/{slug}/jobs", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA}, allow_redirects=False)
+    except Exception:
+        return None
+    if r.status_code == 200:
+        return True
+    if r.status_code in (301, 302, 303, 307, 308):
+        return False if "invalid=1" in r.headers.get("Location", "") else None
+    return None
+
+
+def _cc_check_paylocity(slug: str) -> bool | None:
+    """slug is 'company_id|company_name_slug' (see
+    discovery._url_to_slug_paylocity). A real board's page embeds a
+    window.pageData JSON blob regardless of open-job count; a fake
+    company_id serves a static 'does not exist'/'job not found' page."""
+    parts = slug.split("|", 1)
+    if len(parts) != 2:
+        return None
+    company_id, company_name_slug = parts
+    url = f"https://recruiting.paylocity.com/recruiting/jobs/All/{company_id}/{company_name_slug}"
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    if "window.pageData" in r.text:
+        return True
+    lowered = r.text.lower()
+    if "does not exist" in lowered or "job not found" in lowered:
+        return False
+    return None
+
+
+_DNS_FAILURE_RE = re.compile(
+    r"nodename nor servname provided|name or service not known|"
+    r"getaddrinfo failed|no address associated with hostname|failed to resolve",
+    re.I,
+)
+
+
+def _cc_dns_dead_check(url: str) -> bool | None:
+    """Sync mirror of verification.py's _dns_dead_check (avature/eploy/
+    taleo): True only when the failure is a genuine DNS resolution
+    failure — the subdomain was never provisioned at all. Any other
+    failure (refused, timeout, a non-DNS connection error) is ambiguous,
+    never dead."""
+    try:
+        requests.get(url, timeout=10, headers={"User-Agent": _ROBOTS_UA}, allow_redirects=True)
+        return True  # resolved and got SOME response — tenant exists
+    except requests.exceptions.ConnectionError as e:
+        return False if _DNS_FAILURE_RE.search(str(e)) else None
+    except Exception:
+        return None
+
+
 _CC_LIVE_CHECK = {
     "greenhouse": lambda slug: _cc_check_status(
         f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"),
@@ -2173,7 +2291,38 @@ _CC_LIVE_CHECK = {
         f"https://apply.workable.com/api/v1/widget/accounts/{slug}"),
     "rippling": lambda slug: _cc_check_status(
         f"https://ats.rippling.com/api/v2/board/{slug}/jobs"),
+    "bamboohr": _cc_check_bamboohr,
+    "icims": lambda slug: _cc_check_multi_host_tenant(
+        [(f"{slug}.icims.com", "/"), (f"careers-{slug}.icims.com", "/")]),
+    "teamtailor": lambda slug: _cc_check_subdomain_tenant(f"{slug}.teamtailor.com"),
+    "recruitee": lambda slug: _cc_check_subdomain_tenant(f"{slug}.recruitee.com"),
+    "softgarden": lambda slug: _cc_check_subdomain_tenant(f"{slug}.softgarden.io"),
+    "zoho": lambda slug: _cc_check_subdomain_tenant(f"{slug}.zohorecruit.com"),
+    "hrmdirect": lambda slug: _cc_check_subdomain_tenant(f"{slug}.hrmdirect.com"),
+    "personio": lambda slug: _cc_check_multi_host_tenant(
+        [(f"{slug}.jobs.personio.de", "/"), (f"{slug}.jobs.personio.com", "/")]),
+    "joincom": lambda slug: _cc_check_status(f"https://join.com/companies/{slug}"),
+    "paylocity": _cc_check_paylocity,
+    "jobvite": _cc_check_jobvite,
+    "avature": lambda slug: _cc_dns_dead_check(f"https://{slug}.avature.net/careers/SearchJobs"),
+    "eploy": lambda slug: _cc_dns_dead_check(
+        f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx"),
+    "taleo": lambda slug: _cc_dns_dead_check(f"https://{slug.split('|', 1)[0]}.taleo.net/"),
 }
+# NOT included, deliberately:
+#  - workday, smartrecruiters, breezyhr, oracle_cloud_hcm, jobadder,
+#    folkshr, adp, brassring — same platforms in verification.py's own
+#    _UNVERIFIABLE_ATS, for the exact same researched reasons (e.g.
+#    Workday: confirmed 2026-09 that a fake tenant subdomain resolves
+#    anyway, so there's no safe "doesn't exist" signal to check at all —
+#    verification.py never checks these either, archive_i rows on them
+#    are left completely alone, only counted).
+#  - jazzhr, pageup, pinpoint, flatchr, jobylon — newer CC_PLATFORM_
+#    PATTERNS entries that simply haven't been researched into
+#    verification.py yet (no verifier AND no _UNVERIFIABLE_ATS entry —
+#    genuinely unresearched, not confirmed either way). Per this
+#    project's zero-guessed-claims rule, they stay unchecked here too
+#    until that research happens — same list to extend in both files.
 
 
 def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str) -> dict:
