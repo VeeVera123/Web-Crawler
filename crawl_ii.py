@@ -936,11 +936,19 @@ def run_finalize() -> None:
     window (2026-08, my own default at the time, chosen because Crawl II
     was a brand-new heuristic pipeline with no production track record —
     see git history for that original reasoning) — superseded by the
-    explicit 30-day instruction rather than left as a standing exception."""
+    explicit 30-day instruction rather than left as a standing exception.
+
+    2026-09 (second change): dropped again, from 31 to 3 — same explicit
+    instruction and same reasoning as crawl_i.py's run_finalize (three
+    consecutive misses on a roughly-daily run means the job is gone, not
+    just unconfirmed for a month). inactive_days matched to 3 as well for
+    the same reason given there — see crawl_i.py's run_finalize docstring
+    for the full explanation of why inactive_days has to move with
+    delete_days here, not stay at 30."""
     log.info("=" * 60)
     log.info("CRAWL II — finalize (cleanup stale jobs)")
     log.info("=" * 60)
-    summary = cleanup_stale_jobs(inactive_days=30, delete_days=31, source_pipeline=SOURCE_PIPELINE)
+    summary = cleanup_stale_jobs(inactive_days=3, delete_days=3, source_pipeline=SOURCE_PIPELINE)
     log.info(f"Crawl II finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
