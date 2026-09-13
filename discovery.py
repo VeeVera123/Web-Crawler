@@ -2643,7 +2643,25 @@ def _robots_allows(base_url: str, path: str, user_agent: str = _ROBOTS_UA) -> bo
     return allowed
 
 
-_WAYBACK_MAX_PAGES = 25  # safety cap on resumeKey pagination, see below
+_WAYBACK_MAX_PAGES = 500  # safety cap on resumeKey pagination, see below
+# 2026-09: raised from 25 — 25 pages x 5000/page = 125,000 snapshots, which
+# turned out to be exactly enough to get hit (and the cap logged as hit) by
+# every single Greenhouse pattern (boards.greenhouse.io/*, boards.eu.
+# greenhouse.io/*, job-boards.greenhouse.io/*, job-boards.eu.greenhouse.io/*)
+# in the same run — Greenhouse alone has been on the Wayback Machine for
+# years and is one of the most-archived ATS platforms there is, so 125K
+# snapshots is a real, recurring ceiling, not a one-off. The cap's actual
+# JOB is to stop a genuinely pathological loop (CDX repeatedly handing back
+# a resumeKey with no forward progress, a network wedge, etc.) — it was
+# never meant to model "how many snapshots a busy pattern could have."
+# 500 pages x 5000/page = 2.5M snapshots per pattern, ~20x more headroom
+# than the largest count actually observed so far, while still being a
+# hard, finite stop against a genuine runaway. Paired with the new
+# --wayback-shard/--wayback-total-shards platform-sharding below (mirrors
+# Common Crawl's cc_shard/cc_total_shards) so raising this doesn't turn
+# into one giant sequential job — each of the 5 wayback shards below only
+# covers ~1/5 of the platforms, so the extra pages this cap now allows are
+# spent in parallel, not stacked onto one run's wall-clock.
 
 
 def _fetch_wayback_cdx_urls(pattern: str, page_limit: int) -> list[str]:
@@ -2707,7 +2725,9 @@ def _fetch_wayback_cdx_urls(pattern: str, page_limit: int) -> list[str]:
     return urls
 
 
-def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None) -> dict[str, set[str]]:
+def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None,
+                         wb_shard: int | None = None,
+                         wb_total_shards: int = 1) -> dict[str, set[str]]:
     """Query the Wayback Machine CDX index for archived career-page URLs
     across every ATS platform that has a CC_PLATFORM_PATTERNS entry, and
     extract slugs with the matching CC_EXTRACTORS parser — the exact same
@@ -2719,9 +2739,18 @@ def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None) -
     hard overall cap — see _fetch_wayback_cdx_urls for why the old
     flat-limit version was silently truncating on high-volume patterns.
     `platforms` restricts which ATS keys to query (default: every key in
-    CC_PLATFORM_PATTERNS) — lets a future shard split this the same way
-    Common Crawl's own discovery is sharded (--cc-shard/--cc-total-shards)
-    if this ever gets expensive enough to need it; unsharded by default."""
+    CC_PLATFORM_PATTERNS).
+
+    wb_shard/wb_total_shards (2026-09) split the PLATFORMS across
+    `wb_total_shards` independent runs, same platform-sharding scheme as
+    fetch_commoncrawl_slugs' cc_shard/cc_total_shards — added alongside
+    the _WAYBACK_MAX_PAGES raise above so a heavily-archived platform
+    (Greenhouse) being allowed many more resumeKey pages doesn't turn one
+    unsharded Wayback run into a single long sequential job. discovery.yml
+    runs this as 5 shards. Pass wb_shard=None (default) to run every
+    platform in one call, same as before this existed. If `platforms` is
+    ALSO given explicitly, sharding is applied on top of that narrowed
+    list, not on the full CC_PLATFORM_PATTERNS set."""
     slugs_by_ats: dict[str, set[str]] = {}
 
     if not _robots_allows("https://web.archive.org", "/cdx/"):
@@ -2730,6 +2759,12 @@ def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None) -
         return slugs_by_ats
 
     target_platforms = platforms if platforms is not None else list(CC_PLATFORM_PATTERNS.keys())
+    if wb_shard is not None and wb_total_shards > 1:
+        target_platforms = [p for i, p in enumerate(target_platforms)
+                             if i % wb_total_shards == wb_shard]
+        log.info(f"Wayback CDX: shard {wb_shard}/{wb_total_shards} — "
+                 f"{len(target_platforms)} platform(s) assigned to this shard")
+
     for ats in target_platforms:
         patterns = CC_PLATFORM_PATTERNS.get(ats)
         extractor = CC_EXTRACTORS.get(ats)
@@ -4005,6 +4040,20 @@ def main():
              "and 1) as separate matrix jobs.",
     )
     parser.add_argument(
+        "--wayback-shard", type=int, default=None,
+        help="Which Wayback Machine platform-shard this run covers (0-indexed, "
+             "used with --wayback-total-shards). Default: None = all "
+             "platforms in one run. See fetch_wayback_slugs docstring.",
+    )
+    parser.add_argument(
+        "--wayback-total-shards", type=int, default=1,
+        help="Total number of Wayback Machine platform-shards (default: 1, "
+             "i.e. no sharding). discovery.yml runs this as 5 (shards 0-4) "
+             "as separate matrix jobs — added 2026-09 alongside raising "
+             "_WAYBACK_MAX_PAGES so heavily-archived platforms don't turn "
+             "one unsharded run into a single long sequential job.",
+    )
+    parser.add_argument(
         "--theirstack-max", type=int, default=40,
         help="Max companies to pull from TheirStack per run, across all "
              "platforms (default: 40, under the free tier's 50/month)",
@@ -4176,7 +4225,8 @@ def main():
     # fetch_wayback_slugs' docstring and the module header comment above it)
     if args.source in ("wayback", "all"):
         log.info("\n--- WAYBACK MACHINE CDX (cross-platform supplemental discovery) ---")
-        wb_slugs = fetch_wayback_slugs()
+        wb_slugs = fetch_wayback_slugs(wb_shard=args.wayback_shard,
+                                        wb_total_shards=args.wayback_total_shards)
         wb_total = sum(len(s) for s in wb_slugs.values())
         log.info(f"Wayback CDX total: {wb_total} slugs across {len(wb_slugs)} platforms")
 
