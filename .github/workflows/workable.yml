@@ -204,7 +204,21 @@ jobs:
 
   reloop:
     needs: seed
-    if: ${{ always() && github.event.inputs.run_seed == 'true' && github.event.inputs.loop_seed == 'true' }}
+    # 2026-09 fix: was `always()`, which — per GitHub's own cancellation
+    # docs — keeps running even when the user manually cancels the run,
+    # since `always()` unconditionally evaluates true and so is never
+    # skipped by a cancellation. A cancelled seed shard never gets to
+    # clear/mark-done its own checkpoint row (same as a genuine
+    # time-budget stop), so this job's checkpoint-check below saw "shards
+    # left unfinished" and dispatched a brand-new run — re-looping right
+    # past the cancel the user had just asked for. `!cancelled()` keeps
+    # this job running on success AND on a real per-shard failure (e.g. a
+    # 429 wall — fail-fast is off, so other shards can still fail
+    # independently) while skipping it entirely when the run itself was
+    # cancelled. Same fix already applied to common_crawl.yml's
+    # `finalize` job — see that job's own comment for the identical
+    # reasoning.
+    if: ${{ !cancelled() && github.event.inputs.run_seed == 'true' && github.event.inputs.loop_seed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -278,7 +292,21 @@ jobs:
 
   seed-finalize:
     needs: [seed, reloop]
-    if: ${{ always() && github.event.inputs.run_seed == 'true' && needs.reloop.outputs.looped != 'true' }}
+    # 2026-09 fix: was `always()`, same bug class as reloop's own fix
+    # above. If the run was cancelled, `reloop` above now correctly skips
+    # itself (its `!cancelled()` condition) instead of dispatching a new
+    # run — but with the old `always()` here, this job didn't know the
+    # difference between "reloop legitimately decided no more looping was
+    # needed" and "reloop was skipped because the run got cancelled": in
+    # both cases needs.reloop.outputs.looped is empty/not 'true', so
+    # seed-finalize would still merge whatever partial shard CSVs existed
+    # so far and publish them as if the seed stage had genuinely finished
+    # — silently shipping incomplete data right after the user cancelled
+    # to stop exactly that. `!cancelled()` makes this job skip whenever
+    # the run (or its `seed`/`reloop` dependencies) was cancelled, while
+    # still running normally after every real success or per-shard
+    # failure.
+    if: ${{ !cancelled() && github.event.inputs.run_seed == 'true' && needs.reloop.outputs.looped != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
