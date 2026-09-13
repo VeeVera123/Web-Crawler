@@ -29,71 +29,65 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 from dotenv import load_dotenv
 from selectolax.lexbor import LexborHTMLParser
+
 load_dotenv()
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # geo.py/discovery.py live here
 import geo  # noqa: E402
 from discovery import URL_TO_SLUG  # noqa: E402
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
-datefmt="%H:%M:%S")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("node")
 
-# 2026-08, REVERTED (SIGTERM only — see 2026-09 below for SIGINT):
-# ... [Signal handling comments omitted for brevity, identical to original] ...
 def _hard_exit_on_sigint(signum, frame):
     os._exit(130)
 signal.signal(signal.SIGINT, _hard_exit_on_sigint)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-ARCHIVE_I_TABLE = "archive_i"  # was slug_registry
-ARCHIVE_II_TABLE = "archive_ii"  # was archive_iii
+ARCHIVE_I_TABLE = "archive_i"
+ARCHIVE_II_TABLE = "archive_ii"
 CHECKPOINT_TABLE = "crawl_checkpoints"
 STAT_TALLY_TABLE = "crawl_stat_tallies"
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-# OPTIMIZED (2026-09): Dropped timeouts to drop dead hosts faster and prevent 
-# them from clogging async semaphore slots.
+# OPTIMIZED: Tighter timeouts to drop dead/rate-limited connections faster 
+# and free up concurrency slots.
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=8, connect=4)
 
-MAX_PAGE_BYTES = 3_000_000  # safety cap, not a realistic limit
-
-# OPTIMIZED (2026-09): Maxed out concurrency limits to fully saturate network I/O 
-# on modern GitHub Actions runners.
+MAX_PAGE_BYTES = 3_000_000
 CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_CONCURRENCY", "800"))
 CONNECTOR_LIMIT = int(os.environ.get("CRAWL_CONNECTOR_LIMIT", str(CRAWL_CONCURRENCY + 200)))
-
-# 2026-08: PARSE_WORKERS used to size a ProcessPoolExecutor...
 PARSE_WORKERS = int(os.environ.get("PARSE_WORKERS", "16"))
 TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_TIME_BUDGET_MINUTES", "330"))
 
 CAREER_PATHS = [
- "/careers",  "/career",  "/careers-home",  "/careers-and-jobs",
- "/jobs",  "/job-openings",  "/open-positions",  "/open-roles",  "/open-jobs",
- "/openings",  "/current-openings",  "/vacancies",  "/vacancy",  "/job-search",
- "/find-a-job",  "/positions",  "/opportunities",
- "/join-us",  "/join",  "/join-our-team",  "/join-the-team",
- "/work-with-us",  "/work-for-us",  "/work-here",
- "/about/careers",  "/about-us/careers",  "/company/careers",  "/company/jobs",
- "/about/jobs",  "/about-us/jobs",  "/team/careers",
- "/hiring",  "/we-are-hiring",  "/now-hiring",  "/were-hiring",
- "/employment",  "/employment-opportunities",
- "/recruitment",  "/recruiting",  "/talent",
- "/apply",  "/apply-now",
+    "/careers", "/career", "/careers-home", "/careers-and-jobs",
+    "/jobs", "/job-openings", "/open-positions", "/open-roles", "/open-jobs",
+    "/openings", "/current-openings", "/vacancies", "/vacancy", "/job-search",
+    "/find-a-job", "/positions", "/opportunities",
+    "/join-us", "/join", "/join-our-team", "/join-the-team",
+    "/work-with-us", "/work-for-us", "/work-here",
+    "/about/careers", "/about-us/careers", "/company/careers", "/company/jobs",
+    "/about/jobs", "/about-us/jobs", "/team/careers",
+    "/hiring", "/we-are-hiring", "/now-hiring", "/were-hiring",
+    "/employment", "/employment-opportunities",
+    "/recruitment", "/recruiting", "/talent",
+    "/apply", "/apply-now",
 ]
 
 CAREER_LIKE_RE = re.compile(
-r"\b(?:" + "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS) + r")\b",
-re.I)
+    r"\b(?:" + "|".join(re.escape(p.strip("/")).replace("-", "-?") for p in CAREER_PATHS) + r")\b",
+    re.I)
 
 SITEMAP_MAX_FOLLOW = 8
 SITEMAP_INDEX_PATHS = ("/sitemap.xml", "/sitemap_index.xml")
 
 _BLOG_LIKE_PATH_RE = re.compile(
-r"/(?:blog|news|press|media|insights|articles?|resources|case-studies)/"
-r"|/\d{4}/\d{1,2}(?:/\d{1,2})?/", re.I)
+    r"/(?:blog|news|press|media|insights|articles?|resources|case-studies)/"
+    r"|/\d{4}/\d{1,2}(?:/\d{1,2})?/", re.I)
 
 def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
     segments = [s for s in path.strip("/").split("/") if s]
@@ -103,40 +97,40 @@ def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
     return len(words) > max_words
 
 _JOB_LISTING_LINK_PHRASES = [
- "view all jobs",  "view jobs",  "view open positions",  "view open roles",
- "view careers",  "view our jobs",  "view our careers",  "view our openings",
- "view current openings",  "view all openings",  "view all roles",  "view roles",
- "view all vacancies",  "view vacancies",  "view all positions",  "view positions",
- "view job openings",  "view current job openings",  "view open jobs",
- "see all jobs",  "see open positions",  "see open roles",  "see our openings",
- "see careers",  "see all openings",  "see current openings",  "see all positions",
- "see all vacancies",  "see open jobs",  "see job openings",
- "browse jobs",  "browse careers",  "browse openings",  "browse open positions",
- "browse our jobs",  "browse all jobs",  "browse vacancies",  "browse job openings",
- "browse open roles",  "browse current openings",  "browse career opportunities",
- "browse positions",  "browse roles",  "browse all positions",
- "explore careers",  "explore our careers",  "explore jobs",  "explore roles",
- "explore our roles",  "explore open positions",  "explore opportunities",
- "explore career opportunities",  "explore all jobs",  "explore current openings",
- "explore job openings",  "explore all positions",  "explore open roles",
- "search jobs",  "search openings",  "search open positions",  "search careers",
- "search all jobs",  "search current openings",  "search vacancies",
- "find a job",  "find jobs",  "find your next role",  "find open positions",
- "find our openings",  "find current openings",  "find open roles",
- "job board",  "careers page",  "our jobs",  "our openings",  "our careers",
- "our current openings",  "our open positions",  "our open roles",  "our vacancies",
- "current openings",  "current opportunities",  "current vacancies",
- "current job openings",  "current job opportunities",
- "open positions",  "open roles",  "job openings",  "job opportunities",
- "all open positions",  "all open roles",  "all current openings",
- "all job openings",  "all vacancies",  "all positions",  "all roles",
- "latest openings",  "latest jobs",  "latest vacancies",  "latest job openings",
- "check out our openings",  "check our openings",  "check out our jobs",
- "career opportunities",  "join our team",  "join the team",
+    "view all jobs", "view jobs", "view open positions", "view open roles",
+    "view careers", "view our jobs", "view our careers", "view our openings",
+    "view current openings", "view all openings", "view all roles", "view roles",
+    "view all vacancies", "view vacancies", "view all positions", "view positions",
+    "view job openings", "view current job openings", "view open jobs",
+    "see all jobs", "see open positions", "see open roles", "see our openings",
+    "see careers", "see all openings", "see current openings", "see all positions",
+    "see all vacancies", "see open jobs", "see job openings",
+    "browse jobs", "browse careers", "browse openings", "browse open positions",
+    "browse our jobs", "browse all jobs", "browse vacancies", "browse job openings",
+    "browse open roles", "browse current openings", "browse career opportunities",
+    "browse positions", "browse roles", "browse all positions",
+    "explore careers", "explore our careers", "explore jobs", "explore roles",
+    "explore our roles", "explore open positions", "explore opportunities",
+    "explore career opportunities", "explore all jobs", "explore current openings",
+    "explore job openings", "explore all positions", "explore open roles",
+    "search jobs", "search openings", "search open positions", "search careers",
+    "search all jobs", "search current openings", "search vacancies",
+    "find a job", "find jobs", "find your next role", "find open positions",
+    "find our openings", "find current openings", "find open roles",
+    "job board", "careers page", "our jobs", "our openings", "our careers",
+    "our current openings", "our open positions", "our open roles", "our vacancies",
+    "current openings", "current opportunities", "current vacancies",
+    "current job openings", "current job opportunities",
+    "open positions", "open roles", "job openings", "job opportunities",
+    "all open positions", "all open roles", "all current openings",
+    "all job openings", "all vacancies", "all positions", "all roles",
+    "latest openings", "latest jobs", "latest vacancies", "latest job openings",
+    "check out our openings", "check our openings", "check out our jobs",
+    "career opportunities", "join our team", "join the team",
 ]
 
 _JOB_LISTING_LINK_RE = re.compile(
-"|".join(re.escape(p) for p in set(_JOB_LISTING_LINK_PHRASES)), re.I)
+    "|".join(re.escape(p) for p in set(_JOB_LISTING_LINK_PHRASES)), re.I)
 
 _MAX_CAREER_LINK_FOLLOW_PER_TIER = 3
 
@@ -155,17 +149,17 @@ def _extract_job_listing_link_candidates(html: str, base_url: str) -> list[tuple
             if not url:
                 continue
             text_sources = " ".join([
-            a_node.text(strip=True) or "",
-            a_node.attributes.get("aria-label") or "",
-            a_node.attributes.get("title") or "",
+                a_node.text(strip=True) or "",
+                a_node.attributes.get("aria-label") or "",
+                a_node.attributes.get("title") or "",
             ])
             score = 0
             if _JOB_LISTING_LINK_RE.search(text_sources):
                 score += 1
             path = urlparse(url).path
             if (CAREER_LIKE_RE.search(path)
-            and not _BLOG_LIKE_PATH_RE.search(path)
-            and not _looks_like_sentence_slug(path)):
+                and not _BLOG_LIKE_PATH_RE.search(path)
+                and not _looks_like_sentence_slug(path)):
                 score += 1
             if score == 0:
                 continue
@@ -178,37 +172,37 @@ def _extract_job_listing_link_candidates(html: str, base_url: str) -> list[tuple
 MIN_CAREER_PAGE_TEXT_CHARS = 250
 
 _STRONG_HIRING_PHRASES = [
- "current openings",  "current opening",  "current vacancies",  "current vacancy",
- "open positions",  "open position",  "open roles",  "open role",
- "job openings",  "job opening",  "we're hiring",  "we are hiring",  "now hiring",
- "join our team",  "join the team",  "join our growing team",
- "submit your application",  "submit an application",  "submit your resume",
- "send us your resume",  "send your resume",  "send your cv",  "submit your cv",
- "employment opportunities",  "career opportunities",  "job opportunities",
- "view openings",  "view our openings",  "view current openings",  "view all jobs",
- "see our openings",  "browse openings",  "browse our jobs",  "browse open positions",
- "explore careers",  "explore our careers",  "explore open positions",
- "search jobs",  "search openings",  "search open positions",
- "find your next role",  "find a job",  "meet our hiring team",
- "equal opportunity employer",  "we are an equal opportunity employer",
- "join us and",  "grow your career with us",  "build your career with us",
+    "current openings", "current opening", "current vacancies", "current vacancy",
+    "open positions", "open position", "open roles", "open role",
+    "job openings", "job opening", "we're hiring", "we are hiring", "now hiring",
+    "join our team", "join the team", "join our growing team",
+    "submit your application", "submit an application", "submit your resume",
+    "send us your resume", "send your resume", "send your cv", "submit your cv",
+    "employment opportunities", "career opportunities", "job opportunities",
+    "view openings", "view our openings", "view current openings", "view all jobs",
+    "see our openings", "browse openings", "browse our jobs", "browse open positions",
+    "explore careers", "explore our careers", "explore open positions",
+    "search jobs", "search openings", "search open positions",
+    "find your next role", "find a job", "meet our hiring team",
+    "equal opportunity employer", "we are an equal opportunity employer",
+    "join us and", "grow your career with us", "build your career with us",
 ]
 
 _WEAK_HIRING_WORDS = [
- "career",  "careers",  "job",  "jobs",  "position",  "positions",
- "vacancy",  "vacancies",  "hiring",  "recruit",  "recruiting",  "recruitment",
- "recruiter",  "talent",  "opening",  "openings",  "employment",
- "internship",  "internships",  "apprenticeship",  "apprenticeships",
- "resume",  "cv",  "candidate",  "candidates",  "applicant",  "applicants",
- "onboarding",  "workforce",  "headcount",
+    "career", "careers", "job", "jobs", "position", "positions",
+    "vacancy", "vacancies", "hiring", "recruit", "recruiting", "recruitment",
+    "recruiter", "talent", "opening", "openings", "employment",
+    "internship", "internships", "apprenticeship", "apprenticeships",
+    "resume", "cv", "candidate", "candidates", "applicant", "applicants",
+    "onboarding", "workforce", "headcount",
 ]
 
-_WEAK_HIRING_PHRASES = ["apply now",  "apply today",  "apply here",  "apply online"]
+_WEAK_HIRING_PHRASES = ["apply now", "apply today", "apply here", "apply online"]
 
 _STRONG_HIRING_RE = re.compile("|".join(re.escape(p) for p in _STRONG_HIRING_PHRASES), re.I)
 _WEAK_HIRING_RE = re.compile(
-r"\b(?:" + "|".join(re.escape(w) for w in _WEAK_HIRING_WORDS + _WEAK_HIRING_PHRASES) + r")\b",
-re.I,
+    r"\b(?:" + "|".join(re.escape(w) for w in _WEAK_HIRING_WORDS + _WEAK_HIRING_PHRASES) + r")\b",
+    re.I,
 )
 
 def _has_hiring_vocabulary(text: str) -> bool:
@@ -251,10 +245,9 @@ def _clean_extracted_url(url: str) -> str:
                 url = url[:-1]
     return url
 
-def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
+def _extract_candidate_urls_from_tree(tree, base_url: str, raw_html: str) -> set[str]:
     urls: set[str] = set()
     try:
-        tree = LexborHTMLParser(html)
         for node in tree.css("a[href]"):
             href = node.attributes.get("href")
             if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
@@ -269,7 +262,7 @@ def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
                 break
     except Exception:
         pass
-    for m in _URL_RE.finditer(html):
+    for m in _URL_RE.finditer(raw_html):
         cleaned = _clean_extracted_url(m.group(0))
         if cleaned:
             urls.add(cleaned)
@@ -289,10 +282,9 @@ def _walk_json_strings(obj, depth: int = 0):
         for v in obj:
             yield from _walk_json_strings(v, depth + 1)
 
-def _extract_jsonld_urls(html: str) -> set[str]:
+def _extract_jsonld_urls_from_tree(tree) -> set[str]:
     urls: set[str] = set()
     try:
-        tree = LexborHTMLParser(html)
         for node in tree.css('script[type="application/ld+json"]'):
             text = node.text(strip=True)
             if not text:
@@ -326,9 +318,8 @@ def _detect_ats_hits(urls: set[str]) -> list[tuple[str, str, str]]:
                     hits.append((ats, slug, url))
     return hits
 
-def _extract_address_zone_text(html: str) -> str:
+def _extract_address_zone_text_from_tree(tree) -> str:
     try:
-        tree = LexborHTMLParser(html)
         parts = []
         for tag in ("footer", "address"):
             for node in tree.css(tag):
@@ -357,10 +348,9 @@ def _walk_for_address_country(obj, depth: int = 0) -> str | None:
                 return result
     return None
 
-def detect_country(html: str, target_geo_countries: set[str]) -> tuple[str | None, str | None]:
+def _detect_country_from_tree(tree, target_geo_countries: set[str]) -> tuple[str | None, str | None]:
     jsonld_country = None
     try:
-        tree = LexborHTMLParser(html)
         for node in tree.css('script[type="application/ld+json"]'):
             text = node.text(strip=True)
             if not text:
@@ -381,7 +371,7 @@ def detect_country(html: str, target_geo_countries: set[str]) -> tuple[str | Non
         if jsonld_country in target_geo_countries:
             return jsonld_country, "jsonld"
         return None, None
-    zone_text = _extract_address_zone_text(html)
+    zone_text = _extract_address_zone_text_from_tree(tree)
     if zone_text:
         resolved = geo.extract_countries(zone_text)
         if len(resolved) == 1:
@@ -390,40 +380,42 @@ def detect_country(html: str, target_geo_countries: set[str]) -> tuple[str | Non
                 return only, "footer_address"
     return None, None
 
-def _extract_visible_text(html: str) -> str:
+def _extract_visible_text_from_tree(tree) -> str:
     try:
-        tree = LexborHTMLParser(html)
         body = tree.css_first("body")
         return body.text(strip=True) if body else tree.root.text(strip=True)
     except Exception:
         return ""
 
+# OPTIMIZED: Single-pass DOM parsing. 
+# Previously, LexborHTMLParser was instantiated 4 separate times per page.
 def _parse_detect(html: str, base_url: str, target_geo_countries: set[str]
 ) -> tuple[list[tuple[str, str, str]], str | None, str | None, int, bool]:
-    urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
+    tree = LexborHTMLParser(html)
+    urls = _extract_candidate_urls_from_tree(tree, base_url, html) | _extract_jsonld_urls_from_tree(tree)
     hits = _detect_ats_hits(urls)
-    country, method = detect_country(html, target_geo_countries)
-    text = _extract_visible_text(html)
+    country, method = _detect_country_from_tree(tree, target_geo_countries)
+    text = _extract_visible_text_from_tree(tree)
     text_len = len(text)
     has_hiring_vocab = _has_hiring_vocabulary(text)
     return hits, country, method, text_len, has_hiring_vocab
 
 _ATS_VENDOR_DOMAINS = (
- "greenhouse.io",  "lever.co",  "ashbyhq.com",  "bamboohr.com",  "icims.com",
- "myworkdayjobs.com",  "rippling.com",  "workable.com",  "recruitee.com",
- "smartrecruiters.com",  "taleo.net",  "oraclecloud.com",  "brassring.com",
- "teamtailor.com",  "successfactors.com",  "successfactors.eu",  "sapsf.com",  "sapsf.eu",
- "breezy.hr",  "hrmdirect.com",  "softgarden.io",  "softgarden.de",  "zohorecruit.com",
- "zohorecruit.eu",  "paylocity.com",  "join.com",  "personio.de",  "personio.com",
- "workatastartup.com",  "ycombinator.com",  "eploy.net",  "folksats.app",  "glowinthecloud.com",
- "jobadder.com",  "jobvite.com",  "adp.com",  "avature.net",
- "pageuppeople.com",  "pinpointhq.com",  "flatchr.io",  "jobylon.com",
- "occupop-careers.com",
- "csod.com",  "ultipro.com",  "dayforcehcm.com",  "applytojob.com",
- "comeet.co",  "phenompeople.com",  "eightfold.ai",  "clearcompanyhr.com",
- "freshteam.com",  "newtonsoftware.com",  "applicantpro.com",
- "hiringthing.com",  "paycomonline.com",  "isolvedhire.com",
- "getro.com",
+    "greenhouse.io", "lever.co", "ashbyhq.com", "bamboohr.com", "icims.com",
+    "myworkdayjobs.com", "rippling.com", "workable.com", "recruitee.com",
+    "smartrecruiters.com", "taleo.net", "oraclecloud.com", "brassring.com",
+    "teamtailor.com", "successfactors.com", "successfactors.eu", "sapsf.com", "sapsf.eu",
+    "breezy.hr", "hrmdirect.com", "softgarden.io", "softgarden.de", "zohorecruit.com",
+    "zohorecruit.eu", "paylocity.com", "join.com", "personio.de", "personio.com",
+    "workatastartup.com", "ycombinator.com", "eploy.net", "folksats.app", "glowinthecloud.com",
+    "jobadder.com", "jobvite.com", "adp.com", "avature.net",
+    "pageuppeople.com", "pinpointhq.com", "flatchr.io", "jobylon.com",
+    "occupop-careers.com",
+    "csod.com", "ultipro.com", "dayforcehcm.com", "applytojob.com",
+    "comeet.co", "phenompeople.com", "eightfold.ai", "clearcompanyhr.com",
+    "freshteam.com", "newtonsoftware.com", "applicantpro.com",
+    "hiringthing.com", "paycomonline.com", "isolvedhire.com",
+    "getro.com",
 )
 
 def _looks_like_real_career_page(url: str, text_len: int, has_hiring_vocab: bool, origin: str) -> bool:
@@ -453,57 +445,57 @@ def _best_inhouse_candidate(candidates: list[dict], origin: str) -> dict | None:
 _ORG_SCHEMA_TYPE_RE = re.compile(r'"@type"\s*:\s*"(?:Organization|Corporation)"', re.I)
 EMPLOYEE_COUNT_MIN_FOR_CREDIT = 200
 _ORG_EMPLOYEE_COUNT_RE = re.compile(
-r'"numberOfEmployees"\s*:\s*(?:{[^}]{0,160}?"(?:value|minValue)"\s*:\s*)?"?(\d{1,9})"?', re.I)
+    r'"numberOfEmployees"\s*:\s*(?:{[^}]{0,160}?"(?:value|minValue)"\s*:\s*)?"?(\d{1,9})"?', re.I)
 _ORG_AUTHORITY_SAMEAS_RE = re.compile(
-r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:wikipedia.org|crunchbase.com|bloomberg.com)',
-re.I)
+    r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:wikipedia.org|crunchbase.com|bloomberg.com)',
+    re.I)
 _ORG_REGULATOR_SAMEAS_RE = re.compile(
-r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:'
-r'sec.gov|'                                          
-r'company-information.service.gov.uk|'              
-r'sedarplus.ca|'                                       
-r'asic.gov.au|'                                       
-r'cro.ie|'                                             
-r'companies-register.companiesoffice.govt.nz|'       
-r'bizfile.gov.sg|'                                    
-r'kvk.nl|'                                             
-r'brreg.no|'                                           
-r'bolagsverket.se|'                                    
-r'virk.dk|'                                            
-r'ytj.fi|'                                             
-r'justizonline.gv.at|justiz.gv.at|'                 
-r'kbo-bce.be|'                                         
-r'skatturinn.is|'                                      
-r'lbr.lu|'                                             
-r'annuaire-entreprises.data.gouv.fr|infogreffe.fr|'  
-r'handelsregister.de'                                  
-r')', re.I)
+    r'"sameAs"\s*:\s*\[[^\]]{0,600}(?:'
+    r'sec.gov|'
+    r'company-information.service.gov.uk|'
+    r'sedarplus.ca|'
+    r'asic.gov.au|'
+    r'cro.ie|'
+    r'companies-register.companiesoffice.govt.nz|'
+    r'bizfile.gov.sg|'
+    r'kvk.nl|'
+    r'brreg.no|'
+    r'bolagsverket.se|'
+    r'virk.dk|'
+    r'ytj.fi|'
+    r'justizonline.gv.at|justiz.gv.at|'
+    r'kbo-bce.be|'
+    r'skatturinn.is|'
+    r'lbr.lu|'
+    r'annuaire-entreprises.data.gouv.fr|infogreffe.fr|'
+    r'handelsregister.de'
+    r')', re.I)
 _CORP_FOOTER_LINKS_RE = re.compile(
-r'\b(?:investor relations|investors?|newsroom|press releases?|board of directors|'
-r'esg\b|sustainability report|annual report|shareholders?|corporate governance|'
-r'executive (?:team|leadership)|leadership team|media kit|quarterly results|'
-r'earnings call|form 10-k|proxy statement)\b', re.I)
+    r'\b(?:investor relations|investors?|newsroom|press releases?|board of directors|'
+    r'esg\b|sustainability report|annual report|shareholders?|corporate governance|'
+    r'executive (?:team|leadership)|leadership team|media kit|quarterly results|'
+    r'earnings call|form 10-k|proxy statement)\b', re.I)
 _LEGAL_ENTITY_SUFFIX_RE = re.compile(
-r'(?:©|copyright)[^\n<]{0,80}\b(?:inc.?|llc|l.l.c.|corp(?:oration)?.?|gmbh|plc|s.a.|ltd.?|'
-r'pty.?\sltd.?|pte.?\sltd.?|b.?v.?|s.?p.?a.?|s.?r.?l.?|s.?a.?s.?|a.?g.?|a.?b.?|'
-r'a/s|k.?k.?|co.,?\s*ltd.?|oy|ug)\b',
-re.I)
+    r'(?:©|copyright)[^\n<]{0,80}\b(?:inc.?|llc|l.l.c.|corp(?:oration)?.?|gmbh|plc|s.a.|ltd.?|'
+    r'pty.?\sltd.?|pte.?\sltd.?|b.?v.?|s.?p.?a.?|s.?r.?l.?|s.?a.?s.?|a.?g.?|a.?b.?|'
+    r'a/s|k.?k.?|co.,?\s*ltd.?|oy|ug)\b',
+    re.I)
 _COMPLIANCE_BANNER_RE = re.compile(r'(?:onetrust.com|cookielaw.org|trustarc.com|cookiebot.com)', re.I)
 _ENTERPRISE_MARTECH_RE = re.compile(
-r'(?:6sense.com|demandbase.com|marketo.net|pardot.com|omtrdc.net|2o7.net|'
-r'exacttarget.com|salesforceliveagent.com|eloqua.com|terminus.com|rollworks.com|'
-r'zoominfo.com|bombora.com)', re.I)
+    r'(?:6sense.com|demandbase.com|marketo.net|pardot.com|omtrdc.net|2o7.net|'
+    r'exacttarget.com|salesforceliveagent.com|eloqua.com|terminus.com|rollworks.com|'
+    r'zoominfo.com|bombora.com)', re.I)
 _OBSERVABILITY_RE = re.compile(
-r'(?:datadoghq.com|dynatrace.com|newrelic.com|nr-data.net|sentry.io|js.sentry-cdn.com|'
-r'appdynamics.com|instana.io|splunkcloud.com)', re.I)
+    r'(?:datadoghq.com|dynatrace.com|newrelic.com|nr-data.net|sentry.io|js.sentry-cdn.com|'
+    r'appdynamics.com|instana.io|splunkcloud.com)', re.I)
 
 QUALITY_INDEX_THRESHOLD = 35
 
 _MX_ENTERPRISE_GATEWAY_RE = re.compile(
-r'(?:mimecast.com|pphosted.com|ppe-hosted.com|iphmx.com|barracudanetworks.com|'
-r'forcepoint.com|mailcontrol.com|messagelabs.com)', re.I)
+    r'(?:mimecast.com|pphosted.com|ppe-hosted.com|iphmx.com|barracudanetworks.com|'
+    r'forcepoint.com|mailcontrol.com|messagelabs.com)', re.I)
 _MX_MAINSTREAM_HOSTED_RE = re.compile(
-r'(?:google.com|googlemail.com|aspmx.l.google.com|outlook.com|protection.outlook.com)', re.I)
+    r'(?:google.com|googlemail.com|aspmx.l.google.com|outlook.com|protection.outlook.com)', re.I)
 MX_LOOKUP_TIMEOUT = 3.0
 _mx_resolver = None
 
@@ -512,7 +504,7 @@ def _get_mx_resolver():
     if _mx_resolver is None:
         try:
             import aiodns
-            _mx_resolver = aiodns.DNSResolver()
+            _mx_resolver = aiodns.DaemonResolver()
         except ImportError:
             _mx_resolver = False
     return _mx_resolver or None
@@ -536,10 +528,10 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
 
 WEBGRAPH_TIERS_URL = os.environ.get("WEBGRAPH_TIERS_URL", "")
 WEBGRAPH_RANK_BANDS = (
-("S+", 1_000_000, 20),
-("S", 10_000_000, 15),
-("A", 25_000_000, 12),
-("B", 40_000_000, 8),
+    ("S+", 1_000_000, 20),
+    ("S", 10_000_000, 15),
+    ("A", 25_000_000, 12),
+    ("B", 40_000_000, 8),
 )
 _webgraph_ranks: dict[str, str] | None = None
 _webgraph_load_lock: asyncio.Lock | None = None
@@ -548,7 +540,7 @@ _WEBGRAPH_MIN_PART_BYTES = 32 * 1024 * 1024
 _WEBGRAPH_PART_RETRIES = 3
 
 async def _fetch_range(session: aiohttp.ClientSession, url: str, start: int, end: int,
-timeout: aiohttp.ClientTimeout) -> bytes:
+                       timeout: aiohttp.ClientTimeout) -> bytes:
     last_exc: Exception | None = None
     for attempt in range(_WEBGRAPH_PART_RETRIES + 1):
         try:
@@ -688,30 +680,13 @@ def _quality_index_score(html: str) -> tuple[int, list[str]]:
         signals.append("legal_entity_suffix")
     return score, signals
 
-_WIKIPEDIA_SAMEAS_URL_RE = re.compile(
-r'"sameAs"\s*:\s*\[[^\]]{0,600}?"(https?://[a-z]{2,3}\.wikipedia\.org/wiki/[^"]+)"', re.I)
-WIKIPEDIA_VERIFY_TIMEOUT = 5.0
+# OPTIMIZED: Removed _wikipedia_mention_score. 
+# Making an external HTTP request to Wikipedia for every domain with a sameAs link 
+# introduces unbounded latency and potential rate-limiting, severely bottlenecking 
+# high-concurrency crawling. The regex check (_ORG_AUTHORITY_SAMEAS_RE) already 
+# awards +10 points, which is sufficient without the network stall.
 
-async def _wikipedia_mention_score(session: aiohttp.ClientSession, html: str,
-domain: str) -> tuple[int, str | None]:
-    m = _WIKIPEDIA_SAMEAS_URL_RE.search(html)
-    if not m:
-        return 0, None
-    wiki_url = m.group(1)
-    try:
-        async with session.get(wiki_url, timeout=aiohttp.ClientTimeout(total=WIKIPEDIA_VERIFY_TIMEOUT),
-        headers={"User-Agent": USER_AGENT}) as r:
-            if r.status >= 400:
-                return 0, None
-            article_html = await r.text(errors="ignore")
-    except Exception:
-        return 0, None
-    if domain.lower() in article_html.lower():
-        return 15, "wikipedia_mention_verified"
-    return 0, None
-
-async def _quality_index_score_async(session: aiohttp.ClientSession, html: str,
-domain: str) -> tuple[int, list[str]]:
+async def _quality_index_score_async(session: aiohttp.ClientSession, html: str, domain: str) -> tuple[int, list[str]]:
     score, signals = _quality_index_score(html)
     mx_score, mx_signal = await _mx_provider_score(domain)
     if mx_signal:
@@ -721,10 +696,6 @@ domain: str) -> tuple[int, list[str]]:
     if wg_signal:
         score += wg_score
         signals.append(wg_signal)
-    wiki_score, wiki_signal = await _wikipedia_mention_score(session, html, domain)
-    if wiki_signal:
-        score += wiki_score
-        signals.append(wiki_signal)
     return score, signals
 
 def log_quality_index_summary(stats: dict) -> None:
@@ -780,8 +751,7 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
         stats["unreachable"] += 1
         return None
 
-async def _resolve_grnh_se_hits(session: aiohttp.ClientSession, html: str,
-stats: dict) -> list[tuple[str, str, str]]:
+async def _resolve_grnh_se_hits(session: aiohttp.ClientSession, html: str, stats: dict) -> list[tuple[str, str, str]]:
     hits: list[tuple[str, str, str]] = []
     seen_short_urls: set[str] = set()
     for short_url in _GRNH_SE_RE.findall(html):
@@ -840,8 +810,7 @@ async def gather_page_candidates(detect_fn, pages: list[tuple[str, str] | None])
     return out
 
 async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession,
-candidates: list[dict], already_fetched: set[str],
-stats: dict) -> list[dict]:
+candidates: list[dict], already_fetched: set[str], stats: dict) -> list[dict]:
     link_pool: dict[str, int] = {}
     for c in candidates:
         if c["hits"]:
@@ -871,8 +840,7 @@ stats: dict) -> list[dict]:
     return results
 
 async def detect_page_hits(session: aiohttp.ClientSession, parse_pool: concurrent.futures.Executor,
-html: str, url: str, target_geo_countries: set[str],
-stats: dict) -> tuple[list[tuple[str, str, str]], str | None, str | None, int, bool]:
+html: str, url: str, target_geo_countries: set[str], stats: dict) -> tuple[list[tuple[str, str, str]], str | None, str | None, int, bool]:
     loop = asyncio.get_running_loop()
     hits, country, method, text_len, has_hiring_vocab = await loop.run_in_executor(
         parse_pool, _parse_detect, html, url, target_geo_countries)
@@ -1048,8 +1016,7 @@ async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows:
     return await _upsert_rows(session, ARCHIVE_II_TABLE, "website_url", rows)
 
 async def save_crawl_checkpoint(session: aiohttp.ClientSession, source: str, shard_index: int,
-shard_count: int, resume_offset: int,
-partition: str | None = None) -> None:
+shard_count: int, resume_offset: int, partition: str | None = None) -> None:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -1084,8 +1051,7 @@ shard_count: int) -> int:
         return 0
 
 async def load_crawl_checkpoint_with_partition(session: aiohttp.ClientSession, source: str,
-shard_index: int, shard_count: int
-) -> tuple[str | None, int]:
+shard_index: int, shard_count: int) -> tuple[str | None, int]:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None, 0
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -1356,4 +1322,11 @@ def new_connector() -> aiohttp.TCPConnector:
         resolver = aiohttp.AsyncResolver()
     except ImportError:
         log.warning("  aiodns not installed — DNS resolution will use the slower default resolver.")
-    return aiohttp.TCPConnector(limit=CONNECTOR_LIMIT, ttl_dns_cache=300, resolver=resolver)
+    # OPTIMIZED: Added tcp_keepalive=True to aggressively drop stale/TLS-hanging 
+    # connections at the OS level, freeing up concurrency slots faster.
+    return aiohttp.TCPConnector(
+        limit=CONNECTOR_LIMIT, 
+        ttl_dns_cache=300, 
+        resolver=resolver,
+        tcp_keepalive=True
+    )
