@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 14-job matrix over 8 sources, all running in parallel — instead of one
+  # 18-job matrix over 8 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -56,6 +56,16 @@ jobs:
   # actually run at once (queued-but-not-running shards buy nothing, see
   # this conversation's own shard-count discussion). See discovery.py's
   # fetch_commoncrawl_slugs docstring for how the platform-sharding works.
+  #
+  # wayback runs as 5 separate jobs (platform-sharded, via --wayback-shard/
+  # --wayback-total-shards, same scheme as commoncrawl above) — added
+  # 2026-09 alongside raising discovery.py's _WAYBACK_MAX_PAGES from 25 to
+  # 500. That cap was getting hit on every Greenhouse pattern in the same
+  # unsharded run at exactly 125,000 snapshots (25 pages x 5000/page);
+  # raising it lets a heavily-archived platform actually finish fetching,
+  # but only makes sense paired with sharding — otherwise all that extra
+  # allowed pagination would just stack onto one job's wall-clock instead
+  # of running across 5 in parallel. See fetch_wayback_slugs' docstring.
   #
   # httparchive runs as 3 separate jobs too (date-sharded, via --ha-shard/
   # --ha-total-shards) — this source's single ~90min job was the slowest
@@ -119,7 +129,20 @@ jobs:
             name: common crawl 3
             extra_args: "--cc-shard 2 --cc-total-shards 3"
           - source: wayback
-            name: wayback
+            name: wayback 1
+            extra_args: "--wayback-shard 0 --wayback-total-shards 5"
+          - source: wayback
+            name: wayback 2
+            extra_args: "--wayback-shard 1 --wayback-total-shards 5"
+          - source: wayback
+            name: wayback 3
+            extra_args: "--wayback-shard 2 --wayback-total-shards 5"
+          - source: wayback
+            name: wayback 4
+            extra_args: "--wayback-shard 3 --wayback-total-shards 5"
+          - source: wayback
+            name: wayback 5
+            extra_args: "--wayback-shard 4 --wayback-total-shards 5"
           - source: latmay
             name: Latmay H.F
           - source: icims_hrjobs
