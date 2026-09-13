@@ -533,11 +533,23 @@ def run_finalize() -> None:
     2026-08: delete_days dropped from 60 to 31 (per user instruction), and
     scoped to source_pipeline='crawl_i' only — Crawl II runs its own
     separate finalize (crawl_ii.py) with its own policy, and neither
-    pipeline's cleanup should be able to touch the other's rows."""
+    pipeline's cleanup should be able to touch the other's rows.
+
+    2026-09: delete_days dropped again, from 31 to 3 (per explicit user
+    instruction: "if a role is not found, after three runs, that's days 1
+    through 3, it should be deleted, cause its likely closed"). inactive_days
+    dropped to match (3) rather than left at 30 — with delete_days now
+    also 3, a 30-day inactive_days would be dead code: cleanup_stale_jobs
+    runs its mark-inactive pass and its hard-delete pass in the same call,
+    so any row old enough to hard-delete at day 3 would never have lived
+    long enough to hit a 30-day inactive_cutoff first. This assumes crawl_i
+    runs roughly daily — three consecutive runs where a job's board no
+    longer lists it (last_seen not refreshed) now means it's gone, not
+    just "not re-confirmed in the last month"."""
     log.info("=" * 60)
     log.info("CRAWL I — finalize (cleanup stale jobs)")
     log.info("=" * 60)
-    summary = cleanup_stale_jobs(inactive_days=30, delete_days=31, source_pipeline="crawl_i")
+    summary = cleanup_stale_jobs(inactive_days=3, delete_days=3, source_pipeline="crawl_i")
     log.info(f"Crawl I finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
