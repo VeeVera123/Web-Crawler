@@ -2325,30 +2325,72 @@ _CC_LIVE_CHECK = {
 #    until that research happens — same list to extend in both files.
 
 
-def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str) -> dict:
+def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -> dict:
     """Applied to a CC/Wayback fetch_*_slugs() result right before it's
     returned — see the module comment above _CC_LIVE_CHECK for why only
     these two sources need this. `slugs_by_ats` values may be a set[str]
     (no company name) or a dict[str, str] ({slug: name}); the returned
-    dict preserves whichever shape each ATS's value came in as."""
+    dict preserves whichever shape each ATS's value came in as.
+
+    2026-09 fix: this used to check every candidate slug fully serially —
+    one `requests.get(timeout=10)` (up to TWO sequential ones for the
+    multi-host-tenant checkers like icims/personio, so up to 20s) plus a
+    flat time.sleep(0.3) between EVERY single slug, across all 19
+    platforms _CC_LIVE_CHECK now covers. With the hundreds-to-thousands of
+    candidate slugs a real CC/Wayback fetch produces, that serial loop's
+    worst case ran into the tens of minutes — confirmed live: a real
+    fetch_wayback_slugs() run got killed by the workflow's own cancellation
+    (KeyboardInterrupt mid-request inside _cc_check_paylocity) after
+    running long past what a "quick live pre-check" should ever take.
+    Each check hits its own distinct per-slug host (a different company's
+    subdomain/tenant), so — same reasoning as fetch_yc_slugs's per-domain
+    concurrent checks elsewhere in this file — there's no single shared
+    endpoint here that concurrency would overload. Runs all checks across
+    every ATS at once via a bounded thread pool instead of one ATS-then-
+    the-next serial pass.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     dropped = checked = 0
     out = {}
+    is_dict_by_ats = {}
+    kept_by_ats = {}
+    work = []  # (ats, slug, name)
+
     for ats, slugs in slugs_by_ats.items():
         checker = _CC_LIVE_CHECK.get(ats)
         if not checker or not slugs:
             out[ats] = slugs
             continue
         is_dict = isinstance(slugs, dict)
+        is_dict_by_ats[ats] = is_dict
+        kept_by_ats[ats] = {}
         items = list(slugs.items()) if is_dict else [(s, "") for s in slugs]
-        kept = {}
         for slug, name in items:
-            checked += 1
-            if checker(slug) is False:
-                dropped += 1
-            else:
-                kept[slug] = name
-            time.sleep(0.3)
-        out[ats] = kept if is_dict else set(kept)
+            work.append((ats, slug, name))
+
+    def _check_one(ats, slug, name):
+        checker = _CC_LIVE_CHECK[ats]
+        try:
+            is_dead = checker(slug) is False
+        except Exception:
+            is_dead = False  # a checker crashing is not evidence of death
+        return ats, slug, name, is_dead
+
+    if work:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_check_one, ats, slug, name) for ats, slug, name in work]
+            for future in as_completed(futures):
+                ats, slug, name, is_dead = future.result()
+                checked += 1
+                if is_dead:
+                    dropped += 1
+                else:
+                    kept_by_ats[ats][slug] = name
+
+    for ats in kept_by_ats:
+        kept = kept_by_ats[ats]
+        out[ats] = kept if is_dict_by_ats[ats] else set(kept)
     if checked:
         log.info(f"{label}: live pre-check confirmed {dropped}/{checked} candidate "
                  f"slugs are already dead — dropped before ever reaching archive_i")
