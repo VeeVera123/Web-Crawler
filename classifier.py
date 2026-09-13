@@ -579,6 +579,48 @@ GLOBAL_KEYWORDS = [
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
+# 2026-09 fix: a subset of GLOBAL_KEYWORDS, for _text_has_global_evidence's
+# post-AI safety net ONLY (see that function's docstring) — real case that
+# exposed this: an Ashby posting (jobs.ashbyhq.com/vesta/1f031efa-...,
+# "Senior Manager, Customer Success") whose description described the
+# COMPANY as "distributed"/a "global team" while its actual hiring was
+# scoped to specific hub cities (New York, San Francisco) — confirmed via
+# the live posting. That still let the AI's match_global verdict survive
+# the safety net, because entries like bare "distributed", "global team",
+# "global workforce", "global presence", "global network", "global
+# talent", or "earth" are marketing language describing what a COMPANY
+# *is*, not a statement of where a ROLE can be based — and the safety net
+# deliberately has no residue-stripping (unlike the strict FIELD-level
+# check above, rule 4, which requires the phrase be the ONLY thing left
+# in a short location string — genuinely low false-positive risk there).
+# Applied to a whole free-form job description instead, those same loose,
+# single-phrase entries are exactly the ones a "distributed team, but
+# hiring is hub-city-only" posting will trip. Excluded here: any entry
+# that only describes the company/team's nature rather than an explicit
+# hiring-scope policy ("hire globally," "open to candidates worldwide,"
+# "work from anywhere," "no location restriction," "time zone agnostic,"
+# etc. all stay — those remain unambiguous hiring-policy statements).
+_SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS = {
+    r"\bearth\b",
+    r"\bplanet\s*earth\b",
+    r"\bglobal\s*citizens?\b",
+    r"\bglobal\s*workforce\b",
+    r"\bglobal\s*operations?\b",
+    r"\bglobal\s*presence\b",
+    r"\bglobal\s*network\b",
+    r"\bglobal\s*reach\b",
+    r"\bglobal\s*coverage\b",
+    r"\bglobal\s*scale\b",
+    r"\b(fully\s*)?distributed\b",
+    r"\bdistributed\s*team\b",
+    r"\bdistributed\s*workforce\b",
+    r"\b(global|international)\s*team\b",
+    r"\bglobal\s*talent\b",
+    r"\bglobal\s*talent\s*pool\b",
+}
+_SAFETY_NET_GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS
+                         if kw not in _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS]
+
 STANDALONE_GLOBAL_RE = re.compile(
     r"^\s*(global|worldwide|world\s*wide|anywhere|international|wfa|earth|planet\s*earth|"
     r"distributed|borderless|everywhere|"
@@ -928,7 +970,7 @@ def _text_has_global_evidence(text: str) -> bool:
     t = text.lower()
     if STANDALONE_GLOBAL_RE.search(text.strip()):
         return True
-    return any(rx.search(t) for rx in GLOBAL_RE)
+    return any(rx.search(t) for rx in _SAFETY_NET_GLOBAL_RE)
 
 
 def _text_has_africa_or_emea_evidence(text: str) -> bool:
