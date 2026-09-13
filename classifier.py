@@ -175,6 +175,26 @@ INCLUDE_KEYWORDS = [
     r"customer\s*onboarding", r"client\s*onboarding",
     r"onboarding\s*(manager|lead|specialist)",
     r"implementation\s*(manager|lead|specialist|consultant)",
+
+    # Project Management
+    r"project\s*manag(?:er|ement)", r"project\s*lead\b",
+    r"project\s*director", r"project\s*coordinator",
+    r"project\s*specialist", r"project\s*consultant",
+    r"\bpmo\b", r"program\s*manag(?:er|ement)", r"program\s*lead\b",
+    r"program\s*director", r"program\s*coordinator",
+    r"technical\s*project\s*manag", r"it\s*project\s*manag",
+    r"digital\s*project\s*manag", r"senior\s*project\s*manag",
+    r"junior\s*project\s*manag",
+
+    # Operations Manager / Management
+    r"operations\s*manag(?:er|ement)", r"operations\s*lead\b",
+    r"operations\s*director", r"operations\s*coordinator",
+    r"operations\s*specialist", r"operations\s*analyst",
+    r"\bops\s*manag(?:er|ement)\b", r"\bops\s*lead\b",
+    r"business\s*operations\s*manag", r"business\s*operations\s*lead",
+    r"regional\s*operations\s*manag", r"national\s*operations\s*manag",
+    r"global\s*operations\s*manag", r"senior\s*operations\s*manag",
+    r"junior\s*operations\s*manag", r"head\s*of\s*.*operations",
 ]
 
 EXCLUDE_KEYWORDS = [
@@ -221,8 +241,9 @@ def keyword_classify_role(title: str) -> str:
 
 
 ROLE_SYSTEM_PROMPT = """\
-You are a job title classifier. Decide if each title is a Customer Success \
-or Account Management role.
+You are a job title classifier. Decide if each title is a Customer Success, \
+Account Management, Project Management, or Operations Manager/Management \
+role.
 
 YES if the role is any variation of:
 - Customer Success Manager/Lead/Specialist/Director/Associate/Consultant
@@ -235,12 +256,18 @@ YES if the role is any variation of:
 - Customer/Client Care Manager
 - Retention/Renewal Manager
 - Onboarding/Implementation Manager (customer-facing)
+- Project Manager/Lead/Coordinator/Director/PMO (technical/IT/digital/senior/junior)
+- Program Manager/Lead/Coordinator/Director
+- Operations Manager/Lead/Director/Coordinator/Specialist/Analyst (business/regional/national/global operations)
+- Head of Operations
 
 NO if the role is:
 - Any kind of Engineer or Developer
 - Sales (SDR, BDR, Account Executive, demand gen)
 - IT/Desktop/Hardware Support
-- Marketing, Product, Design, HR, Finance, Legal
+- Marketing, Design, HR, Finance, Legal
+- Product Manager/Owner (this is a distinct role from Project Manager — a
+  "Product Manager" is NO even though a "Project Manager" is YES)
 
 Respond ONLY with lines like:
 1 YES
