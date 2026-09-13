@@ -346,6 +346,20 @@ def iter_seed_hosts_by_file(partitions: list[str], shard_index: int | None, shar
 SOURCE_LABEL = "common_crawl_probe"
 _BANNER = "=" * 60
 
+# 2026-09 fix: a sentinel `partition` value meaning "this shard already
+# fully finished its entire assigned crawl" — see the completion branch
+# below and the early short-circuit in run_host_crawl for why this is
+# now persisted instead of the checkpoint row being deleted outright.
+# Same real bug class as Workable's (see workable_seed.py's
+# _mark_seed_shard_done docstring): common_crawl.yml's `finalize` job
+# re-dispatches the WHOLE shard matrix (every shard, 0..shard_count-1)
+# whenever ANY shard's checkpoint row is still present, and a deleted
+# row is indistinguishable from "never started" — an already-finished
+# shard would silently re-crawl its ENTIRE assigned host list from
+# scratch on every subsequent loop iteration, for as long as any OTHER
+# shard still needed more loops to finish.
+_DONE_SENTINEL = "__DONE__"
+
 
 async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: int | None,
                           shard_count: int | None, concurrency: int,
@@ -428,6 +442,11 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 else:
                     resume_partition, resume_file_index = await node.load_crawl_checkpoint_with_partition(
                         session, SOURCE_LABEL, shard_index, shard_count)
+                    if resume_partition == _DONE_SENTINEL:
+                        log.info(f"  shard{label} already fully completed a prior run (checkpoint "
+                                 f"marked done) — nothing to do, not re-crawling. Pass "
+                                 f"--start-file-index 0 to force a genuine restart.")
+                        return
                     if resume_partition:
                         log.info(f"  resuming from checkpoint: {resume_file_index} file(s) already completed "
                                  f"in {resume_partition} on a prior run — skipping straight past them")
@@ -499,9 +518,13 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                 if file_num == total_files:
                     partitions_completed = partition_num
             if not time_budget_hit and resumable:
-                # Ran clean to the end — clear the checkpoint so a later,
-                # differently-shaped run doesn't wrongly skip ahead.
-                await node.clear_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count)
+                # Ran clean to the end — persist a DONE sentinel (see
+                # _DONE_SENTINEL's module comment) instead of deleting the
+                # checkpoint row outright, so an automatic reloop
+                # redispatch recognizes this shard already finished
+                # instead of silently re-crawling its whole bucket again.
+                await node.save_crawl_checkpoint(session, SOURCE_LABEL, shard_index, shard_count,
+                                                  total_hosts_seen, partition=_DONE_SENTINEL)
     finally:
         parse_pool.shutdown(wait=True)
 
