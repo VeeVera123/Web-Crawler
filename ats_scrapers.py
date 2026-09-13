@@ -413,18 +413,48 @@ def scrape_ashby(slug: str) -> list[dict]:
             dept = dept.get("name", "")
 
         # Compensation
+        # 2026-09 fix: this used to check comp_item["low"]/["high"]/["currency"]
+        # on `compensation` treated as a dict-or-list of ranges — those keys
+        # don't exist anywhere in Ashby's real response, confirmed against
+        # both developers.ashbyhq.com's docs and a live board fetch (Replit's).
+        # The real shape (only present when ?includeCompensation=true, which
+        # this scraper already passes) is:
+        #   compensation: {
+        #     scrapeableCompensationSalarySummary: "<plain-text summary>",
+        #     compensationTierSummary: "<plain-text summary>",
+        #     summaryComponents: [{compensationType, interval, currencyCode,
+        #                          minValue, maxValue, summary}, ...],
+        #     compensationTiers: [{components: [<same shape>], ...}, ...],
+        #   }
+        # so the old code's key lookups always missed and salary_str was
+        # silently "" for every Ashby job regardless of what the API
+        # actually returned.
         salary_str = ""
         comp = post.get("compensation")
-        if comp:
-            parts = []
-            for comp_item in (comp if isinstance(comp, list) else [comp]):
-                if isinstance(comp_item, dict):
-                    low = comp_item.get("low", "")
-                    high = comp_item.get("high", "")
-                    currency = comp_item.get("currency", "USD")
-                    if low and high:
+        if isinstance(comp, dict):
+            # Prefer Ashby's own ready-made human-readable summary — it's
+            # exactly what the job board itself displays, so it already
+            # handles multi-tier/multi-currency cases correctly.
+            salary_str = (comp.get("scrapeableCompensationSalarySummary")
+                          or comp.get("compensationTierSummary") or "")
+            if not salary_str:
+                # Fall back to building one from the structured components
+                # (summaryComponents first, else every tier's components).
+                components = comp.get("summaryComponents") or []
+                if not components:
+                    for tier in (comp.get("compensationTiers") or []):
+                        if isinstance(tier, dict):
+                            components.extend(tier.get("components") or [])
+                parts = []
+                for c in components:
+                    if not isinstance(c, dict):
+                        continue
+                    low = c.get("minValue")
+                    high = c.get("maxValue")
+                    currency = c.get("currencyCode") or "USD"
+                    if low is not None and high is not None:
                         parts.append(f"{currency} {low}-{high}")
-            salary_str = "; ".join(parts)
+                salary_str = "; ".join(parts)
 
         # Enrich location from address.postalAddress if location is bare
         # Ashby's `location` field is often just "Remote" or "Hybrid",
