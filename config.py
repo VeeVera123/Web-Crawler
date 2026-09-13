@@ -132,23 +132,16 @@ _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verif
 _NVIDIA_BASE_INTERVAL = 1.5
 
 # ── Role classification providers (free tiers, concurrent) ──
-# Cerebras + Groq + NVIDIA NIM. Cerebras/Groq moved off Gemini 2026-08 (see
-# module docstring); NVIDIA re-added 2026-09 as the third leg so a single
-# provider going down/rate-limited doesn't stall role classification —
-# ai_classify_roles() fails over a dead provider's batch to the other two.
+# Groq + NVIDIA NIM. Cerebras removed 2026-09 per explicit user instruction
+# ("Just remove cerebras") — no replacement provider added; Gemini was
+# considered and explicitly declined for this stage (it's already the sole
+# provider for location classification, and the user didn't want its
+# already-tight free-tier rate limit shared across both stages). With only
+# two providers left, ai_classify_roles()'s cross-provider failover now
+# fails a batch over to the other of these two rather than to either of
+# two alternates — still real redundancy, just narrower than the 3-provider
+# setup this replaces.
 _ROLE_PROVIDER_DEFS = [
-    # Cerebras: gpt-oss-120b, confirmed live/non-deprecated (2026-08). Free
-    # tier is 5 RPM ORG-WIDE — the tightest budget of any provider here —
-    # so batches are sized up (24K chars, ~6K tokens) to minimize how many
-    # calls are needed per shard rather than firing lots of small ones.
-    _make_provider(
-        "cerebras",
-        "CEREBRAS_API_KEY",
-        "gpt-oss-120b",
-        "https://api.cerebras.ai/v1",
-        max_batch_chars=24_000,      # ~6K tokens, well under the 30K TPM cap
-        min_call_interval=_CEREBRAS_BASE_INTERVAL * AI_RATE_SHARDS,
-    ),
     # Groq: GPT OSS 120B, free tier 8K TPM — need small batches + throttle
     _make_provider(
         "groq",
@@ -158,13 +151,20 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # NVIDIA NIM: Llama 3.1 70B Instruct — real, currently-hosted NIM model,
-    # 128K context. Titles are short, so batches stay modest (12K chars)
-    # even though the model's context window is much larger.
+    # NVIDIA NIM: 2026-09 fix — "meta/llama-3.1-70b-instruct" hit its
+    # documented end-of-life on 2026-08-26 (confirmed live: every call
+    # started returning "410 Gone ... reached its end of life ... no
+    # longer available"). Replaced with nvidia/nemotron-3.5-lightning-30b-a3b
+    # — verified against build.nvidia.com's own model page: a currently
+    # live NIM model on the free tier ("Free Endpoint Available"), same
+    # OpenAI-compatible chat/completions shape, same
+    # https://integrate.api.nvidia.com/v1 base URL, no other config
+    # changes needed. Batches stay modest (titles are short) even though
+    # this model's context window is much larger.
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
-        "meta/llama-3.1-70b-instruct",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
         "https://integrate.api.nvidia.com/v1",
         max_batch_chars=12_000,
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
@@ -208,10 +208,14 @@ _LOCATION_PROVIDER_DEFS = [
     # sharing ONE real 40 RPM quota, not two independent ones). Location
     # descriptions are much longer than role titles, so this entry gets a
     # bigger batch budget than the role one above.
+    # 2026-09 fix: same end-of-life model swap as the role-classification
+    # entry above — see that one's comment for the full story (confirmed
+    # live 410 Gone, replaced with the verified-live
+    # nvidia/nemotron-3.5-lightning-30b-a3b).
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
-        "meta/llama-3.1-70b-instruct",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
         "https://integrate.api.nvidia.com/v1",
         max_batch_chars=80_000,
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
