@@ -360,6 +360,32 @@ SUPPORTED_ATS = {
     # value needs to travel in the slug; scrape_paycom discovers the
     # tenant's regional API host itself from the bootstrap page.
     "paycom",
+    # 2026-09: SAP SuccessFactors (Career Site Builder tenants only) —
+    # REVERSED out of "genuinely blocked" for a DIFFERENT reason than
+    # csod/paycom above: this isn't a hidden anonymous API, it's plain
+    # server-rendered HTML that was always robots.txt-legal — the old
+    # "blocked on every live host checked" verdict was true only for the
+    # legacy shared-host successfactors.com/.eu/sapsf.com/.eu/jobs2web.com
+    # tenants (confirmed still robots.txt-disallowed live, e.g.
+    # career2.successfactors.eu — those stay OUT of SUPPORTED_ATS, see
+    # GREYLIST_ATS.md), which is all that was tested before. A modern CSB
+    # tenant runs on the CUSTOMER'S OWN branded domain (careers.swissre.com,
+    # jobs.sap.com) with its own robots.txt, and confirmed live on two
+    # independent such tenants: neither blocks /search/ (paginated HTML
+    # job listing, "Results 1-N of TOTAL") nor /job/{slug}/{id}/ (full,
+    # untruncated description server-rendered, no JS/API needed at all).
+    # The one real API (`POST {origin}/services/recruiting/v1/jobs`) IS
+    # confirmed robots.txt-disallowed on both tenants (`Disallow: /services/`)
+    # — not used here, by design, per this project's hard robots.txt rule.
+    # Slug is just the tenant's host (e.g. "careers.swissre.com") — there's
+    # no vendor domain suffix to key URL_TO_SLUG off, so unlike every other
+    # entry here there is NO URL_TO_SLUG["successfactors"]; discovery
+    # happens by content fingerprint (any already-fetched page referencing
+    # SAP's rmkcdn.successfactors.com asset CDN), wired into node.py's
+    # _parse_detect exactly like grnh.se's special-cased resolver — see
+    # node.py's _detect_successfactors_hit and ats_scrapers.scrape_successfactors
+    # for the full evidence trail and GREYLIST_ATS.md for the writeup.
+    "successfactors",
 }
 
 # The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
@@ -951,11 +977,21 @@ def _url_to_slug_teamtailor(url: str) -> str | None:
     return None
 
 
-# SuccessFactors: no extractor here anymore — confirmed genuinely
-# unscrapeable (see Main/BLACKLISTED_ATS.md). node.py's _ATS_VENDOR_DOMAINS
-# still lists its host suffixes on purpose (a different job: correctly
-# classifying a page as "ATS-related, not in-house" regardless of whether
-# this project can scrape it) — that list is NOT affected by this removal.
+# SuccessFactors: still no URL_TO_SLUG entry here, but NOT because it's
+# unscrapeable anymore — see SUPPORTED_ATS's comment above for the 2026-09
+# reversal (modern Career Site Builder tenants ARE scraped now, via
+# ats_scrapers.scrape_successfactors). It's absent from this dict
+# specifically because there's no vendor domain suffix to key a URL-string
+# extractor off (every tenant runs on its own branded domain) — discovery
+# instead happens via node.py's _detect_successfactors_hit, which checks a
+# fetched page's own CONTENT for SAP's rmkcdn.successfactors.com asset
+# fingerprint, the same "needs real content, not just the URL" reasoning
+# as grnh.se below. node.py's _ATS_VENDOR_DOMAINS still separately lists
+# the legacy successfactors.com/.eu/sapsf.com/.eu host suffixes (those
+# ARE a real, matchable domain, and stay genuinely robots.txt-blocked —
+# see GREYLIST_ATS.md) for its own unrelated job: correctly classifying
+# a page as "ATS-related, not in-house" even when it's a platform this
+# project doesn't (or, for the legacy hosts, still can't) scrape.
 
 def _url_to_slug_breezyhr(url: str) -> str | None:
     parsed = urlparse(url)
@@ -1688,11 +1724,16 @@ URL_TO_SLUG = {
     "oracle_cloud_hcm": _url_to_slug_oracle_cloud,
     "brassring": _url_to_slug_brassring,
     "teamtailor": _url_to_slug_teamtailor,
-    # successfactors/ukg/phenom: no entry — confirmed unscrapeable, see
-    # Main/BLACKLISTED_ATS.md. Kept out of here on purpose: node.py's
-    # _detect_ats_hits shares this same dict, so an entry here would keep
-    # flagging pages as this platform with no way to ever turn that into
-    # real job data.
+    # ukg/phenom: no entry — confirmed unscrapeable, see Main/BLACKLISTED_ATS.md.
+    # Kept out of here on purpose: node.py's _detect_ats_hits shares this
+    # same dict, so an entry here would keep flagging pages as this
+    # platform with no way to ever turn that into real job data.
+    # successfactors: ALSO no entry here (see the standalone comment near
+    # this dict's SuccessFactors extractor placeholder above), but for a
+    # different reason — it IS scraped now (2026-09 reversal, see
+    # SUPPORTED_ATS's comment), just not detectable from a URL string
+    # alone. Its hits come from node.py's _detect_successfactors_hit
+    # (content-fingerprint check) instead of this dict.
     "breezyhr": _url_to_slug_breezyhr,
     # "applytojob" removed 2026-08 — see SUPPORTED_ATS comment above.
     "hrmdirect": _url_to_slug_hrmdirect,
@@ -2181,7 +2222,7 @@ CC_PLATFORM_PATTERNS = {
     "avature": ["*.avature.net/*"],
     # NEW (2026-09): BrassRing had NO Common Crawl discovery at all before
     # this — a real gap, since the scraper for it (scrape_brassring) is
-    # actively re-enabled/working, unlike SuccessFactors below. Confirmed
+    # actively re-enabled/working. Confirmed
     # live customer examples: sjobs.brassring.com/TGnewUI/Search/Home/Home
     # (Lowe's, Kodak), krb-sjobs.brassring.com/TGnewUI/Search/Home/Home
     # (IBM, Ahold) — a leading wildcard subdomain catches both the
@@ -2191,10 +2232,14 @@ CC_PLATFORM_PATTERNS = {
     # regardless of which exact path/casing (TGnewUI vs TGNewUI) a
     # specific customer's URL happens to use.
     "brassring": ["*.brassring.com/TGnewUI/*"],
-    # SuccessFactors deliberately has NO Common Crawl pattern — confirmed
-    # unscrapeable (see Main/BLACKLISTED_ATS.md), so discovering its slugs
-    # would be pure wasted effort. Also means it has no Wayback CDX
-    # pattern either, since fetch_wayback_slugs reuses this exact dict.
+    # SuccessFactors deliberately has NO Common Crawl pattern still — this
+    # is unchanged by the 2026-09 reversal (see SUPPORTED_ATS's comment):
+    # it's scraped now, but a CSB tenant runs on its own branded domain
+    # with no shared, CC-indexable URL shape to query for (unlike every
+    # other platform in this dict). Also means it has no Wayback CDX
+    # pattern either, since fetch_wayback_slugs reuses this exact dict —
+    # discovery for it instead runs entirely through node.py's own crawl
+    # (content-fingerprint detection), not this Common-Crawl/Wayback path.
     # New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon — all 4 have a
     # real shared-domain URL shape to query for. Occupop has NO entry
     # here — same reasoning as SuccessFactors above (confirmed JS-rendered
@@ -2262,8 +2307,11 @@ CC_EXTRACTORS = {
     "avature": _url_to_slug_avature,
     # New (2026-09): brassring — see the CC_PLATFORM_PATTERNS entry above
     # for why this platform had no Common Crawl discovery at all before.
-    # No SuccessFactors entry here on purpose — kept out of BOTH dicts
-    # together, matching keys as this dict's own comment above requires.
+    # Still no SuccessFactors entry here either — kept out of BOTH dicts
+    # together, matching keys as this dict's own comment above requires —
+    # but (2026-09 reversal) it IS scraped now via a different discovery
+    # path entirely; see CC_PLATFORM_PATTERNS's comment above and
+    # SUPPORTED_ATS's comment for the full detail.
     "brassring": _url_to_slug_brassring,
     # New (2026-09) — kept in sync with CC_PLATFORM_PATTERNS above (no
     # Occupop entry here either — see that dict's comment; Homerun never
@@ -2700,9 +2748,12 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
 # were guessed for this — it's the identical query list, just pointed at
 # a second, independent index. This naturally still excludes whatever
 # CC_PLATFORM_PATTERNS itself excludes (occupop/successfactors have no
-# entry there, each for its own documented reason — see that dict; homerun
-# was removed entirely 2026-09, see SUPPORTED_ATS's removal comment), so
-# this doesn't need its own separate exclusion list.
+# entry there, each for its own documented reason — successfactors because
+# a CSB tenant's branded domain has no shared, CC/Wayback-indexable URL
+# shape, NOT because it's unscrapeable (see SUPPORTED_ATS's comment for
+# the 2026-09 reversal); homerun was removed entirely 2026-09, see
+# SUPPORTED_ATS's removal comment), so this doesn't need its own separate
+# exclusion list.
 #
 # The CDX API (web.archive.org/cdx/search/cdx) is IA's own documented,
 # public, purpose-built endpoint for exactly this kind of targeted
