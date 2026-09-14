@@ -560,6 +560,39 @@ def _detect_ats_hits(urls: set[str]) -> list[tuple[str, str, str]]:
     return hits
 
 
+# 2026-09: SAP SuccessFactors (Career Site Builder) reversal — see
+# discovery.py's SUPPORTED_ATS comment and ats_scrapers.scrape_successfactors
+# for the full live-verified evidence trail. Every other ATS above is
+# detected purely from a candidate URL's STRING (a vendor domain suffix,
+# a distinctive path shape) via discovery.py's URL_TO_SLUG — no fetch
+# needed. A CSB tenant can't be: it runs on the customer's own branded
+# domain (careers.swissre.com, jobs.sap.com, ...) with no shared suffix
+# to match. The one reliable signal is inside the page's own CONTENT:
+# every CSB tenant's rendered pages reference SAP's own Recruiting
+# Marketing asset CDN at rmkcdn.successfactors.com — confirmed live on
+# two independent tenants on completely unrelated custom domains. Exactly
+# like _resolve_grnh_se_hits above (which also can't be a pure URL_TO_SLUG
+# entry, needing a real fetch instead), this gets its own small hook —
+# except this one is even cheaper: no extra fetch at all, just a
+# substring check on a page _parse_detect is already parsing.
+_SUCCESSFACTORS_FINGERPRINT = "rmkcdn.successfactors.com"
+
+
+def _detect_successfactors_hit(html: str, url: str) -> tuple[str, str, str] | None:
+    """Returns an ('successfactors', host, url) hit if THIS fetched page's
+    own content carries the SAP CSB fingerprint. Slug is just the tenant's
+    host (e.g. 'careers.swissre.com') — ats_scrapers.scrape_successfactors
+    reconstructs https://{host}/search/ and /job/... from it; unlike
+    Workday/Cornerstone there's no separate per-tenant ID to pull out of
+    the URL itself."""
+    if _SUCCESSFACTORS_FINGERPRINT not in html:
+        return None
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return None
+    return ("successfactors", host, url)
+
+
 # ── country detection ───────────────────────────────────────────────────
 
 def _extract_address_zone_text(html: str) -> str:
@@ -660,6 +693,9 @@ def _parse_detect(html: str, base_url: str, target_geo_countries: set[str]
     crawl_one/PARSE_WORKERS)."""
     urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
     hits = _detect_ats_hits(urls)
+    sf_hit = _detect_successfactors_hit(html, base_url)
+    if sf_hit and not any(h[0] == sf_hit[0] and h[1] == sf_hit[1] for h in hits):
+        hits = hits + [sf_hit]
     country, method = detect_country(html, target_geo_countries)
     text = _extract_visible_text(html)
     text_len = len(text)
