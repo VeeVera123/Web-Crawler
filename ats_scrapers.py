@@ -3443,6 +3443,196 @@ def scrape_csod(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Paycom ───────────────────────────────────────────────
+# 2026-09: REVERSED out of discovery-only (see discovery.py's
+# _url_to_slug_paycom comment and GREYLIST_ATS.md for the full evidence
+# trail). Confirmed live, twice, on two independent real Paycom tenants
+# (FUTEK — clientkey 5AA9970AFB7E7320DA597F2CF00E6958 — and a second
+# unrelated tenant on clientkey 74B8425BF3D1B3ACB19CC1353DC5FA0E):
+#   1. GET https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/career-page
+#      returns a real HTML document whose inline bootstrap script embeds
+#      (a) a genuine bearer JWT (confirmed working — a separate endpoint,
+#      GET .../api/ats/job-titles, returns real data with just this
+#      token) and (b) "atsPortalMantleServiceUrl", the tenant's own
+#      regional API base (e.g. "https://portal-applicant-tracking.
+#      us-cent.paycomonline.net/") — same per-tenant-region pattern as
+#      Cornerstone's "cloud" field, extracted dynamically here rather
+#      than hardcoding one region.
+#   2. POST {base}api/ats/job-posting-previews/search with that bearer
+#      token returns real job data — but ONLY with the exact body shape
+#      below; skip/take alone (confirmed required — an empty body gets a
+#      real 422 validation error) silently return totalCount 0 without
+#      the "filtersForQuery" wrapper object with every filter category
+#      explicitly present as an empty array/string. This exact shape was
+#      obtained from external research (matching the real, live-verified
+#      minified-JS identifier names: keywordSearchText, workEnvironments,
+#      positionTypes, educationLevels, categories, travelTypes,
+#      shiftTypes, otherFilters, sortOption) and confirmed live to return
+#      real, complete job listings (titles, locations, truncated
+#      descriptions) on both test tenants.
+#   3. GET {base}api/ats/job-postings/{jobId} (also just the bearer
+#      token) returns the FULL job description, salary, and category —
+#      the search endpoint's own description field is truncated.
+_PAYCOM_JOB_URL_RE = re.compile(
+    r"paycomonline\.net/v4/ats/web\.php/portal/([0-9A-Fa-f]{32})/jobs/(\d+)", re.I
+)
+_PAYCOM_BASE_URL_RE = re.compile(r'"atsPortalMantleServiceUrl"\s*:\s*"([^"]+)"')
+_PAYCOM_TOKEN_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
+_PAYCOM_EMPTY_FILTERS = {
+    "distanceFrom": 0, "workEnvironments": [], "positionTypes": [],
+    "educationLevels": [], "categories": [], "travelTypes": [], "shiftTypes": [],
+    "otherFilters": [], "keywordSearchText": "", "location": "", "sortOption": "",
+}
+# Short-lived cache so scrape_paycom's pagination AND enrich_descriptions'
+# later per-job detail fetches don't each refetch the same tenant's
+# bootstrap page — real cost at scale (a tenant with 100 jobs would
+# otherwise trigger 100 extra bootstrap fetches during enrichment).
+_paycom_bootstrap_cache: dict[str, tuple[str, str]] = {}
+_paycom_bootstrap_lock = threading.Lock()
+
+
+def _paycom_bootstrap(clientkey: str) -> tuple[str, str] | None:
+    """Fetch the tenant's career-page bootstrap HTML and extract (token,
+    api_base_url). Cached per clientkey for this process's lifetime — the
+    token is scoped to the tenant, not to a single request, and a fresh
+    one is cheap to re-derive next run."""
+    with _paycom_bootstrap_lock:
+        cached = _paycom_bootstrap_cache.get(clientkey)
+    if cached:
+        return cached
+
+    r = _get(
+        f"https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/career-page",
+        headers={"User-Agent": random.choice(USER_AGENTS)},
+    )
+    if not r:
+        return None
+
+    token_match = _PAYCOM_TOKEN_RE.search(r.text)
+    base_match = _PAYCOM_BASE_URL_RE.search(r.text)
+    if not token_match or not base_match:
+        log.debug(f"Paycom: no bootstrap token/API base found for {clientkey}")
+        return None
+
+    token = token_match.group(0)
+    base = base_match.group(1).replace("\\/", "/")
+    if not base.endswith("/"):
+        base += "/"
+
+    result = (token, base)
+    with _paycom_bootstrap_lock:
+        _paycom_bootstrap_cache[clientkey] = result
+    return result
+
+
+def scrape_paycom(slug: str) -> list[dict]:
+    """Paycom — anonymous-bearer-JWT public JSON API.
+    Slug is the 32-hex clientkey (see discovery.py's _url_to_slug_paycom —
+    slug format unchanged by this reversal, unlike Cornerstone's). See the
+    block comment above for the full live-verified evidence trail."""
+    clientkey = slug.upper()
+    if not re.match(r"^[0-9A-F]{32}$", clientkey):
+        log.debug(f"Invalid Paycom (paycom) slug format: {slug}")
+        return []
+
+    bootstrap = _paycom_bootstrap(clientkey)
+    if not bootstrap:
+        return []
+    token, base = bootstrap
+    search_url = f"{base}api/ats/job-posting-previews/search"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Locale": "en-US",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+
+    jobs = []
+    seen = set()
+    skip = 0
+    take = 25
+    total = None
+
+    while total is None or skip < total:
+        payload = {"skip": skip, "take": take, "filtersForQuery": dict(_PAYCOM_EMPTY_FILTERS)}
+        try:
+            resp = _get_session().post(search_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+        except Exception:
+            break
+
+        total = data.get("jobPostingPreviewsCount", 0)
+        previews = data.get("jobPostingPreviews", [])
+        if not previews:
+            break
+
+        for item in previews:
+            job_id = item.get("jobId")
+            if job_id is None or job_id in seen:
+                continue
+            seen.add(job_id)
+            jobs.append({
+                "title": (item.get("jobTitle") or "").strip(),
+                "url": f"https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/jobs/{job_id}",
+                "company": "",  # filled in from the detail endpoint during enrichment
+                "location": item.get("locations", ""),
+                "country": "",
+                "department": "",
+                "workplace_type": item.get("remoteType", ""),
+                "employment_type": item.get("positionType", ""),
+                "salary": "",
+                "description_snippet": _snippet(item.get("description", "")),
+                "source_ats": "Paycom",
+                "slug": slug,
+            })
+
+        skip += take
+        time.sleep(random.uniform(0.3, 0.8))
+
+    return jobs
+
+
+def _fetch_paycom_description(job: dict) -> str:
+    """Fetch the FULL description (plus salary/category) from Paycom's
+    per-job detail endpoint — the search endpoint's own description field
+    is truncated. Re-derives the tenant's bootstrap token/API base from
+    job['url'] rather than requiring scrape_paycom to stash extra state
+    (matches _fetch_workday_description's convention); _paycom_bootstrap's
+    cache means this is a real network fetch only once per tenant."""
+    m = _PAYCOM_JOB_URL_RE.search(job.get("url", ""))
+    if not m:
+        return job.get("description_snippet", "")
+    clientkey, job_id = m.group(1).upper(), m.group(2)
+
+    bootstrap = _paycom_bootstrap(clientkey)
+    if not bootstrap:
+        return job.get("description_snippet", "")
+    token, base = bootstrap
+
+    r = _get(
+        f"{base}api/ats/job-postings/{job_id}",
+        headers={"Authorization": f"Bearer {token}", "Locale": "en-US",
+                 "User-Agent": random.choice(USER_AGENTS)},
+    )
+    if not r:
+        return job.get("description_snippet", "")
+    try:
+        posting = r.json().get("jobPosting", {})
+    except Exception:
+        return job.get("description_snippet", "")
+
+    desc = _snippet(posting.get("description", ""))
+    salary = posting.get("salaryRange", "")
+    if salary and not job.get("salary"):
+        job["salary"] = salary
+    department = posting.get("jobCategory", "")
+    if department and not job.get("department"):
+        job["department"] = department
+    return desc or job.get("description_snippet", "")
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -3486,6 +3676,9 @@ SCRAPERS = {
     # 2026-09: Cornerstone OnDemand — REVERSED out of discovery-only, see
     # scrape_csod's block comment above for the full live-verified evidence.
     "csod": scrape_csod,
+    # 2026-09: Paycom — REVERSED out of discovery-only, see scrape_paycom's
+    # block comment above for the full live-verified evidence.
+    "paycom": scrape_paycom,
     # No scraper exists for occupop, successfactors, ukg, or phenom — all
     # 4 confirmed genuinely unscrapeable (robots.txt disallow, JS-only
     # rendering, or an auth-gated API with no public alternative). Full
@@ -4215,6 +4408,10 @@ DESCRIPTION_FETCHERS = {
     # way to recover it.
     "Zoho": _fetch_generic_description,
     "BambooHR": _fetch_generic_description,
+    # 2026-09: Paycom — the search endpoint's description field is
+    # truncated; the real full text (plus salary/category) only comes
+    # from the per-job detail endpoint. See _fetch_paycom_description.
+    "Paycom": _fetch_paycom_description,
 }
 
 
