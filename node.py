@@ -712,6 +712,18 @@ _ATS_VENDOR_DOMAINS = (
     # jazzhr URL_TO_SLUG entries (dayforcehcm.com/applytojob.com were
     # already listed above).
     "getro.com",
+    # 2026-09: paycomonline.net added — confirmed live this session that
+    # every real Paycom job-board URL found actually resolves under .net,
+    # not .com (which was already listed above but never actually seen
+    # live; kept rather than removed, since a wrong/unused domain here is
+    # harmless per this list's own stated policy above). csod.com
+    # (Cornerstone OnDemand) was already listed above too — no change
+    # needed there. See discovery.py's _url_to_slug_csod/_url_to_slug_paycom
+    # for the full research (both confirmed discoverable but NOT currently
+    # scrapable — JS-rendered app shells, no public unauthenticated API —
+    # same as occupop above, so both get the same "tag it, don't scrape it
+    # yet" treatment).
+    "paycomonline.net",
 )
 
 
