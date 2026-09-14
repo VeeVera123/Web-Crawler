@@ -1383,11 +1383,36 @@ def _url_to_slug_pinpoint(url: str) -> str | None:
 
 def _url_to_slug_flatchr(url: str) -> str | None:
     """Extract slug from Flatchr URLs (France).
-    Two real URL families, both confirmed live:
+
+    2026-09 BUG FIX: this used to also accept careers.flatchr.io/vacancy/
+    {X}/... and return X as the company slug, on the assumption a vacancy
+    URL's first path segment is the same company slug ats_scrapers.
+    scrape_flatchr uses to build its OWN vacancy links
+    (/vacancy/{company_slug}/{vacancy_id}). Confirmed LIVE that's wrong:
+    a real Flatchr vacancy page is a single path segment,
+    careers.flatchr.io/vacancy/{vacancy.slug} where vacancy.slug is
+    "{lowercased per-vacancy id}-{job-title-slug}" (e.g.
+    "8aby1n7jw70dlgjn-agent-de-surveillance-point-ecole") — fetched live
+    from a real posting and cross-checked against the company/{slug}.json
+    API response for the SAME job, whose real company slug
+    ("mairiedesaintbrice") shares no relationship with that vacancy string
+    at all. So parts[1] on a /vacancy/ URL was never the company slug —
+    it's a per-job string with no company identifier recoverable from the
+    URL alone (the real slug only exists inside the page/API payload,
+    which a bare URL-to-slug extractor never fetches). Confirmed this was
+    live, active corruption, not a one-off: 11,360 of 12,320 (92%) of
+    flatchr's current archive_i rows carry this per-vacancy-shaped value
+    instead of a real company slug as of 2026-09 — see verification.py's
+    _UNVERIFIABLE_ATS entry for flatchr for why that also blocks adding a
+    verifier until those rows are corrected. Fix: drop the /vacancy/
+    branch entirely — only extract from the two URL families that
+    genuinely carry the company slug:
       1. Shared board domain: {slug}.flatchr.io/...
       2. Company page: careers.flatchr.io/company/{slug}
-         (job postings under careers.flatchr.io/vacancy/{slug}/... use
-         the same company slug as the first path segment)."""
+    A /vacancy/ URL now yields no slug at all (None) rather than a wrong
+    one — a real company posted under one of these two other URL
+    families will still be discovered normally; this only stops seeding
+    the SAME company from its vacancy URLs under a fabricated identifier."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     if host.endswith(".flatchr.io") and host != "careers.flatchr.io":
@@ -1397,7 +1422,7 @@ def _url_to_slug_flatchr(url: str) -> str | None:
         return None
     if host == "careers.flatchr.io":
         parts = parsed.path.strip("/").split("/")
-        if len(parts) >= 2 and parts[0] in ("company", "vacancy") and parts[1]:
+        if len(parts) >= 2 and parts[0] == "company" and parts[1]:
             slug = parts[1].lower()
             if slug not in SKIP_SLUGS:
                 return slug
