@@ -275,6 +275,13 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     # Flatchr, and Occupop.
     # These platforms just aren't in Wappalyzer's ruleset — this source
     # can't help with them regardless of query design.
+    # 2026-09: also checked Cornerstone OnDemand and Paycom (never checked
+    # before, an open gap noticed while auditing discovery coverage for
+    # their reversal) — direct fetch of the enthec/webappanalyzer fork's
+    # technology files confirmed NEITHER has an entry (no key containing
+    # "Corner" anywhere in the c.json file; no "Paycom" key in p.json).
+    # Same conclusion as the rest of this list: not in Wappalyzer's
+    # ruleset, this source can't help regardless of query design.
 }
 
 # ATS platforms we have working scrapers for (20 active)
@@ -470,7 +477,20 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     # with SUPPORTED_ATS keys — mapping an ATS name here that isn't in
     # SUPPORTED_ATS would KeyError the first time OpenPostings actually
     # contains an Occupop row.
-    # successfactors/ukg/phenom: same reasoning — see Main/BLACKLISTED_ATS.md.
+    # ukg/phenom: same reasoning — see Main/BLACKLISTED_ATS.md.
+    # 2026-09: closed a real gap found while auditing discovery coverage
+    # for the csod/paycom/successfactors reversals — OpenPostings' own
+    # README (github.com/Masterjx9/OpenPostings) lists "PaycomOnline" as
+    # one of its 80+ supported ATS labels, but it was never mapped here,
+    # so paycom rows were silently falling into the "unmapped ATS" bucket
+    # even after paycom got a real URL_TO_SLUG entry. Confirmed the same
+    # README has NO "Cornerstone OnDemand"/"csod" entry at all, and no
+    # entry that's actually SuccessFactors (its "SAP HR Cloud" listing is
+    # a different, unconfirmed product — not assumed to be the same
+    # thing, so deliberately NOT mapped to "successfactors" here) — so
+    # there's genuinely nothing to add for either of those two.
+    "paycomonline": "paycom",
+    "paycom": "paycom",
     # "ycombinator" intentionally not mapped — see SUPPORTED_ATS comment
     # above (not a real ATS, no code path left in this project at all).
 }
