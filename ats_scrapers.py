@@ -12,6 +12,7 @@ import random
 import threading
 import time
 import xml.etree.ElementTree as ET
+import urllib.robotparser
 from html import unescape
 from urllib.parse import unquote
 import requests
@@ -1541,12 +1542,202 @@ def scrape_teamtailor(slug: str) -> list[dict]:
     return unique_jobs
 
 
-# SAP SuccessFactors: confirmed genuinely blocked (robots.txt disallow on
-# every checked live host + no stable single API path across SAP data
-# centers) — no scraper here anymore. See Main/BLACKLISTED_ATS.md for the
-# full evidence; not registered in SCRAPERS below or in discovery.py's
-# SUPPORTED_ATS. Its ~866 already-discovered archive_i rows were deleted
-# 2026-09 (dead weight — could never be scraped into real job data).
+# ── SAP SuccessFactors (successfactors) ──────────────────────────────
+# 2026-09: REVERSED out of "genuinely blocked" — see discovery.py's
+# SUPPORTED_ATS comment and node.py's _detect_successfactors_hit for the
+# full live-verified evidence trail, and GREYLIST_ATS.md for the writeup.
+# The old verdict (robots.txt disallow on every checked live host) was
+# actually correct for what it tested: the legacy SHARED-host tenants
+# (career{N}.successfactors.com/.eu, sapsf.com/.eu, jobs2web.com) — still
+# confirmed live this session that those genuinely disallow the whole
+# site (e.g. career2.successfactors.eu). Those stay unscraped, and stay
+# out of SUPPORTED_ATS/SCRAPERS.
+#
+# What the old verdict never anticipated: a modern Career Site Builder
+# (CSB) tenant runs on the CUSTOMER's OWN branded domain (careers.swissre.com,
+# jobs.sap.com, ...) with its own separate robots.txt — confirmed live on
+# two independent such tenants that:
+#   - /search/?page=N is plain paginated, server-rendered HTML (a results
+#     count string like "Results 1-25 of 288", "Page 1 of 36"), giving
+#     each job's title, URL (/job/{slug}/{numeric id}/), location, and
+#     posted date — but NO description snippet, so every job needs the
+#     second-pass enrichment fetch below.
+#   - /job/{slug}/{id}/ has the FULL, untruncated description
+#     server-rendered — no JS, no API call, no auth needed at all.
+#   - Neither path appeared in either tenant's robots.txt disallow list.
+#     The one real hidden API (`POST {origin}/services/recruiting/v1/jobs`,
+#     which does exist and does work) IS robots.txt-disallowed on both
+#     tenants tested (`Disallow: /services/`) — deliberately NOT used
+#     here, per this project's non-negotiable robots.txt rule.
+#   - A multi-locale tenant can report wildly different job counts per
+#     locale (confirmed live on jobs.sap.com: de_DE/en_US/fr_FR/ja_JP/
+#     zh_CN all present, each a completely different job set) — so this
+#     queries every locale /search/ itself advertises via its own
+#     language-switcher links, deduplicating by job ID.
+#   - Since each tenant is the customer's own domain (not a shared vendor
+#     host verified once for everyone), robots.txt is checked LIVE per
+#     tenant here — unlike every other scraper in this file.
+#
+# Its ~866 already-discovered (and unscrapeable at the time) archive_i
+# rows were deleted 2026-09 — those were all legacy-host discoveries from
+# before this reversal, so no migration/backfill applies to them.
+
+_SF_JOB_ROW_RE = re.compile(
+    r'<a[^>]+href="(/job/[^"?#]+?/(\d{5,})/?)"[^>]*>(.*?)</a>(.{0,400}?)'
+    r'(?=<a[^>]+href="/job/|\Z)',
+    re.I | re.S,
+)
+_SF_LOCALE_RE = re.compile(r'[?&]locale=([a-z]{2}_[A-Z]{2})\b')
+_SF_TRAILING_DATE_RE = re.compile(r'\s*\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{4}\s*$')
+_SF_MAX_LOCALES = 10
+_SF_MAX_PAGES_PER_LOCALE = 200
+# SAP's own standard CSB template ends every job's real content with this
+# kind of boilerplate before unrelated site chrome/footer — confirmed
+# live verbatim on a real posting ("Reference Code: 138425", "Job
+# Segment: ...", "Apply now »", "Find similar jobs:"). Used to trim the
+# full page down to just the actual description in the enrichment fetch
+# below; a tenant that customizes this wording just falls back to the
+# untrimmed (but still real, still complete) page text.
+_SF_DESC_END_MARKERS = ("Apply now", "Reference Code:", "Find similar jobs:")
+
+_sf_robots_cache: dict[str, "urllib.robotparser.RobotFileParser | None"] = {}
+_sf_robots_lock = threading.Lock()
+
+
+def _sf_robots_parser(origin: str) -> "urllib.robotparser.RobotFileParser | None":
+    """Per-tenant robots.txt, cached per origin. Returns None (treated as
+    allow-all below, same convention every other scraper here uses when a
+    platform has no robots.txt at all) if it can't be fetched/parsed."""
+    with _sf_robots_lock:
+        if origin in _sf_robots_cache:
+            return _sf_robots_cache[origin]
+    rp = None
+    r = _get(f"{origin}/robots.txt")
+    if r is not None:
+        rp = urllib.robotparser.RobotFileParser()
+        try:
+            rp.parse(r.text.splitlines())
+        except Exception:
+            rp = None
+    with _sf_robots_lock:
+        _sf_robots_cache[origin] = rp
+    return rp
+
+
+def _sf_robots_allows(origin: str, path: str) -> bool:
+    rp = _sf_robots_parser(origin)
+    if rp is None:
+        return True
+    try:
+        return rp.can_fetch("*", f"{origin}{path}")
+    except Exception:
+        return True
+
+
+def scrape_successfactors(slug: str) -> list[dict]:
+    """SAP SuccessFactors — Career Site Builder tenants only (legacy
+    shared-host tenants stay unscraped, see block comment above). Slug is
+    the tenant's own branded host (e.g. 'careers.swissre.com') — there's
+    no vendor domain suffix or per-tenant ID to extract the way every
+    other platform here has; discovery happens via node.py's
+    _detect_successfactors_hit content-fingerprint check instead of a
+    URL_TO_SLUG converter."""
+    host = (slug or "").strip().lower()
+    if not host or "/" in host or " " in host:
+        log.debug(f"Invalid SuccessFactors (successfactors) slug format: {slug}")
+        return []
+    origin = f"https://{host}"
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    if not _sf_robots_allows(origin, "/search/"):
+        log.debug(f"SuccessFactors: {host} disallows /search/ via robots.txt; skipping")
+        return []
+
+    r = _get(f"{origin}/search/", headers=headers)
+    if r is None:
+        return []
+    locales = list(dict.fromkeys(_SF_LOCALE_RE.findall(r.text)))[:_SF_MAX_LOCALES]
+
+    seen_ids: set[str] = set()
+    jobs: list[dict] = []
+
+    def _scrape_locale(locale: str | None):
+        page = 1
+        while page <= _SF_MAX_PAGES_PER_LOCALE:
+            params = {"page": page}
+            if locale:
+                params["locale"] = locale
+            resp = _get(f"{origin}/search/", headers=headers, params=params)
+            if resp is None:
+                break
+            matches = list(_SF_JOB_ROW_RE.finditer(resp.text))
+            if not matches:
+                break
+            for m in matches:
+                job_path, job_id, title_html, trailer_html = m.groups()
+                if job_id in seen_ids:
+                    continue
+                seen_ids.add(job_id)
+                title = unescape(re.sub(r"<[^>]+>", "", title_html)).strip()
+                trailer = unescape(re.sub(r"<[^>]+>", " ", trailer_html))
+                trailer = re.sub(r"\s+", " ", trailer).strip()
+                location = _SF_TRAILING_DATE_RE.sub("", trailer).strip()
+                jobs.append({
+                    "title": title,
+                    "url": f"{origin}{job_path}",
+                    "company": "",
+                    "location": location,
+                    "country": "",
+                    "department": "",
+                    "workplace_type": "",
+                    "employment_type": "",
+                    "salary": "",
+                    # search page never shows a snippet — see block
+                    # comment above; always enriched via
+                    # _fetch_successfactors_description.
+                    "description_snippet": "",
+                    "source_ats": "SuccessFactors",
+                    "slug": slug,
+                })
+            page += 1
+            time.sleep(random.uniform(0.3, 0.8))
+
+    _scrape_locale(None)
+    for loc in locales:
+        _scrape_locale(loc)
+
+    return jobs
+
+
+def _fetch_successfactors_description(job: dict) -> str:
+    """Full description is server-rendered directly on the /job/ page
+    (see scrape_successfactors's block comment) — fetches it and trims
+    from the job title down to just before SAP's own standard
+    post-content boilerplate (see _SF_DESC_END_MARKERS)."""
+    url = job.get("url", "")
+    if not url:
+        return job.get("description_snippet", "")
+    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if r is None:
+        return job.get("description_snippet", "")
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "header", "footer"]):
+            tag.decompose()
+        h1 = soup.find("h1")
+        title_text = h1.get_text(strip=True) if h1 else (job.get("title") or "")
+        text = soup.get_text("\n", strip=True)
+        start = text.find(title_text) if title_text else -1
+        body = text[start:] if start != -1 else text
+        end = len(body)
+        for marker in _SF_DESC_END_MARKERS:
+            idx = body.find(marker)
+            if idx != -1:
+                end = min(end, idx)
+        description = body[:end].strip()
+        return _snippet(description) if description else job.get("description_snippet", "")
+    except Exception:
+        return job.get("description_snippet", "")
 
 # ── BreezyHR ────────────────────────────────────────────
 
@@ -3679,11 +3870,17 @@ SCRAPERS = {
     # 2026-09: Paycom — REVERSED out of discovery-only, see scrape_paycom's
     # block comment above for the full live-verified evidence.
     "paycom": scrape_paycom,
-    # No scraper exists for occupop, successfactors, ukg, or phenom — all
-    # 4 confirmed genuinely unscrapeable (robots.txt disallow, JS-only
-    # rendering, or an auth-gated API with no public alternative). Full
-    # evidence for each: Main/BLACKLISTED_ATS.md. That doc is the single
-    # place this list lives now — don't re-add per-platform detail here.
+    # 2026-09: SAP SuccessFactors (Career Site Builder tenants) — REVERSED
+    # out of "genuinely blocked", see scrape_successfactors's block
+    # comment above for the full live-verified evidence. Legacy
+    # shared-host successfactors.com/.eu tenants are NOT included — those
+    # stay confirmed robots.txt-blocked.
+    "successfactors": scrape_successfactors,
+    # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
+    # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
+    # an auth-gated API with no public alternative). Full evidence for
+    # each: Main/BLACKLISTED_ATS.md. That doc is the single place this
+    # list lives now — don't re-add per-platform detail here.
     # YCombinator (Work at a Startup) — NOT an ATS. It's a multi-company
     # job AGGREGATOR (like RemoteOK/Jobicy were), not a single-company
     # ATS, so it was never keyed by per-company slug here. 2026-09: the
@@ -4412,6 +4609,10 @@ DESCRIPTION_FETCHERS = {
     # truncated; the real full text (plus salary/category) only comes
     # from the per-job detail endpoint. See _fetch_paycom_description.
     "Paycom": _fetch_paycom_description,
+    # 2026-09: SuccessFactors — the /search/ listing page never shows a
+    # description snippet at all (title/location/date only), so every
+    # job needs this fetch. See _fetch_successfactors_description.
+    "SuccessFactors": _fetch_successfactors_description,
 }
 
 
