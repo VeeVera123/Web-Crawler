@@ -348,9 +348,18 @@ SUPPORTED_ATS = {
     # its raw HTTP response, honored with zero cookies/session by a real
     # public job-search API (see ats_scrapers.scrape_csod and
     # _url_to_slug_csod's docstring for the full evidence trail, and
-    # GREYLIST_ATS.md for the before/after writeup). Dayforce/Getro/Paycom
-    # remain discovery-only — this reversal is specific to Cornerstone.
+    # GREYLIST_ATS.md for the before/after writeup). Dayforce/Getro
+    # remain discovery-only.
     "csod",
+    # 2026-09: Paycom — ALSO reversed out of discovery-only, same session,
+    # same pattern (a different anonymous bearer JWT embedded in its own
+    # career-page bootstrap HTML, honoring a real POST search API with no
+    # per-customer OAuth needed) — see ats_scrapers.scrape_paycom's block
+    # comment and GREYLIST_ATS.md. Slug format UNCHANGED (still just the
+    # 32-hex clientkey) — unlike Cornerstone, no per-tenant region/page-id
+    # value needs to travel in the slug; scrape_paycom discovers the
+    # tenant's regional API host itself from the bootstrap page.
+    "paycom",
 }
 
 # The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
@@ -1620,18 +1629,37 @@ def _url_to_slug_paycom(url: str) -> str | None:
     subdomain — confirmed live via multiple real examples (e.g.
     74B8425BF3D1B3ACB19CC1353DC5FA0E, 5AA9970AFB7E7320DA597F2CF00E6958).
 
-    2026-09: DISCOVERY ONLY, deliberately not in SUPPORTED_ATS/
-    ats_scrapers.SCRAPERS — confirmed live (both the /career-page listing
-    and an individual /jobs/{id} detail page) that this is a client-side-
-    rendered app shell with no server-rendered content and no embedded
-    JSON ("You need to enable JavaScript to run this app."). No
+    2026-09 REVERSAL: promoted out of discovery-only, same session as
+    Cornerstone's. The original verdict here (below, kept for the record)
+    was right about the RENDERED page (both the /career-page listing and
+    an individual /jobs/{id} detail page really are client-side-rendered
+    app shells — "You need to enable JavaScript to run this app.") but
+    wrong about the underlying platform: live testing (real browser, two
+    independent tenants: FUTEK on clientkey
+    5AA9970AFB7E7320DA597F2CF00E6958, plus a second unrelated tenant on
+    74B8425BF3D1B3ACB19CC1353DC5FA0E) found the career-page bootstrap
+    HTML embeds a genuine anonymous bearer JWT and the tenant's own
+    regional API base URL ("atsPortalMantleServiceUrl") as plain text —
+    confirmed present in the raw response, same as Cornerstone's token.
+    That token genuinely authenticates a real job-search API
+    (POST {base}api/ats/job-posting-previews/search) with no per-customer
+    OAuth needed. See ats_scrapers.py's scrape_paycom for the full
+    request shape (the exact body needed a specific "filtersForQuery"
+    wrapper with every filter category present as an empty array — a
+    naive {skip,take} body silently returns zero results, the same class
+    of quirk as Cornerstone's careerSitePageId) and GREYLIST_ATS.md for
+    the evidence trail. Slug format is UNCHANGED by this reversal (still
+    just the 32-hex clientkey) — scrape_paycom discovers the tenant's
+    regional API host itself from the bootstrap page, so no second value
+    needs to travel in the slug the way Cornerstone's siteId does.
+
+    Original discovery-only verdict (2026-09, superseded above): no
     documented public unauthenticated job-search API was found; third-
     party job aggregators do index Paycom postings at real scale, but
     describe their own scraping/normalization layer, not a Paycom
-    endpoint that's usable here. Same failure class as SuccessFactors/
-    Cornerstone above — genuinely not scrapable via this project's plain-
-    HTTP method today, not just unresearched. Slugs still captured here
-    for the same reason as Cornerstone's."""
+    endpoint that's usable here. That was true of Paycom's *documented*
+    API — it's the separate anonymous bootstrap-token side channel above
+    that this reversal found instead."""
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     if host not in ("www.paycomonline.net", "paycomonline.net"):
@@ -1692,13 +1720,14 @@ URL_TO_SLUG = {
     # _url_to_slug_dayforce below (its extractor used to live here).
     # occupop: no entry — confirmed unscrapeable, see Main/BLACKLISTED_ATS.md
     # and the comment just above (successfactors) for the same reasoning.
-    # New (2026-09): Dayforce/Getro/Paycom are still slug-discovery only,
-    # see the block comment above these functions — no scraper/
-    # SUPPORTED_ATS entry yet. Cornerstone (csod) is DIFFERENT as of
-    # 2026-09: it was reversed out of discovery-only into a real scraper
-    # (see _url_to_slug_csod's docstring above and ats_scrapers.scrape_csod)
-    # — it's now also in SUPPORTED_ATS and CC_EXTRACTORS/CC_PLATFORM_PATTERNS
-    # below, unlike its two neighbors here.
+    # New (2026-09): Dayforce/Getro are still slug-discovery only, see the
+    # block comment above these functions — no scraper/SUPPORTED_ATS entry
+    # yet. Cornerstone (csod) AND Paycom are DIFFERENT as of 2026-09: both
+    # were reversed out of discovery-only into real scrapers (see
+    # _url_to_slug_csod/_url_to_slug_paycom's docstrings above and
+    # ats_scrapers.scrape_csod/scrape_paycom) — both are now also in
+    # SUPPORTED_ATS and CC_EXTRACTORS/CC_PLATFORM_PATTERNS below, unlike
+    # Dayforce/Getro.
     "dayforce": _url_to_slug_dayforce,
     "getro": _url_to_slug_getro,
     "csod": _url_to_slug_csod,
@@ -2182,8 +2211,13 @@ CC_PLATFORM_PATTERNS = {
     # ats_scrapers.scrape_csod), so discovering its slugs via Common Crawl
     # is worth doing now (it wasn't when this was discovery-only, same
     # reasoning SuccessFactors/Occupop are excluded above). Dayforce/
-    # Getro/Paycom stay excluded here — no scraper exists for them yet.
+    # Getro stay excluded here — no scraper exists for them yet.
     "csod": ["*.csod.com/ux/ats/careersite/*"],
+    # 2026-09: Paycom — ALSO reversed, same reasoning (see SUPPORTED_ATS
+    # comment above and ats_scrapers.scrape_paycom). _url_to_slug_paycom's
+    # existing pattern already matches both real path shapes.
+    "paycom": ["www.paycomonline.net/v4/ats/web.php/portal/*/jobs*",
+               "www.paycomonline.net/v4/ats/web.php/portal/*/career-page*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -2242,6 +2276,10 @@ CC_EXTRACTORS = {
     # above (see SUPPORTED_ATS comment for the reversal). _url_to_slug_csod
     # already returns the 'tenant|siteId' shape scrape_csod expects.
     "csod": _url_to_slug_csod,
+    # 2026-09: Paycom — kept in sync with CC_PLATFORM_PATTERNS above (see
+    # SUPPORTED_ATS comment for the reversal). _url_to_slug_paycom's
+    # existing 32-hex-clientkey extraction needs no changes.
+    "paycom": _url_to_slug_paycom,
 }
 
 
