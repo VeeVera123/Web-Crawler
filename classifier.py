@@ -44,9 +44,25 @@ RETRY_BASE_DELAY = 5  # seconds
 
 
 def _make_client(provider: dict):
-    """Create an OpenAI-compatible client for a provider config dict."""
+    """Create an OpenAI-compatible client for a provider config dict.
+
+    2026-09 fix: max_retries=0 — the openai-python SDK retries failed
+    requests itself by default (max_retries=2, i.e. up to 3 real HTTP
+    attempts per .create() call, with its own short backoff — that's what
+    the "Retrying request in 0.49s" log lines actually are, not anything
+    _ai_call() below logs). That sat UNDERNEATH _ai_call()'s own
+    MAX_RETRIES=3 outer loop with no coordination between the two, so a
+    single logical "attempt" there could silently fire up to 3 real
+    requests — confirmed live: a Gemini 429 burst that should have been 3
+    attempts (per the module docstring) actually sent 5+ requests in the
+    same second before _ai_call() even logged its own "attempt 3" error.
+    That's 3x (or more) the intended request volume against a
+    rate/quota-limited provider, and 3x the wall-clock spent retrying
+    before this stage's own cross-provider failover ever gets a chance to
+    kick in. max_retries=0 makes _ai_call()'s loop the ONLY retry layer,
+    matching what its own docstring already claims."""
     from openai import OpenAI
-    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"])
+    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"], max_retries=0)
 
 
 # Pre-create clients for all configured providers
@@ -103,11 +119,36 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
             return content.strip()
         except Exception as e:
             error_str = str(e)
-            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_str.lower()
-            is_daily_limit = "tokens per day" in error_str.lower() or "daily" in error_str.lower()
+            error_lower = error_str.lower()
+            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_lower
+            # 2026-09 fix: confirmed live this missed Gemini's actual
+            # free-tier daily-quota error entirely — its real wording is
+            # "Quota exceeded for metric: ...generate_content_free_tier_
+            # requests" with quotaId "GenerateRequestsPerDayPerProjectPer
+            # Model-FreeTier", none of which contains "tokens per day" or
+            # the bare word "daily" (case-insensitively) that this check
+            # used to require. Because it fell through as an ordinary
+            # rate limit instead, _ai_call() kept retrying with backoff
+            # for a quota that a few seconds' wait can never fix within
+            # the same UTC day — wasting all MAX_RETRIES attempts (and,
+            # combined with the max_retries=0 fix above, needlessly
+            # delaying cross-provider failover) on a call guaranteed to
+            # fail again immediately. Broadened to also catch "per day"
+            # and "quota exceeded" — still narrow enough not to misfire
+            # on an ordinary transient rate-limit message (those say
+            # "rate limit"/"too many requests", never "quota exceeded"
+            # or a per-day quota window).
+            is_daily_limit = (
+                "tokens per day" in error_lower
+                or "requests per day" in error_lower
+                or "per day" in error_lower
+                or "perday" in error_lower.replace(" ", "").replace("_", "")
+                or ("quota exceeded" in error_lower and "day" in error_lower)
+                or "daily" in error_lower
+            )
 
             if is_daily_limit:
-                log.error(f"{name} daily token limit reached — skipping remaining AI calls")
+                log.error(f"{name} daily quota reached — skipping remaining AI calls for {name} today")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
