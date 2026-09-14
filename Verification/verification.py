@@ -391,6 +391,44 @@ _UNVERIFIABLE_ATS = {
                           # dead-signal, not yet researched live. A real candidate for
                           # future work, same class as breezyhr/folkshr/adp above.
     "successfactors",     # JS-rendered, no HTTP scraper at all (see ats_scrapers.py SCRAPERS)
+    "pinpoint",            # CONFIRMED 2026-09: the postings.json API this project's own
+                          # scraper hits works fine in production, but every live check
+                          # attempt made FOR THIS research pass — against both a real
+                          # subdomain and a deliberately fake one — was refused by
+                          # pinpointhq.com's own tenant-level robots.txt before a
+                          # response could even be inspected. No live-confirmed dead/
+                          # alive signal exists yet as a result; a real candidate for
+                          # future work via a tool that isn't robots-gated the way this
+                          # research pass's fetch tooling was, same unresearched-not-
+                          # unverifiable class as brassring below.
+    "jobylon",             # NOT researched as unsafe — genuinely no cheap per-company
+                          # signal exists to check. ats_scrapers.scrape_jobylon's own
+                          # docstring explains why: there's no per-tenant API or even a
+                          # reliable per-tenant URL (emp.jobylon.com/companies/{id}-{slug}/
+                          # is JS-rendered), so the real scraper works by crawling the
+                          # entire site-wide sitemap.xml and keeping only detail pages
+                          # that happen to link back to this company — the same
+                          # sitemap-wide crawl a verifier would need to run per ROW,
+                          # not a cheap single-request check like every other verifier
+                          # here. Left unverified rather than built as a heavyweight
+                          # special case.
+    "flatchr",             # NOT an unverifiable API — confirmed 2026-09 the opposite:
+                          # GET https://careers.flatchr.io/company/{slug}.json cleanly
+                          # 404s for a fake company and 200s with a real {"items":[...]}
+                          # body for a real one. The blocker is the DATA, not the API:
+                          # confirmed live that ~92% of flatchr's current archive_i rows
+                          # (11,360 of 12,320) hold a per-VACANCY string as "slug"
+                          # (discovery.py's _url_to_slug_flatchr misreads a one-segment
+                          # "/vacancy/{vacancy-slug}" URL as if it were the two-segment
+                          # "/vacancy/{company_slug}/{vacancy_id}" shape ats_scrapers.
+                          # scrape_flatchr itself builds — see that extractor's docstring
+                          # for the fix and the live evidence). A verifier would 404 on
+                          # nearly all of those — not because the companies are gone, but
+                          # because the stored identifier was never a real company slug —
+                          # and delete them as a false "mass extinction." Revisit once
+                          # those existing rows are corrected or removed; the ~960 rows
+                          # with a genuine company-shaped slug already verify correctly
+                          # against the same 404 signal, for whenever that's safe to turn on.
     # "ycombinator" removed 2026-09 along with discovery.py's URL_TO_SLUG
     # entry for it — it was never a real ATS (job-board aggregator), that
     # entry only ever produced permanently-unscrapable rows, and it can
@@ -532,6 +570,54 @@ async def _verify_jobvite(session: aiohttp.ClientSession, slug: str) -> bool:
         raise RuntimeError(f"ambiguous status {r.status}")
 
 
+async def _verify_jazzhr(session: aiohttp.ClientSession, slug: str) -> bool:
+    """JazzHR (ats_scrapers.scrape_jazzhr) — slug is the {slug}.applytojob.com
+    subdomain. NOT a DNS-only signal like avature/eploy/taleo above:
+    confirmed live (2026-09) that applytojob.com wildcards DNS the same way
+    Workday does — a deliberately fake subdomain (definitely-fake-zzz999.
+    applytojob.com) still resolves and responds, it just 302-redirects to
+    JazzHR's own https://www.jazzhr.com/job-seekers marketing page, while a
+    real tenant (bathplanet.applytojob.com, thinkjam.applytojob.com — both
+    checked live) serves its own board directly with no redirect at all.
+    So the signal here is the REDIRECT TARGET HOST, not resolution or
+    status code — same shape as _verify_jobvite's '?invalid=1' redirect
+    check just above, applied to a host instead of a query param."""
+    url = f"https://{slug}.applytojob.com"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_host = (urlparse(str(r.url)).hostname or "").lower()
+        if final_host in ("jazzhr.com", "www.jazzhr.com"):
+            return False
+        if r.status == 200:
+            return True
+        raise RuntimeError(f"ambiguous status {r.status} (final host {final_host!r})")
+
+
+async def _verify_pageup(session: aiohttp.ClientSession, slug: str) -> bool:
+    """PageUp (ats_scrapers.scrape_pageup) — slug is 'portalId|source', all
+    tenants sharing the single careers.pageuppeople.com host (no per-tenant
+    subdomain, so no DNS-based signal applies here at all). Confirmed live
+    (2026-09): a real portal ('470|pa', Peter Alexander's board) returns
+    200 with real listings, while a fabricated portal ID ('999999|zz')
+    returns a clean 404 — including a handful of stale archive_i rows with
+    a non-numeric portal_id (e.g. 'jobs|...', 'apply|999') left over from
+    before discovery.py's own portal_id.isdigit() fix (see
+    _url_to_slug_pageup's docstring); those already-junk rows 404
+    cleanly too, so this verifier just reports them dead like any other."""
+    parts = slug.split("|", 1)
+    if len(parts) != 2:
+        raise RuntimeError(f"malformed PageUp slug (expected 'portalId|source'): {slug!r}")
+    portal_id, source = parts
+    url = f"https://careers.pageuppeople.com/{portal_id}/{source}/en/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        if r.status == 200:
+            return True
+        raise RuntimeError(f"ambiguous status {r.status}")
+
+
 async def _dns_dead_check(session: aiohttp.ClientSession, url: str) -> bool:
     """Shared helper for subdomain-per-tenant platforms whose ONLY safe
     'does not exist' signal is the subdomain simply failing to resolve at
@@ -612,6 +698,8 @@ ARCHIVE_II_VERIFIERS = {
     "avature": _verify_avature,
     "eploy": _verify_eploy,
     "taleo": _verify_taleo,
+    "jazzhr": _verify_jazzhr,
+    "pageup": _verify_pageup,
 }
 
 
