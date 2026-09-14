@@ -342,6 +342,15 @@ SUPPORTED_ATS = {
     # robots) — that stale blacklist entry is why this whole gap went
     # unnoticed.
     "adp", "brassring", "jobvite", "jobadder", "folkshr", "avature", "eploy",
+    # 2026-09: Cornerstone OnDemand (csod) — REVERSED out of discovery-only.
+    # Confirmed live (real browser, two independent tenants) that the
+    # bootstrap career-site page embeds a genuine anonymous bearer JWT in
+    # its raw HTTP response, honored with zero cookies/session by a real
+    # public job-search API (see ats_scrapers.scrape_csod and
+    # _url_to_slug_csod's docstring for the full evidence trail, and
+    # GREYLIST_ATS.md for the before/after writeup). Dayforce/Getro/Paycom
+    # remain discovery-only — this reversal is specific to Cornerstone.
+    "csod",
 }
 
 # The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
@@ -1548,6 +1557,94 @@ def _url_to_slug_jazzhr(url: str) -> str | None:
     return None
 
 
+_CSOD_CAREERSITE_PATH_RE = re.compile(r"^/ux/ats/careersite/(\d+)/", re.I)
+
+
+def _url_to_slug_csod(url: str) -> str | None:
+    """Cornerstone OnDemand — subdomain-per-tenant on csod.com
+    ({tenant}.csod.com/ux/ats/careersite/{siteId}/home[/requisition/{id}]);
+    confirmed live via real examples: cn360.csod.com, ama-assn.csod.com,
+    msc.csod.com, survitec.csod.com, merlin.csod.com, each carrying a
+    matching '?c={tenant}' query param.
+
+    2026-09 REVERSAL: promoted out of discovery-only. The original
+    verdict here (client-side-rendered app shell, no server-rendered job
+    content, "same failure class as SuccessFactors") was correct about
+    the RENDERED page but wrong about the underlying platform — live
+    testing (real browser, two independent tenants: CN Rail/cn360 and
+    Survitec) found the ~5KB bootstrap HTML response for ANY
+    /ux/ats/careersite/{siteId}/home URL embeds a genuine anonymous
+    bearer JWT as plain text (`"token":"eyJ..."`) plus the tenant's
+    regional API host (`"cloud":"https://{region}.api.csod.com/"`) —
+    confirmed present in the RAW HTTP response body (fetched with
+    fetch(..., {cache:'no-store'}) before any JS ran), not something
+    client-JS synthesizes — so a plain requests.get() sees it exactly
+    like scrape_csod's bootstrap fetch does. That token is honored by
+    POST {cloud}rec-job-search/external/jobs with zero cookies/session,
+    and its own `rurls` JWT claim explicitly whitelists
+    "rec-job-search/external" as an anonymous-accessible route — this is
+    a deliberate anonymous API, not an accident. See ats_scrapers.py's
+    scrape_csod for the full request shape and the careerSitePageId
+    quirk (a per-tenant value that must be discovered, doesn't reliably
+    match the URL's siteId) and GREYLIST_ATS.md for the evidence trail.
+
+    Slug format is now 'tenant|siteId' (siteId from the URL path, e.g.
+    'cn360|3') — scrape_csod needs both to rebuild the bootstrap URL,
+    same pipe-delimited convention as _url_to_slug_workday above. Falls
+    back to careersite id '1' (confirmed the most common default/home
+    site id) when a matched URL's path doesn't carry a numeric siteId
+    segment, so a plain tenant-root URL still yields a usable slug
+    instead of being dropped."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(".csod.com"):
+        return None
+    tenant = host[: -len(".csod.com")]
+    if not (tenant and tenant != "www" and tenant not in SKIP_SLUGS and _looks_like_real_slug(tenant)):
+        return None
+    m = _CSOD_CAREERSITE_PATH_RE.match(parsed.path or "")
+    site_id = m.group(1) if m else "1"
+    return f"{tenant}|{site_id}"
+
+
+_PAYCOM_CLIENTKEY_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+
+
+def _url_to_slug_paycom(url: str) -> str | None:
+    """Paycom — ALL customers share one domain (www.paycomonline.net,
+    NOT paycomonline.com — node.py's _ATS_VENDOR_DOMAINS had the wrong
+    TLD before this fix, confirmed live: every real example found
+    resolves under .net, .com was never seen live). Tenant is a 32-hex-
+    character 'clientkey' in the path
+    (/v4/ats/web.php/portal/{clientkey}/jobs or /career-page), not a
+    subdomain — confirmed live via multiple real examples (e.g.
+    74B8425BF3D1B3ACB19CC1353DC5FA0E, 5AA9970AFB7E7320DA597F2CF00E6958).
+
+    2026-09: DISCOVERY ONLY, deliberately not in SUPPORTED_ATS/
+    ats_scrapers.SCRAPERS — confirmed live (both the /career-page listing
+    and an individual /jobs/{id} detail page) that this is a client-side-
+    rendered app shell with no server-rendered content and no embedded
+    JSON ("You need to enable JavaScript to run this app."). No
+    documented public unauthenticated job-search API was found; third-
+    party job aggregators do index Paycom postings at real scale, but
+    describe their own scraping/normalization layer, not a Paycom
+    endpoint that's usable here. Same failure class as SuccessFactors/
+    Cornerstone above — genuinely not scrapable via this project's plain-
+    HTTP method today, not just unresearched. Slugs still captured here
+    for the same reason as Cornerstone's."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host not in ("www.paycomonline.net", "paycomonline.net"):
+        return None
+    m = re.match(r"^/v4/ats/web\.php/portal/([0-9A-Fa-f]{32})(?:/|$)", parsed.path)
+    if not m:
+        return None
+    clientkey = m.group(1)
+    if _PAYCOM_CLIENTKEY_RE.match(clientkey):
+        return clientkey.upper()
+    return None
+
+
 URL_TO_SLUG = {
     "greenhouse": _url_to_slug_greenhouse,
     "lever": _url_to_slug_lever,
@@ -1595,10 +1692,17 @@ URL_TO_SLUG = {
     # _url_to_slug_dayforce below (its extractor used to live here).
     # occupop: no entry — confirmed unscrapeable, see Main/BLACKLISTED_ATS.md
     # and the comment just above (successfactors) for the same reasoning.
-    # New (2026-09): slug-discovery only, see the block comment above these
-    # three functions — no scraper/SUPPORTED_ATS entry yet.
+    # New (2026-09): Dayforce/Getro/Paycom are still slug-discovery only,
+    # see the block comment above these functions — no scraper/
+    # SUPPORTED_ATS entry yet. Cornerstone (csod) is DIFFERENT as of
+    # 2026-09: it was reversed out of discovery-only into a real scraper
+    # (see _url_to_slug_csod's docstring above and ats_scrapers.scrape_csod)
+    # — it's now also in SUPPORTED_ATS and CC_EXTRACTORS/CC_PLATFORM_PATTERNS
+    # below, unlike its two neighbors here.
     "dayforce": _url_to_slug_dayforce,
     "getro": _url_to_slug_getro,
+    "csod": _url_to_slug_csod,
+    "paycom": _url_to_slug_paycom,
     "jazzhr": _url_to_slug_jazzhr,
 }
 
@@ -2073,6 +2177,13 @@ CC_PLATFORM_PATTERNS = {
     "pinpoint": ["*.pinpointhq.com/*"],
     "flatchr": ["*.flatchr.io/*", "careers.flatchr.io/company/*"],
     "jobylon": ["emp.jobylon.com/companies/*"],
+    # 2026-09: Cornerstone OnDemand (csod) — REVERSED out of discovery-only,
+    # now has a real working scraper (see SUPPORTED_ATS comment above and
+    # ats_scrapers.scrape_csod), so discovering its slugs via Common Crawl
+    # is worth doing now (it wasn't when this was discovery-only, same
+    # reasoning SuccessFactors/Occupop are excluded above). Dayforce/
+    # Getro/Paycom stay excluded here — no scraper exists for them yet.
+    "csod": ["*.csod.com/ux/ats/careersite/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -2127,6 +2238,10 @@ CC_EXTRACTORS = {
     "pinpoint": _url_to_slug_pinpoint,
     "flatchr": _url_to_slug_flatchr,
     "jobylon": _url_to_slug_jobylon,
+    # 2026-09: Cornerstone OnDemand — kept in sync with CC_PLATFORM_PATTERNS
+    # above (see SUPPORTED_ATS comment for the reversal). _url_to_slug_csod
+    # already returns the 'tenant|siteId' shape scrape_csod expects.
+    "csod": _url_to_slug_csod,
 }
 
 
