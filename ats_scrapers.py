@@ -3279,6 +3279,170 @@ def scrape_jobylon(slug: str) -> list[dict]:
 # evidence. Its ~34 already-discovered archive_i rows were deleted
 # 2026-09 (dead weight — could never be scraped into real job data).
 
+# ── Cornerstone OnDemand (csod) ─────────────────────────
+# 2026-09: REVERSED out of discovery-only (see discovery.py's
+# _url_to_slug_csod docstring and GREYLIST_ATS.md for the full evidence
+# trail). Confirmed live, twice, on two independent real tenants (CN
+# Rail/cn360.csod.com and Survitec/survitec.csod.com):
+#   1. GET https://{tenant}.csod.com/ux/ats/careersite/{siteId}/home?c={tenant}
+#      returns a small (~5KB) HTML document whose RAW response body (not
+#      something client-JS synthesizes — confirmed via fetch(...,
+#      {cache:'no-store'}) before any JS ran) embeds a bootstrap JS blob
+#      containing an anonymous bearer JWT ("token":"eyJ...") and the
+#      tenant's regional API host ("cloud":"https://{region}.api.csod.com/").
+#      Decoding that JWT's own payload shows an "rurls" claim that
+#      explicitly whitelists "rec-job-search/external" — this is a
+#      deliberately anonymous-accessible route, not an accident/leak.
+#   2. POST {cloud}rec-job-search/external/jobs with that bearer token
+#      (no cookies/session needed) returns real job data:
+#      {"status":"Success","data":{"totalCount":N,"requisitions":[...]}}.
+#      Confirmed via two independent externally-sourced research reports
+#      (Qwen, DeepSeek) plus this project's own live testing that
+#      requests failing with totalCount:0 despite plausible-looking
+#      bodies are missing "careerSitePageId" — required, and genuinely
+#      NOT derivable from the JWT, the careersites config endpoint, or
+#      any page attribute found (confirmed live: it does not reliably
+#      equal the URL's careerSiteId — CN Rail's site 3 needed pageId 1,
+#      Survitec's site 4 needed pageId 4, no pattern connects the two).
+#      The open-source career-ops project's own CSOD provider (GitHub,
+#      commit ffbbf41) uses "pageId == careerSiteId" as its only
+#      heuristic — matches Survitec but not CN Rail — so that's tried
+#      first here (cheapest, matches at least one real case), falling
+#      back to brute-forcing a small range exactly as that project does
+#      when its own heuristic misses.
+_CSOD_SEARCH_PATH = "rec-job-search/external/jobs"
+_CSOD_TOKEN_RE = re.compile(r'"token"\s*:\s*"(eyJ[A-Za-z0-9_\-\.]+)"')
+_CSOD_CLOUD_RE = re.compile(r'"cloud"\s*:\s*"(https://[a-z0-9.\-]*api\.csod\.com/)"', re.I)
+_CSOD_PAGE_ID_BRUTE_FORCE_MAX = 20  # small, cheap range — matches career-ops' own fallback scope
+
+
+def _csod_search(search_url: str, headers: dict, site_id: int, page_id: int,
+                  page_number: int, page_size: int = 25) -> dict | None:
+    """One POST to the anonymous job-search API. Returns the 'data' object
+    on a real Success response, None on any failure/unexpected shape."""
+    payload = {
+        "careerSiteId": site_id, "careerSitePageId": page_id,
+        "pageNumber": page_number, "pageSize": page_size, "cultureId": 1,
+        "searchText": "", "cultureName": "en-US",
+        "states": [], "countryCodes": [], "cities": [], "placeID": "",
+        "radius": None, "postingsWithinDays": None,
+        "customFieldCheckboxKeys": [], "customFieldDropdowns": [], "customFieldRadios": [],
+    }
+    try:
+        resp = _get_session().post(search_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+    if data.get("status") != "Success":
+        return None
+    result = data.get("data")
+    return result if isinstance(result, dict) else None
+
+
+def scrape_csod(slug: str) -> list[dict]:
+    """Cornerstone OnDemand — anonymous-bearer-JWT public JSON API.
+    Slug format: 'tenant|careerSiteId' (careerSiteId from the URL path,
+    e.g. 'cn360|3' — see discovery.py's _url_to_slug_csod). See the block
+    comment above for the full live-verified evidence trail."""
+    parts = slug.split("|")
+    if len(parts) != 2:
+        log.debug(f"Invalid Cornerstone (csod) slug format: {slug}")
+        return []
+    tenant, site_id_str = parts
+    if not site_id_str.isdigit():
+        log.debug(f"Invalid Cornerstone (csod) careerSiteId in slug: {slug}")
+        return []
+    site_id = int(site_id_str)
+
+    boot_url = f"https://{tenant}.csod.com/ux/ats/careersite/{site_id}/home?c={tenant}"
+    r = _get(boot_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return []
+
+    token_match = _CSOD_TOKEN_RE.search(r.text)
+    cloud_match = _CSOD_CLOUD_RE.search(r.text)
+    if not token_match or not cloud_match:
+        log.debug(f"Cornerstone: no bootstrap token/cloud endpoint found for {tenant}")
+        return []
+    token = token_match.group(1)
+    cloud = cloud_match.group(1)
+    search_url = f"{cloud}{_CSOD_SEARCH_PATH}"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+
+    # Find a working careerSitePageId: try "same as careerSiteId" first
+    # (career-ops' heuristic), then brute-force the rest of a small range.
+    page_id_candidates = [site_id] + [
+        i for i in range(1, _CSOD_PAGE_ID_BRUTE_FORCE_MAX + 1) if i != site_id
+    ]
+    working_page_id = None
+    first_page = None
+    for candidate in page_id_candidates:
+        result = _csod_search(search_url, headers, site_id, candidate, page_number=1)
+        if result and result.get("totalCount", 0) > 0:
+            working_page_id = candidate
+            first_page = result
+            break
+        time.sleep(random.uniform(0.2, 0.5))
+
+    if working_page_id is None or first_page is None:
+        log.debug(f"Cornerstone: no working careerSitePageId found for {tenant} "
+                  f"(tried 1-{_CSOD_PAGE_ID_BRUTE_FORCE_MAX}) — likely zero open postings")
+        return []
+
+    company_name = tenant.replace("-", " ").title()
+    total = first_page.get("totalCount", 0)
+    page_size = 25
+    jobs = []
+    seen = set()
+    page_number = 1
+    page_data = first_page
+
+    while page_data:
+        reqs = page_data.get("requisitions", [])
+        if not reqs:
+            break
+        for req in reqs:
+            req_id = req.get("requisitionId")
+            if req_id is None or req_id in seen:
+                continue
+            seen.add(req_id)
+
+            locs = req.get("locations") or []
+            loc0 = locs[0] if locs and isinstance(locs[0], dict) else {}
+            location = ", ".join(x for x in (loc0.get("city"), loc0.get("state")) if x)
+            country = loc0.get("country", "")
+            desc = _snippet(req.get("externalDescription", ""))
+
+            jobs.append({
+                "title": (req.get("displayJobTitle") or "").strip(),
+                "url": f"https://{tenant}.csod.com/ux/ats/careersite/{site_id}/home/requisition/{req_id}?c={tenant}",
+                "company": company_name,
+                "location": location,
+                "country": country,
+                "department": "",
+                "workplace_type": "",
+                "employment_type": "",
+                "salary": _extract_salary(desc),
+                "description_snippet": desc,
+                "source_ats": "Cornerstone OnDemand",
+                "slug": slug,
+            })
+
+        if len(seen) >= total:
+            break
+        page_number += 1
+        time.sleep(random.uniform(0.3, 0.8))
+        page_data = _csod_search(search_url, headers, site_id, working_page_id, page_number, page_size)
+
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -3319,6 +3483,9 @@ SCRAPERS = {
     "pinpoint": scrape_pinpoint,
     "flatchr": scrape_flatchr,
     "jobylon": scrape_jobylon,
+    # 2026-09: Cornerstone OnDemand — REVERSED out of discovery-only, see
+    # scrape_csod's block comment above for the full live-verified evidence.
+    "csod": scrape_csod,
     # No scraper exists for occupop, successfactors, ukg, or phenom — all
     # 4 confirmed genuinely unscrapeable (robots.txt disallow, JS-only
     # rendering, or an auth-gated API with no public alternative). Full
