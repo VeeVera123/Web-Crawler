@@ -55,6 +55,18 @@ Sources:
      trail for why this is a manually-curated repo list, not a live
      GitHub-wide search, and why csod needs one live per-tenant resolve
      while workday/brassring/oracle_cloud_hcm are free local reassembly.)
+  12. Open Jobs Daily H.F (--source openjobsdaily; 2026-09, new —
+     huggingface.co/datasets/Yigit-Karaman/open-jobs-daily, ~9.8M rows
+     across both HF configs, CC0-1.0. Same shape as Edward H.F: only the
+     `url` column is read, resolved through URL_TO_SLUG — the dataset's
+     own pre-labeled ats/slug columns aren't trusted directly. See
+     fetch_openjobsdaily_slugs docstring.)
+  13. Zalize H.F (--source zalizedata; 2026-09, new —
+     huggingface.co/datasets/zalizedata/tech-job-postings-salary-dataset,
+     "L" config only (~394k rows), CC-BY-NC-4.0 NON-COMMERCIAL — confirmed
+     with the user this project's current use is non-commercial; remove
+     this source if that ever changes. See fetch_zalizedata_slugs
+     docstring.)
 
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
@@ -98,6 +110,8 @@ Usage:
     python discovery.py --source wayback       # Wayback CDX (all platforms) only
     python discovery.py --source latmay        # Latmay H.F (Hugging Face) only
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
+    python discovery.py --source openjobsdaily # Open Jobs Daily H.F (Hugging Face) only
+    python discovery.py --source zalizedata    # Zalize H.F (Hugging Face) only
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
     python discovery.py --source github        # GitHub repo registries only
@@ -3690,6 +3704,214 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 270, hf_shard: int | None 
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 12 & 13: two more Hugging Face bulk datasets, 2026-09
+# (Yigit-Karaman/open-jobs-daily + zalizedata/tech-job-postings-salary-dataset)
+# ══════════════════════════════════════════════════════════
+# Same "offline pass through URL_TO_SLUG" shape as Latmay/Edward above —
+# both datasets hand over a real per-job `url` column directly, so there's
+# no live crawl step, just _resolve_url_via_url_to_slug reused as-is.
+# Each of these datasets ALSO carries its own pre-labeled `ats`/slug-style
+# columns (open-jobs-daily: "ats"+"slug"; zalizedata: "ats"+"ats_token"),
+# but those are deliberately NOT trusted directly — same reasoning as
+# Latmay's own docstring above: a label's exact wording isn't guaranteed
+# to match this file's own ATS key naming, and re-deriving the slug via
+# URL_TO_SLUG is the one path already confirmed correct against every
+# platform this project actually supports. A row whose `ats` label names
+# a platform we don't support at all (confirmed live: open-jobs-daily has
+# real "gohire" rows, e.g. jobs.gohire.io — not in URL_TO_SLUG) is simply
+# not resolved, exactly like any other unsupported-platform row from any
+# other bulk source — a genuine future candidate, not silently trusted in.
+#
+#   Yigit-Karaman/open-jobs-daily (huggingface.co/datasets/
+#     Yigit-Karaman/open-jobs-daily — CC0-1.0, public domain). Two HF
+#     configs, confirmed live via the datasets-server API: "default"
+#     (12 Parquet files, ~3.08M rows) and "ledger" (3 files, ~6.69M rows,
+#     adds first_seen_at/last_seen_at/removed_at/is_open — a change-
+#     tracking history of the same underlying postings, not a disjoint
+#     dataset). Both configs are pulled — anything the "default" snapshot
+#     missed that "ledger" still has (or vice versa) is pure upside, and
+#     slugs naturally dedupe via the shared dict. ~24.8GB total across
+#     both configs (confirmed via the dataset's own listed file size) —
+#     real bulk volume, same as Edward H.F, so this reuses that exact
+#     streaming-download + time-budget + file-sharding shape rather than
+#     Latmay's simpler single-shot pattern.
+#   zalizedata/tech-job-postings-salary-dataset (huggingface.co/datasets/
+#     zalizedata/tech-job-postings-salary-dataset — CC-BY-NC-4.0,
+#     NON-COMMERCIAL. Confirmed with the user 2026-09 that this project's
+#     current use is non-commercial; if that ever changes, this source
+#     must be removed — see GREYLIST_ATS.md-style reasoning, documented
+#     here since there's no per-ATS-platform doc for a bulk slug SOURCE).
+#     Three HF configs (L/M/S), confirmed live via the datasets-server
+#     API: L is the largest at ~394k rows (M ~19.3k, S ~35.4k) — the
+#     dataset card doesn't document the exact L/M/S relationship, but
+#     since L already has the most rows, only L is fetched here rather
+#     than guessing M/S are disjoint from it and risking real duplicate
+#     download/processing work for no new coverage. Single Parquet file,
+#     small enough for Latmay's simpler single-shot pattern — no
+#     streaming/time-budget/file-sharding needed.
+
+def fetch_openjobsdaily_slugs(time_budget_minutes: int = 270, hf_shard: int | None = None,
+                                hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
+    """Yigit-Karaman/open-jobs-daily — ~9.8M rows across 15 Parquet files
+    (12 "default" + 3 "ledger", ~24.8GB total). Only `url` is ever read —
+    every other column (title, location, timestamps, etc.) is projected
+    away at the Parquet read itself. See the module-level block comment
+    above this function for the CC0 license, why both configs are pulled,
+    and why the dataset's own pre-labeled `ats`/`slug` columns are NOT
+    trusted directly.
+
+    Same streaming-download + graceful time-budget + file-level sharding
+    shape as fetch_edwarddgao_slugs — copied deliberately rather than
+    factored into a shared helper, matching this file's existing pattern
+    of one dedicated function per HF source (never a shared seed/probe
+    pipeline, per the user's standing instruction for these)."""
+    import pyarrow.parquet as pq
+
+    file_urls = _hf_parquet_urls("Yigit-Karaman/open-jobs-daily")
+    if not file_urls:
+        log.warning("Open Jobs Daily H.F: no Parquet files resolved, skipping source")
+        return {}
+
+    shard_note = ""
+    if hf_total_shards and hf_shard is not None:
+        shard_size = -(-len(file_urls) // hf_total_shards)  # ceil division
+        start_i = hf_shard * shard_size
+        end_i = min(start_i + shard_size, len(file_urls))
+        file_urls = file_urls[start_i:end_i]
+        shard_note = f" [shard {hf_shard}/{hf_total_shards}]"
+
+    log.info(f"Open Jobs Daily H.F{shard_note}: {len(file_urls)} Parquet files to process "
+             f"(time budget: {time_budget_minutes}min, 0 = no budget)")
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    processed = 0
+    start = time.monotonic()
+    _PROGRESS_EVERY = 5_000
+    budget_seconds = time_budget_minutes * 60 if time_budget_minutes else None
+
+    for file_i, file_url in enumerate(file_urls):
+        if budget_seconds and (time.monotonic() - start) >= budget_seconds:
+            log.info(f"Open Jobs Daily H.F{shard_note}: time budget reached after "
+                     f"{file_i}/{len(file_urls)} files — stopping gracefully, "
+                     f"keeping {processed:,} rows' worth of progress.")
+            break
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+                download_timed_out = False
+                with requests.get(file_url, timeout=300, stream=True) as r:
+                    r.raise_for_status()
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        tmp.write(chunk)
+                        if budget_seconds and (time.monotonic() - start) >= budget_seconds:
+                            download_timed_out = True
+                            break
+                if download_timed_out:
+                    log.info(f"Open Jobs Daily H.F{shard_note}: time budget reached "
+                             f"mid-download of file {file_i + 1}/{len(file_urls)} — "
+                             f"stopping gracefully, keeping {processed:,} rows' worth "
+                             f"of progress (this in-flight file's partial download is "
+                             f"discarded, not counted).")
+                    break
+                tmp.flush()
+
+                pf = pq.ParquetFile(tmp.name)
+                for batch in pf.iter_batches(columns=["url"], batch_size=50_000):
+                    for url in batch.column("url").to_pylist():
+                        processed += 1
+                        hit = _resolve_url_via_url_to_slug(url)
+                        if hit:
+                            actual_ats, slug = hit
+                            slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+
+                        if processed % _PROGRESS_EVERY == 0:
+                            elapsed = max(time.monotonic() - start, 0.001)
+                            resolved = sum(len(s) for s in slugs_by_ats.values())
+                            log.info(f"Open Jobs Daily H.F{shard_note}: file "
+                                     f"{file_i + 1}/{len(file_urls)}, {processed:,} "
+                                     f"processed ({processed / elapsed:,.1f}/sec), "
+                                     f"{resolved:,} resolved ({resolved / processed * 100:.1f}%)")
+        except Exception as e:
+            log.warning(f"Open Jobs Daily H.F{shard_note}: file {file_i + 1}/"
+                        f"{len(file_urls)} ({file_url}) failed, skipping: {e}")
+            continue
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} slugs from Open Jobs Daily H.F{shard_note}")
+    log.info(f"Open Jobs Daily H.F{shard_note} summary: {processed:,} rows processed, "
+             f"{total:,} slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
+    return slugs_by_ats
+
+
+def fetch_zalizedata_slugs() -> dict[str, dict[str, str]]:
+    """zalizedata/tech-job-postings-salary-dataset — "L" config only
+    (~394k rows, one Parquet file). Only `url` is ever read. See the
+    module-level block comment above fetch_openjobsdaily_slugs for the
+    CC-BY-NC-4.0 non-commercial license (confirmed acceptable for this
+    project's current, non-commercial use — remove this source if that
+    ever changes) and why only the "L" config is fetched.
+
+    Small enough for Latmay's simpler single-shot pattern — no
+    streaming/time-budget/sharding needed."""
+    import pyarrow.parquet as pq
+
+    r = requests.get("https://huggingface.co/api/datasets/"
+                      "zalizedata/tech-job-postings-salary-dataset/parquet",
+                      timeout=30)
+    try:
+        r.raise_for_status()
+        file_urls = r.json().get("L", {}).get("train", [])
+    except Exception as e:
+        log.warning(f"Zalize H.F: Parquet resolve failed: {e}")
+        return {}
+    if not file_urls:
+        log.warning("Zalize H.F: no Parquet files resolved for the 'L' config, skipping source")
+        return {}
+
+    all_urls: list[str] = []
+    for file_url in file_urls:
+        try:
+            resp = requests.get(file_url, timeout=120)
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning(f"Zalize H.F: failed to download {file_url}: {e}")
+            continue
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+            tmp.write(resp.content)
+            tmp.flush()
+            table = pq.read_table(tmp.name, columns=["url"])
+        all_urls.extend(table.column("url").to_pylist())
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    processed = 0
+    start = time.monotonic()
+    _PROGRESS_EVERY = 5_000
+
+    for url in all_urls:
+        processed += 1
+        hit = _resolve_url_via_url_to_slug(url)
+        if hit:
+            actual_ats, slug = hit
+            slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+
+        if processed % _PROGRESS_EVERY == 0:
+            elapsed = max(time.monotonic() - start, 0.001)
+            resolved = sum(len(s) for s in slugs_by_ats.values())
+            log.info(f"Zalize H.F: {processed:,}/{len(all_urls):,} processed "
+                     f"({processed / elapsed:,.1f}/sec), {resolved:,} "
+                     f"resolved ({resolved / processed * 100:.1f}%)")
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} slugs from Zalize H.F")
+    log.info(f"Zalize H.F summary: {processed:,} rows processed, {total:,} "
+             f"slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
 # SOURCE 9: TheirStack (freemium technology-usage API)
 # ══════════════════════════════════════════════════════════
 
@@ -4755,8 +4977,8 @@ def main():
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
                  "wayback", "theirstack", "httparchive",
-                 "latmay", "edwarddgao", "icims_hrjobs",
-                 "github", "all"],
+                 "latmay", "edwarddgao", "openjobsdaily", "zalizedata",
+                 "icims_hrjobs", "github", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -4864,19 +5086,30 @@ def main():
              "fetch_edwarddgao_slugs docstring).",
     )
     parser.add_argument(
+        "--openjobsdaily-time-budget-minutes", type=int, default=270,
+        help="Self-stop gracefully after this many minutes downloading/"
+             "resolving Open Jobs Daily H.F's 15 Parquet files (~24.8GB, "
+             "both configs), keeping whatever was resolved so far "
+             "(default: 270, same margin-under-job-timeout reasoning as "
+             "--edwarddgao-time-budget-minutes; 0 = no budget, run to full "
+             "completion — see fetch_openjobsdaily_slugs docstring).",
+    )
+    parser.add_argument(
         "--hf-shard", type=int, default=None,
         help="Which Hugging Face shard this run covers (0-indexed, used "
-             "with --hf-total-shards) — applies to BOTH latmay and "
-             "edwarddgao. For edwarddgao this slices the 375 Parquet FILES "
-             "(cuts download volume per shard); for latmay (a single file) "
-             "this slices ROW INDEXES after the one download. Default: "
-             "None = all rows/files in one run.",
+             "with --hf-total-shards) — applies to latmay, edwarddgao, AND "
+             "openjobsdaily (zalizedata is small enough it's never "
+             "sharded). For edwarddgao/openjobsdaily this slices the "
+             "Parquet FILE list (cuts download volume per shard); for "
+             "latmay (a single file) this slices ROW INDEXES after the one "
+             "download. Default: None = all rows/files in one run.",
     )
     parser.add_argument(
         "--hf-total-shards", type=int, default=1,
         help="Total number of Hugging Face shards (default: 1, i.e. no "
-             "sharding). discovery.yml runs this as 3 for both latmay and "
-             "edwarddgao, matching commoncrawl/httparchive's shard count.",
+             "sharding). discovery.yml runs this as 3 for latmay, "
+             "edwarddgao, and openjobsdaily, matching commoncrawl/"
+             "httparchive's shard count.",
     )
     parser.add_argument(
         "--csod-resolve-budget-minutes", type=int, default=CSOD_RESOLVE_TIME_BUDGET_MINUTES,
@@ -4906,6 +5139,7 @@ def main():
     log.info("DISCOVERY — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("           + Wayback CDX (all ATS) + Latmay H.F + Edward H.F")
+    log.info("           + Open Jobs Daily H.F + Zalize H.F")
     log.info("           + TheirStack + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
@@ -5061,6 +5295,44 @@ def main():
             grand_total += upserted
         else:
             grand_total += ed_total
+
+    # Source 12: Open Jobs Daily H.F (huggingface.co/datasets/Yigit-Karaman/
+    # open-jobs-daily — ~9.8M rows across both configs, CC0-1.0)
+    if args.source in ("openjobsdaily", "all"):
+        log.info("\n--- OPEN JOBS DAILY H.F (Hugging Face, ~9.8M job postings) ---")
+        ojd_slugs = fetch_openjobsdaily_slugs(
+            time_budget_minutes=args.openjobsdaily_time_budget_minutes,
+            hf_shard=args.hf_shard, hf_total_shards=args.hf_total_shards)
+        ojd_total = sum(len(s) for s in ojd_slugs.values())
+        if ojd_total:
+            log.info(f"Open Jobs Daily H.F total: {ojd_total} slugs across "
+                     f"{sum(1 for s in ojd_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(ojd_slugs, source="Open Jobs Daily H.F",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ojd_total
+
+    # Source 13: Zalize H.F (huggingface.co/datasets/zalizedata/
+    # tech-job-postings-salary-dataset — "L" config, ~394k rows,
+    # CC-BY-NC-4.0 non-commercial — see the module comment above
+    # fetch_openjobsdaily_slugs for the license note)
+    if args.source in ("zalizedata", "all"):
+        log.info("\n--- ZALIZE H.F (Hugging Face, ~394k tech job postings) ---")
+        zl_slugs = fetch_zalizedata_slugs()
+        zl_total = sum(len(s) for s in zl_slugs.values())
+        if zl_total:
+            log.info(f"Zalize H.F total: {zl_total} slugs across "
+                     f"{sum(1 for s in zl_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(zl_slugs, source="Zalize H.F",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += zl_total
 
     # Source 9: TheirStack (freemium — small monthly trickle for thin
     # platforms, see fetch_theirstack_slugs docstring)
