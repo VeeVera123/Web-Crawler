@@ -751,6 +751,11 @@ _ATS_VENDOR_DOMAINS = (
     # careers.hireology.com is ATS-related, not in-house, same as every
     # other entry in this list.
     "hireology.com",
+    # 2026-09: gem.com added alongside discovery.py's new "gem"
+    # SUPPORTED_ATS entry — jobs.gem.com/{slug} is ATS-related, not
+    # in-house. Full-suffix "gem.com" matches jobs.gem.com safely (no
+    # unrelated company can share Gem's own vendor domain).
+    "gem.com",
     # 2026-09: getro.com added alongside discovery.py's new dayforce/getro/
     # jazzhr URL_TO_SLUG entries (dayforcehcm.com/applytojob.com were
     # already listed above).
