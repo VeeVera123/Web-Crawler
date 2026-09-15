@@ -3926,6 +3926,171 @@ def scrape_hireology(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Gem ─────────────────────────────────────────
+
+# Gem's public job board (jobs.gem.com/{slug}) is a client-rendered
+# React/Relay app — job data is never present in the raw HTML (confirmed
+# live via WebFetch failing to find it, then confirmed via real Chrome
+# browser network inspection). It's fetched from a single public, keyless
+# GraphQL endpoint: POST https://jobs.gem.com/api/public/graphql/batch,
+# body is a JSON array of {operationName, query, variables} objects,
+# response is a JSON array of {data: {...}} in the same order — confirmed
+# live 2026-09 against a real tenant (jobs.gem.com/dragonfly-careers),
+# 200 with real job data, no auth header/cookie of any kind. No
+# robots.txt exists on jobs.gem.com at all (404 on /robots.txt), so
+# nothing here is disallowed.
+_GEM_GRAPHQL_URL = "https://jobs.gem.com/api/public/graphql/batch"
+
+# List query — confirmed live: returns every open posting for a board in
+# one call, no pagination params/cursor seen or needed (small per-company
+# boards, same assumption this project already makes for isolvedhire's
+# single-call list endpoint).
+_GEM_LIST_QUERY = """
+query JobBoardList($boardId: String!) {
+  oatsExternalJobPostings(boardId: $boardId) {
+    jobPostings {
+      id
+      extId
+      title
+      locations { id name city isoCountry isRemote extId }
+      job { id department { id name extId } locationType employmentType }
+    }
+  }
+}
+"""
+
+# Per-job description query — confirmed live (200 response) against the
+# same real tenant/job used to confirm the list query above.
+_GEM_DETAIL_QUERY = """
+query ExternalJobPosting($boardId: String!, $extId: String!) {
+  oatsExternalJobPosting(boardId: $boardId, extId: $extId) {
+    descriptionHtml
+  }
+}
+"""
+
+
+def _gem_graphql_batch(operations: list[dict]) -> list[dict] | None:
+    """POST a batch of GraphQL operations to Gem's public endpoint.
+    Returns the parsed JSON array (one entry per operation, in order) or
+    None on any failure — callers degrade gracefully rather than raising."""
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Content-Type": "application/json",
+               "Accept": "application/json"}
+    try:
+        resp = _get_session().post(_GEM_GRAPHQL_URL, json=operations, headers=headers,
+                                     timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception as e:
+        log.debug(f"Gem: GraphQL batch request failed: {e}")
+        return None
+    return data if isinstance(data, list) else None
+
+
+def scrape_gem(slug: str) -> list[dict]:
+    """Gem — public keyless GraphQL job board (2026-09, new platform).
+    Slug is the job-board vanity path used on jobs.gem.com
+    (e.g. 'dragonfly-careers' for jobs.gem.com/dragonfly-careers), which
+    is exactly the GraphQL $boardId variable.
+
+    Two-step, both confirmed live 2026-09 via real browser network
+    inspection (this platform is JS-rendered end to end — no data is
+    ever present in the raw HTML):
+      1. One "JobBoardList" batch call — every open posting for the
+         board (title, locations, department, employment/location type).
+      2. One further batch call packing an "ExternalJobPosting" operation
+         per job (all in a single POST, matching the "batch" shape of
+         the endpoint itself) to pull each job's full descriptionHtml —
+         avoids an N-request fan-out for an N-job board.
+
+    No Wappalyzer fingerprint exists for Gem (checked live, absent) and
+    it isn't in openroles' tenant registry either (checked live, absent)
+    — this is purely a URL_TO_SLUG/CC_PLATFORM_PATTERNS/OpenPostings-map
+    discovery target, no bonus source to lean on.
+
+    URL caveat: the per-job page path on jobs.gem.com uses a THIRD opaque
+    ID encoding, different from both the GraphQL "id" and "extId" fields
+    (confirmed live — navigating to jobs.gem.com/{slug}/{id} using the
+    GraphQL "id" value 404'd as "Job not found"; no field in this query
+    set decodes to the real page-path token). Rather than construct and
+    ship a link confirmed to be wrong, `url` below points at the board's
+    listing page instead of a per-job deep link."""
+    list_resp = _gem_graphql_batch([
+        {"operationName": "JobBoardList", "query": _GEM_LIST_QUERY, "variables": {"boardId": slug}}
+    ])
+    if not list_resp:
+        return []
+    try:
+        postings = list_resp[0]["data"]["oatsExternalJobPostings"]["jobPostings"]
+    except Exception as e:
+        log.debug(f"Gem: unexpected list response shape for {slug}: {e}")
+        return []
+    if not isinstance(postings, list) or not postings:
+        return []
+
+    # One batch call for every job's description, matched back up by
+    # array position (same order in, same order out — confirmed by the
+    # endpoint's own "batch" contract).
+    desc_ops = [
+        {"operationName": "ExternalJobPosting", "query": _GEM_DETAIL_QUERY,
+         "variables": {"boardId": slug, "extId": p.get("extId")}}
+        for p in postings if p.get("extId")
+    ]
+    desc_by_ext_id = {}
+    if desc_ops:
+        desc_resp = _gem_graphql_batch(desc_ops) or []
+        for op, result in zip(desc_ops, desc_resp):
+            try:
+                html = result["data"]["oatsExternalJobPosting"]["descriptionHtml"]
+            except Exception:
+                continue
+            if html:
+                desc_by_ext_id[op["variables"]["extId"]] = html
+
+    company_name = slug.replace("-", " ").title()
+    jobs = []
+    for p in postings:
+        if not isinstance(p, dict):
+            continue
+        title = (p.get("title") or "").strip()
+        ext_id = p.get("extId")
+        if not title or not ext_id:
+            continue
+
+        locs = p.get("locations") or []
+        remote_loc = next((l for l in locs if isinstance(l, dict) and l.get("isRemote")), None)
+        if locs and isinstance(locs[0], dict):
+            loc0 = remote_loc or locs[0]
+            location = loc0.get("name") or loc0.get("city", "")
+        else:
+            location = ""
+        workplace_type = "Remote" if remote_loc else ""
+
+        job_info = p.get("job") or {}
+        department = (job_info.get("department") or {}).get("name", "")
+
+        desc_html = desc_by_ext_id.get(ext_id, "")
+        desc = _snippet(desc_html) if desc_html else ""
+
+        jobs.append({
+            "title": title,
+            "url": f"https://jobs.gem.com/{slug}",  # see docstring URL caveat
+            "company": company_name,
+            "location": location,
+            "country": "",
+            "department": department,
+            "workplace_type": workplace_type,
+            "employment_type": (job_info.get("employmentType") or "").replace("_", " ").title(),
+            "salary": _extract_salary(desc) if desc else "",
+            "description_snippet": desc,
+            "source_ats": "Gem",
+            "slug": slug,
+        })
+
+    return jobs
+
+
 # ── isolvedhire ─────────────────────────────────────────
 
 # Matches BOTH the raw-JSON form ("domain_id":4412 — if a bootstrap blob
@@ -4091,6 +4256,10 @@ SCRAPERS = {
     # full live-verified evidence trail.
     "hireology": scrape_hireology,
     "isolvedhire": scrape_isolvedhire,
+    # 2026-09: Gem — scrape_gem's own docstring above has the full
+    # confirmed-live GraphQL evidence trail (list + batched detail calls,
+    # no auth, no robots.txt on jobs.gem.com at all).
+    "gem": scrape_gem,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -4833,6 +5002,13 @@ DESCRIPTION_FETCHERS = {
     # case (same as Zoho/BambooHR above), but registered with the generic
     # fetcher as a defensive fallback for the rare short/empty case.
     "Hireology": _fetch_generic_description,
+    # Gem deliberately NOT registered here: scrape_gem already fetches
+    # each job's real descriptionHtml via GraphQL in one batched call, and
+    # job["url"] points at the board's JS-rendered listing page (see
+    # scrape_gem's URL caveat) — a generic HTML fetch against that URL
+    # would return the same content-free shell for every job, not a
+    # per-job description, so it would only waste requests on the rare
+    # already-failed case rather than actually recovering anything.
     # isolvedhire's list endpoint has NO description field at all (see
     # scrape_isolvedhire's docstring) — every job needs this fetch.
     "isolvedhire": _fetch_generic_description,
