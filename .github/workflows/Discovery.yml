@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 18-job matrix over 8 sources, all running in parallel — instead of one
+  # 19-job matrix over 9 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -81,6 +81,20 @@ jobs:
   # the shard count for zero extra coverage, which is why that path was
   # rejected. See fetch_httparchive_candidate_urls' docstring for the full
   # reasoning.
+  #
+  # 2026-09: added github (single job, unsharded — a short,
+  # manually-curated list of known public GitHub repos, currently just
+  # datascry/openroles, that publish pre-built ATS tenant/slug JSON files;
+  # fetched via jsDelivr's CDN mirror, no GitHub API/auth involved, so no
+  # extra secret or rate-limit concern here). Most mapped platforms are a
+  # free local reassembly from that repo's own metadata (workday, brassring,
+  # oracle_cloud_hcm); csod needs one bounded live per-tenant HTTP resolve
+  # instead (see --csod-resolve-budget-minutes, default 15min — cheap
+  # enough this job doesn't need its own timeout override). See
+  # discovery.py's module docstring (source 11) and
+  # fetch_github_registries_slugs' own docstring for the full research
+  # trail, including why successfactors and UKG/ultipro are deliberately
+  # excluded rather than mapped.
   #
   # Every sharded entry below also sets `name:` — without it, GitHub's
   # default matrix job display name spells out every matrix key verbatim
@@ -147,6 +161,8 @@ jobs:
             name: Latmay H.F
           - source: icims_hrjobs
             name: iCIMS HR Jobs
+          - source: github
+            name: GitHub registries
           - source: edwarddgao
             name: Edward H.F 1
             extra_args: "--hf-shard 0 --hf-total-shards 3"
