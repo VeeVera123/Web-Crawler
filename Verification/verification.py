@@ -57,7 +57,12 @@ which robots.txt disallows, confirmed live 2026-09, not just "suspected"),
 or no live example could be found/reached to confirm a rule at all
 (breezyhr, jobadder — jobadder's "Nothing here I'm afraid..." page was
 found to be plausibly the SAME message a real empty board shows, an
-explicitly UNSAFE signal — folkshr, adp). Taleo moved OUT of this bucket
+explicitly UNSAFE signal — folkshr, adp). 2026-09: Hireology and
+isolvedhire (both brand-new platforms this session) were ALSO confirmed
+verifiable and added straight to ARCHIVE_II_VERIFIERS — see
+_verify_hireology/_verify_isolvedhire's own docstrings for the full
+live-confirmed evidence, including the same real-empty-vs-dead check
+this file's whole methodology is built around. Taleo moved OUT of this bucket
 2026-09 — confirmed live (plain DNS lookups, not proxied through any
 fetch tool) that it's genuinely subdomain-per-tenant like avature/eploy,
 so a nonexistent tenant's subdomain simply doesn't resolve; see
@@ -678,6 +683,55 @@ async def _verify_taleo(session: aiohttp.ClientSession, slug: str) -> bool:
     return await _dns_dead_check(session, f"https://{company}.taleo.net/")
 
 
+async def _verify_hireology(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Hireology (2026-09, new platform — see discovery.py's SUPPORTED_ATS
+    comment). GET the public careers API for this slug, page=1&page_size=1.
+
+    Confirmed live 2026-09: a nonexistent tenant slug
+    (api.hireology.com/v2/public/careers/{fake-slug}) gets a clean 404
+    from the API itself. Ruled out the oracle_cloud_hcm-style trap
+    separately: a REAL, known tenant (1sthonda) requesting a deliberately
+    out-of-range page (page=999) still returns a normal
+    200 + {"data":[],"count":3,"page":999,"page_size":5} shape — an empty
+    result set is never a 404 for a real tenant, so the two cases can't
+    be confused here the way they can for Oracle Cloud HCM. Any other
+    status (5xx, timeout, unexpected) is left ambiguous via
+    raise_for_status() below — never treated as dead."""
+    url = f"https://api.hireology.com/v2/public/careers/{slug}"
+    async with session.get(url, params={"page": 1, "page_size": 1}, timeout=REQUEST_TIMEOUT,
+                            headers={"Accept": "application/json", "User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
+async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool:
+    """isolvedhire (2026-09, new platform — see discovery.py's
+    SUPPORTED_ATS comment). GET the tenant's /jobs/ board page and follow
+    redirects.
+
+    Confirmed live 2026-09 via real browser network inspection: a
+    nonexistent/unregistered subdomain is redirected by isolvedhire's own
+    shared platform infrastructure to a literal
+    notset.php?{subdomain}&root=32 handler — an explicit, deterministic
+    "this subdomain isn't provisioned" signal. Confirmed distinct from
+    every real tenant checked, including two REAL tenants with zero
+    current open postings (1stresponse, 21stcenturyequip — both stay on
+    their own /jobs/ page with full branding/nav, no redirect at all) as
+    well as an active one (1stccu) — ruling out the oracle_cloud_hcm-style
+    trap of a real-but-empty tenant looking identical to a dead one. Any
+    other non-2xx status is left ambiguous via raise_for_status() below."""
+    url = f"https://{slug}.isolvedhire.com/jobs/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        final_path = urlparse(str(r.url)).path
+        if "notset.php" in final_path:
+            return False
+        r.raise_for_status()
+        return True
+
+
 ARCHIVE_II_VERIFIERS = {
     "bamboohr": _verify_bamboohr,
     "icims": _verify_icims,
@@ -700,6 +754,13 @@ ARCHIVE_II_VERIFIERS = {
     "taleo": _verify_taleo,
     "jazzhr": _verify_jazzhr,
     "pageup": _verify_pageup,
+    # New (2026-09): Hireology / isolvedhire — see _verify_hireology/
+    # _verify_isolvedhire's own docstrings above for the full live-
+    # confirmed dead-signal evidence (both explicitly ruled out the
+    # oracle_cloud_hcm-style real-empty-vs-dead ambiguity before being
+    # added here, per this file's own WHY-19-OF-26 methodology above).
+    "hireology": _verify_hireology,
+    "isolvedhire": _verify_isolvedhire,
 }
 
 
