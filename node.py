@@ -2024,7 +2024,112 @@ async def _upsert_rows(session: aiohttp.ClientSession, table: str, on_conflict: 
     return sum(results)
 
 
-async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list[dict]) -> int:
+# 2026-09: added at the user's explicit request — "written to archive_i"
+# never meant "newly added." _upsert_rows above (and every summary line
+# built on it) has always counted successfully-upserted ROWS, not new
+# DATABASE rows: `resolution=merge-duplicates` means a hit on an
+# (ats,slug) pair some OTHER source (or an earlier run of this same one)
+# already discovered just re-merges into the existing row and gets counted
+# identically to a genuine first discovery. That's correct/intended
+# upsert behavior (dedup is meant to be free), but the log wording was
+# misleading enough that it looked like data was disappearing.
+#
+# Fix, with no extra round-trip: first_seen (archive_i's own DEFAULT
+# now() column) is deliberately never included in the write payload (see
+# write_ats_hits_to_archive_i's docstring on last_seen for the identical
+# reasoning) — so PostgREST's merge-duplicates ON CONFLICT DO UPDATE only
+# ever SETs the columns actually sent (ats, slug, source), leaving
+# first_seen at its ORIGINAL value for an existing row untouched, while a
+# true first INSERT gets the column default (now()) fired for the first
+# time. Requesting `return=representation` on the SAME write hands back
+# every affected row's current first_seen — a row whose returned
+# first_seen falls at/after this run's own start time (confirmed against
+# a real archive_i row: DEFAULT now() timestamp with time zone) can only
+# be true because THIS run's INSERT just set it moments ago; an
+# already-existing row's first_seen would be some earlier, real discovery
+# time. A small negative buffer (_NEW_ROW_CLOCK_SKEW_SECONDS) absorbs
+# request latency/clock drift between when run_started_at was captured and
+# when Postgres actually executed the write.
+_NEW_ROW_CLOCK_SKEW_SECONDS = 30
+
+
+async def _upsert_rows_and_count_new(session: aiohttp.ClientSession, table: str, on_conflict: str,
+                                      rows: list[dict], run_started_at: datetime) -> tuple[int, int]:
+    """Same retry/chunk plumbing as _upsert_rows, but additionally reports
+    how many of the successfully-written rows were GENUINE new inserts
+    this run (vs. a merge into an already-existing row) — see the module
+    comment directly above this function. Returns (written, new_count).
+    Only archive_i needs this distinction right now (see
+    write_ats_hits_to_archive_i) — archive_ii/other tables keep using the
+    plain _upsert_rows above; duplicating rather than complicating that
+    shared helper with an optional mode is the surgical choice here."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        log.warning(f"SUPABASE_URL/SUPABASE_KEY not set — cannot write to {table}.")
+        return 0, 0
+    if not rows:
+        return 0, 0
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Prefer": "return=representation,resolution=merge-duplicates",
+    }
+    cutoff = run_started_at.timestamp() - _NEW_ROW_CLOCK_SKEW_SECONDS
+    chunk_size = 1000
+    chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+
+    async def _write_chunk(chunk):
+        last_err = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(1.5 * (2 ** (attempt - 1)))
+            try:
+                async with session.post(
+                    f"{SUPABASE_URL}/rest/v1/{table}",
+                    headers=headers, params={"on_conflict": on_conflict}, json=chunk,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as r:
+                    if r.status >= 400:
+                        last_err = f"{r.status} {await r.text()}"
+                        if r.status >= 500:
+                            continue
+                        break
+                    try:
+                        returned = await r.json()
+                    except Exception:
+                        # return=representation failed to parse for some
+                        # reason (empty body, unexpected content-type) —
+                        # the write itself still succeeded (status < 400),
+                        # so count the chunk as written with an unknown
+                        # new/merged split rather than losing the write
+                        # count too.
+                        return len(chunk), 0
+                    new_n = 0
+                    for row in returned:
+                        fs = row.get("first_seen")
+                        if not fs:
+                            continue
+                        try:
+                            ts = datetime.fromisoformat(fs.replace("Z", "+00:00")).timestamp()
+                        except (ValueError, AttributeError):
+                            continue
+                        if ts >= cutoff:
+                            new_n += 1
+                    return len(returned), new_n
+            except Exception as e:
+                last_err = str(e)
+                if isinstance(e, aiohttp.ClientResponseError) and e.status < 500:
+                    break
+        log.error(f"Failed to write a chunk of {len(chunk)} rows to {table} after retries — DATA LOST: {last_err}")
+        return 0, 0
+
+    results = await asyncio.gather(*(_write_chunk(c) for c in chunks))
+    written = sum(w for w, _ in results)
+    new_count = sum(n for _, n in results)
+    return written, new_count
+
+
+async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list[dict],
+                                       run_started_at: datetime | None = None) -> tuple[int, int]:
     """rows come in shaped {"ats","slug","source_hostname","root_domain",
     "country","discovery_method"} (crawl_batch's internal shape, kept for
     found_rows/logging) but archive_i's actual schema is just
@@ -2068,7 +2173,9 @@ async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list
     class of garbage again without also breaking this backstop."""
     slim_rows = [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"]}
                  for r in rows if "${" not in r["slug"]]
-    return await _upsert_rows(session, ARCHIVE_I_TABLE, "ats,slug", slim_rows)
+    if run_started_at is None:
+        run_started_at = datetime.now(timezone.utc)
+    return await _upsert_rows_and_count_new(session, ARCHIVE_I_TABLE, "ats,slug", slim_rows, run_started_at)
 
 
 async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows: list[dict]) -> int:
@@ -2371,6 +2478,15 @@ def log_crawl_summary(label: str, stats: dict, platform_counts: "Counter", count
     log.info("")
     log.info("  accuracy:")
     log.info(f"    ATS hits found:  {total_hits:,} ({total_hits / hosts_n * 100:.2f}% of hosts attempted)")
+    if "new_slugs_added" in stats:
+        # 2026-09: distinguishes genuinely NEW (ats,slug) rows (a real
+        # first INSERT into archive_i, per _upsert_rows_and_count_new)
+        # from total_hits above, which counts every hit this run found —
+        # including re-discoveries of already-known slugs from an earlier
+        # run or a different source, merged into their existing row rather
+        # than added as new. See write_ats_hits_to_archive_i/crawl_batch.
+        new_n = stats.get("new_slugs_added", 0)
+        log.info(f"    new slugs added: {new_n:,} ({new_n / max(total_hits, 1) * 100:.1f}% of hits were new)")
     log.info(f"    with country:    {total_hits - written_without_country:,} "
              f"({(1 - written_without_country / max(total_hits, 1)) * 100:.1f}% of hits)")
     log.info(f"    no ATS found:    {stats.get('dropped_no_ats', 0):,} "
@@ -2543,6 +2659,15 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     budget. Callers don't need to do anything with this beyond passing the
     values through — see save/load/clear_crawl_checkpoint above and each
     source's run_crawl() for how the resume-on-startup side works."""
+    # 2026-09: captured once per crawl_batch() call (not per sub-batch) and
+    # passed through to write_ats_hits_to_archive_i on every sub-batch write
+    # below — see _upsert_rows_and_count_new's docstring for why a single,
+    # slightly-stale-by-design "run start" timestamp (rather than one taken
+    # fresh per write) is exactly what's needed to tell a genuine first
+    # INSERT (first_seen >= this, within the clock-skew buffer) apart from a
+    # merge into an already-existing row (first_seen from some earlier run).
+    run_started_at = datetime.now(timezone.utc)
+
     def _capture_for(domain: str) -> bool:
         if capture_inhouse_domains is not None:
             return domain in capture_inhouse_domains
@@ -2610,8 +2735,10 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                 seen_domains.add(career_capture["website_url"])
                 scrape_rows.append({**career_capture, "discovery_method": discovery_method})
         written = 0
+        new_written = 0
         if batch_rows:
-            written = await write_ats_hits_to_archive_i(session, batch_rows)
+            written, new_written = await write_ats_hits_to_archive_i(session, batch_rows, run_started_at)
+            stats["new_slugs_added"] = stats.get("new_slugs_added", 0) + new_written
             found_rows.extend(batch_rows)
         written_scrape = 0
         if scrape_rows:
@@ -2627,7 +2754,8 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         hit_n = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
         dup_note = f", {duplicates_collapsed} dup collapsed" if duplicates_collapsed else ""
         log.info(f"  {done}/{len(tasks)} {unit_label} — {rate:.1f}/sec — {elapsed:.0f}s elapsed")
-        log.info(f"    → {written}/{len(batch_rows)} written to {ARCHIVE_I_TABLE}{dup_note} — {len(found_rows)} hits total "
+        log.info(f"    → {written}/{len(batch_rows)} written to {ARCHIVE_I_TABLE} ({new_written} new{dup_note}) — "
+                 f"{len(found_rows)} hits total, {stats.get('new_slugs_added', 0)} new so far "
                  f"(hit rate so far: {hit_n / max(stats['companies_attempted'], 1) * 100:.2f}%)")
         if scrape_rows:
             log.info(f"    → {written_scrape}/{len(scrape_rows)} career pages written to {ARCHIVE_II_TABLE}")
