@@ -4019,6 +4019,24 @@ def fetch_eutechjobs_slugs(time_budget_minutes: int = 270, hf_shard: int | None 
                 tmp.flush()
 
                 pf = pq.ParquetFile(tmp.name)
+                # 2026-09: this dataset's 280 Parquet files do NOT all share
+                # one schema — confirmed live (some files genuinely lack a
+                # `career_url` field, raising pyarrow's own "Field ... does
+                # not exist in schema" on column-projected reads). Rather
+                # than let that surface as an opaque per-file exception
+                # (caught below, but with no clue what that file's real
+                # columns are), check the schema up front and log the
+                # actual column names so a real, evidence-based fallback
+                # column name can be added later if one of these turns out
+                # to hold the same data under a different name — nothing
+                # is guessed here, this just makes the next occurrence
+                # diagnostic instead of opaque.
+                if "career_url" not in pf.schema.names:
+                    log.warning(f"Aramente H.F{shard_note}: file {file_i + 1}/"
+                                f"{len(file_urls)} has no 'career_url' column "
+                                f"— skipping this file. Its actual columns: "
+                                f"{pf.schema.names}")
+                    continue
                 for batch in pf.iter_batches(columns=["career_url"], batch_size=50_000):
                     for url in batch.column("career_url").to_pylist():
                         processed += 1
