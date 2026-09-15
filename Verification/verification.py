@@ -732,6 +732,39 @@ async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool
         return True
 
 
+async def _verify_gem(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Gem (2026-09, new platform — see discovery.py's SUPPORTED_ATS
+    comment). POST a "JobBoardMeta" GraphQL query for this boardId to
+    Gem's public batch endpoint.
+
+    Confirmed live 2026-09 via real browser network inspection that
+    Gem's job-LIST query (oatsExternalJobPostings) is NOT a safe dead
+    signal by itself — a nonexistent boardId returns the exact same
+    200 + {"jobPostings": []} shape as a real board with zero current
+    postings, the same oracle_cloud_hcm-style trap this file's whole
+    methodology exists to avoid. The safe signal found instead:
+    jobBoardExternal(vanityUrlPath: $boardId) returns real metadata
+    ({id, teamDisplayName, pageTitle}) for a real board (confirmed
+    against dragonfly-careers) and a bare `null` for a nonexistent one
+    (confirmed against a fabricated slug) — this checks board
+    EXISTENCE, not job count, so a real-but-currently-empty board can
+    never be confused with a dead one. Any non-2xx status is left
+    ambiguous via raise_for_status() below."""
+    query = ("query JobBoardMeta($boardId: String!) { "
+             "jobBoardExternal(vanityUrlPath: $boardId) { id } }")
+    body = [{"operationName": "JobBoardMeta", "query": query, "variables": {"boardId": slug}}]
+    async with session.post("https://jobs.gem.com/api/public/graphql/batch", json=body,
+                             timeout=REQUEST_TIMEOUT,
+                             headers={"Content-Type": "application/json",
+                                      "Accept": "application/json", "User-Agent": USER_AGENT}) as r:
+        r.raise_for_status()
+        data = await r.json()
+        try:
+            return data[0]["data"]["jobBoardExternal"] is not None
+        except (KeyError, IndexError, TypeError):
+            return False
+
+
 ARCHIVE_II_VERIFIERS = {
     "bamboohr": _verify_bamboohr,
     "icims": _verify_icims,
@@ -761,6 +794,11 @@ ARCHIVE_II_VERIFIERS = {
     # added here, per this file's own WHY-19-OF-26 methodology above).
     "hireology": _verify_hireology,
     "isolvedhire": _verify_isolvedhire,
+    # 2026-09: Gem — see _verify_gem's own docstring above for the full
+    # live-confirmed evidence, including finding and ruling out its own
+    # oracle_cloud_hcm-style trap in the obvious (job-list) query before
+    # landing on the board-metadata query as the actual safe signal.
+    "gem": _verify_gem,
 }
 
 
