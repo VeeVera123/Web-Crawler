@@ -1,7 +1,7 @@
 """
 PEOPLE DATA LABS PROBE — a thin, disposable probe source on top of node.py
 (the permanent engine). Reads PDL's Free Company Dataset, extracts
-{name, domain, country, size}, and hands domains to node.crawl_batch(). All
+{name, domain, country, size}, hands domains to node.crawl_batch(). All
 fetch/parse/detect/write logic lives in node.py — fix a bug there once,
 every probe/seed source gets the fix.
 
@@ -325,6 +325,17 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
              f"({start_at:,} skipped from a prior checkpoint, {len(companies):,} total in shard), "
              f"{elapsed:.0f}s, {rate:.1f}/sec, hit={hit_n / companies_n * 100:.1f}% "
              f"({hit_n}), unreachable={stats['homepage_unreachable'] / companies_n * 100:.1f}% ──")
+    if "new_slugs_added" in stats and hit_n:
+        # 2026-09: this probe has its own hand-rolled summary (never used
+        # node.log_crawl_summary, unlike common_crawl_probe.py) so it never
+        # got the new-vs-total distinction node.py's write_ats_hits_to_
+        # archive_i/_upsert_rows_and_count_new added — a real hit here can
+        # be a genuinely NEW (ats,slug) row or a re-discovery of one already
+        # in archive_i from an earlier run/different source, merged rather
+        # than inserted. Same wording/percentage convention as
+        # log_crawl_summary's own "new slugs added" line.
+        new_n = stats.get("new_slugs_added", 0)
+        log.info(f"  new slugs added: {new_n:,} ({new_n / hit_n * 100:.1f}% of hits were new)")
     if hit_n:
         log.info(f"  hit source: homepage={stats['hits_from_homepage'] / hit_n * 100:.1f}% "
                  f"career_path={stats['hits_from_career_path'] / hit_n * 100:.1f}% "
