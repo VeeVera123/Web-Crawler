@@ -1548,6 +1548,61 @@ _BINARY_CONTENT_PREFIXES = ("image/", "video/", "audio/", "font/",
                              "application/pdf", "application/zip", "application/octet-stream")
 
 
+_HOMEPAGE_HEDGE_DELAY_SECONDS = 2.5
+
+
+async def _fetch_homepage_race(session: aiohttp.ClientSession, candidates: list[str],
+                                stats: dict) -> tuple[str, str] | None:
+    """2026-09 speedup: replaces the old fully-sequential "try candidate,
+    wait out the WHOLE REQUEST_TIMEOUT on failure, try the next" loop with
+    a hedged race. The first candidate (bare https://{domain}) starts
+    immediately, same as before. Each SUBSEQUENT candidate (www., then
+    http:// as a last resort) now starts either as soon as the one before
+    it definitively fails, OR after _HOMEPAGE_HEDGE_DELAY_SECONDS — 2.5s,
+    well under REQUEST_TIMEOUT's 6s connect/10s total — whichever comes
+    first, rather than waiting for the full timeout to elapse. Whichever
+    candidate succeeds first wins; every other still-in-flight candidate
+    is cancelled immediately.
+
+    Net effect: a domain whose bare https:// hangs/is slow (not one that
+    fails fast — that already moved on immediately, hedge delay or not)
+    no longer pays a full extra REQUEST_TIMEOUT before the www fallback
+    even starts — now it only pays the 2.5s hedge. A domain where the
+    first candidate succeeds quickly (the common case) is unaffected:
+    the second candidate never starts, so there's no added request volume
+    for the case that matters most for run cost. _fetch_page itself
+    always increments stats["requests_attempted"] as its first line
+    before awaiting anything, so a candidate cancelled mid-flight after
+    losing the race still counts as attempted, consistent with every
+    other call to _fetch_page; a cancelled task's CancelledError
+    propagates past _fetch_page's own `except Exception` (CancelledError
+    is a BaseException, not an Exception) so a losing/cancelled candidate
+    is never miscounted as stats["unreachable"]."""
+    pending = list(candidates)
+    in_flight: set[asyncio.Task] = {asyncio.ensure_future(_fetch_page(session, pending.pop(0), stats))}
+    result = None
+    try:
+        while result is None and (pending or in_flight):
+            timeout = _HOMEPAGE_HEDGE_DELAY_SECONDS if pending else None
+            done, _pending_tasks = await asyncio.wait(
+                in_flight, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                in_flight.discard(task)
+                page = task.result()
+                if page and result is None:
+                    result = page
+            if result is not None:
+                break
+            if pending:
+                in_flight.add(asyncio.ensure_future(_fetch_page(session, pending.pop(0), stats)))
+        return result
+    finally:
+        for task in in_flight:
+            task.cancel()
+        if in_flight:
+            await asyncio.gather(*in_flight, return_exceptions=True)
+
+
 async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> tuple[str, str] | None:
     """One page, capped at MAX_PAGE_BYTES. No retries/backoff — a single
     miss just means this path didn't pan out, not worth re-hammering."""
@@ -1804,11 +1859,11 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
             candidates.append(f"https://www.{domain}")
         candidates.append(f"http://{domain}")  # last resort
 
-        page = None
-        for base_url in candidates:
-            page = await _fetch_page(session, base_url, stats)
-            if page:
-                break
+        # 2026-09: was a fully-sequential try/wait-full-timeout/try-next
+        # loop — see _fetch_homepage_race's own docstring for the hedged-
+        # race replacement and why it's a pure latency win with no added
+        # request volume in the common (fast first-candidate) case.
+        page = await _fetch_homepage_race(session, candidates, stats)
         if not page:
             stats["homepage_unreachable"] += 1
             return [], None
