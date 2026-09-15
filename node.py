@@ -744,6 +744,13 @@ _ATS_VENDOR_DOMAINS = (
     "comeet.co", "phenompeople.com", "eightfold.ai", "clearcompanyhr.com",
     "freshteam.com", "newtonsoftware.com", "applicantpro.com",
     "hiringthing.com", "paycomonline.com", "isolvedhire.com",
+    # 2026-09: hireology.com added alongside discovery.py's new hireology/
+    # isolvedhire SUPPORTED_ATS entries (isolvedhire.com was already
+    # listed above, added in an earlier "tag it, don't scrape it yet"
+    # round before either platform had a working scraper) — a page on
+    # careers.hireology.com is ATS-related, not in-house, same as every
+    # other entry in this list.
+    "hireology.com",
     # 2026-09: getro.com added alongside discovery.py's new dayforce/getro/
     # jazzhr URL_TO_SLUG entries (dayforcehcm.com/applytojob.com were
     # already listed above).
