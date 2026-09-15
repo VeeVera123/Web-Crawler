@@ -67,6 +67,19 @@ Sources:
      with the user this project's current use is non-commercial; remove
      this source if that ever changes. See fetch_zalizedata_slugs
      docstring.)
+  14. Aramente H.F (--source eutechjobs; 2026-09, new —
+     huggingface.co/datasets/Aramente/eu-tech-jobs, 3,180,028 rows across
+     280 Parquet files, cc-by-4.0 (attribution only, no NC restriction —
+     confirmed live from the dataset's raw README YAML frontmatter). NOTE:
+     the dataset's own rendered card/README prose describes a DIFFERENT,
+     non-matching schema (job titles, salaries, description_md, etc.) —
+     that text doesn't match the real Parquet columns and was NOT trusted;
+     the schema below is confirmed live via the datasets-server first-rows/
+     size APIs (15 columns, matching num_columns exactly). Only the
+     `career_url` column is read, resolved through URL_TO_SLUG — the
+     dataset's own pre-labeled slug/ats_provider/ats_handle columns aren't
+     trusted directly, same reasoning as every other bulk H.F source here.
+     See fetch_eutechjobs_slugs docstring.)
 
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
@@ -112,6 +125,7 @@ Usage:
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source openjobsdaily # Open Jobs Daily H.F (Hugging Face) only
     python discovery.py --source zalizedata    # Zalize H.F (Hugging Face) only
+    python discovery.py --source eutechjobs    # Aramente H.F (Hugging Face) only
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
     python discovery.py --source github        # GitHub repo registries only
@@ -3912,6 +3926,128 @@ def fetch_zalizedata_slugs() -> dict[str, dict[str, str]]:
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 14: Aramente H.F (huggingface.co/datasets/Aramente/eu-tech-jobs),
+# 2026-09
+# ══════════════════════════════════════════════════════════
+# License: cc-by-4.0 (attribution only, NOT non-commercial — confirmed live
+# from the dataset repo's raw README.md YAML frontmatter, e.g.
+# huggingface.co/datasets/Aramente/eu-tech-jobs/raw/main/README.md).
+#
+# IMPORTANT — the dataset's own rendered card/README prose (as opposed to
+# its YAML frontmatter) describes a schema that does NOT match the real
+# data: it talks about job titles, salaries, `description_md`, ISO country
+# codes, etc., as if this were shaped like Open Jobs Daily/Zalizedata
+# above. Two independent, direct queries against the datasets-server JSON
+# APIs (`/first-rows` and `/size` — not the HTML-rendered page, which is
+# what produced the mismatched description) instead confirm a real,
+# self-consistent 15-column schema (num_columns=15 from `/size` matches
+# exactly): slug, name, country, categories, industry_tags, ats_provider,
+# ats_handle, career_url, github_org, funding_stage, size_bucket, notes,
+# oss_signal, top_repo_stars, primary_language. 3,180,028 rows across 280
+# Parquet files (~2.8GB total), confirmed via the same `/size` endpoint and
+# the HF Parquet-export API's file listing. Sample rows show one row per
+# job posting (`career_url` is a specific posting URL, e.g. a RemoteOK
+# listing or an ATS-hosted board page), with `ats_provider`/`ats_handle`
+# populated only when the source is a real ATS — null when it's an
+# aggregator like RemoteOK. As with every other bulk H.F source here, the
+# dataset's own `slug`/`ats_provider`/`ats_handle` labels are NOT trusted
+# directly — only `career_url` is read, resolved through URL_TO_SLUG.
+
+def fetch_eutechjobs_slugs(time_budget_minutes: int = 270, hf_shard: int | None = None,
+                             hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
+    """Aramente/eu-tech-jobs — 3,180,028 rows across 280 Parquet files
+    (~2.8GB total). Only `career_url` is ever read — every other column
+    (name, country, categories, ats_provider, github_org, etc.) is
+    projected away at the Parquet read itself. See the module-level block
+    comment above this function for the cc-by-4.0 license, the real
+    (datasets-server-confirmed) 15-column schema — which does NOT match
+    the dataset's own rendered card/README prose — and why the dataset's
+    own ats_provider/ats_handle/slug columns are NOT trusted directly.
+
+    Same streaming-download + graceful time-budget + file-level sharding
+    shape as fetch_edwarddgao_slugs/fetch_openjobsdaily_slugs — copied
+    deliberately rather than factored into a shared helper, matching this
+    file's existing pattern of one dedicated function per HF source."""
+    import pyarrow.parquet as pq
+
+    file_urls = _hf_parquet_urls("Aramente/eu-tech-jobs")
+    if not file_urls:
+        log.warning("Aramente H.F: no Parquet files resolved, skipping source")
+        return {}
+
+    shard_note = ""
+    if hf_total_shards and hf_shard is not None:
+        shard_size = -(-len(file_urls) // hf_total_shards)  # ceil division
+        start_i = hf_shard * shard_size
+        end_i = min(start_i + shard_size, len(file_urls))
+        file_urls = file_urls[start_i:end_i]
+        shard_note = f" [shard {hf_shard}/{hf_total_shards}]"
+
+    log.info(f"Aramente H.F{shard_note}: {len(file_urls)} Parquet files to process "
+             f"(time budget: {time_budget_minutes}min, 0 = no budget)")
+
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    processed = 0
+    start = time.monotonic()
+    _PROGRESS_EVERY = 5_000
+    budget_seconds = time_budget_minutes * 60 if time_budget_minutes else None
+
+    for file_i, file_url in enumerate(file_urls):
+        if budget_seconds and (time.monotonic() - start) >= budget_seconds:
+            log.info(f"Aramente H.F{shard_note}: time budget reached after "
+                     f"{file_i}/{len(file_urls)} files — stopping gracefully, "
+                     f"keeping {processed:,} rows' worth of progress.")
+            break
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+                download_timed_out = False
+                with requests.get(file_url, timeout=300, stream=True) as r:
+                    r.raise_for_status()
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        tmp.write(chunk)
+                        if budget_seconds and (time.monotonic() - start) >= budget_seconds:
+                            download_timed_out = True
+                            break
+                if download_timed_out:
+                    log.info(f"Aramente H.F{shard_note}: time budget reached "
+                             f"mid-download of file {file_i + 1}/{len(file_urls)} — "
+                             f"stopping gracefully, keeping {processed:,} rows' worth "
+                             f"of progress (this in-flight file's partial download is "
+                             f"discarded, not counted).")
+                    break
+                tmp.flush()
+
+                pf = pq.ParquetFile(tmp.name)
+                for batch in pf.iter_batches(columns=["career_url"], batch_size=50_000):
+                    for url in batch.column("career_url").to_pylist():
+                        processed += 1
+                        hit = _resolve_url_via_url_to_slug(url)
+                        if hit:
+                            actual_ats, slug = hit
+                            slugs_by_ats.setdefault(actual_ats, {})[slug] = ""
+
+                        if processed % _PROGRESS_EVERY == 0:
+                            elapsed = max(time.monotonic() - start, 0.001)
+                            resolved = sum(len(s) for s in slugs_by_ats.values())
+                            log.info(f"Aramente H.F{shard_note}: file "
+                                     f"{file_i + 1}/{len(file_urls)}, {processed:,} "
+                                     f"processed ({processed / elapsed:,.1f}/sec), "
+                                     f"{resolved:,} resolved ({resolved / processed * 100:.1f}%)")
+        except Exception as e:
+            log.warning(f"Aramente H.F{shard_note}: file {file_i + 1}/"
+                        f"{len(file_urls)} ({file_url}) failed, skipping: {e}")
+            continue
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    for ats, slugs in slugs_by_ats.items():
+        log.info(f"  {ats}: {len(slugs)} slugs from Aramente H.F{shard_note}")
+    log.info(f"Aramente H.F{shard_note} summary: {processed:,} rows processed, "
+             f"{total:,} slugs resolved ({total / max(processed, 1) * 100:.1f}%)")
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
 # SOURCE 9: TheirStack (freemium technology-usage API)
 # ══════════════════════════════════════════════════════════
 
@@ -4978,7 +5114,7 @@ def main():
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
                  "wayback", "theirstack", "httparchive",
                  "latmay", "edwarddgao", "openjobsdaily", "zalizedata",
-                 "icims_hrjobs", "github", "all"],
+                 "eutechjobs", "icims_hrjobs", "github", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -5095,21 +5231,33 @@ def main():
              "completion — see fetch_openjobsdaily_slugs docstring).",
     )
     parser.add_argument(
+        "--eutechjobs-time-budget-minutes", type=int, default=270,
+        help="Self-stop gracefully after this many minutes downloading/"
+             "resolving Aramente H.F's 280 Parquet files (~2.8GB), "
+             "keeping whatever was resolved so far (default: 270, same "
+             "margin-under-job-timeout reasoning as "
+             "--edwarddgao-time-budget-minutes; 0 = no budget, run to "
+             "full completion — see fetch_eutechjobs_slugs docstring).",
+    )
+    parser.add_argument(
         "--hf-shard", type=int, default=None,
         help="Which Hugging Face shard this run covers (0-indexed, used "
-             "with --hf-total-shards) — applies to latmay, edwarddgao, AND "
-             "openjobsdaily (zalizedata is small enough it's never "
-             "sharded). For edwarddgao/openjobsdaily this slices the "
-             "Parquet FILE list (cuts download volume per shard); for "
-             "latmay (a single file) this slices ROW INDEXES after the one "
-             "download. Default: None = all rows/files in one run.",
+             "with --hf-total-shards) — applies to latmay, edwarddgao, "
+             "openjobsdaily, AND eutechjobs (zalizedata is small enough "
+             "it's never sharded). For edwarddgao/openjobsdaily/"
+             "eutechjobs this slices the Parquet FILE list (cuts download "
+             "volume per shard); for latmay (a single file) this slices "
+             "ROW INDEXES after the one download. Default: None = all "
+             "rows/files in one run.",
     )
     parser.add_argument(
         "--hf-total-shards", type=int, default=1,
         help="Total number of Hugging Face shards (default: 1, i.e. no "
-             "sharding). discovery.yml runs this as 3 for latmay, "
-             "edwarddgao, and openjobsdaily, matching commoncrawl/"
-             "httparchive's shard count.",
+             "sharding). discovery.yml runs this as 3 for edwarddgao, "
+             "openjobsdaily, and eutechjobs (real per-shard Parquet-file "
+             "download reduction); latmay stays a single unsharded job "
+             "(one small file — sharding it would only spread per-row "
+             "URL_TO_SLUG work, not cut download volume).",
     )
     parser.add_argument(
         "--csod-resolve-budget-minutes", type=int, default=CSOD_RESOLVE_TIME_BUDGET_MINUTES,
@@ -5139,7 +5287,7 @@ def main():
     log.info("DISCOVERY — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("           + Wayback CDX (all ATS) + Latmay H.F + Edward H.F")
-    log.info("           + Open Jobs Daily H.F + Zalize H.F")
+    log.info("           + Open Jobs Daily H.F + Zalize H.F + Aramente H.F")
     log.info("           + TheirStack + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
@@ -5333,6 +5481,28 @@ def main():
             grand_total += upserted
         else:
             grand_total += zl_total
+
+    # Source 14: Aramente H.F (huggingface.co/datasets/Aramente/
+    # eu-tech-jobs — 3,180,028 rows across 280 Parquet files, cc-by-4.0 —
+    # see the module comment above fetch_eutechjobs_slugs for the real,
+    # datasets-server-confirmed schema, which does NOT match this
+    # dataset's own rendered card/README prose)
+    if args.source in ("eutechjobs", "all"):
+        log.info("\n--- ARAMENTE H.F (Hugging Face, 3.18M EU tech job postings) ---")
+        et_slugs = fetch_eutechjobs_slugs(
+            time_budget_minutes=args.eutechjobs_time_budget_minutes,
+            hf_shard=args.hf_shard, hf_total_shards=args.hf_total_shards)
+        et_total = sum(len(s) for s in et_slugs.values())
+        if et_total:
+            log.info(f"Aramente H.F total: {et_total} slugs across "
+                     f"{sum(1 for s in et_slugs.values() if s)} platforms")
+
+        if not args.dry_run:
+            upserted = upsert_to_supabase(et_slugs, source="Aramente H.F",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += et_total
 
     # Source 9: TheirStack (freemium — small monthly trickle for thin
     # platforms, see fetch_theirstack_slugs docstring)
