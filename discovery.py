@@ -291,6 +291,17 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     # "Corner" anywhere in the c.json file; no "Paycom" key in p.json).
     # Same conclusion as the rest of this list: not in Wappalyzer's
     # ruleset, this source can't help regardless of query design.
+    # 2026-09: Hireology / isolvedhire — checked against this same
+    # enthec/webappanalyzer fork alongside the other 2026-09 additions.
+    # Hireology HAS a real fingerprint (dom: a[href*='sites.hireology.com/']
+    # — note this is a DIFFERENT host than the careers.hireology.com
+    # career-board URL confirmed in ats_scrapers.scrape_hireology; likely
+    # a separate widget/badge link Wappalyzer keys off, but "hireology.com"
+    # is already a full-suffix match in node.py's _ATS_VENDOR_DOMAINS so
+    # this needs no extra domain wiring). isolvedhire has NO fingerprint —
+    # confirmed absent from the i.json technology file — so it's left out
+    # of this dict entirely, same as Pinpoint/Flatchr/Occupop/etc above.
+    "hireology": "Hireology",
 }
 
 # ATS platforms we have working scrapers for (20 active)
@@ -509,6 +520,22 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "paycom": "paycom",
     # "ycombinator" intentionally not mapped — see SUPPORTED_ATS comment
     # above (not a real ATS, no code path left in this project at all).
+    # 2026-09: Hireology / isolvedhire — OpenPostings' own README
+    # (github.com/Masterjx9/OpenPostings#supported-ats) confirmed live to
+    # list BOTH of these (found while auditing that repo for other
+    # unsupported platforms — see GREYLIST_ATS.md's 2026-09 writeup).
+    # "Hireology" is a normal, cleanly-spelled label. isolvedhire's own
+    # entry is genuinely mis-typed in their README as "isolvisolvedhire"
+    # (confirmed verbatim via a raw-text search of their README, not a
+    # transcription error on this end) — mapped as-is since that's the
+    # literal string their own data will actually contain, plus the
+    # sane spellings as defensive aliases in case their real ATS_name
+    # field values differ from the README's own typo.
+    "hireology": "hireology",
+    "isolvisolvedhire": "isolvedhire",
+    "isolvedhire": "isolvedhire",
+    "isolved hire": "isolvedhire",
+    "isolved": "isolvedhire",
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -2755,7 +2782,10 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
     """Discover slugs from Common Crawl for platforms not well-covered
     by OpenPostings.
 
-    cc_shard/cc_total_shards split the 27 PLATFORMS (not a hash of work
+    cc_shard/cc_total_shards split the PLATFORMS in CC_PLATFORM_PATTERNS
+    (36 as of 2026-09 — this count has drifted upward many times since
+    this docstring was first written; not re-pinning it to a literal
+    number here) (not a hash of work
     items) across `cc_total_shards` independent runs — added 2026-08 when
     source 9 (Web Data Commons) was retired for a bad cost/payoff ratio
     (37 slugs for ~4 minutes of live fetching against a 3000-page sample)
