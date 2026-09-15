@@ -47,6 +47,14 @@ Sources:
      GOOGLE_APPLICATION_CREDENTIALS set. See fetch_httparchive_slugs
      docstring for the full explanation of how this reuses the Y
      Combinator resolver rather than being a separate pipeline.)
+  11. GitHub repo registries (--source github; 2026-09, new — pre-built ATS
+     slug registries from known public repos, e.g. datascry/openroles'
+     data/tenants/*.json, pulled via jsDelivr's CDN mirror, no GitHub
+     API/auth needed. See GITHUB_REGISTRY_REPOS and
+     fetch_github_registries_slugs docstring — including the research
+     trail for why this is a manually-curated repo list, not a live
+     GitHub-wide search, and why csod needs one live per-tenant resolve
+     while workday/brassring/oracle_cloud_hcm are free local reassembly.)
 
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
@@ -92,6 +100,7 @@ Usage:
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
+    python discovery.py --source github        # GitHub repo registries only
     python discovery.py --source commoncrawl --cc-shard 0 --cc-total-shards 2
     python discovery.py --source commoncrawl --cc-shard 1 --cc-total-shards 2
     python discovery.py --dry-run              # count without writing
@@ -4049,6 +4058,349 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 11: GitHub repo registries (2026-09, new — source label "github")
+# ══════════════════════════════════════════════════════════
+# Built at the user's explicit request after datascry/openroles
+# (github.com/datascry/openroles) surfaced UKG/UltiPro slugs we don't have —
+# investigated live and confirmed that repo's OWN scraper hits UKG's
+# robots.txt-disallowed LoadSearchResults API directly (not a compliant
+# trick; see the module's UKG research), but its DISCOVERY side is a
+# genuinely separate, reusable asset: data/tenants/{ats}.json files, each a
+# JSON array of {ats, slug, status, first_seen_at, metadata} records,
+# pre-vetted by the repo's own weekly liveness probing (we only keep
+# status=="live" rows here — a real quality signal most of our other
+# sources don't have).
+#
+# Fetched via jsDelivr's GitHub CDN mirror (cdn.jsdelivr.net/gh/... for raw
+# files, data.jsdelivr.com's package API for the file listing), NOT
+# GitHub's own API — confirmed live this session that GitHub's REST/GraphQL
+# code-search endpoints 403 without a personal token and even authenticated
+# cap at 10 req/min for code search, while jsDelivr needs no auth, isn't
+# robots-blocked, and mirrors any public repo's files directly. This is a
+# different GitHub-based technique from the retired github_org_probe.py
+# (Crawler/github_org - Retired/) — that one enumerated GitHub
+# ORGANIZATIONS via the metered GitHub API to harvest their profile
+# "website" field as a company-domain seed (a company-discovery source);
+# this one reads specific known repos' own pre-built slug-registry files
+# (an ATS-slug-discovery source) and never touches GitHub's API at all.
+#
+# GITHUB_REGISTRY_REPOS is deliberately a short, manually-verified seed
+# list, not a live "search all of GitHub" crawl — there is no compliant,
+# unauthenticated way to search GitHub broadly (confirmed live: the search
+# API needs a token this project doesn't have configured, and this
+# session's own sandboxed token is repo-scoped, not search-scoped). Finding
+# more repos shaped like this one is a manual research task (WebSearch
+# turned up only datascry/openroles as a genuine multi-platform slug
+# registry this round — several "career-ops" repos that looked similar are
+# personal AI job-search CLI tools, not slug databases, confirmed by their
+# own descriptions, not assumed). Add more entries here as they're found;
+# the fetch/parse logic below is generic per-repo, not hardcoded to this one.
+GITHUB_REGISTRY_REPOS = [
+    {"repo": "datascry/openroles", "branch": "main", "path_prefix": "data/tenants/"},
+]
+
+# openroles filename (their "ats" field) -> our SUPPORTED_ATS key. Every
+# platform below was individually checked LIVE this session — either the
+# slug is already a bare single string matching what our own scraper
+# expects, or openroles' own metadata carries enough to reconstruct our
+# compound slug format (workday/brassring/oracle_cloud_hcm — see their
+# dedicated _assemble_* functions below). A few platforms were checked and
+# genuinely EXCLUDED because neither the bare slug nor the metadata gets us
+# to a working slug, and guessing would silently write broken rows (the
+# exact "contamination" failure mode this project has fought all session
+# with Feashliaa/Rippling):
+#   - successfactors: openroles' "slug" is a short nickname ("sap",
+#     "adidas"), not the tenant HOSTNAME scrape_successfactors takes as its
+#     slug — and every host sampled this session (career5.successfactors.eu,
+#     career10.successfactors.com, career4.successfactors.com) is a LEGACY
+#     shared domain, i.e. exactly the genuinely-robots.txt-blocked tenant
+#     shape this project already confirmed is NOT the reversed
+#     branded-CSB-domain case. Also, our own node.py content-fingerprint
+#     detection (rmkcdn.successfactors.com) is a fundamentally better fit
+#     for this platform than a static snapshot list — it finds branded
+#     tenants dynamically wherever they're crawled, rather than depending
+#     on openroles having separately discovered and probed them.
+#   - ultipro, phenom: not in SUPPORTED_ATS at all (UKG stays blacklisted —
+#     see the module's UKG research and GREYLIST_ATS.md; nothing to map to).
+# csod is handled separately (see _resolve_csod_career_site_id) — it needs
+# ONE live per-tenant HTTP resolve (openroles' own csod.ts scraper does the
+# identical bootstrap: GET {slug}.csod.com/ats/careersite/search.aspx —
+# confirmed live from their actual source — the redirect target embeds the
+# careerSiteId our scrape_csod needs as the 2nd half of its slug; openroles'
+# own tenant file carries no such value directly, so it must be resolved,
+# not just read).
+_GITHUB_REGISTRY_ATS_MAP = {
+    "ashby": "ashby",
+    "bamboohr": "bamboohr",
+    "breezy": "breezyhr",
+    "greenhouse": "greenhouse",
+    "hrmdirect": "hrmdirect",
+    "icims": "icims",
+    "jazzhr": "jazzhr",
+    "jobvite": "jobvite",
+    "lever": "lever",
+    "pageup": "pageup",
+    "paycom": "paycom",  # verified live: their 32-hex slug matches
+                          # scrape_paycom's ^[0-9A-F]{32}$ clientkey exactly
+    "personio": "personio",
+    "pinpointhq": "pinpoint",
+    "recruitee": "recruitee",
+    "rippling": "rippling",
+    "smartrecruiters": "smartrecruiters",
+    "taleo": "taleo",
+    "teamtailor": "teamtailor",
+    "workable": "workable",
+    "zohorecruit": "zoho",
+}
+
+_WORKDAY_WD_NUM_RE = re.compile(r"\.wd(\d+)\.myworkdayjobs\.com$", re.I)
+
+
+def _assemble_workday_slug(entry: dict) -> str | None:
+    """Reconstruct our 'company|wd#|site_id' format from an openroles
+    workday.json entry's metadata (host + site) — confirmed live this
+    session against real entries, e.g.
+    {"slug": "2020companies", "metadata": {"host":
+    "2020companies.wd1.myworkdayjobs.com", "site": "External_Careers"}}
+    -> "2020companies|wd1|External_Careers". Returns None (skip the row)
+    when metadata.site is missing — confirmed live that some entries omit
+    it, and site_id isn't safely guessable (scrape_workday would just get
+    a 404 from a wrong guess, silently producing a dead slug)."""
+    meta = entry.get("metadata") or {}
+    host = (meta.get("host") or "").strip()
+    site = (meta.get("site") or "").strip()
+    company = (entry.get("slug") or "").strip()
+    if not company or not site:
+        return None
+    m = _WORKDAY_WD_NUM_RE.search(host)
+    if not m:
+        return None
+    return f"{company}|wd{m.group(1)}|{site}"
+
+
+def _assemble_brassring_slug(entry: dict) -> str | None:
+    """Reconstruct our 'partnerId|siteId' format from an openroles
+    brassring.json entry's metadata — confirmed live this session against
+    real entries, e.g. {"slug": "aafes", "metadata": {"partnerid": "25212",
+    "siteid": "5164"}} -> "25212|5164", matching _url_to_slug_brassring's
+    own format exactly. Returns None when either value is missing/non-
+    numeric rather than guess (mirrors scrape_csod's/_url_to_slug_brassring's
+    own PARTNER_ID_RE/SITE_ID_RE digit-only validation)."""
+    meta = entry.get("metadata") or {}
+    pid = str(meta.get("partnerid") or "").strip()
+    sid = str(meta.get("siteid") or "").strip()
+    if not (pid.isdigit() and sid.isdigit()):
+        return None
+    return f"{pid}|{sid}"
+
+
+def _assemble_oracle_cloud_slug(entry: dict) -> str | None:
+    """Reconstruct our 'host_prefix|site_number' format from an openroles
+    oraclecloud.json entry's metadata — confirmed live this session against
+    real entries, e.g. {"metadata": {"host": "ejhp.fa.us6.oraclecloud.com",
+    "site": "CX_2"}} -> "ejhp.fa.us6|CX_2", matching
+    _url_to_slug_oracle_cloud's own 'host_prefix|site_number' format (see
+    its docstring's own 'eeho.fa.us2|CX_1' example). Returns None if the
+    host doesn't actually end in .oraclecloud.com or site is missing."""
+    meta = entry.get("metadata") or {}
+    host = (meta.get("host") or "").strip().lower()
+    site = (meta.get("site") or "").strip()
+    if not host.endswith(".oraclecloud.com") or not site:
+        return None
+    host_prefix = host[:-len(".oraclecloud.com")]
+    if not host_prefix:
+        return None
+    return f"{host_prefix}|{site}"
+
+
+_CSOD_CAREERSITE_ID_RE = re.compile(r"/ux/ats/careersite/(\d+)/")
+CSOD_RESOLVE_TIME_BUDGET_MINUTES = 15  # see fetch_github_registries_slugs docstring
+
+
+def _resolve_csod_career_site_id(portal_slug: str) -> str | None:
+    """One live per-tenant HTTP resolve, mirroring openroles' own csod.ts
+    scraper exactly (confirmed live this session by reading their source):
+    GET {slug}.csod.com/ats/careersite/search.aspx?site=1&c={slug} — modern
+    tenants 302-redirect to a URL containing the careerSiteId
+    (/ux/ats/careersite/{csid}/home?c={slug}). openroles' own tenant file
+    carries no such value (confirmed live — csod.json entries have no
+    metadata field at all), so this can't be a free local assembly like
+    workday/brassring/oracle_cloud_hcm above; it costs one real request per
+    candidate slug, bounded by CSOD_RESOLVE_TIME_BUDGET_MINUTES below.
+    Returns None on any non-redirect response, timeout, or unparseable
+    target — never guesses."""
+    url = f"https://{portal_slug}.csod.com/ats/careersite/search.aspx?site=1&c={portal_slug}"
+    try:
+        r = requests.get(url, timeout=15, allow_redirects=True)
+    except Exception:
+        return None
+    m = _CSOD_CAREERSITE_ID_RE.search(r.url or "")
+    return m.group(1) if m else None
+
+
+def _github_registry_list_files(repo: str, branch: str, path_prefix: str) -> list[str]:
+    """List every file path under path_prefix in repo@branch via jsDelivr's
+    package API (data.jsdelivr.com) — no GitHub API call, no auth, no
+    robots block (confirmed live this session; GitHub's own code-search API
+    403s unauthenticated). Returns [] on any failure — logged, not raised,
+    same as every other source's per-repo/per-file error handling below."""
+    url = f"https://data.jsdelivr.com/v1/packages/gh/{repo}@{branch}?structure=flat"
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.error(f"  {repo}: failed to list files via jsDelivr: {e}")
+        return []
+    files = data.get("files") or []
+    return [f["name"].lstrip("/") for f in files
+            if isinstance(f, dict) and f.get("name", "").lstrip("/").startswith(path_prefix)
+            and f["name"].endswith(".json")]
+
+
+def fetch_github_registries_slugs(csod_resolve_time_budget_minutes: int = CSOD_RESOLVE_TIME_BUDGET_MINUTES
+                                   ) -> dict[str, dict[str, str]]:
+    """Pull pre-built ATS slug registries from known public GitHub repos
+    (see GITHUB_REGISTRY_REPOS) via jsDelivr's CDN mirror. Returns
+    {ats: {slug: company_name}}. See the module comment above this
+    function for the full research trail (why jsDelivr not GitHub's API,
+    why this repo list is short and manual, and why a couple of platforms
+    are deliberately excluded from the ATS map rather than guessed).
+
+    csod is special-cased: unlike workday/brassring/oracle_cloud_hcm (a free
+    local reassembly from openroles' own metadata), a working csod slug
+    needs one live per-tenant HTTP resolve (see
+    _resolve_csod_career_site_id) — run with a small thread pool, bounded by
+    csod_resolve_time_budget_minutes so a large/slow csod.json can't turn
+    one run into an unbounded wall-clock cost; past the budget, whatever's
+    already resolved is kept (same self-stop-gracefully shape as every
+    other long-running source in this file), the rest is simply skipped
+    this run rather than lost (a future run re-attempts them)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    slugs_by_ats: dict[str, dict[str, str]] = {ats: {} for ats in SUPPORTED_ATS}
+    skipped_ats: dict[str, int] = {}
+
+    for reg in GITHUB_REGISTRY_REPOS:
+        repo, branch, prefix = reg["repo"], reg["branch"], reg["path_prefix"]
+        files = _github_registry_list_files(repo, branch, prefix)
+        if not files:
+            log.warning(f"  {repo}: no tenant files found under '{prefix}' — skipping")
+            continue
+        log.info(f"  {repo}: {len(files)} tenant files found")
+
+        for path in files:
+            basename = path[len(prefix):].removesuffix(".json").lower()
+            is_workday = basename == "workday"
+            is_brassring = basename == "brassring"
+            is_oracle = basename == "oraclecloud"
+            is_csod = basename == "csod"
+            if is_csod:
+                our_ats = "csod"
+            elif is_workday:
+                our_ats = "workday"
+            elif is_brassring:
+                our_ats = "brassring"
+            elif is_oracle:
+                our_ats = "oracle_cloud_hcm"
+            else:
+                our_ats = _GITHUB_REGISTRY_ATS_MAP.get(basename)
+            if not our_ats:
+                skipped_ats[basename] = skipped_ats.get(basename, 0) + 1
+                continue
+
+            raw_url = f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path}"
+            try:
+                r = requests.get(raw_url, timeout=60)
+                r.raise_for_status()
+                entries = r.json()
+            except Exception as e:
+                log.error(f"  {repo}/{path}: failed to fetch/parse: {e}")
+                continue
+            if not isinstance(entries, list):
+                log.warning(f"  {repo}/{path}: unexpected JSON shape (not a list) — skipping")
+                continue
+
+            live_entries = [e for e in entries if isinstance(e, dict) and e.get("status") == "live"]
+
+            if is_csod:
+                # Live per-tenant resolve, bounded by time budget — see
+                # docstring. Each entry's bare portal slug ("a-talent")
+                # becomes our 'tenant|careerSiteId' format only if the
+                # resolve succeeds.
+                added = 0
+                deadline = time.monotonic() + csod_resolve_time_budget_minutes * 60
+                budget_hit = False
+                with ThreadPoolExecutor(max_workers=30) as pool:
+                    futures = {}
+                    for entry in live_entries:
+                        if time.monotonic() >= deadline:
+                            budget_hit = True
+                            break
+                        portal_slug = (entry.get("slug") or "").strip()
+                        if not portal_slug or portal_slug.lower() in SKIP_SLUGS:
+                            continue
+                        futures[pool.submit(_resolve_csod_career_site_id, portal_slug)] = entry
+                    for fut in as_completed(futures):
+                        entry = futures[fut]
+                        try:
+                            csid = fut.result()
+                        except Exception:
+                            csid = None
+                        if not csid:
+                            continue
+                        portal_slug = (entry.get("slug") or "").strip()
+                        slug = f"{portal_slug}|{csid}"
+                        name = (entry.get("display_name") or "").strip()
+                        if slug not in slugs_by_ats[our_ats]:
+                            slugs_by_ats[our_ats][slug] = name
+                            added += 1
+                if budget_hit:
+                    log.warning(f"    csod: resolve time budget "
+                                f"({csod_resolve_time_budget_minutes}min) reached — "
+                                f"remaining candidates skipped this run, will be "
+                                f"re-attempted next run")
+                if added:
+                    log.info(f"    csod -> {our_ats}: {added} live slugs (resolved)")
+                continue
+
+            added = 0
+            for entry in live_entries:
+                if is_workday:
+                    slug = _assemble_workday_slug(entry)
+                elif is_brassring:
+                    slug = _assemble_brassring_slug(entry)
+                elif is_oracle:
+                    slug = _assemble_oracle_cloud_slug(entry)
+                else:
+                    slug = (entry.get("slug") or "").strip()
+
+                if not slug:
+                    continue
+                bare_part = slug.split("|", 1)[0] if "|" in slug else slug
+                if bare_part.lower() in SKIP_SLUGS:
+                    continue
+                if not (is_workday or is_brassring or is_oracle) and not _looks_like_real_slug(slug):
+                    continue
+
+                name = (entry.get("display_name") or "").strip()
+                if slug not in slugs_by_ats[our_ats]:
+                    slugs_by_ats[our_ats][slug] = name
+                    added += 1
+            if added:
+                log.info(f"    {basename} -> {our_ats}: {added} live slugs")
+
+    total = sum(len(s) for s in slugs_by_ats.values())
+    log.info(f"GitHub registries total: {total} slugs across "
+             f"{sum(1 for s in slugs_by_ats.values() if s)} platforms")
+    if skipped_ats:
+        top_skipped = sorted(skipped_ats.items(), key=lambda x: -x[1])[:10]
+        log.info(f"  unmapped registry files (excluded, see module comment): "
+                 f"{', '.join(f'{k}({v})' for k, v in top_skipped)}")
+    return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
 # SUPABASE UPSERT
 # ══════════════════════════════════════════════════════════
 
@@ -4264,7 +4616,8 @@ def main():
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
                  "wayback", "theirstack", "httparchive",
-                 "latmay", "edwarddgao", "icims_hrjobs", "all"],
+                 "latmay", "edwarddgao", "icims_hrjobs",
+                 "github", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -4385,6 +4738,14 @@ def main():
         help="Total number of Hugging Face shards (default: 1, i.e. no "
              "sharding). discovery.yml runs this as 3 for both latmay and "
              "edwarddgao, matching commoncrawl/httparchive's shard count.",
+    )
+    parser.add_argument(
+        "--csod-resolve-budget-minutes", type=int, default=CSOD_RESOLVE_TIME_BUDGET_MINUTES,
+        help="Self-stop gracefully after this many minutes resolving GitHub-registry "
+             "csod (Cornerstone) bare portal slugs to our 'tenant|careerSiteId' format "
+             "via one live HTTP redirect check per candidate (default: "
+             f"{CSOD_RESOLVE_TIME_BUDGET_MINUTES} — see fetch_github_registries_slugs docstring). "
+             "Unresolved candidates past the budget are simply skipped this run, not lost.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -4527,6 +4888,21 @@ def main():
             grand_total += upserted
         else:
             grand_total += ihr_total
+
+    # Source 11: GitHub repo registries (pre-built ATS slug files from
+    # known public repos, e.g. datascry/openroles — see
+    # fetch_github_registries_slugs docstring)
+    if args.source in ("github", "all"):
+        log.info("\n--- GITHUB REGISTRIES (pre-built ATS slug files) ---")
+        gr_slugs = fetch_github_registries_slugs(
+            csod_resolve_time_budget_minutes=args.csod_resolve_budget_minutes)
+        gr_total = sum(len(s) for s in gr_slugs.values())
+        if not args.dry_run:
+            upserted = upsert_to_supabase(gr_slugs, source="github",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += gr_total
 
     # Source 8: Edward H.F (huggingface.co/datasets/edwarddgao/open-apply-jobs
     # — 31M+ individual job postings, apply_url resolved through URL_TO_SLUG)
