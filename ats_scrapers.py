@@ -3824,6 +3824,213 @@ def _fetch_paycom_description(job: dict) -> str:
     return desc or job.get("description_snippet", "")
 
 
+# ── Hireology ───────────────────────────────────────────
+
+def scrape_hireology(slug: str) -> list[dict]:
+    """Hireology — public unauthenticated JSON API (2026-09, new platform).
+    Slug is the tenant identifier used on careers.hireology.com
+    (e.g. '1sthonda' for careers.hireology.com/1sthonda/{job_id}/description).
+
+    Confirmed live: GET https://api.hireology.com/v2/public/careers/{slug}
+    ?page={page}&page_size={page_size} — no auth/cookies/JS needed, and
+    api.hireology.com has no robots.txt at all (404 on /robots.txt, so no
+    disallow rule of any kind — confirmed live 2026-09).
+
+    Response shape: {"data": [...], "count", "page", "page_size"}, one
+    real full job object per entry (confirmed live against a real tenant:
+    id, name, status ("Open"/etc — case as-is from the API, matched
+    case-insensitively below), job_description (full HTML, no truncation),
+    locations (array of {city, state, zip_code}), remote (bool),
+    job_family.name (department), organization.name (company),
+    career_site_url (canonical apply-page URL), compensation
+    ({comp_range_min, comp_range_max, comp_period, ...} — only present on
+    some postings). Paginated; openroles' own scraper caps at 40 pages
+    (4,000 postings/tenant) — mirrored here as a defensive ceiling, not
+    because any real tenant has been seen hitting it."""
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    page_size = 100
+    max_pages = 40
+    company_name = ""
+    jobs = []
+
+    for page in range(1, max_pages + 1):
+        r = _get(f"https://api.hireology.com/v2/public/careers/{slug}",
+                  headers=headers, params={"page": page, "page_size": page_size})
+        if not r:
+            break
+        try:
+            payload = r.json()
+        except Exception as e:
+            log.debug(f"Hireology: JSON parse failed for {slug} page {page}: {e}")
+            break
+
+        items = payload.get("data", [])
+        if not isinstance(items, list) or not items:
+            break
+
+        for j in items:
+            if not isinstance(j, dict):
+                continue
+            if str(j.get("status", "")).strip().lower() != "open":
+                continue
+            title = (j.get("name") or "").strip()
+            if not title:
+                continue
+
+            org_name = (j.get("organization") or {}).get("name", "")
+            if org_name and not company_name:
+                company_name = org_name
+
+            locs = j.get("locations") or []
+            if isinstance(locs, list) and locs and isinstance(locs[0], dict):
+                loc0 = locs[0]
+                location = ", ".join(p for p in (loc0.get("city", ""), loc0.get("state", "")) if p)
+            else:
+                location = ""
+            if not location and j.get("remote"):
+                location = "Remote"
+
+            department = (j.get("job_family") or {}).get("name", "")
+            desc = _snippet(j.get("job_description", ""))
+
+            comp = j.get("compensation") or {}
+            salary = ""
+            if comp.get("comp_range_min") and comp.get("comp_range_max"):
+                period = f"/{comp['comp_period']}" if comp.get("comp_period") else ""
+                salary = f"${comp['comp_range_min']}-${comp['comp_range_max']}{period}"
+            elif not salary:
+                salary = _extract_salary(desc)
+
+            job_url = j.get("career_site_url") or (
+                f"https://careers.hireology.com/{slug}/{j.get('id')}/description" if j.get("id") else ""
+            )
+
+            jobs.append({
+                "title": title,
+                "url": job_url,
+                "company": org_name or company_name or slug.replace("-", " ").title(),
+                "location": location,
+                "country": "",
+                "department": department,
+                "workplace_type": "Remote" if j.get("remote") else "",
+                "employment_type": (j.get("employment_status") or "").strip(),
+                "salary": salary,
+                "description_snippet": desc,
+                "source_ats": "Hireology",
+                "slug": slug,
+            })
+
+        if len(items) < page_size:
+            break
+
+    return jobs
+
+
+# ── isolvedhire ─────────────────────────────────────────
+
+# Matches BOTH the raw-JSON form ("domain_id":4412 — if a bootstrap blob
+# is ever present verbatim in the static HTML) and the URL-encoded form
+# actually confirmed live in the wild (widget hrefs/JS carry it as
+# jsParamsJson=%7B%22domain_id%22:4412,... — a URL-encoded JSON blob, not
+# double-encoded, so the colon itself is NOT %3A in real examples seen).
+# %22 is a literal double-quote; matching both %22domain_id%22 and
+# "domain_id" covers every form seen so far without needing a full
+# urllib.parse.unquote() pass over the whole page.
+_ISOLVEDHIRE_DOMAIN_ID_RE = re.compile(r'(?:"|%22)domain_id(?:"|%22)\s*(?::|%3A)\s*(\d+)')
+
+
+def scrape_isolvedhire(slug: str) -> list[dict]:
+    """isolvedhire (iSolved Hire) — public unauthenticated JSON API
+    (2026-09, new platform). Slug is the customer subdomain
+    (e.g. '1stccu' for 1stccu.isolvedhire.com).
+
+    Two-step, confirmed live end-to-end via real browser network
+    inspection 2026-09 (this platform is a Vue SPA — its own bootstrap
+    JSON isn't reliably present in a plain static-HTML fetch, so the
+    domain_id is instead pulled from the FIRST live occurrence of
+    "domain_id":N anywhere on the rendered page's own outgoing widget
+    calls, e.g. /core/widget/{domain_id}/follow-us — the same numeric ID
+    the page's own JobListings component uses to call /core/jobs/):
+
+      1. GET https://{slug}.isolvedhire.com/jobs/ (plain HTML fetch is
+         enough to find the embedded domain_id via regex below in the
+         common case; confirmed the id is a small stable per-tenant
+         integer, not session-specific).
+      2. GET https://{slug}.isolvedhire.com/core/jobs/{domain_id}
+         ?getParams=%7B%22isInternal%22%3A0%7D — confirmed live 200,
+         returns {"success", "data": {"jobs": [...]}}, no pagination.
+
+    robots.txt confirmed live 2026-09: disallows only /admin/, /stats/,
+    and the /internaljobs* family — neither /jobs/ nor /core/jobs/ is
+    blocked.
+
+    Per openroles' own scraper: list-endpoint job objects carry NO
+    description field at all (title/location/comp/category only) — every
+    job here gets description_snippet="" and relies on DESCRIPTION_FETCHERS
+    (_fetch_generic_description against item['jobUrl']) for enrichment,
+    same convention as ADP/Jobvite/etc above."""
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    board_url = f"https://{slug}.isolvedhire.com/jobs/"
+    r = _get(board_url, headers=headers)
+    if not r:
+        return []
+
+    m = _ISOLVEDHIRE_DOMAIN_ID_RE.search(r.text)
+    if not m:
+        log.debug(f"isolvedhire: couldn't find domain_id for {slug}")
+        return []
+    domain_id = m.group(1)
+
+    r2 = _get(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
+               headers={**headers, "Accept": "application/json"},
+               params={"getParams": '{"isInternal":0}'})
+    if not r2:
+        return []
+    try:
+        payload = r2.json()
+    except Exception as e:
+        log.debug(f"isolvedhire: JSON parse failed for {slug}: {e}")
+        return []
+
+    items = (payload.get("data") or {}).get("jobs", [])
+    if not isinstance(items, list):
+        return []
+
+    company_name = slug.replace("-", " ").title()
+    jobs = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+
+        location = item.get("jobLocation") or ", ".join(
+            p for p in (item.get("city", ""), item.get("abbreviation", "")) if p)
+        salary = ""
+        if item.get("minSalary") and item.get("maxSalary"):
+            salary = f"${item['minSalary']}-${item['maxSalary']}"
+
+        job_url = item.get("jobUrl") or f"https://{slug}.isolvedhire.com/jobs/{item.get('id', '')}"
+
+        jobs.append({
+            "title": title,
+            "url": job_url,
+            "company": company_name,
+            "location": location,
+            "country": item.get("iso3", ""),
+            "department": item.get("classification") or item.get("jobCategory", ""),
+            "workplace_type": item.get("workplaceType", ""),
+            "employment_type": item.get("employmentType", ""),
+            "salary": salary,
+            "description_snippet": "",  # see docstring — list endpoint has none
+            "source_ats": "isolvedhire",
+            "slug": slug,
+        })
+
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -3876,6 +4083,14 @@ SCRAPERS = {
     # shared-host successfactors.com/.eu tenants are NOT included — those
     # stay confirmed robots.txt-blocked.
     "successfactors": scrape_successfactors,
+    # 2026-09: Hireology / isolvedhire — new platforms found via the
+    # datascry/openroles GitHub-registry discovery source (discovery.py's
+    # fetch_github_registries_slugs); both confirmed live, real public
+    # JSON APIs, no robots.txt block, no auth/JS needed. See
+    # scrape_hireology/scrape_isolvedhire's own docstrings above for the
+    # full live-verified evidence trail.
+    "hireology": scrape_hireology,
+    "isolvedhire": scrape_isolvedhire,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -4613,6 +4828,14 @@ DESCRIPTION_FETCHERS = {
     # description snippet at all (title/location/date only), so every
     # job needs this fetch. See _fetch_successfactors_description.
     "SuccessFactors": _fetch_successfactors_description,
+    # 2026-09: Hireology's list endpoint already returns the full
+    # job_description HTML — no enrichment fetch needed in the common
+    # case (same as Zoho/BambooHR above), but registered with the generic
+    # fetcher as a defensive fallback for the rare short/empty case.
+    "Hireology": _fetch_generic_description,
+    # isolvedhire's list endpoint has NO description field at all (see
+    # scrape_isolvedhire's docstring) — every job needs this fetch.
+    "isolvedhire": _fetch_generic_description,
 }
 
 
