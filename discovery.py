@@ -402,6 +402,13 @@ SUPPORTED_ATS = {
     # node.py's _detect_successfactors_hit and ats_scrapers.scrape_successfactors
     # for the full evidence trail and GREYLIST_ATS.md for the writeup.
     "successfactors",
+    # 2026-09: Hireology / isolvedhire — new platforms, found via the
+    # datascry/openroles GitHub-registry discovery source (source 11
+    # below) and confirmed live+scrapable end-to-end (real public JSON
+    # APIs, no robots.txt block, no auth/JS needed). See
+    # ats_scrapers.scrape_hireology/scrape_isolvedhire for the full
+    # evidence trail.
+    "hireology", "isolvedhire",
 }
 
 # The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
@@ -1464,6 +1471,38 @@ def _url_to_slug_pinpoint(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_hireology(url: str) -> str | None:
+    """Extract slug from Hireology URLs (2026-09, new platform).
+    Pattern: careers.hireology.com/{slug}/{job_id}/description — the
+    slug is the FIRST path segment on this one shared host (unlike
+    Pinpoint/etc, Hireology customers don't get their own subdomain).
+    Confirmed live via openroles' own scraper source + a real tenant
+    (careers.hireology.com/1sthonda/170266/description)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host != "careers.hireology.com":
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if parts and parts[0] and parts[0].lower() not in SKIP_SLUGS:
+        return parts[0].lower()
+    return None
+
+
+def _url_to_slug_isolvedhire(url: str) -> str | None:
+    """Extract slug from isolvedhire (iSolved Hire) URLs (2026-09, new
+    platform). Pattern: {slug}.isolvedhire.com/... — subdomain-per-tenant,
+    same shape as Pinpoint/BreezyHR. Confirmed live via real browser
+    network inspection against 1stccu.isolvedhire.com."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host.endswith(".isolvedhire.com"):
+        return None
+    slug = host[: -len(".isolvedhire.com")].lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
+    return None
+
+
 def _url_to_slug_flatchr(url: str) -> str | None:
     """Extract slug from Flatchr URLs (France).
 
@@ -1803,6 +1842,9 @@ URL_TO_SLUG = {
     "csod": _url_to_slug_csod,
     "paycom": _url_to_slug_paycom,
     "jazzhr": _url_to_slug_jazzhr,
+    # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
+    "hireology": _url_to_slug_hireology,
+    "isolvedhire": _url_to_slug_isolvedhire,
 }
 
 
@@ -2292,6 +2334,9 @@ CC_PLATFORM_PATTERNS = {
     # existing pattern already matches both real path shapes.
     "paycom": ["www.paycomonline.net/v4/ats/web.php/portal/*/jobs*",
                "www.paycomonline.net/v4/ats/web.php/portal/*/career-page*"],
+    # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
+    "hireology": ["careers.hireology.com/*/*/description"],
+    "isolvedhire": ["*.isolvedhire.com/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -2357,6 +2402,9 @@ CC_EXTRACTORS = {
     # SUPPORTED_ATS comment for the reversal). _url_to_slug_paycom's
     # existing 32-hex-clientkey extraction needs no changes.
     "paycom": _url_to_slug_paycom,
+    # New (2026-09): Hireology / isolvedhire — see CC_PLATFORM_PATTERNS above.
+    "hireology": _url_to_slug_hireology,
+    "isolvedhire": _url_to_slug_isolvedhire,
 }
 
 
@@ -4134,6 +4182,14 @@ _GITHUB_REGISTRY_ATS_MAP = {
     "bamboohr": "bamboohr",
     "breezy": "breezyhr",
     "greenhouse": "greenhouse",
+    # 2026-09: Hireology / isolvedhire — new platforms, added directly to
+    # this map since openroles' bare slug is exactly what our scrapers
+    # need too (careers.hireology.com/{slug}/... and
+    # {slug}.isolvedhire.com — see ats_scrapers.scrape_hireology/
+    # scrape_isolvedhire and this file's _url_to_slug_hireology/
+    # _url_to_slug_isolvedhire for the full evidence trail).
+    "hireology": "hireology",
+    "isolvedhire": "isolvedhire",
     "hrmdirect": "hrmdirect",
     "icims": "icims",
     "jazzhr": "jazzhr",
