@@ -420,6 +420,24 @@ SUPPORTED_ATS = {
     # ats_scrapers.scrape_hireology/scrape_isolvedhire for the full
     # evidence trail.
     "hireology", "isolvedhire",
+    # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
+    # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
+    # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
+    # network inspection (WebFetch can't see it — client-rendered, no
+    # data in raw HTML): a public, keyless POST to
+    # jobs.gem.com/api/public/graphql/batch with operation
+    # "JobBoardList" (query field oatsExternalJobPostings(boardId:
+    # $boardId)) returns the full jobPostings list for a real slug
+    # (dragonfly-careers) with real title/location/department data —
+    # confirmed 200 with no auth header of any kind. Per-job full
+    # description comes from a second query, "ExternalJobPosting"
+    # (oatsExternalJobPosting(boardId, extId) { descriptionHtml }),
+    # same endpoint. See ats_scrapers.scrape_gem for the full request
+    # shapes. No Wappalyzer fingerprint exists for Gem (checked
+    # cdn.jsdelivr.net/gh/enthec/webappanalyzer@main/src/technologies/
+    # g.json live — absent) so, like isolvedhire, it is NOT added to
+    # HTTPARCHIVE_ATS_TECH_NAMES.
+    "gem",
 }
 
 # The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
@@ -536,6 +554,10 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     "isolvedhire": "isolvedhire",
     "isolved hire": "isolvedhire",
     "isolved": "isolvedhire",
+    # 2026-09: Gem — confirmed live in the same OpenPostings README as a
+    # clean, single "Gem" list entry (github.com/Masterjx9/OpenPostings —
+    # "Supported ATS" section).
+    "gem": "gem",
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -1530,6 +1552,25 @@ def _url_to_slug_isolvedhire(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_gem(url: str) -> str | None:
+    """Extract slug from Gem job-board URLs (2026-09, new platform).
+    Pattern: jobs.gem.com/{slug}[/...] — shared host, slug is the first
+    path segment, same shape as Hireology. The slug is exactly the
+    "boardId" GraphQL variable used against jobs.gem.com's public
+    api/public/graphql/batch endpoint — confirmed live via real Chrome
+    browser network inspection against jobs.gem.com/dragonfly-careers
+    (see ats_scrapers.scrape_gem for the confirmed request/response
+    shapes)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host != "jobs.gem.com":
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if parts and parts[0] and parts[0].lower() not in SKIP_SLUGS:
+        return parts[0].lower()
+    return None
+
+
 def _url_to_slug_flatchr(url: str) -> str | None:
     """Extract slug from Flatchr URLs (France).
 
@@ -1872,6 +1913,8 @@ URL_TO_SLUG = {
     # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
     "hireology": _url_to_slug_hireology,
     "isolvedhire": _url_to_slug_isolvedhire,
+    # New (2026-09): Gem — see SUPPORTED_ATS comment above.
+    "gem": _url_to_slug_gem,
 }
 
 
@@ -2364,6 +2407,8 @@ CC_PLATFORM_PATTERNS = {
     # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
     "hireology": ["careers.hireology.com/*/*/description"],
     "isolvedhire": ["*.isolvedhire.com/*"],
+    # New (2026-09): Gem — see SUPPORTED_ATS comment above.
+    "gem": ["jobs.gem.com/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -2432,6 +2477,8 @@ CC_EXTRACTORS = {
     # New (2026-09): Hireology / isolvedhire — see CC_PLATFORM_PATTERNS above.
     "hireology": _url_to_slug_hireology,
     "isolvedhire": _url_to_slug_isolvedhire,
+    # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
+    "gem": _url_to_slug_gem,
 }
 
 
@@ -4220,6 +4267,12 @@ _GITHUB_REGISTRY_ATS_MAP = {
     # _url_to_slug_isolvedhire for the full evidence trail).
     "hireology": "hireology",
     "isolvedhire": "isolvedhire",
+    # 2026-09: Gem — checked, NOT present. openroles' data/tenants/ and
+    # scraper/src/ats/ file listings (via data.jsdelivr.com's flat
+    # structure endpoint) confirmed live to have no "gem" entry at all.
+    # No key added here; Gem is still fully wired via SUPPORTED_ATS/
+    # URL_TO_SLUG/CC_PLATFORM_PATTERNS/CC_EXTRACTORS/
+    # _OPENPOSTINGS_ATS_MAP_RAW above — this source just doesn't carry it.
     "hrmdirect": "hrmdirect",
     "icims": "icims",
     "jazzhr": "jazzhr",
