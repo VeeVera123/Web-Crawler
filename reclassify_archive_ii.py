@@ -227,8 +227,18 @@ async def _run_shard(shard: int, total_shards: int) -> None:
 
             written_archive_i = 0
             if promote_hit_rows:
-                written_archive_i = await node.write_ats_hits_to_archive_i(session, promote_hit_rows)
-                log.info(f"  → {written_archive_i}/{len(promote_hit_rows)} hit rows written to archive_i")
+                # 2026-09: write_ats_hits_to_archive_i now returns
+                # (written, new_written) instead of a bare int — see
+                # node.py's own new-vs-total slug-counting fix (this call
+                # site broke with a real TypeError until unpacked here:
+                # 'written_archive_i >= len(...)' below was comparing a
+                # tuple to an int). new_written is only used for the log
+                # line — the shortfall check below still uses the total
+                # written count, unaffected by the new/merged distinction.
+                written_archive_i, new_written = await node.write_ats_hits_to_archive_i(
+                    session, promote_hit_rows)
+                log.info(f"  → {written_archive_i}/{len(promote_hit_rows)} hit rows written to archive_i "
+                         f"({new_written} new)")
                 # Conservative on purpose: only delete an archive_ii row
                 # once we're confident its promotion actually landed.
                 # write_ats_hits_to_archive_i's return value is a
