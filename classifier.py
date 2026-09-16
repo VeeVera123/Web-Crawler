@@ -568,7 +568,7 @@ GLOBAL_KEYWORDS = [
     r"\bdistributed\s*[\-–—/,()]?\s*remote\b",
     # Bare "global"/"worldwide"/etc. qualifiers (not necessarily paired
     # with "remote" in the string — e.g. "100% Global", "Fully Global")
-    r"\b(100%|fully|truly|genuinely)\s*global\b",
+    r"\b(100%|fully|truly|genuinely)\s*global(?:ly)?\b",
     r"\b(100%|fully|truly|genuinely)\s*worldwide\b",
     r"\bglobal(?:ly)?\s*[\-–—/,()]?\s*hiring\b",
     r"\bhiring\s*global(?:ly)?\b",
@@ -641,6 +641,28 @@ GLOBAL_KEYWORDS = [
     r"\bglobal\s*talent\b",
     r"\bglobal\s*talent\s*pool\b",
     r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
+    # 2026-09 expansion (explicit user request: over-expand this vocabulary,
+    # zero tolerance for excluding a genuine global-hiring role — false
+    # positives are acceptable, false negatives are not).
+    r"\bopen\s*to\s*remote\s*(candidates|applicants)\s*(anywhere|worldwide|globally)\b",
+    r"\bwork\s*remotely\s*from\s*(any|anywhere)\b",
+    r"\bhire\s*(across|in)\s*(over\s*)?\d+\+?\s*countries\b",
+    r"\bteam\s*(members?)?\s*(across|in|spanning)\s*(over\s*)?\d+\+?\s*countries\b",
+    r"\boperat\w*\s*in\s*(over\s*)?\d+\+?\s*countries\b",
+    r"\bemployer\s*of\s*record\b",
+    r"\b(via\s*)?(deel|remote\.com|oyster\s*hr|papaya\s*global|multiplier|velocity\s*global|rippling\s*eor|justworks)\b",
+    r"\bhire\s*without\s*borders\b",
+    r"\bborderless\s*hiring\b",
+    r"\bglobally\s*distributed\b",
+    r"\bworldwide\s*team\b",
+    r"\bglobal[\-\s]*first\b",
+    r"\bremote[\-\s]*first\b",
+    r"\bdigital\s*nomad\b",
+    r"\bacross\s*(all\s*)?time\s*zones\b",
+    r"\ball\s*time\s*zones\b",
+    r"\bwork\s*from\s*any\s*part\s*of\s*the\s*world\b",
+    r"\bglobal\s*remote\s*team\b",
+    r"\bremote[\-\s]*native\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -683,6 +705,20 @@ _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS = {
     r"\b(global|international)\s*team\b",
     r"\bglobal\s*talent\b",
     r"\bglobal\s*talent\s*pool\b",
+    # 2026-09 additions: same reasoning — these describe what the COMPANY
+    # is/does, not an explicit statement that THIS role's hiring is open
+    # globally (the exact Ashby false-positive pattern documented above),
+    # so they stay out of the stricter free-text safety net while still
+    # counting for the FIELD-level residue check and the base keyword list.
+    r"\bteam\s*(members?)?\s*(across|in|spanning)\s*(over\s*)?\d+\+?\s*countries\b",
+    r"\boperat\w*\s*in\s*(over\s*)?\d+\+?\s*countries\b",
+    r"\bglobally\s*distributed\b",
+    r"\bworldwide\s*team\b",
+    r"\bglobal[\-\s]*first\b",
+    r"\bremote[\-\s]*first\b",
+    r"\bdigital\s*nomad\b",
+    r"\bglobal\s*remote\s*team\b",
+    r"\bremote[\-\s]*native\b",
 }
 _SAFETY_NET_GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS
                          if kw not in _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS]
@@ -1252,6 +1288,28 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     return batch_results, True
 
 
+def _dynamic_job_cap(jobs: list[dict]) -> int:
+    """5-7 jobs per batch (2026-09, explicit user request: 'reduce batch
+    size for location classification to between 5 to 7 max, dynamically
+    sized based on the number of characters so the LLMs does not lose
+    context'). Scaled down toward 5 as the jobs being batched have longer
+    descriptions — more text per job in one call means less of the model's
+    attention per job, which is the exact confirmed-live failure mode
+    (see MAX_JOBS_PER_BATCH's history below). Based on the AVERAGE
+    description length across the jobs being batched, since the cap
+    applies to the batch as a whole, not any single job.
+    """
+    if not jobs:
+        return 7
+    total = sum(len(j.get("description_snippet") or "") for j in jobs)
+    avg = total / len(jobs)
+    if avg <= 2_000:
+        return 7
+    if avg <= 8_000:
+        return 6
+    return 5
+
+
 def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
     """Build batches dynamically based on description length.
 
@@ -1268,23 +1326,23 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     # primary truncation point. 30,000 chars is large enough that no real
     # job description is ever actually cut off by it.
     MAX_DESC_CHARS = 30_000
-    # 120 -> 10 (2026-09, explicit user request): a batch of up to 120 jobs
-    # in one bulk "one-line-verdict-per-job" call is exactly the shape that
-    # let cheap/small models cut corners — this is the same call shape as
-    # the confirmed live failure where gpt-4.1-nano hallucinated a
-    # match_global verdict with zero supporting text anywhere in the job
-    # (see classifier.py's "Post-AI safety net" section in
-    # ai_classify_locations for the real posting this closes). A real run
-    # the same day this was raised had ~74 unsure jobs on Gemini/OpenAI and
-    # ~141 on NVIDIA — at 10/batch that's ~7-8 calls for Gemini/OpenAI and
-    # ~15 for NVIDIA per run, comfortably inside every provider's RPM
-    # budget (the tightest, Gemini's ~15 RPM / Cerebras-style throttling,
-    # still clears this with room to spare), in exchange for far more of
-    # the model's attention per job. Deliberately NOT applied to role
-    # classification (_build_role_batches, a separate function) — role
-    # verdicts are just a short title, not a full JD, so the same bulk-call
-    # risk doesn't apply there; left unchanged per explicit instruction.
-    MAX_JOBS_PER_BATCH = 10
+    # 120 -> 10 -> 5-7 dynamic (2026-09, explicit user request): a batch of
+    # up to 120 jobs in one bulk "one-line-verdict-per-job" call is exactly
+    # the shape that let cheap/small models cut corners — this is the same
+    # call shape as the confirmed live failure where gpt-4.1-nano
+    # hallucinated a match_global verdict with zero supporting text
+    # anywhere in the job (see classifier.py's "Post-AI safety net" section
+    # in ai_classify_locations for the real posting this closes). First
+    # reduced to a flat 10, now made dynamic (5-7, via _dynamic_job_cap)
+    # so long-description batches get even more of the model's attention
+    # per job than a flat cap would give them. Even at the floor (5/batch),
+    # a real run's ~74 unsure jobs on Gemini/OpenAI is ~15 calls and ~141
+    # on NVIDIA is ~29 calls per run — still comfortably inside every
+    # provider's RPM budget. Deliberately NOT applied to role classification
+    # (_build_role_batches, a separate function) — role verdicts are just a
+    # short title, not a full JD, so the same bulk-call risk doesn't apply
+    # there; left unchanged per explicit instruction.
+    MAX_JOBS_PER_BATCH = _dynamic_job_cap(jobs)
 
     batches = []
     current_batch = []
