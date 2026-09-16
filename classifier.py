@@ -439,6 +439,20 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
         for batch in batches:
             all_work.append((p, client, batch))
 
+    # Surface missing providers the same way ai_classify_locations does —
+    # a title excluded here defaults straight to False (non-match) with
+    # no other signal, so if a provider's API key is missing this run,
+    # that's the single most useful line for explaining an unexpectedly
+    # low role-match count.
+    _known_role_providers = {"groq", "nvidia"}
+    _active = {p["name"] for p in providers}
+    _missing = _known_role_providers - _active
+    if _missing:
+        log.warning(f"Role AI running with {len(_active)}/2 providers "
+                    f"({', '.join(sorted(_active)) or 'none'}) — missing "
+                    f"{', '.join(sorted(_missing))} (no API key set). No "
+                    f"failover if this one struggles.")
+
     provider_summary = ", ".join(
         f"{p['name']}:{len(provider_titles[p['name']])}" for p in providers
     )
@@ -447,6 +461,7 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
 
     results = {}
     failed_batches = []  # [(failed_provider_name, batch_titles), ...]
+    no_ai_read: set[str] = set()  # titles never actually reviewed by a provider
 
     def _run_round(work):
         with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
@@ -454,6 +469,7 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             for provider, client, batch in work:
                 if client is None:
                     failed_batches.append((provider["name"], batch))
+                    no_ai_read.update(batch)
                     continue
                 f = pool.submit(_classify_role_batch, batch, provider, client)
                 future_map[f] = (provider["name"], batch)
@@ -463,9 +479,11 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
                 try:
                     batch_results = future.result()
                     results.update(batch_results)
+                    no_ai_read.difference_update(batch)
                 except Exception as e:
                     log.error(f"Role classification error ({pname}): {e}")
                     failed_batches.append((pname, batch))
+                    no_ai_read.update(batch)
 
     _run_round(all_work)
 
@@ -512,7 +530,14 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     # Any title never touched by any provider at all (shouldn't happen,
     # but matches the old function's "always return every title" contract)
     for t in titles:
-        results.setdefault(t, False)
+        if t not in results:
+            results[t] = False
+            no_ai_read.add(t)
+
+    if no_ai_read:
+        log.warning(f"Role AI: {len(no_ai_read)}/{len(titles)} titles never reached a "
+                    f"provider and were excluded by default (see warnings above) — "
+                    f"NOT a genuine non-match verdict.")
 
     return results
 
@@ -901,8 +926,15 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     if has_hard_country_specific_auth_signal(job):
         return "no_match", None
 
-    raw_loc = job.get("location", "")
-    raw_country = job.get("country", "")
+    # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
+    # Supabase (a NULL column) or a scraper that found no location has the
+    # key PRESENT with value None, not missing, so the "" default here
+    # never kicked in and `raw_loc + " " + raw_country` crashed with
+    # "unsupported operand type(s) for +: 'NoneType' and 'str'" the moment
+    # either field was None. This is the same safe idiom already used
+    # everywhere else in this file (see e.g. line ~1253 below).
+    raw_loc = job.get("location") or ""
+    raw_country = job.get("country") or ""
     if isinstance(raw_loc, list):
         raw_loc = ", ".join(str(x) for x in raw_loc)
     if isinstance(raw_country, list):
@@ -1143,7 +1175,7 @@ Respond ONLY with lines like:
 4 UNCERTAIN"""
 
 
-def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> list[str]:
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
     """Classify a single batch of jobs by location using a specific provider.
 
     Descriptions are sent IN FULL (only bounded by MAX_DESC_CHARS, applied
@@ -1157,6 +1189,16 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     being asked to find. _build_dynamic_batches already guarantees the
     batch's TOTAL character count stays under the provider's real budget
     (max_batch_chars), so no additional re-slicing is needed here.
+
+    Returns (labels, call_ok). call_ok is False only when the underlying
+    API call itself failed (see _ai_call) — every job in the batch then
+    defaults to 'uncertain' for a reason that has nothing to do with the
+    job itself. This is tracked separately from a genuine model-returned
+    UNCERTAIN verdict (call_ok=True) so ai_classify_locations' summary can
+    tell "the AI looked and couldn't tell" apart from "the AI never
+    actually got called" — the same bare 'uncertain' label meant either
+    one before this distinction existed, making a low classification
+    count impossible to diagnose from the log alone.
     """
     numbered_lines = []
     for j, job in enumerate(batch_jobs):
@@ -1180,7 +1222,7 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     if text is None:
         log.warning(f"AI location classification failed ({provider['name']}) "
                      f"for batch of {len(batch_jobs)}, keeping as uncertain")
-        return batch_results
+        return batch_results, False
 
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
@@ -1207,7 +1249,7 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
                 elif label.startswith("UNCERTAIN"):
                     batch_results[idx] = "uncertain"
 
-    return batch_results
+    return batch_results, True
 
 
 def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
@@ -1324,6 +1366,24 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
 
     providers = LOCATION_PROVIDERS
 
+    # 2026-09: surface missing providers up front. LOCATION_PROVIDERS
+    # silently drops any of gemini/openai/nvidia whose API key env var
+    # isn't set (see config.py's _make_provider) — running location
+    # classification on 1 provider instead of 3 isn't wrong, but it cuts
+    # both capacity and failover coverage a lot, and previously the only
+    # sign of it was the raw HTTP request log for whichever provider(s)
+    # were actually left — nothing said the others were missing. This is
+    # the single most likely explanation for "why did so few jobs get a
+    # real AI verdict this run."
+    _known_location_providers = {"gemini", "openai", "nvidia"}
+    _active = {p["name"] for p in providers}
+    _missing = _known_location_providers - _active
+    if _missing:
+        log.warning(f"Location AI running with {len(_active)}/3 providers "
+                    f"({', '.join(sorted(_active)) or 'none'}) — missing "
+                    f"{', '.join(sorted(_missing))} (no API key set). Lower "
+                    f"throughput and no failover if this one struggles.")
+
     # ── Round-robin assign jobs to providers (tracking original indices) ──
     provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
     for i, job in enumerate(jobs):
@@ -1357,6 +1417,12 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
 
     results: list[tuple[str, str | None]] = [("uncertain", None)] * len(jobs)
     failed_batches = []  # [(failed_provider_name, orig_indices, batch_jobs), ...]
+    # Indices that ended up 'uncertain' because their batch's AI call never
+    # actually succeeded (see _classify_location_batch's call_ok) — as
+    # opposed to the model genuinely reading the job and saying UNCERTAIN.
+    # Cleared whenever a later attempt (the failover round) succeeds for
+    # that index, so this only reflects the FINAL outcome.
+    no_ai_read: set[int] = set()
 
     def _run_round(work):
         with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
@@ -1364,6 +1430,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
             for provider, client, orig_indices, batch in work:
                 if client is None:
                     failed_batches.append((provider["name"], orig_indices, batch))
+                    no_ai_read.update(orig_indices)
                     continue
                 f = pool.submit(_classify_location_batch, batch, provider, client)
                 future_map[f] = (provider["name"], orig_indices, batch)
@@ -1371,12 +1438,17 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
             for future in as_completed(future_map):
                 pname, orig_indices, batch = future_map[future]
                 try:
-                    batch_results = future.result()
+                    batch_results, call_ok = future.result()
                     for j, label in enumerate(batch_results):
                         results[orig_indices[j]] = (label, pname)
+                    if call_ok:
+                        no_ai_read.difference_update(orig_indices)
+                    else:
+                        no_ai_read.update(orig_indices)
                 except Exception as e:
                     log.error(f"Location classification error ({pname}): {e}")
                     failed_batches.append((pname, orig_indices, batch))
+                    no_ai_read.update(orig_indices)
 
     _run_round(all_work)
 
@@ -1441,24 +1513,34 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         job = jobs[i]
         text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
         if label == "match_global" and not _text_has_global_evidence(text):
-            log.info(f"Downgrading unsupported match_global → uncertain for "
-                     f"{job.get('url', job.get('title', '?'))!r} (no global "
-                     f"keyword evidence in title/description)")
+            log.debug(f"Downgrading unsupported match_global → uncertain for "
+                      f"{job.get('url', job.get('title', '?'))!r} (no global "
+                      f"keyword evidence in title/description)")
             results[i] = ("uncertain", provider_name)
         elif label == "match_africa" and not _text_has_africa_or_emea_evidence(text):
-            log.info(f"Downgrading unsupported match_africa → uncertain for "
-                     f"{job.get('url', job.get('title', '?'))!r} (no Africa/"
-                     f"EMEA keyword evidence in title/description)")
+            log.debug(f"Downgrading unsupported match_africa → uncertain for "
+                      f"{job.get('url', job.get('title', '?'))!r} (no Africa/"
+                      f"EMEA keyword evidence in title/description)")
             results[i] = ("uncertain", provider_name)
 
+    # 2026-09: simplified summary. "Classified X/Y" previously conflated
+    # two very different things under one 'uncertain' bucket: a job the
+    # model actually read and couldn't decide on, vs. a job whose batch's
+    # API call never went through at all (see no_ai_read above) — both
+    # printed identically, so a bad run (e.g. 2 of 3 providers missing)
+    # looked the same as a normal one full of genuinely ambiguous
+    # postings. Uncertain jobs are NOT dropped either way — they still
+    # go through, just at lower confidence — so the summary says that
+    # plainly instead of leaving it to be inferred.
     labels = [label for label, _ in results]
-    classified = sum(1 for label in labels if label != "uncertain")
-    log.info(f"AI classified {classified}/{len(jobs)} locations "
-             f"({labels.count('match_global')} match_global, "
-             f"{labels.count('match_africa')} match_africa, "
-             f"{labels.count('no_match')} no_match, "
-             f"{labels.count('uncertain')} uncertain/unclassified)")
-
+    no_read = len(no_ai_read)
+    genuinely_uncertain = labels.count("uncertain") - no_read
+    log.info(f"Locations: {labels.count('match_global')} global, "
+             f"{labels.count('match_africa')} Africa, "
+             f"{labels.count('no_match')} excluded, "
+             f"{genuinely_uncertain} uncertain (kept, lower confidence)"
+             + (f", {no_read} skipped — AI never reached them (see warnings above)"
+                if no_read else ""))
     return results
 
 
