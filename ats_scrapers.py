@@ -5970,9 +5970,31 @@ QUESTION_FETCHERS = {
 }
 
 
+def _fetch_wild_questions(job: dict) -> str:
+    """2026-09: fallback for jobs on unsupported/"wild" ATS platforms
+    (archive_ii's target — no entry in QUESTION_FETCHERS at all, so they
+    previously got ZERO application-question enrichment no matter how
+    strong a signal the real form had). Reuses the same universal
+    Level-3 parser + /apply, /application URL-guessing already proven out
+    for supported platforms (_fetch_generic_form_questions_multi) — it
+    doesn't know this platform's API, but the plain-URL-guess convention
+    it tries is platform-agnostic by design, so it's exactly as applicable
+    to an unknown wild site as to a named ATS with no dedicated fetcher."""
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
+
+
 def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
-    """Fetch application questions for location-'unsure' jobs, across ALL
-    20 supported ATS platforms (see QUESTION_FETCHERS above).
+    """Fetch application questions for location-'unsure' jobs.
+
+    Jobs on one of the 20 supported ATS platforms (see QUESTION_FETCHERS
+    above) use that platform's dedicated fetcher. Everything else —
+    including archive_ii's unsupported-ATS/"wild" company career sites —
+    falls back to _fetch_wild_questions, the same universal HTML-form
+    parser + /apply,/application URL-guessing used as the Level-3 fallback
+    everywhere else in this file (2026-09: previously these jobs got no
+    application-question enrichment at all, purely because their
+    source_ats had no dedicated entry — the generic parser doesn't need
+    one, so there's no reason to skip them).
 
     Work authorization / visa sponsorship questions are strong signals that
     a job is NOT globally open, even when its location field just says
@@ -5989,22 +6011,27 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
 
     to_enrich = [
         j for j in jobs
-        if j.get("source_ats") in QUESTION_FETCHERS
-        and keyword_classify_location(j) == "unsure"
+        if j.get("url") and keyword_classify_location(j) == "unsure"
     ]
 
     if not to_enrich:
         return jobs
 
     by_platform: dict[str, int] = {}
+    wild_count = 0
     for j in to_enrich:
-        by_platform[j["source_ats"]] = by_platform.get(j["source_ats"], 0) + 1
+        ats = j.get("source_ats") or "unknown"
+        if ats not in QUESTION_FETCHERS:
+            wild_count += 1
+        by_platform[ats] = by_platform.get(ats, 0) + 1
     platform_summary = ", ".join(f"{k}:{v}" for k, v in sorted(by_platform.items()))
     log.info(f"Fetching application questions for {len(to_enrich)} unsure-location jobs "
-             f"across {len(by_platform)} ATS platforms ({platform_summary})...")
+             f"across {len(by_platform)} ATS platforms ({platform_summary})"
+             + (f" — {wild_count} on unsupported/wild sites, generic fallback" if wild_count else "")
+             + "...")
 
     def _fetch_one(job):
-        fetcher = QUESTION_FETCHERS[job["source_ats"]]
+        fetcher = QUESTION_FETCHERS.get(job.get("source_ats"), _fetch_wild_questions)
         try:
             questions = fetcher(job)
             if questions:
