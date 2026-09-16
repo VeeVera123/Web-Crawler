@@ -18,22 +18,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 2026-09: matrix rebalanced at the user's request — httparchive cut from
-  # 3 shards to 1 (its BigQuery cost is the same total either way per its
-  # own docstring reasoning below, so this is purely a job-count/matrix-
-  # budget tradeoff, not a coverage change), and that budget handed to
-  # three new Hugging Face bulk sources: Aramente H.F (eu-tech-jobs, 280
-  # Parquet files — 3-way file-sharded, same real per-shard download
-  # reduction as edwarddgao) and Open Jobs Daily H.F (15 Parquet files
-  # across 2 configs — also 3-way file-sharded) newly wired in here for
-  # the first time (both existed in discovery.py already but had no
-  # matrix job), plus Zalize H.F (single ~394k-row Parquet file — one
-  # unsharded job, same reasoning as Latmay below: splitting a single-file
-  # download just repeats the same download N times for less row-
-  # processing work each, no actual bandwidth saved). Latmay itself is
-  # left as-is (still one unsharded job) for that same single-file reason.
+  # 2026-09: matrix rebalanced twice this week. First pass cut httparchive
+  # from 3 shards to 1 to free budget for three new Hugging Face bulk
+  # sources (Aramente H.F, Open Jobs Daily H.F, Zalize H.F). Second pass,
+  # immediately after — Aramente H.F and Zalize H.F were REMOVED entirely
+  # at the user's request (their discovery.py functions are left defined/
+  # unused; see discovery.py's module docstring, Source 13/14 comments).
+  # Open Jobs Daily H.F stays, newly wired in here (existed in discovery.py
+  # already but had no matrix job until this week) with its own 3-way
+  # file-sharding. With those two sources' 4 job slots freed again,
+  # httparchive is restored to its original 3 date-sharded jobs — that
+  # reduction was purely a matrix-budget trade with no cost difference
+  # either way (see its own comment below), so reverting it is free now
+  # that the budget it was freed for no longer exists. Latmay stays a
+  # single unsharded job, same single-Parquet-file reasoning as always.
   #
-  # 25-job matrix over 13 sources, all running in parallel — instead of one
+  # 23-job matrix over 11 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -82,21 +82,20 @@ jobs:
   # allowed pagination would just stack onto one job's wall-clock instead
   # of running across 5 in parallel. See fetch_wayback_slugs' docstring.
   #
-  # httparchive: cut from 3 date-sharded jobs back down to 1 unsharded job
-  # 2026-09, at the user's request, to free matrix slots for the new HF
-  # sources below. This costs zero total BigQuery bytes scanned either
-  # way — `httparchive.crawl.pages` is partitioned by `date`, not by
-  # `technology`, so splitting the resolved crawl-date list just means N
-  # shards each scanning roughly their own fraction of the same partition
-  # bytes; summed across shards it's identical to one job scanning the
-  # whole range. 3-way sharding only bought wall-clock parallelism (this
-  # was the single slowest job in the matrix, ~90min), not cost or
-  # coverage — see fetch_httparchive_candidate_urls' docstring for why
-  # sharding by ATS tech instead was rejected (that WOULD multiply cost,
-  # since technology isn't a partition/clustering key). If the ~90min
-  # single-job wall-clock becomes a problem again, re-adding --ha-shard/
-  # --ha-total-shards entries here is the fix, at the cost of the matrix
-  # slots this reclaims.
+  # httparchive runs as 3 separate jobs (date-sharded, via --ha-shard/
+  # --ha-total-shards) — this source's single ~90min job was the slowest
+  # thing left in the matrix. Briefly cut to 1 unsharded job 2026-09 to
+  # free matrix slots for a batch of new HF sources, then restored back
+  # to 3 immediately after two of those sources (Aramente H.F, Zalize
+  # H.F) were removed again — the cut was a zero-cost matrix-budget trade
+  # either way, since `httparchive.crawl.pages` is partitioned by `date`,
+  # not by `technology`: splitting the resolved crawl-date list means each
+  # shard scans roughly its own fraction of the same partition bytes,
+  # summed across shards identical to one job scanning the whole range.
+  # Deliberately NOT sharded by ATS tech instead — that WOULD multiply
+  # BigQuery cost by the shard count, since technology isn't a partition/
+  # clustering key. See fetch_httparchive_candidate_urls' docstring for
+  # the full reasoning.
   #
   # 2026-09: added github (single job, unsharded — a short,
   # manually-curated list of known public GitHub repos, currently just
@@ -112,22 +111,15 @@ jobs:
   # trail, including why successfactors and UKG/ultipro are deliberately
   # excluded rather than mapped.
   #
-  # 2026-09: three more Hugging Face bulk sources added — Aramente H.F
-  # (huggingface.co/datasets/Aramente/eu-tech-jobs, 280 Parquet files,
-  # cc-by-4.0 — see discovery.py's module docstring, source 14, including
-  # the note that this dataset's own rendered card/README describes a
-  # schema that does NOT match its real Parquet columns) split 3-way like
-  # edwarddgao (real per-shard file-list reduction); Open Jobs Daily H.F
-  # (huggingface.co/datasets/Yigit-Karaman/open-jobs-daily, 15 Parquet
-  # files across 2 configs, CC0-1.0) also split 3-way, same reasoning —
-  # both existed in discovery.py already but had no matrix job until now;
-  # and Zalize H.F (huggingface.co/datasets/zalizedata/
-  # tech-job-postings-salary-dataset, "L" config, one Parquet file,
-  # CC-BY-NC-4.0 NON-COMMERCIAL — confirmed with the user this project's
-  # current use is non-commercial) as a single unsharded job, same
-  # single-file reasoning as Latmay H.F above (sharding a one-file
-  # download just repeats that same download per shard for less row-
-  # processing work each — no bandwidth saved).
+  # 2026-09: Open Jobs Daily H.F (huggingface.co/datasets/Yigit-Karaman/
+  # open-jobs-daily, 15 Parquet files across 2 configs, CC0-1.0) added as
+  # its own 3-way file-sharded matrix job — existed in discovery.py
+  # already but had no matrix job until now. Two sibling HF sources added
+  # alongside it the same week, Aramente H.F (eu-tech-jobs) and Zalize H.F
+  # (tech-job-postings-salary-dataset), were REMOVED again immediately
+  # after at the user's request — see discovery.py's module docstring
+  # (Source 13/14 comments) for why; their functions are left defined/
+  # unused there, and they have no matrix job here.
   #
   # Every sharded entry below also sets `name:` — without it, GitHub's
   # default matrix job display name spells out every matrix key verbatim
@@ -206,7 +198,14 @@ jobs:
             name: Edward H.F 3
             extra_args: "--hf-shard 2 --hf-total-shards 3"
           - source: httparchive
-            name: http archive
+            name: http archive 1
+            extra_args: "--ha-shard 0 --ha-total-shards 3"
+          - source: httparchive
+            name: http archive 2
+            extra_args: "--ha-shard 1 --ha-total-shards 3"
+          - source: httparchive
+            name: http archive 3
+            extra_args: "--ha-shard 2 --ha-total-shards 3"
           - source: openjobsdaily
             name: Open Jobs Daily H.F 1
             extra_args: "--hf-shard 0 --hf-total-shards 3"
@@ -215,17 +214,6 @@ jobs:
             extra_args: "--hf-shard 1 --hf-total-shards 3"
           - source: openjobsdaily
             name: Open Jobs Daily H.F 3
-            extra_args: "--hf-shard 2 --hf-total-shards 3"
-          - source: zalizedata
-            name: Zalize H.F
-          - source: eutechjobs
-            name: Aramente H.F 1
-            extra_args: "--hf-shard 0 --hf-total-shards 3"
-          - source: eutechjobs
-            name: Aramente H.F 2
-            extra_args: "--hf-shard 1 --hf-total-shards 3"
-          - source: eutechjobs
-            name: Aramente H.F 3
             extra_args: "--hf-shard 2 --hf-total-shards 3"
 
     steps:
@@ -238,9 +226,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # pyarrow: needed by the Latmay/Edward/Open Jobs Daily/Zalize/
-        # Aramente H.F sources to read Hugging Face's auto-converted
-        # Parquet dataset exports.
+        # pyarrow: needed by the Latmay/Edward/Open Jobs Daily H.F sources
+        # to read Hugging Face's auto-converted Parquet dataset exports.
         run: pip install requests python-dotenv google-cloud-bigquery pyarrow
 
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
