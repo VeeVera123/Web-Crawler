@@ -440,7 +440,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         all_jobs = new_jobs
 
         # Filter for CSM/AM roles
-        log.info("── Role classification ──")
+        log.info("── Role check (is this a CSM/AM role?) ──")
         csm_jobs = filter_roles(all_jobs)
         if not csm_jobs:
             log.info("No CSM/AM roles found.")
@@ -451,7 +451,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
                 )
             return
 
-        log.info("── Location classification ──")
+        log.info("── Location check (open to global/Africa hires?) ──")
         # Enrich descriptions for platforms that lack them
         log.info("  fetching descriptions for jobs missing them...")
         csm_jobs = enrich_descriptions(csm_jobs)
