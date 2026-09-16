@@ -179,14 +179,22 @@ ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
 # roughly halving its total call volume across a full run. NVIDIA re-added
 # 2026-09 as the third leg here too — same failover as role classification.
 _LOCATION_PROVIDER_DEFS = [
-    # Gemini: 1M context, ~15 RPM free tier (see note above on why this
-    # isn't a hard-confirmed current number)
+    # Gemini: verified live 2026-09 via
+    # https://deepmind.google/models/model-cards/gemini-3-5-flash/ — up to
+    # 1,000,000 input tokens, 64K output. max_batch_chars below = 20%
+    # breathing room off that real number (0.8 x 1,000,000 tokens), then
+    # tokens->chars at the standard ~4 chars/token English-text heuristic.
+    # NOTE: this char budget is a safety net, not the real limiter — the
+    # actual quality-driven cap on batch size is MAX_JOBS_PER_BATCH (5-7,
+    # see classifier.py's _build_dynamic_batches/_dynamic_job_cap), since
+    # a real job batch of even 7 long (30K-char) descriptions is ~210K
+    # chars, nowhere near this ceiling.
     _make_provider(
         "gemini",
         "GEMINI_API_KEY",
         "gemini-3.5-flash",
         "https://generativelanguage.googleapis.com/v1beta/openai/",
-        max_batch_chars=400_000,     # 1M context
+        max_batch_chars=3_200_000,   # 1,000,000 tok * 0.8 * 4 chars/tok
         min_call_interval=_GEMINI_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
     # OpenAI: GPT-4.1 nano, paid tier. Confirmed Tier 1: 500 RPM / 200K TPM,
@@ -194,12 +202,17 @@ _LOCATION_PROVIDER_DEFS = [
     # processes x 12 req/min each (~108 RPM aggregate), that's ~22% of the
     # confirmed 500 RPM ceiling. Revisit if your OpenAI account is on a
     # lower tier than Tier 1.
+    # Context/max_batch_chars verified live 2026-09 via
+    # https://developers.openai.com/api/docs/models/gpt-4.1-nano —
+    # 1,047,576 token context, 32,768 max output. Same 0.8 headroom x
+    # ~4 chars/tok heuristic as Gemini above; same "safety net, not the
+    # real limiter" caveat applies (see Gemini's comment).
     _make_provider(
         "openai",
         "OPENAI_API_KEY",
         "gpt-4.1-nano",
         "https://api.openai.com/v1",
-        max_batch_chars=300_000,     # 400K - 100K breathing space
+        max_batch_chars=3_300_000,   # 1,047,576 tok * 0.8 * 4 chars/tok ≈ 3.35M, rounded down
         min_call_interval=5.0,       # Tier 1: ~12 req/min
     ),
     # NVIDIA NIM: same key/model/quota pool as the role-classification entry
@@ -211,13 +224,17 @@ _LOCATION_PROVIDER_DEFS = [
     # 2026-09 fix: same end-of-life model swap as the role-classification
     # entry above — see that one's comment for the full story (confirmed
     # live 410 Gone, replaced with the verified-live
-    # nvidia/nemotron-3.5-lightning-30b-a3b).
+    # nvidia/nemotron-3.5-lightning-30b-a3b). Context/max_batch_chars
+    # verified live 2026-09 via
+    # https://build.nvidia.com/nvidia/nemotron-3.5-lightning-30b-a3b/modelcard
+    # — up to 1,000,000 token context. Same 0.8 headroom x ~4 chars/tok
+    # heuristic and "safety net, not the real limiter" caveat as above.
     _make_provider(
         "nvidia",
         "NVIDIA_API_KEY",
         "nvidia/nemotron-3.5-lightning-30b-a3b",
         "https://integrate.api.nvidia.com/v1",
-        max_batch_chars=80_000,
+        max_batch_chars=3_200_000,   # 1,000,000 tok * 0.8 * 4 chars/tok
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
