@@ -866,8 +866,8 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         done = min(i + batch_size, len(pages))
         elapsed = time.monotonic() - crawl_start
         rate = stats["requests_attempted"] / elapsed if elapsed > 0 else 0
-        log.info(f"  {done}/{len(pages)} pages — {rate:.1f} req/sec — {elapsed:.0f}s elapsed — "
-                 f"{len(batch_candidates)} candidates this batch ({len(all_candidate_jobs)} total)")
+        log.info(f"  {done}/{len(pages)} pages checked — {rate:.1f}/sec — {elapsed:.0f}s so far — "
+                 f"{len(batch_candidates)} postings found this batch ({len(all_candidate_jobs)} total)")
 
     pages_done = min(len(pages), i + batch_size) if pages else 0
 
@@ -875,7 +875,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         touch_archive_ii_last_seen(all_pages_with_roles)
 
     if not all_candidate_jobs:
-        log.info("No candidate postings found on any page — nothing to classify or write.")
+        log.info("No job postings found — nothing to do.")
         return pages_done, 0, time_budget_hit
 
     log.info("── Deduplication ──")
@@ -889,22 +889,22 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
             new_jobs.append(job)
     if already_seen:
         touch_seen_jobs_raw(already_seen)
-    log.info(f"  {len(all_candidate_jobs)} candidates → {len(already_seen)} already known "
-             f"(skipped, last_seen refreshed only), {len(new_jobs)} new — only new ones go to AI")
+    log.info(f"  Found {len(all_candidate_jobs)} postings: {len(already_seen)} already in the "
+             f"database (skipped), {len(new_jobs)} new — only the new ones get reviewed")
 
     if not new_jobs:
-        log.info("No new candidates to classify.")
+        log.info("No new postings to review.")
         return pages_done, 0, time_budget_hit
 
-    log.info("── Role classification ──")
+    log.info("── Role check (is this a CSM/AM role?) ──")
     role_matched = _filter_roles(new_jobs)
-    log.info(f"  {len(new_jobs)} candidates → {len(role_matched)} CSM/AM roles")
+    log.info(f"  {len(new_jobs)} postings checked → {len(role_matched)} are CSM/AM roles")
     if not role_matched:
         return pages_done, 0, time_budget_hit
 
-    log.info("── Location classification ──")
+    log.info("── Location check (open to global/Africa hires?) ──")
     global_jobs, confidences = _filter_locations(role_matched)
-    log.info(f"  {len(role_matched)} roles → {len(global_jobs)} global/Africa-eligible")
+    log.info(f"  {len(role_matched)} roles checked → {len(global_jobs)} are eligible")
     if not global_jobs:
         return pages_done, 0, time_budget_hit
 
