@@ -61,25 +61,12 @@ Sources:
      `url` column is read, resolved through URL_TO_SLUG — the dataset's
      own pre-labeled ats/slug columns aren't trusted directly. See
      fetch_openjobsdaily_slugs docstring.)
-  13. Zalize H.F (--source zalizedata; 2026-09, new —
-     huggingface.co/datasets/zalizedata/tech-job-postings-salary-dataset,
-     "L" config only (~394k rows), CC-BY-NC-4.0 NON-COMMERCIAL — confirmed
-     with the user this project's current use is non-commercial; remove
-     this source if that ever changes. See fetch_zalizedata_slugs
-     docstring.)
-  14. Aramente H.F (--source eutechjobs; 2026-09, new —
-     huggingface.co/datasets/Aramente/eu-tech-jobs, 3,180,028 rows across
-     280 Parquet files, cc-by-4.0 (attribution only, no NC restriction —
-     confirmed live from the dataset's raw README YAML frontmatter). NOTE:
-     the dataset's own rendered card/README prose describes a DIFFERENT,
-     non-matching schema (job titles, salaries, description_md, etc.) —
-     that text doesn't match the real Parquet columns and was NOT trusted;
-     the schema below is confirmed live via the datasets-server first-rows/
-     size APIs (15 columns, matching num_columns exactly). Only the
-     `career_url` column is read, resolved through URL_TO_SLUG — the
-     dataset's own pre-labeled slug/ats_provider/ats_handle columns aren't
-     trusted directly, same reasoning as every other bulk H.F source here.
-     See fetch_eutechjobs_slugs docstring.)
+  13. Zalize H.F — REMOVED 2026-09 at the user's request (see main()'s
+     Source 13 comment). fetch_zalizedata_slugs() itself is left
+     defined/unused.
+  14. Aramente H.F — REMOVED 2026-09 at the user's request (see main()'s
+     Source 14 comment). fetch_eutechjobs_slugs() itself is left
+     defined/unused.
 
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
@@ -124,8 +111,6 @@ Usage:
     python discovery.py --source latmay        # Latmay H.F (Hugging Face) only
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source openjobsdaily # Open Jobs Daily H.F (Hugging Face) only
-    python discovery.py --source zalizedata    # Zalize H.F (Hugging Face) only
-    python discovery.py --source eutechjobs    # Aramente H.F (Hugging Face) only
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
     python discovery.py --source github        # GitHub repo registries only
@@ -3721,6 +3706,10 @@ def fetch_edwarddgao_slugs(time_budget_minutes: int = 270, hf_shard: int | None 
 # SOURCE 12 & 13: two more Hugging Face bulk datasets, 2026-09
 # (Yigit-Karaman/open-jobs-daily + zalizedata/tech-job-postings-salary-dataset)
 # ══════════════════════════════════════════════════════════
+# Source 13 (zalizedata) REMOVED 2026-09 at the user's request — see
+# main()'s Source 13 comment. fetch_zalizedata_slugs() below is left
+# defined/unused; this block comment (including its zalizedata research
+# trail) is kept as-is for reference rather than deleted.
 # Same "offline pass through URL_TO_SLUG" shape as Latmay/Edward above —
 # both datasets hand over a real per-job `url` column directly, so there's
 # no live crawl step, just _resolve_url_via_url_to_slug reused as-is.
@@ -3929,6 +3918,11 @@ def fetch_zalizedata_slugs() -> dict[str, dict[str, str]]:
 # SOURCE 14: Aramente H.F (huggingface.co/datasets/Aramente/eu-tech-jobs),
 # 2026-09
 # ══════════════════════════════════════════════════════════
+# REMOVED 2026-09 at the user's request — see main()'s Source 14 comment.
+# fetch_eutechjobs_slugs() below is left defined/unused; this block
+# comment (including its schema-discrepancy research trail) is kept
+# as-is for reference rather than deleted.
+#
 # License: cc-by-4.0 (attribution only, NOT non-commercial — confirmed live
 # from the dataset repo's raw README.md YAML frontmatter, e.g.
 # huggingface.co/datasets/Aramente/eu-tech-jobs/raw/main/README.md).
@@ -5131,8 +5125,8 @@ def main():
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
                  "wayback", "theirstack", "httparchive",
-                 "latmay", "edwarddgao", "openjobsdaily", "zalizedata",
-                 "eutechjobs", "icims_hrjobs", "github", "all"],
+                 "latmay", "edwarddgao", "openjobsdaily",
+                 "icims_hrjobs", "github", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -5249,32 +5243,22 @@ def main():
              "completion — see fetch_openjobsdaily_slugs docstring).",
     )
     parser.add_argument(
-        "--eutechjobs-time-budget-minutes", type=int, default=270,
-        help="Self-stop gracefully after this many minutes downloading/"
-             "resolving Aramente H.F's 280 Parquet files (~2.8GB), "
-             "keeping whatever was resolved so far (default: 270, same "
-             "margin-under-job-timeout reasoning as "
-             "--edwarddgao-time-budget-minutes; 0 = no budget, run to "
-             "full completion — see fetch_eutechjobs_slugs docstring).",
-    )
-    parser.add_argument(
         "--hf-shard", type=int, default=None,
         help="Which Hugging Face shard this run covers (0-indexed, used "
              "with --hf-total-shards) — applies to latmay, edwarddgao, "
-             "openjobsdaily, AND eutechjobs (zalizedata is small enough "
-             "it's never sharded). For edwarddgao/openjobsdaily/"
-             "eutechjobs this slices the Parquet FILE list (cuts download "
-             "volume per shard); for latmay (a single file) this slices "
-             "ROW INDEXES after the one download. Default: None = all "
+             "AND openjobsdaily. For edwarddgao/openjobsdaily this "
+             "slices the Parquet FILE list (cuts download volume per "
+             "shard); for latmay (a single file) this slices ROW "
+             "INDEXES after the one download. Default: None = all "
              "rows/files in one run.",
     )
     parser.add_argument(
         "--hf-total-shards", type=int, default=1,
         help="Total number of Hugging Face shards (default: 1, i.e. no "
-             "sharding). discovery.yml runs this as 3 for edwarddgao, "
-             "openjobsdaily, and eutechjobs (real per-shard Parquet-file "
-             "download reduction); latmay stays a single unsharded job "
-             "(one small file — sharding it would only spread per-row "
+             "sharding). discovery.yml runs this as 3 for edwarddgao "
+             "and openjobsdaily (real per-shard Parquet-file download "
+             "reduction); latmay stays a single unsharded job (one "
+             "small file — sharding it would only spread per-row "
              "URL_TO_SLUG work, not cut download volume).",
     )
     parser.add_argument(
@@ -5305,7 +5289,7 @@ def main():
     log.info("DISCOVERY — Supabase as single source of truth")
     log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
     log.info("           + Wayback CDX (all ATS) + Latmay H.F + Edward H.F")
-    log.info("           + Open Jobs Daily H.F + Zalize H.F + Aramente H.F")
+    log.info("           + Open Jobs Daily H.F")
     log.info("           + TheirStack + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
@@ -5481,46 +5465,14 @@ def main():
         else:
             grand_total += ojd_total
 
-    # Source 13: Zalize H.F (huggingface.co/datasets/zalizedata/
-    # tech-job-postings-salary-dataset — "L" config, ~394k rows,
-    # CC-BY-NC-4.0 non-commercial — see the module comment above
-    # fetch_openjobsdaily_slugs for the license note)
-    if args.source in ("zalizedata", "all"):
-        log.info("\n--- ZALIZE H.F (Hugging Face, ~394k tech job postings) ---")
-        zl_slugs = fetch_zalizedata_slugs()
-        zl_total = sum(len(s) for s in zl_slugs.values())
-        if zl_total:
-            log.info(f"Zalize H.F total: {zl_total} slugs across "
-                     f"{sum(1 for s in zl_slugs.values() if s)} platforms")
-
-        if not args.dry_run:
-            upserted = upsert_to_supabase(zl_slugs, source="Zalize H.F",
-                                           dry_run=args.dry_run)
-            grand_total += upserted
-        else:
-            grand_total += zl_total
-
-    # Source 14: Aramente H.F (huggingface.co/datasets/Aramente/
-    # eu-tech-jobs — 3,180,028 rows across 280 Parquet files, cc-by-4.0 —
-    # see the module comment above fetch_eutechjobs_slugs for the real,
-    # datasets-server-confirmed schema, which does NOT match this
-    # dataset's own rendered card/README prose)
-    if args.source in ("eutechjobs", "all"):
-        log.info("\n--- ARAMENTE H.F (Hugging Face, 3.18M EU tech job postings) ---")
-        et_slugs = fetch_eutechjobs_slugs(
-            time_budget_minutes=args.eutechjobs_time_budget_minutes,
-            hf_shard=args.hf_shard, hf_total_shards=args.hf_total_shards)
-        et_total = sum(len(s) for s in et_slugs.values())
-        if et_total:
-            log.info(f"Aramente H.F total: {et_total} slugs across "
-                     f"{sum(1 for s in et_slugs.values() if s)} platforms")
-
-        if not args.dry_run:
-            upserted = upsert_to_supabase(et_slugs, source="Aramente H.F",
-                                           dry_run=args.dry_run)
-            grand_total += upserted
-        else:
-            grand_total += et_total
+    # Source 13 (Zalize H.F) and Source 14 (Aramente H.F) REMOVED 2026-09
+    # at the user's request. fetch_zalizedata_slugs()/fetch_eutechjobs_slugs()
+    # themselves are left defined/unused, same treatment as fetch_yc_slugs()
+    # above — zero risk, easy to restore if ever wanted back. Their
+    # 'Zalize H.F'/'Aramente H.F' matrix jobs were removed from
+    # Discovery.yml in the same change; their archive_i.source CHECK
+    # constraint values were deliberately left in place (harmless unused
+    # allowed values, same as legacy 'wdc'/'tranco').
 
     # Source 9: TheirStack (freemium — small monthly trickle for thin
     # platforms, see fetch_theirstack_slugs docstring)
