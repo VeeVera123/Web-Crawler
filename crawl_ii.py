@@ -148,6 +148,28 @@ MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches 
 # added cost needs tuning against TIME_BUDGET_MINUTES/CRAWL_CONCURRENCY.
 MAX_CAREER_LINK_FOLLOW = int(os.environ.get("CRAWL_II_MAX_LINK_FOLLOW", "1"))
 
+# 2026-09: archive_ii previously only ever read ONE listing page per
+# company career URL. A landing/stub page with no listings at all was
+# already handled (MAX_CAREER_LINK_FOLLOW above), but a genuine listings
+# page that itself spans multiple pages ("Page 1 of 5", a "Next"/"Load
+# more" link) was NOT — everything past page 1 was silently missed. This
+# caps how many listing pages of ONE company's job board this file will
+# walk before giving up, so a company with an unusually deep or looping
+# pagination scheme can't blow the time budget for the whole shard.
+MAX_ARCHIVE_II_PAGES_PER_LISTING = int(os.environ.get("CRAWL_II_MAX_PAGES_PER_LISTING", "15"))
+
+# Matches the exact "next page" phrasings _NAV_TEXT_BLOCKLIST_RE already
+# treats as nav chrome, not a job title (see that regex above) — reused
+# here as a POSITIVE signal instead: an <a> this project already knows
+# isn't a job link, but whose text says "next"/"load more"/etc., is
+# exactly the pagination control we want to follow.
+_NEXT_PAGE_TEXT_RE = re.compile(
+    r"^\s*(next(\s*page)?|older\s*(jobs|postings|roles)?|"
+    r"more\s*(jobs|roles|postings)?|show\s*more|load\s*more|view\s*more|"
+    r"»|>|›)\s*$",
+    re.I,
+)
+
 
 # ── Sharding (same deterministic hash approach as crawl_i.py's _shard_of) ──
 
@@ -388,6 +410,55 @@ _NAV_TEXT_BLOCKLIST_RE = re.compile(
     r"load more|back to (search|jobs|careers)|share this job)$", re.I)
 
 
+def _find_next_page_url(html: str, page_url: str) -> str | None:
+    """Best-effort 'next page' detection for a paginated job-listing page.
+
+    Two signals, in order of confidence:
+      1. <link rel="next" href="..."> in <head> — the standards-based
+         signal, when a site bothers to emit it.
+      2. An <a> whose rel="next", OR whose visible text/aria-label matches
+         a common 'next page' phrasing (_NEXT_PAGE_TEXT_RE — the same
+         phrase list _NAV_TEXT_BLOCKLIST_RE already recognizes as non-job
+         nav chrome, just used here as the positive signal it actually is).
+
+    Deliberately NEVER constructs or guesses a URL (e.g. incrementing a
+    ?page=N query param) — only a link that actually appears as a real
+    href in this page's own HTML is ever returned, so a company using a
+    URL scheme this project hasn't seen before can't cause a fabricated
+    fetch. Returns an absolute URL, or None if no next-page signal found.
+    """
+    try:
+        tree = LexborHTMLParser(html)
+    except Exception:
+        return None
+
+    link_next = tree.css_first('link[rel="next"]')
+    if link_next is not None:
+        href = link_next.attributes.get("href")
+        if href:
+            try:
+                return urljoin(page_url, href)
+            except ValueError:
+                pass
+
+    for a in tree.css("a[href]"):
+        href = a.attributes.get("href") or ""
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        rel = (a.attributes.get("rel") or "").lower().split()
+        text = a.text(deep=True, separator=" ").strip()
+        aria = (a.attributes.get("aria-label") or "").strip()
+        if "next" in rel or _NEXT_PAGE_TEXT_RE.match(text) or _NEXT_PAGE_TEXT_RE.match(aria):
+            try:
+                resolved = urljoin(page_url, href)
+                parsed = urlparse(resolved)
+            except ValueError:
+                continue
+            if parsed.scheme in ("http", "https") and resolved != page_url:
+                return resolved
+    return None
+
+
 def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
     try:
         tree = LexborHTMLParser(html)
@@ -615,6 +686,59 @@ async def _extract_via_jsonld_or_heuristic(session: aiohttp.ClientSession, sem: 
     return confirmed
 
 
+async def _walk_pagination(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                            first_html: str, first_url: str, company: str, stats: dict,
+                            parse_pool: concurrent.futures.Executor,
+                            first_postings: list[dict]) -> list[dict]:
+    """2026-09: a genuine listings page (as opposed to the landing/stub-page
+    case MAX_CAREER_LINK_FOLLOW handles above) can itself span multiple
+    pages — "Page 1 of 5", a "Next"/"Load more" control. Previously this
+    file read exactly one listing page per company and stopped, silently
+    missing every posting past page 1. This follows _find_next_page_url
+    forward from a page that already yielded at least one posting, merging
+    each subsequent page's postings in (deduped by job URL) until: no
+    next-page link is found, MAX_ARCHIVE_II_PAGES_PER_LISTING is reached,
+    a next link points somewhere already visited (loop guard against a
+    self-referential/cyclic pagination scheme), or a page adds zero new
+    postings (real pagination always advances; a page that doesn't is
+    either the true end or a broken/looping "next" link either way)."""
+    all_postings = list(first_postings)
+    seen_urls = {p["url"] for p in all_postings if p.get("url")}
+    seen_pages = {first_url}
+    loop = asyncio.get_running_loop()
+    current_html, current_url = first_html, first_url
+
+    for _ in range(MAX_ARCHIVE_II_PAGES_PER_LISTING - 1):
+        next_url = await loop.run_in_executor(parse_pool, _find_next_page_url, current_html, current_url)
+        if not next_url or next_url in seen_pages:
+            break
+        seen_pages.add(next_url)
+        async with sem:
+            fetched = await node._fetch_page(session, next_url, stats)
+        if not fetched:
+            break
+        stats["pagination_pages_followed"] += 1
+        next_final_url, next_html = fetched
+        next_postings = await _extract_via_jsonld_or_heuristic(
+            session, sem, next_html, next_final_url, company, stats, parse_pool)
+
+        new_count = 0
+        for p in next_postings:
+            u = p.get("url")
+            if u and u in seen_urls:
+                continue
+            if u:
+                seen_urls.add(u)
+            all_postings.append(p)
+            new_count += 1
+        if new_count == 0:
+            break
+        stats["pagination_extra_postings"] += new_count
+        current_html, current_url = next_html, next_final_url
+
+    return all_postings
+
+
 async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                                       page: dict, stats: dict,
                                       parse_pool: concurrent.futures.Executor) -> list[dict]:
@@ -647,7 +771,7 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
 
     postings = await _extract_via_jsonld_or_heuristic(session, sem, html, final_url, company, stats, parse_pool)
     if postings:
-        return postings
+        return await _walk_pagination(session, sem, html, final_url, company, stats, parse_pool, postings)
 
     loop = asyncio.get_running_loop()
     link_candidates = await loop.run_in_executor(
@@ -667,7 +791,8 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
             session, sem, followed_html, followed_url, company, stats, parse_pool)
         if postings:
             stats["career_link_follow_found_postings"] += 1
-            return postings
+            return await _walk_pagination(
+                session, sem, followed_html, followed_url, company, stats, parse_pool, postings)
 
     stats["no_postings_found"] += 1
     return []
@@ -980,6 +1105,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
         "heuristic_pages": 0, "heuristic_postings": 0, "no_postings_found": 0,
         "apply_page_augmented": 0,
         "career_link_follow_attempted": 0, "career_link_follow_found_postings": 0,
+        "pagination_pages_followed": 0, "pagination_extra_postings": 0,
     }
     sem = asyncio.Semaphore(CRAWL_CONCURRENCY)
     connector = new_connector()
@@ -1010,6 +1136,8 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     log.info(f"  Apply-page augmented: {stats['apply_page_augmented']} postings enriched with apply URL")
     log.info(f"  Career-link follow: {stats['career_link_follow_attempted']} links followed, "
              f"{stats['career_link_follow_found_postings']} of those pages had postings")
+    log.info(f"  Pagination: {stats['pagination_pages_followed']} extra listing pages followed, "
+             f"{stats['pagination_extra_postings']} extra postings found on them")
 
     log_egress_summary(label=f"crawl_ii shard {shard}/{total_shards}")
 
