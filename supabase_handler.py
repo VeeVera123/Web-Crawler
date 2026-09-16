@@ -144,6 +144,30 @@ def _post(table: str, data: dict | list[dict], upsert: bool = False) -> dict | l
         return None
 
 
+def _dedupe_rows_by_job_url(rows: list[dict]) -> list[dict]:
+    """Collapse rows to one per job_url, keeping the LAST occurrence.
+
+    2026-09 bug fix: multiple shards/pipelines can each independently
+    decide the same job_url is "already known" and queue it up to be
+    touched/upserted in the SAME run — crawl_i.py and crawl_ii.py scrape
+    overlapping ATS boards, and a single board can also legitimately list
+    the same posting twice (e.g. under two categories). Sending two rows
+    with the same job_url in one on_conflict=job_url upsert statement
+    isn't just wasteful, it's a hard Postgres error: "ON CONFLICT DO
+    UPDATE command cannot affect row a second time" (code 21000) — this
+    fails the ENTIRE chunk (confirmed live: a single duplicate job_url
+    anywhere in a 500-row chunk turned into a 500 Internal Server Error
+    for all 500 rows, not just the duplicate). Deduping here, right
+    before any upsert POST, is cheap and makes every upsert path in this
+    file safe regardless of what duplicates the caller's own list holds."""
+    by_url: dict[str, dict] = {}
+    for row in rows:
+        url = row.get("job_url")
+        if url:
+            by_url[url] = row
+    return list(by_url.values())
+
+
 def _patch(table: str, filters: str, data: dict) -> bool:
     """PATCH (update) rows matching filters."""
     try:
@@ -635,6 +659,7 @@ def touch_seen_jobs_raw(jobs: list[dict]) -> int:
     for i in range(0, len(jobs), CHUNK):
         chunk = jobs[i:i + CHUNK]
         rows = [_build_row_raw(j) for j in chunk if j.get("url")]
+        rows = _dedupe_rows_by_job_url(rows)
         if not rows:
             continue
         try:
@@ -918,12 +943,32 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
             existing.add(url)  # prevent dupes within this batch
 
     # ── Bulk insert new jobs (chunks of 100) ──────────────
+    # 2026-09: switched from a plain _post() INSERT to an explicit
+    # on_conflict=job_url upsert. This shard's own `existing` set only
+    # reflects the jobs table as of THIS shard's fetch — a different
+    # shard/pipeline scraping the same job concurrently and inserting it
+    # first causes a genuine 409 Client Error: Conflict on a plain INSERT
+    # (confirmed live). Upserting instead means that race resolves as a
+    # harmless merge (the other shard's insert wins, last_seen still gets
+    # refreshed) rather than failing the whole chunk.
+    new_rows = _dedupe_rows_by_job_url(new_rows)
     added = 0
+    headers = {**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
     for i in range(0, len(new_rows), 100):
         chunk = new_rows[i:i + 100]
-        result = _post("jobs", chunk)
-        if result is not None:
+        try:
+            r = http_requests.post(
+                f"{REST}/jobs", headers=headers, json=chunk, timeout=60,
+                params={"on_conflict": "job_url"},
+            )
+            r.raise_for_status()
             added += len(chunk)
+        except Exception as e:
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f" | body: {resp.text[:500]}"
+            log.error(f"Supabase upsert (jobs, new) failed for chunk of {len(chunk)}: {e}{detail}")
 
     # ── Touch last_seen for existing jobs still active ────
     if seen_jobs:
@@ -993,6 +1038,7 @@ def _touch_last_seen(seen_jobs: list[tuple[dict, str]], today: str):
             # actually inserted the row as its owner, untouched.
             del row["source_pipeline"]
             rows.append(row)
+        rows = _dedupe_rows_by_job_url(rows)
         try:
             r = http_requests.post(
                 f"{REST}/jobs",
@@ -1000,7 +1046,7 @@ def _touch_last_seen(seen_jobs: list[tuple[dict, str]], today: str):
                 params={"on_conflict": "job_url"},
             )
             r.raise_for_status()
-            touched += len(chunk)
+            touched += len(rows)
         except Exception as e:
             detail = ""
             resp = getattr(e, "response", None)
