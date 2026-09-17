@@ -1,28 +1,27 @@
 """
 Configuration — multi-provider architecture.
 
-Role classification:     Cerebras + Groq + NVIDIA NIM, running concurrently
-Location classification: Gemini + OpenAI + NVIDIA NIM, running concurrently
+Role classification:     Gemini + Groq, running concurrently
+Location classification: NVIDIA NIM + OpenAI + Groq, running concurrently
 
-2026-09: re-added NVIDIA (NVIDIA_API_KEY, NIM's OpenAI-compatible API at
-integrate.api.nvidia.com) as a third provider for BOTH stages. Together
-with the failover in classifier.py's ai_classify_roles()/
-ai_classify_locations() — if one of the three providers for a stage fails
-its batch after 3 attempts, the other two split and retry that batch's
-items before anything is defaulted — this means either stage can survive
-any single provider being down or rate-limited, not just Cerebras/Groq or
-Gemini/OpenAI individually failing.
+2026-09: swapped Gemini and NVIDIA between the two stages, and added Groq
+to both (explicit user request). Gemini was repeatedly hitting its
+free-tier DAILY quota in location classification (long job descriptions,
+heavier real workload) — moved to role classification instead, where
+calls are short (just titles) and its daily budget goes much further.
+NVIDIA moved the other way, consolidating into location-only rather than
+splitting its one 40 RPM quota across both stages. Groq (openai/
+gpt-oss-120b — confirmed live as Groq's largest/most-capable free-tier
+model) now runs in BOTH stages under the same provider name, so its one
+real 8K TPM quota is tracked as shared, not double-counted.
 
-Changed 2026-08: role classification moved off Gemini (was Gemini + Groq)
-onto Cerebras + Groq. Gemini was previously doing double duty — every
-process runs BOTH role classification (stage 2) and location
-classification (stage 4) sequentially, and both shared one Gemini API
-key/project quota. Across 9 concurrent GitHub Actions processes, that's
-18 independent streams of Gemini calls (9 processes x 2 stages) fighting
-over one quota, not 9 — which is what was actually driving the ~70
-"too many requests" hits, not an under-calibrated interval. Giving role
-classification its own dedicated providers (Cerebras + Groq) roughly
-halves Gemini's total call volume with no code-path changes needed.
+Together with the failover in classifier.py's ai_classify_roles()/
+ai_classify_locations() — if one of a stage's providers fails a batch
+(after exhausting its own retries, OR immediately once flagged as
+exhausted for the rest of this run — see classifier.py's
+_exhausted_providers_today), the other providers for that stage pick up
+its remaining work — this means either stage can survive any single
+provider being down, rate-limited, or quota-exhausted.
 
 Legacy single-provider mode still works via LLM_PROVIDER env var.
 """
@@ -132,17 +131,40 @@ _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verif
 _NVIDIA_BASE_INTERVAL = 1.5
 
 # ── Role classification providers (free tiers, concurrent) ──
-# Groq + NVIDIA NIM. Cerebras removed 2026-09 per explicit user instruction
-# ("Just remove cerebras") — no replacement provider added; Gemini was
-# considered and explicitly declined for this stage (it's already the sole
-# provider for location classification, and the user didn't want its
-# already-tight free-tier rate limit shared across both stages). With only
-# two providers left, ai_classify_roles()'s cross-provider failover now
-# fails a batch over to the other of these two rather than to either of
-# two alternates — still real redundancy, just narrower than the 3-provider
-# setup this replaces.
+# 2026-09: Gemini + Groq (explicit user request — swapped with location's
+# roster below: Gemini moves here from location, NVIDIA moves OUT of role
+# entirely and consolidates into location-only, Groq is now used by BOTH
+# stages). Reasoning given: Gemini was hitting its free-tier DAILY quota
+# repeatedly in location classification and needed a break/reroute of its
+# own traffic; moving it to role (shorter, cheaper calls — titles, not
+# full job descriptions) gives it a much lighter real workload while
+# keeping it in the rotation instead of dropping it outright.
 _ROLE_PROVIDER_DEFS = [
-    # Groq: GPT OSS 120B, free tier 8K TPM — need small batches + throttle
+    # Gemini: same model/base_url as before, but a role-appropriate (much
+    # smaller) max_batch_chars — titles are short, so there's no reason to
+    # approach anywhere near Gemini's real ~1M-token context here. Kept
+    # generous relative to Groq/NVIDIA below since Gemini's free-tier RPM
+    # (not TPM) is the binding constraint for short-text batches like this.
+    _make_provider(
+        "gemini",
+        "GEMINI_API_KEY",
+        "gemini-3.5-flash",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        max_batch_chars=400_000,
+        min_call_interval=_GEMINI_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
+    # Groq: GPT OSS 120B — confirmed live 2026-09 via
+    # console.groq.com/docs/rate-limits and console.groq.com/docs/model/
+    # openai/gpt-oss-120b as Groq's largest/most-capable model with
+    # published free-tier access (120B-parameter open-weight reasoning
+    # model, 131,072 token context, 65,536 max output; free tier: 30 RPM /
+    # 1K RPD / 8K TPM / 200K TPD) — the smartest free-tier option
+    # available, per explicit user request to use it since free tier
+    # costs no usage credits either way. Same provider name "groq" is
+    # deliberately reused in LOCATION_PROVIDERS below, so classifier.py's
+    # per-provider throttle treats both stages' Groq calls as sharing ONE
+    # real 8K TPM pool, not two independent ones (same pattern already
+    # used for the shared NVIDIA key elsewhere in this file).
     _make_provider(
         "groq",
         "GROQ_API_KEY",
@@ -151,52 +173,18 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # NVIDIA NIM: 2026-09 fix — "meta/llama-3.1-70b-instruct" hit its
-    # documented end-of-life on 2026-08-26 (confirmed live: every call
-    # started returning "410 Gone ... reached its end of life ... no
-    # longer available"). Replaced with nvidia/nemotron-3.5-lightning-30b-a3b
-    # — verified against build.nvidia.com's own model page: a currently
-    # live NIM model on the free tier ("Free Endpoint Available"), same
-    # OpenAI-compatible chat/completions shape, same
-    # https://integrate.api.nvidia.com/v1 base URL, no other config
-    # changes needed. Batches stay modest (titles are short) even though
-    # this model's context window is much larger.
-    _make_provider(
-        "nvidia",
-        "NVIDIA_API_KEY",
-        "nvidia/nemotron-3.5-lightning-30b-a3b",
-        "https://integrate.api.nvidia.com/v1",
-        max_batch_chars=12_000,
-        min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
-    ),
 ]
 
 ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
 
 # ── Location classification providers (concurrent) ──
-# Gemini (1M context, free) + OpenAI (paid) + NVIDIA NIM. Gemini serves
-# ONLY this stage (role classification moved off it, see module docstring),
-# roughly halving its total call volume across a full run. NVIDIA re-added
-# 2026-09 as the third leg here too — same failover as role classification.
+# 2026-09: NVIDIA NIM + OpenAI + Groq (explicit user request — Gemini
+# moved OUT to role classification above, since it kept hitting its free
+# daily quota here; Groq added as a replacement third leg, using the SAME
+# provider name "groq" as its role-classification entry above so both
+# stages' calls draw from Groq's one real 8K TPM pool instead of being
+# tracked as if they were separate quotas).
 _LOCATION_PROVIDER_DEFS = [
-    # Gemini: verified live 2026-09 via
-    # https://deepmind.google/models/model-cards/gemini-3-5-flash/ — up to
-    # 1,000,000 input tokens, 64K output. max_batch_chars below = 20%
-    # breathing room off that real number (0.8 x 1,000,000 tokens), then
-    # tokens->chars at the standard ~4 chars/token English-text heuristic.
-    # NOTE: this char budget is a safety net, not the real limiter — the
-    # actual quality-driven cap on batch size is MAX_JOBS_PER_BATCH (5-7,
-    # see classifier.py's _build_dynamic_batches/_dynamic_job_cap), since
-    # a real job batch of even 7 long (30K-char) descriptions is ~210K
-    # chars, nowhere near this ceiling.
-    _make_provider(
-        "gemini",
-        "GEMINI_API_KEY",
-        "gemini-3.5-flash",
-        "https://generativelanguage.googleapis.com/v1beta/openai/",
-        max_batch_chars=3_200_000,   # 1,000,000 tok * 0.8 * 4 chars/tok
-        min_call_interval=_GEMINI_BASE_INTERVAL * AI_RATE_SHARDS,
-    ),
     # OpenAI: GPT-4.1 nano, paid tier. Confirmed Tier 1: 500 RPM / 200K TPM,
     # org+project-scoped. Not scaled by AI_RATE_SHARDS — even at 9 concurrent
     # processes x 12 req/min each (~108 RPM aggregate), that's ~22% of the
@@ -204,9 +192,13 @@ _LOCATION_PROVIDER_DEFS = [
     # lower tier than Tier 1.
     # Context/max_batch_chars verified live 2026-09 via
     # https://developers.openai.com/api/docs/models/gpt-4.1-nano —
-    # 1,047,576 token context, 32,768 max output. Same 0.8 headroom x
-    # ~4 chars/tok heuristic as Gemini above; same "safety net, not the
-    # real limiter" caveat applies (see Gemini's comment).
+    # 1,047,576 token context, 32,768 max output. 0.8 headroom x ~4
+    # chars/tok heuristic. NOTE: this char budget is a safety net, not the
+    # real limiter — the actual quality-driven cap on batch size is
+    # MAX_JOBS_PER_BATCH (5-7, see classifier.py's
+    # _build_dynamic_batches/_dynamic_job_cap), since a real job batch of
+    # even 7 long (30K-char) descriptions is ~210K chars, nowhere near
+    # this ceiling.
     _make_provider(
         "openai",
         "OPENAI_API_KEY",
@@ -215,17 +207,13 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=3_300_000,   # 1,047,576 tok * 0.8 * 4 chars/tok ≈ 3.35M, rounded down
         min_call_interval=5.0,       # Tier 1: ~12 req/min
     ),
-    # NVIDIA NIM: same key/model/quota pool as the role-classification entry
-    # above ("nvidia" — deliberately the same provider name, so classifier.py's
-    # per-provider throttle correctly treats both stages' NVIDIA calls as
-    # sharing ONE real 40 RPM quota, not two independent ones). Location
-    # descriptions are much longer than role titles, so this entry gets a
-    # bigger batch budget than the role one above.
-    # 2026-09 fix: same end-of-life model swap as the role-classification
-    # entry above — see that one's comment for the full story (confirmed
-    # live 410 Gone, replaced with the verified-live
-    # nvidia/nemotron-3.5-lightning-30b-a3b). Context/max_batch_chars
-    # verified live 2026-09 via
+    # NVIDIA NIM: same key/model/quota pool as elsewhere in this file
+    # ("nvidia" — deliberately the same provider name, so classifier.py's
+    # per-provider throttle correctly treats all NVIDIA calls as sharing
+    # ONE real 40 RPM quota). Now used for location ONLY (2026-09 — moved
+    # out of role classification, consolidating it here instead of
+    # splitting its one quota across both stages).
+    # Context/max_batch_chars verified live 2026-09 via
     # https://build.nvidia.com/nvidia/nemotron-3.5-lightning-30b-a3b/modelcard
     # — up to 1,000,000 token context. Same 0.8 headroom x ~4 chars/tok
     # heuristic and "safety net, not the real limiter" caveat as above.
@@ -236,6 +224,25 @@ _LOCATION_PROVIDER_DEFS = [
         "https://integrate.api.nvidia.com/v1",
         max_batch_chars=3_200_000,   # 1,000,000 tok * 0.8 * 4 chars/tok
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
+    # Groq: GPT OSS 120B — see the role-classification entry above for the
+    # live-verified model/rate-limit details (same model, same account,
+    # same "smartest free-tier option" reasoning). max_batch_chars is
+    # higher than the role entry's 4_000 (real job descriptions need more
+    # room than a bare title) but still small relative to
+    # OpenAI/NVIDIA above — Groq's real 8K TPM ceiling is by far the
+    # tightest of the three location providers, and it's a SHARED pool
+    # with the role-classification Groq traffic above, so this stays
+    # conservative on purpose. MAX_JOBS_PER_BATCH's 5-7 job cap (see
+    # classifier.py) still does most of the real batch-size limiting here,
+    # same as for OpenAI/NVIDIA.
+    _make_provider(
+        "groq",
+        "GROQ_API_KEY",
+        "openai/gpt-oss-120b",
+        "https://api.groq.com/openai/v1",
+        max_batch_chars=6_000,
+        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
 
