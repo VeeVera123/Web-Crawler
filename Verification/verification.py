@@ -1134,15 +1134,13 @@ async def verify_archive_i_row(session: aiohttp.ClientSession, row: dict, dry_ru
     ats, slug = row["ats"], row["slug"]
     verifier = ARCHIVE_II_VERIFIERS[ats]
     async with sem:
-        # 2026-09: confirmed real gap — a slug like
-        # "executive-director-job-description" (a job POSTING's own title,
-        # not a company tenant) can be genuinely LIVE (the page really
-        # responds), so the liveness check below never flagged it; that's
-        # exactly why "even after verification, they were not removed" was
-        # a real bug. _looks_like_real_slug already guards every NEW slug
-        # at ingestion (discovery.py) — this re-runs the same check here so
-        # an already-stored bad row gets caught and removed too, regardless
-        # of whether the page it points at happens to be alive.
+        # 2026-09: a slug shaped like ONE SPECIFIC job posting (e.g.
+        # "executive-director-job-description") can still be genuinely
+        # LIVE on the ATS — it's a real page, just not a company tenant —
+        # so the liveness check below alone can never catch it. Same
+        # shared shape guard discovery.py's every _url_to_slug_* extractor
+        # already uses; checked here BEFORE the live fetch so a bad-shaped
+        # slug is removed regardless of whether it happens to be live.
         if not _looks_like_real_slug(slug):
             if dry_run:
                 async with lock:
