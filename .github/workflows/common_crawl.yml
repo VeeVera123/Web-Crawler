@@ -57,21 +57,23 @@ on:
         type: boolean
         required: false
         default: false
-      quality_index_include_splus:
-        description: "Quality Index: include S+ rank candidates"
+      # 2026-09: was 3 independent booleans (quality_index_include_splus/
+      # _s/_f) — collapsed into one choice input because adding them
+      # pushed this workflow to 12 workflow_dispatch inputs, over
+      # GitHub's hard cap of 10 (see the crawl job's "Host Crawl v2" step
+      # for how this single value is translated back into the same three
+      # --include-splus/--include-s/--include-f probe flags).
+      quality_index_ranks:
+        description: "Quality Index: which ranks to let through"
         required: false
-        type: boolean
-        default: true
-      quality_index_include_s:
-        description: "Quality Index: include S rank candidates"
-        required: false
-        type: boolean
-        default: true
-      quality_index_include_f:
-        description: "Quality Index: include F rank candidates (loosest tier)"
-        required: false
-        type: boolean
-        default: false
+        type: choice
+        options:
+          - "S+ and S"
+          - "S+ only"
+          - "S only"
+          - "S+, S, and F (loosest)"
+          - "F only (loosest)"
+        default: "S+ and S"
 
 concurrency:
   group: common-crawl-${{ github.ref }}
@@ -219,11 +221,25 @@ jobs:
           # it per-shard here instead would race).
 
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
+
+          # 2026-09: quality_index_ranks is a single choice input (see the
+          # workflow_dispatch inputs above for why the 3 old checkboxes
+          # were collapsed into it) — translate it here, in bash, into the
+          # same three --include-splus/--include-s/--include-f flags
+          # common_crawl_probe.py's argparse.BooleanOptionalAction already
+          # expects, so nothing downstream of this step had to change.
+          INCLUDE_SPLUS=no-include-splus
+          INCLUDE_S=no-include-s
+          INCLUDE_F=no-include-f
+          case "${{ github.event.inputs.quality_index_ranks || 'S+ and S' }}" in
+            "S+ and S") INCLUDE_SPLUS=include-splus; INCLUDE_S=include-s ;;
+            "S+ only") INCLUDE_SPLUS=include-splus ;;
+            "S only") INCLUDE_S=include-s ;;
+            "S+, S, and F (loosest)") INCLUDE_SPLUS=include-splus; INCLUDE_S=include-s; INCLUDE_F=include-f ;;
+            "F only (loosest)") INCLUDE_F=include-f ;;
+          esac
+
           # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-          # Three independent Quality Index rank checkboxes — see
-          # common_crawl_probe.py's --include-splus/--include-s/--include-f
-          # (argparse.BooleanOptionalAction). ${{ }} always renders 'true'
-          # or 'false' for a boolean input, so this just picks the matching flag.
           exec python "Common Crawl/common_crawl_probe.py" \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
@@ -231,9 +247,9 @@ jobs:
             --concurrency ${{ github.event.inputs.concurrency || '700' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
             --campaign "${{ needs.prepare-matrix.outputs.campaign }}" \
-            --${{ github.event.inputs.quality_index_include_splus == 'false' && 'no-include-splus' || 'include-splus' }} \
-            --${{ github.event.inputs.quality_index_include_s == 'false' && 'no-include-s' || 'include-s' }} \
-            --${{ github.event.inputs.quality_index_include_f == 'true' && 'include-f' || 'no-include-f' }} \
+            --$INCLUDE_SPLUS \
+            --$INCLUDE_S \
+            --$INCLUDE_F \
             "${CRAWL_ARGS[@]}"
 
   finalize:
@@ -321,12 +337,10 @@ jobs:
             -f concurrency="${{ github.event.inputs.concurrency || '700' }}" \
             -f run_time_minutes="${{ github.event.inputs.run_time_minutes || '330' }}" \
             -f loop_runs=true \
-            -f quality_index_include_splus="${{ github.event.inputs.quality_index_include_splus }}" \
-            -f quality_index_include_s="${{ github.event.inputs.quality_index_include_s }}" \
-            -f quality_index_include_f="${{ github.event.inputs.quality_index_include_f }}"
-            # Rank checkboxes carried forward explicitly — this run's own
-            # choice must survive every loop iteration, not silently reset
-            # to argparse's defaults (S+/S on, F off) on redispatch. reset_stats
+            -f quality_index_ranks="${{ github.event.inputs.quality_index_ranks || 'S+ and S' }}"
+            # Rank choice carried forward explicitly — this run's own pick
+            # must survive every loop iteration, not silently reset to the
+            # input's own default ("S+ and S") on redispatch. reset_stats
             # deliberately omitted -> defaults to false on the redispatch, same
             # as workable.yml's reset_seed=false-during-loop rule: a mid-chain
             # loop iteration must never re-wipe a campaign's already-flushed
