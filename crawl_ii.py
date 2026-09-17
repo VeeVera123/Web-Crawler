@@ -211,6 +211,18 @@ def load_pages(shard: int = 0, total_shards: int = 1) -> list[dict]:
 _JSONLD_SCRIPT_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.I | re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
+# 2026-09: <script>/<style>/<noscript> TAG CONTENTS, not just the tags —
+# _TAG_RE above only strips the tags themselves, so a page's minified JS/
+# CSS body text used to leak straight into the "cleaned" text as noise
+# (same bug ats_scrapers.py's _SCRIPT_STYLE_RE was added to fix there —
+# ported here verbatim rather than reinvented). Confirmed to matter here
+# specifically: a real GFL Environmental posting (careers.gflenv.com)
+# whose page text included "Primary Location: Indianapolis, Indiana"
+# further down the page got NO location captured at all — this noise,
+# combined with the old 4000-char cap below, is exactly the kind of thing
+# that pushes real content past a truncation point before either regex or
+# the AI stage ever sees it.
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.I | re.S)
 
 
 def _coerce_text(value) -> str:
@@ -240,10 +252,19 @@ def _coerce_text(value) -> str:
     return ""
 
 
-def _strip_html(text, max_len: int = 4000) -> str:
+def _strip_html(text, max_len: int = 30_000) -> str:
+    # 2026-09: default raised 4000 -> 30_000 to match classifier.py's own
+    # MAX_DESC_CHARS safety ceiling — that value is documented there as
+    # "large enough that no real job description is ever actually cut off
+    # by it"; there's no reason a heuristic archive_ii page's raw text
+    # should be truncated far more aggressively than every other
+    # extraction path in this project. Individual call sites can still
+    # pass a smaller max_len for genuinely small snippets (e.g. the
+    # apply-page augmentation below).
     text = _coerce_text(text)
     if not text:
         return ""
+    text = _SCRIPT_STYLE_RE.sub(" ", text)
     text = _TAG_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_len]
@@ -538,6 +559,49 @@ _STRONG_JOB_PAGE_PHRASES = [
 _MIN_JOB_DETAIL_TEXT_CHARS = 200
 
 
+# 2026-09: real, evidence-backed gap — a GFL Environmental posting
+# (careers.gflenv.com/account-manager/...) whose page plainly showed
+# "Primary Location: Indianapolis, Indiana" got NO location captured at
+# all via the heuristic path, because that path never even tried to read
+# one out of the page text (see the old comment this replaces: "No
+# reliable structured location signal from a heuristic hit — left blank
+# deliberately"). That was true for the general case (most heuristic
+# pages genuinely have no clean location line) but not for pages that DO
+# print one in plain text next to a recognizable label — exactly the
+# thing regex is good at. Tried in order, first match wins; deliberately
+# narrow (a real label word immediately before the value) to avoid
+# grabbing an unrelated sentence that happens to contain a place name.
+_HEURISTIC_LOCATION_RE = re.compile(
+    r"(?:primary\s*location|job\s*location|work\s*location|location)\s*[:\-]\s*"
+    r"([A-Z][^:]{1,80}?)"
+    r"(?=\s+(?:Apply|Department|Job\s*Type|Employment|Requirements|Responsibilities|"
+    r"Qualifications|About|Benefits|Salary|Schedule|Description|Overview|Summary|"
+    r"Who\s|What\s|We\s|Click|View|Full[- ]?Time|Part[- ]?Time|Posted|Date|Category)\b"
+    r"|[.]\s|$)",
+    re.I,
+)
+
+
+def _extract_heuristic_location(text: str) -> str:
+    """Best-effort "Location:"/"Primary Location:"/"Job Location:" label
+    scan over a heuristic hit's own page text (see _HEURISTIC_LOCATION_RE
+    above for the real posting this closes). Returns "" on no match —
+    NEVER guesses or falls back to something else; classifier.py's
+    existing blank/unsure handling still applies if this finds nothing,
+    exactly as before this fix existed."""
+    m = _HEURISTIC_LOCATION_RE.search(text)
+    if not m:
+        return ""
+    loc = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+    # A label match with almost nothing captured after it, or an
+    # implausibly long run-on (the lookahead failed to find a real
+    # boundary), is more likely noise than a real place name — skip it
+    # rather than write something worse than blank.
+    if not loc or len(loc) > 80:
+        return ""
+    return loc
+
+
 def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) -> dict | None:
     """A candidate link alone is never trusted — this is the gate that
     keeps a heuristic hit from becoming a written job. Requires BOTH a
@@ -545,7 +609,7 @@ def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) 
     homepage-in-disguise, same failure mode node.py's career-page quality
     gate exists for) AND at least one phrase that specifically reads like
     a job posting, not just any content page of similar length."""
-    text = _strip_html(detail_html, max_len=20000)
+    text = _strip_html(detail_html)
     if len(text) < _MIN_JOB_DETAIL_TEXT_CHARS:
         return None
     text_lower = text.lower()
@@ -554,12 +618,13 @@ def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) 
     return {
         "title": candidate["title"],
         "url": candidate["url"],
-        # No reliable structured location signal from a heuristic hit —
-        # left blank deliberately so classifier.py's own "blank → unsure,
-        # let the AI stage look at it" path handles it, exactly like an
-        # ATS board with a blank location field would.
-        "location": "",
-        "description": text[:4000],
+        # 2026-09: try a real regex extraction first (see
+        # _extract_heuristic_location) — falls back to blank, exactly the
+        # old behavior, only when the page has no recognizable location
+        # label at all. classifier.py's "blank → unsure, let the AI stage
+        # look at it" path still handles that case unchanged.
+        "location": _extract_heuristic_location(text),
+        "description": text,
         "company": company,
         "source_ats": DEFAULT_ATS_LABEL,
         "clearance": "",
@@ -927,14 +992,21 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 confidences.append("match")
-            # "uncertain" and "no_match" → both DROP (2026-09 policy
-            # change, explicit user request — see crawl_i.py's
-            # filter_locations for the real GFL Environmental example that
-            # closed this: an archive_ii heuristic hit with NO captured
-            # location text at all got kept anyway under the old "unsure
-            # = plausible, keep it" policy, despite being an ordinary
-            # local US role). Only an affirmative match_global/match_africa
-            # signal keeps a job now.
+            elif label == "uncertain" and provider_name is not None:
+                # 2026-09 policy change, refined per explicit user
+                # follow-up — see crawl_i.py's filter_locations for the
+                # full reasoning. Short version: a job an AI provider
+                # ACTUALLY reviewed and still couldn't classify (real
+                # provider_name) is kept at PRIORITY_UNSURE; a job no
+                # provider ever got to look at at all (provider_name is
+                # None — every provider failed/was exhausted/was never
+                # reached) is dropped, same as "no_match".
+                job["clearance"] = clearance
+                job["location_priority"] = PRIORITY_UNSURE
+                matched.append(job)
+                confidences.append("uncertain")
+            # "no_match" → drop. "uncertain" with no provider_name (never
+            # actually reviewed) → also drop.
 
     return matched, confidences
 
