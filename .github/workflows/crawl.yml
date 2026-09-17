@@ -54,7 +54,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: "Which crawl(s) to run"
+        description: "Which crawl(s) to run this time"
         required: false
         type: choice
         options:
@@ -63,17 +63,13 @@ on:
           - archive_ii
         default: both
       archive_i_shard_count:
-        description: "Crawl I shards"
+        description: "Crawl I: parallel shards over archive_i (known ATS boards) — only used if scope includes archive_i"
         required: false
         default: "10"
       archive_ii_shard_count:
-        description: "Crawl II shards"
+        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if scope includes archive_ii"
         required: false
         default: "10"
-      timeout_minutes:
-        description: "Per-shard timeout, in minutes (applies to both Crawl I and Crawl II shard jobs)"
-        required: false
-        default: "90"
 
 # Belt-and-suspenders: GitHub already serializes runs of the same workflow+ref
 # by default for `schedule`/`workflow_dispatch` unless you opt into concurrent
@@ -94,31 +90,12 @@ jobs:
     outputs:
       archive_i_matrix: ${{ steps.build.outputs.archive_i_matrix }}
       archive_ii_matrix: ${{ steps.build.outputs.archive_ii_matrix }}
-      crawl_ii_time_budget_minutes: ${{ steps.build.outputs.crawl_ii_time_budget_minutes }}
     steps:
       - name: Build shard-index matrices from shard_count inputs
         id: build
         run: |
           ARCHIVE_I_SHARDS="${{ github.event.inputs.archive_i_shard_count || '10' }}"
           ARCHIVE_II_SHARDS="${{ github.event.inputs.archive_ii_shard_count || '10' }}"
-          # 2026-09: crawl_ii.py's own internal TIME_BUDGET_MINUTES (default
-          # 300, overridable via CRAWL_II_TIME_BUDGET_MINUTES) used to be
-          # completely disconnected from this workflow's job-level
-          # `timeout-minutes` — GitHub's hard kill at the old hardcoded 90
-          # would cancel the job well before crawl_ii.py's own 300min
-          # graceful-stop logic (crawl_batch_ii's time_budget_hit check)
-          # ever got a chance to run, so raising anything internally never
-          # actually bought more runtime; the job just got killed at 90
-          # either way. Now both move together: 15min under whatever
-          # timeout_minutes this run uses (same margin/reasoning as
-          # Discovery.yml's edwarddgao budget vs. its own job timeout),
-          # floored at 10 so a very small timeout_minutes never produces a
-          # negative or zero budget.
-          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
-          python3 -c "
-          budget = max(10, int('$TIMEOUT_MINUTES') - 15)
-          print(f'crawl_ii_time_budget_minutes={budget}')
-          " >> "$GITHUB_OUTPUT"
           python3 -c "
           import json
           for name, count in [('archive_i', int('$ARCHIVE_I_SHARDS')), ('archive_ii', int('$ARCHIVE_II_SHARDS'))]:
@@ -136,7 +113,7 @@ jobs:
     needs: prepare-matrix
     if: ${{ github.event.inputs.scope != 'archive_ii' }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJson(github.event.inputs.timeout_minutes || '90') }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false   # one bad shard shouldn't cancel the rest
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.archive_i_matrix) }}
@@ -221,7 +198,7 @@ jobs:
     needs: prepare-matrix
     if: ${{ github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii' }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJson(github.event.inputs.timeout_minutes || '90') }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.archive_ii_matrix) }}
@@ -250,7 +227,6 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
-          CRAWL_II_TIME_BUDGET_MINUTES: ${{ needs.prepare-matrix.outputs.crawl_ii_time_budget_minutes }}
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
 
