@@ -57,6 +57,21 @@ on:
         type: boolean
         required: false
         default: false
+      quality_index_include_splus:
+        description: "Quality Index: include S+ rank candidates"
+        required: false
+        type: boolean
+        default: true
+      quality_index_include_s:
+        description: "Quality Index: include S rank candidates"
+        required: false
+        type: boolean
+        default: true
+      quality_index_include_f:
+        description: "Quality Index: include F rank candidates (loosest tier)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: common-crawl-${{ github.ref }}
@@ -205,6 +220,10 @@ jobs:
 
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
           # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+          # Three independent Quality Index rank checkboxes — see
+          # common_crawl_probe.py's --include-splus/--include-s/--include-f
+          # (argparse.BooleanOptionalAction). ${{ }} always renders 'true'
+          # or 'false' for a boolean input, so this just picks the matching flag.
           exec python "Common Crawl/common_crawl_probe.py" \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '10' }} \
@@ -212,6 +231,9 @@ jobs:
             --concurrency ${{ github.event.inputs.concurrency || '700' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
             --campaign "${{ needs.prepare-matrix.outputs.campaign }}" \
+            --${{ github.event.inputs.quality_index_include_splus == 'false' && 'no-include-splus' || 'include-splus' }} \
+            --${{ github.event.inputs.quality_index_include_s == 'false' && 'no-include-s' || 'include-s' }} \
+            --${{ github.event.inputs.quality_index_include_f == 'true' && 'include-f' || 'no-include-f' }} \
             "${CRAWL_ARGS[@]}"
 
   finalize:
@@ -254,31 +276,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # A checkpoint row surviving past this run means that shard
-          # stopped on its time budget with files still left (see
-          # common_crawl_probe.py's run_host_crawl).
+          # stopped on its time budget with files still left (a clean
+          # finish always clears its own row — see
+          # common_crawl_probe.py's run_host_crawl). ANY row left across
+          # ANY shard means the overall crawl of the requested
+          # partition(s) isn't done yet.
           #
           # Filtered to THIS run's own shard_count, same as workable.yml's
           # reloop job — otherwise a leftover row from a differently-sized
           # past run (e.g. an old shard_count=10 crawl) would inflate this
           # count and could trigger a loop even when every shard from the
           # CURRENT request has already finished.
-          #
-          # 2026-09 FIX: a shard that fully finishes now persists a DONE
-          # sentinel row (partition == "__DONE__" — see
-          # common_crawl_probe.py's _DONE_SENTINEL module comment for the
-          # real bug this closes) instead of having its row deleted
-          # outright. This step must NOT count a done row as "remaining",
-          # or the loop would never stop even once every shard is
-          # actually finished — so it now also selects `partition` and
-          # only counts rows that are NOT marked done.
           SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
-          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&shard_count=eq.$SHARD_COUNT&select=shard_index,partition" \
-            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "
-          import json, sys
-          rows = json.load(sys.stdin)
-          print(sum(1 for row in rows if row.get('partition') != '__DONE__'))
-          ")
-          echo "Shards with a remaining (not-yet-done) checkpoint: $REMAINING"
+          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&shard_count=eq.$SHARD_COUNT&select=shard_index" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          echo "Shards with a remaining checkpoint: $REMAINING"
           echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
 
           if [ "$REMAINING" = "0" ]; then
@@ -308,11 +320,17 @@ jobs:
             -f shard_count="$SHARD_COUNT" \
             -f concurrency="${{ github.event.inputs.concurrency || '700' }}" \
             -f run_time_minutes="${{ github.event.inputs.run_time_minutes || '330' }}" \
-            -f loop_runs=true
-            # reset_stats deliberately omitted -> defaults to false on the
-            # redispatch, same as workable.yml's reset_seed=false-during-
-            # loop rule: a mid-chain loop iteration must never re-wipe a
-            # campaign's already-flushed cumulative stats.
+            -f loop_runs=true \
+            -f quality_index_include_splus="${{ github.event.inputs.quality_index_include_splus }}" \
+            -f quality_index_include_s="${{ github.event.inputs.quality_index_include_s }}" \
+            -f quality_index_include_f="${{ github.event.inputs.quality_index_include_f }}"
+            # Rank checkboxes carried forward explicitly — this run's own
+            # choice must survive every loop iteration, not silently reset
+            # to argparse's defaults (S+/S on, F off) on redispatch. reset_stats
+            # deliberately omitted -> defaults to false on the redispatch, same
+            # as workable.yml's reset_seed=false-during-loop rule: a mid-chain
+            # loop iteration must never re-wipe a campaign's already-flushed
+            # cumulative stats.
 
       # 2026-09: the very last file of the very last partition, from
       # every shard, across every loop iteration this campaign has ever
