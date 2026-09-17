@@ -910,49 +910,6 @@ def update_archive_ii_career_pages(updates: list[dict]) -> int:
     return updated
 
 
-def update_archive_ii_quality_scores(updates: list[dict]) -> int:
-    """Writes {"qi_score", "qi_rank"} for existing archive_ii rows, keyed on
-    website_url — 2026-09, added for reclassify_archive_ii.py's rerank pass
-    (recomputes node.py's Quality Index for every row currently on file, not
-    just newly-captured ones). Same "PATCH not upsert" reasoning as
-    update_archive_ii_career_pages above: a mismatched website_url just
-    updates 0 rows instead of falling back to an INSERT that would violate
-    discovery_method's NOT NULL constraint and take out the whole chunk.
-
-    rank is sent as an explicit null (not omitted) when a row's rerank comes
-    back "" (score below the F floor, or a WebGraph/weak-signal-only
-    composition) — see node.py's _quality_index_rank(). Omitting the key
-    entirely would leave a stale rank from a PREVIOUS rerank in place; an
-    explicit null clears it, matching what "this row no longer qualifies"
-    actually means."""
-    if not updates:
-        return 0
-    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
-    updated = 0
-    for row in updates:
-        website_url = row.get("website_url")
-        if not website_url or "qi_score" not in row:
-            continue
-        rank = row.get("qi_rank") or None
-        try:
-            r = http_requests.patch(
-                f"{REST}/archive_ii", headers=headers,
-                json={"qi_score": row["qi_score"], "qi_rank": rank},
-                params={"website_url": f"eq.{website_url}"},
-                timeout=30,
-            )
-            r.raise_for_status()
-            updated += _content_range_count(r, 1)
-        except Exception as e:
-            detail = ""
-            resp = getattr(e, "response", None)
-            if resp is not None:
-                detail = f" | body: {resp.text[:500]}"
-            log.error(f"Supabase qi_score/qi_rank update failed for {website_url}: {e}{detail}")
-    log.info(f"Updated qi_score/qi_rank for {updated}/{len(updates)} archive_ii rows (rerank)")
-    return updated
-
-
 # ── Job insertion ────────────────────────────────────────
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
