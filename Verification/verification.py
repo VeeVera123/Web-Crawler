@@ -184,6 +184,7 @@ sys.path.insert(0, _ROOT)  # for node.py
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for ats_scrapers.py (job-count reporting)
 import node  # noqa: E402
 from ats_scrapers import scrape_board  # noqa: E402
+from discovery import _looks_like_real_slug  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
@@ -1133,6 +1134,28 @@ async def verify_archive_i_row(session: aiohttp.ClientSession, row: dict, dry_ru
     ats, slug = row["ats"], row["slug"]
     verifier = ARCHIVE_II_VERIFIERS[ats]
     async with sem:
+        # 2026-09: confirmed real gap — a slug like
+        # "executive-director-job-description" (a job POSTING's own title,
+        # not a company tenant) can be genuinely LIVE (the page really
+        # responds), so the liveness check below never flagged it; that's
+        # exactly why "even after verification, they were not removed" was
+        # a real bug. _looks_like_real_slug already guards every NEW slug
+        # at ingestion (discovery.py) — this re-runs the same check here so
+        # an already-stored bad row gets caught and removed too, regardless
+        # of whether the page it points at happens to be alive.
+        if not _looks_like_real_slug(slug):
+            if dry_run:
+                async with lock:
+                    counts["dead"] += 1
+                log.info(f"    {ats}/{slug}: BAD SLUG SHAPE (job posting, not a tenant) — "
+                         f"would delete (report-only)")
+                return
+            ok = await delete_row(session, node.ARCHIVE_I_TABLE, row["id"])
+            async with lock:
+                counts["dead" if ok else "unverified"] += 1
+            if ok:
+                log.info(f"    {ats}/{slug}: BAD SLUG SHAPE (job posting, not a tenant) — deleted")
+            return
         try:
             is_live = await verifier(session, slug)
         except Exception as e:
