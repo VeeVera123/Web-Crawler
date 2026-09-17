@@ -100,6 +100,7 @@ from classifier import (  # noqa: E402
     keyword_classify_role, ai_classify_roles,
     _keyword_classify_location_detail, ai_classify_locations,
     detect_visa_sponsorship, PLACEHOLDER_LOC_RE,
+    classify_role_category,
     PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
 from supabase_handler import (  # noqa: E402
@@ -873,10 +874,14 @@ def _enrich_location_from_description(job: dict) -> None:
 # ── Classification + push (mirrors crawl_i.py's role/location/visa funnel) ──
 
 def _filter_roles(jobs: list[dict]) -> list[dict]:
+    """2026-09 (explicit user request): every included job is also tagged
+    job["role_category"] — one of "CS"/"AM"/"PM"/"OM" — mirrors
+    crawl_i.py's filter_roles."""
     included, unsure = [], []
     for job in jobs:
         result = keyword_classify_role(job["title"])
         if result == "include":
+            job["role_category"] = classify_role_category(job["title"])
             included.append(job)
         elif result == "unsure":
             unsure.append(job)
@@ -884,6 +889,7 @@ def _filter_roles(jobs: list[dict]) -> list[dict]:
         ai_results = ai_classify_roles([j["title"] for j in unsure])
         for job in unsure:
             if ai_results.get(job["title"], False):
+                job["role_category"] = classify_role_category(job["title"])
                 included.append(job)
     return included
 
@@ -921,12 +927,14 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 confidences.append("match")
-            elif label == "uncertain":
-                job["clearance"] = clearance
-                job["location_priority"] = PRIORITY_UNSURE
-                matched.append(job)
-                confidences.append("uncertain")
-            # "no_match" → drop
+            # "uncertain" and "no_match" → both DROP (2026-09 policy
+            # change, explicit user request — see crawl_i.py's
+            # filter_locations for the real GFL Environmental example that
+            # closed this: an archive_ii heuristic hit with NO captured
+            # location text at all got kept anyway under the old "unsure
+            # = plausible, keep it" policy, despite being an ordinary
+            # local US role). Only an affirmative match_global/match_africa
+            # signal keeps a job now.
 
     return matched, confidences
 
