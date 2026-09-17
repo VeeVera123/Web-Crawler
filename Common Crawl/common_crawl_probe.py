@@ -411,7 +411,9 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                           shard_count: int | None, concurrency: int,
                           time_budget_minutes: int, crawl_list: list[str] | None = None,
                           start_file_index: int | None = None, campaign: str | None = None,
-                          reset_stats: bool = False) -> None:
+                          reset_stats: bool = False,
+                          quality_index_include_ranks: frozenset[str] = node.DEFAULT_QUALITY_INDEX_INCLUDE_RANKS,
+                          ) -> None:
     """campaign (2026-09): identifies this whole crawl request (one
     starting partition + --partitions count + --crawl-list, computed once
     by common_crawl.yml's prepare-matrix job and passed through unchanged
@@ -425,7 +427,8 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
     log.info(f"COMMON CRAWL — starting{label}")
     log.info(_BANNER)
     log.info(f"  concurrency={concurrency}  parse_workers={node.PARSE_WORKERS}  "
-             f"time_budget={time_budget_minutes}min (shared across all requested partitions)")
+             f"time_budget={time_budget_minutes}min (shared across all requested partitions)  "
+             f"quality_index_ranks={sorted(quality_index_include_ranks)}")
 
     if crawl_list:
         log.info(f"  explicit --crawl-list given ({len(crawl_list)} requested) — ignoring --crawl/--partitions")
@@ -530,7 +533,8 @@ async def run_host_crawl(crawl: str | None, partitions_count: int, shard_index: 
                     file_hosts, session, sem, stats, parse_pool, node.ACCEPT_ANY_COUNTRY,
                     SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                     time_budget_minutes, batch_size=2000, unit_label="hosts",
-                    capture_inhouse=True)
+                    capture_inhouse=True,
+                    quality_index_include_ranks=quality_index_include_ranks)
                 if campaign:
                     # This file's OWN contribution only — every scalar key
                     # `stats` gained/changed since stats_before, plus the
@@ -667,6 +671,14 @@ def main():
                          help="Only used with --summarize-campaign: the status line to print (the caller "
                               "— e.g. finalize's own checkpoint check — knows whether the campaign is "
                               "actually complete; this function doesn't re-derive that itself).")
+    # 2026-09: same three independent rank checkboxes as opendata_probe.py
+    # — see that file's identical flags for the full reasoning.
+    parser.add_argument("--include-splus", action=argparse.BooleanOptionalAction, default=True,
+                         help="Include Quality Index S+ rank candidates (default: on)")
+    parser.add_argument("--include-s", action=argparse.BooleanOptionalAction, default=True,
+                         help="Include Quality Index S rank candidates (default: on)")
+    parser.add_argument("--include-f", action=argparse.BooleanOptionalAction, default=False,
+                         help="Include Quality Index F rank candidates (default: off)")
     args = parser.parse_args()
     crawl_list = [c.strip() for c in args.crawl_list.split(",") if c.strip()] if args.crawl_list else None
 
@@ -677,10 +689,18 @@ def main():
     if args.reset_stats and not args.campaign:
         parser.error("--reset-stats requires --campaign")
 
+    quality_index_include_ranks = frozenset(
+        {rank for rank, include in (("S+", args.include_splus), ("S", args.include_s),
+                                     ("F", args.include_f)) if include})
+    if not quality_index_include_ranks:
+        log.warning("  all three Quality Index ranks disabled — no archive_ii row will ever be "
+                    "accepted this run (archive_i/known-ATS hits are unaffected).")
+
     asyncio.run(run_host_crawl(args.crawl, args.partitions, args.shard_index, args.shard_count,
                                 args.concurrency, args.time_budget_minutes, crawl_list=crawl_list,
                                 start_file_index=args.start_file_index, campaign=args.campaign,
-                                reset_stats=args.reset_stats))
+                                reset_stats=args.reset_stats,
+                                quality_index_include_ranks=quality_index_include_ranks))
 
 
 if __name__ == "__main__":
