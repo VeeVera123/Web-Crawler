@@ -158,14 +158,11 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                      concurrency: int = node.CRAWL_CONCURRENCY,
                      time_budget_minutes: int = node.TIME_BUDGET_MINUTES,
                      countries: set[str] | None = None,
-                     restart_index: int | None = None,
-                     quality_index_include_ranks: frozenset[str] = node.DEFAULT_QUALITY_INDEX_INCLUDE_RANKS,
-                     ) -> None:
+                     restart_index: int | None = None) -> None:
     label = f" [shard {shard_index}/{shard_count}]" if shard_count else ""
     log.info(f"── OpenData probe{label} ──")
     log.info(f"  concurrency={concurrency}  parse_workers={node.PARSE_WORKERS}  "
-             f"time_budget={time_budget_minutes}min  source={SEED_SOURCE_LABEL}  "
-             f"quality_index_ranks={sorted(quality_index_include_ranks)}")
+             f"time_budget={time_budget_minutes}min  source={SEED_SOURCE_LABEL}")
     time_budget_seconds = time_budget_minutes * 60
 
     companies = read_seed_csv(countries=countries, shard_index=shard_index, shard_count=shard_count)
@@ -218,8 +215,7 @@ async def run_crawl(shard_index: int | None = None, shard_count: int | None = No
                 SEED_SOURCE_LABEL, found_rows, crawl_start, time_budget_seconds,
                 time_budget_minutes, batch_size=3000, unit_label="companies",
                 capture_inhouse=True,
-                shard_index=shard_index, shard_count=shard_count, start_at=start_at,
-                quality_index_include_ranks=quality_index_include_ranks)
+                shard_index=shard_index, shard_count=shard_count, start_at=start_at)
     finally:
         parse_pool.shutdown(wait=True)
 
@@ -276,17 +272,6 @@ def main():
                          help="Per-shard resume. Omit (default) to auto-resume from this shard's own "
                               "Supabase checkpoint. 0 forces a full restart, ignoring any checkpoint. "
                               "A positive value manually overrides the checkpoint for this run.")
-    # 2026-09: three independent checkboxes instead of one INCLUDE_F
-    # boolean — a run can take any combination of the three Quality Index
-    # ranks now, not just "S+/S always, F optional". S+ and S on by
-    # default (the project's normal bar); F (score>=20 but below the old
-    # single "S" threshold) off by default since it's the loosest tier.
-    parser.add_argument("--include-splus", action=argparse.BooleanOptionalAction, default=True,
-                         help="Include Quality Index S+ rank candidates (default: on)")
-    parser.add_argument("--include-s", action=argparse.BooleanOptionalAction, default=True,
-                         help="Include Quality Index S rank candidates (default: on)")
-    parser.add_argument("--include-f", action=argparse.BooleanOptionalAction, default=False,
-                         help="Include Quality Index F rank candidates (default: off)")
     args = parser.parse_args()
     if args.country:
         countries = set(args.country)
@@ -294,15 +279,8 @@ def main():
         countries = None
     else:
         countries = DEFAULT_COUNTRIES
-    quality_index_include_ranks = frozenset(
-        {rank for rank, include in (("S+", args.include_splus), ("S", args.include_s),
-                                     ("F", args.include_f)) if include})
-    if not quality_index_include_ranks:
-        log.warning("  all three Quality Index ranks disabled — no archive_ii row will ever be "
-                    "accepted this run (archive_i/known-ATS hits are unaffected).")
     asyncio.run(run_crawl(args.shard_index, args.shard_count, args.concurrency,
-                           args.time_budget_minutes, countries, args.restart_index,
-                           quality_index_include_ranks))
+                           args.time_budget_minutes, countries, args.restart_index))
 
 
 if __name__ == "__main__":
