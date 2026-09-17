@@ -5045,6 +5045,19 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
              f"across {len(set(j['source_ats'] for j in to_enrich))} platforms...")
 
     def _fetch_one(job):
+        # 2026-09: track whether THIS fetch actually improved the job, not
+        # just whether the job has any description afterward — a job that
+        # qualified for to_enrich because it had a short-but-real
+        # description (< MIN_REAL_DESC_CHARS, still non-empty) already had
+        # a truthy description_snippet BEFORE this fetch ran, so checking
+        # the after-state alone counted it as "enriched" even when the
+        # fetch found nothing new. That inflated the "Enriched X/Y" count
+        # above what this pass actually accomplished — confirmed live as
+        # the real cause of a "why don't the numbers add up" question
+        # (5791 "enriched" out of 7665, but the very next line's fallback
+        # count of jobs actually still missing a description didn't match
+        # 7665-5791 at all).
+        before_len = len(job.get("description_snippet") or "")
         fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
         try:
             desc = fetcher(job)
@@ -5055,7 +5068,7 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
             # run on jobs that already have a short-but-real description
             # (see MIN_REAL_DESC_CHARS), never let a worse result clobber a
             # better one already in hand.
-            if desc and len(desc) >= len(job.get("description_snippet") or ""):
+            if desc and len(desc) >= before_len:
                 job["description_snippet"] = desc
                 salary = _extract_salary(desc)
                 if salary and not job.get("salary"):
@@ -5063,15 +5076,16 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
         except Exception as e:
             log.debug(f"Failed to enrich {job['url']}: {e}")
         time.sleep(random.uniform(0.2, 0.5))
-        return job
+        improved = len(job.get("description_snippet") or "") > before_len
+        return job, improved
 
     enriched = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
         for future in as_completed(futures):
             try:
-                job = future.result()
-                if job.get("description_snippet"):
+                job, improved = future.result()
+                if improved:
                     enriched += 1
             except Exception:
                 pass
@@ -5081,10 +5095,26 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     # ── Fallback: fetch job URL directly for ANY job still missing a JD ──
     # Some ATS APIs don't return descriptions, but the job page itself has one.
     # This catches Workday, iCIMS, SuccessFactors, etc. where the API fetch failed.
+    #
+    # NOTE: this scans ALL of `jobs`, not just `to_enrich` above — a
+    # DIFFERENT, wider population than the "Enriched X/Y" line reports on
+    # (to_enrich only covers DESCRIPTION_FETCHERS platforms whose
+    # description was short/missing; a job on some OTHER platform can
+    # still come back from its OWN list API with a genuinely blank
+    # description). That's why this count can be, and usually is,
+    # different from len(to_enrich) minus the enriched count above — it's
+    # not the same job set. Logged explicitly below so the two numbers
+    # don't look like they should match when they're answering different
+    # questions.
     still_missing = [j for j in jobs if not j.get("description_snippet")
                      and j.get("url")]
     if still_missing:
-        log.info(f"Fallback: fetching {len(still_missing)} job URLs directly for missing JDs...")
+        still_missing_urls = {j["url"] for j in still_missing}
+        from_enrich_pass = sum(1 for j in to_enrich if j.get("url") in still_missing_urls)
+        other_platforms = len(still_missing) - from_enrich_pass
+        log.info(f"Fallback: fetching {len(still_missing)} job URLs directly for missing JDs "
+                 f"({from_enrich_pass} still empty after the pass above, "
+                 f"{other_platforms} from other platforms with a blank description)...")
         fallback_ok = 0
 
         def _fetch_fallback(job):
