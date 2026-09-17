@@ -210,8 +210,9 @@ jobs:
           fi
           # 2026-09: three independent Quality Index rank checkboxes — see
           # opendata_probe.py's --include-splus/--include-s/--include-f
-          # (argparse.BooleanOptionalAction). ${{ }} always renders 'true'
-          # or 'false' for a boolean input, so this just picks the matching flag.
+          # (argparse.BooleanOptionalAction). A boolean workflow_dispatch
+          # input always renders as the literal string true or false, so
+          # this just picks the matching flag.
           python OpenData/opendata_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
