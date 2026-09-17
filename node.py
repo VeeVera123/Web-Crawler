@@ -198,6 +198,69 @@ def _looks_like_sentence_slug(path: str, max_words: int = 6) -> bool:
     return len(words) > max_words
 
 
+# 2026-09: a DIFFERENT false-positive shape than the sentence-slug one
+# above — confirmed real: "events-marketing-manager-job-description" (5
+# words) sailed straight past _looks_like_sentence_slug's max_words=6 cutoff
+# AND never matched CAREER_LIKE_RE (no "jobs"/"job-openings"/etc. substring
+# in it), so it was only ever caught via the link-TEXT half of
+# _extract_job_listing_link_candidates (a "view openings"/"apply now"-style
+# CTA on a landing page happened to point straight at this one specific
+# job's own page). Once followed, _looks_like_real_career_page had nothing
+# that asks "is this ONE job posting rather than a listing page" — a single
+# job description is long and full of hiring vocabulary by its very nature,
+# so it trivially cleared both of that gate's checks and got captured into
+# archive_ii as if it were the company's actual careers page.
+# This is a SHORT, specific-role slug, not a long sentence one, so raising
+# _looks_like_sentence_slug's cutoff would either miss this shape or start
+# rejecting genuine short career-page names — a dedicated check instead.
+# Three independent signals, any one sufficient:
+#  (1) the slug ends in a marker phrase that only ever appears on an
+#      individual job's own page, never a listings page;
+#  (2) the slug ends in a job-board-style numeric posting/req ID with at
+#      least 2 other words before it (a real career-page name is never
+#      "warehouse-associate-48213");
+#  (3) the slug ends in a specific job-TITLE word (manager/director/
+#      engineer/...) AND separately contains one of job/position/vacancy/
+#      posting/opening as its own word — either alone is too common (a
+#      "Careers" page can say "open positions"; a company can be named
+#      "...Solutions Manager Inc" in principle), but the combination is a
+#      strong, specific-role tell.
+_SINGLE_JOB_POSTING_SUFFIX_RE = re.compile(
+    r"-(?:job-description|job-details?|jobdescription|jobdetails?|"
+    r"position-details?|position-description|role-details?|"
+    r"job-posting|jobposting|job-vacancy|vacancy-details?|"
+    r"job-listing|job-opening)$", re.I)
+_TRAILING_NUMERIC_POSTING_ID_RE = re.compile(r"-\d{3,}$")
+_JOB_ROLE_ENDING_WORDS_RE = re.compile(
+    r"-(?:manager|director|specialist|coordinator|analyst|engineer|executive|officer|"
+    r"assistant|associate|representative|supervisor|administrator|technician|consultant|"
+    r"lead|head)$", re.I)
+_JOB_POSTING_TITLE_WORDS_RE = re.compile(
+    r"\b(?:job|jobs|position|vacancy|vacancies|posting|opening|openings)\b", re.I)
+
+
+def _looks_like_single_job_posting_path(path: str) -> bool:
+    """True if the LAST path segment reads like one specific job's own
+    page rather than a company's careers/listings page — see the 2026-09
+    comment above for the concrete confirmed false-positive and why this is
+    a separate check from _looks_like_sentence_slug. Used both to keep
+    _extract_job_listing_link_candidates from ever treating a link to a
+    specific job as "the real listings page worth following", and as a
+    final check in _looks_like_real_career_page before anything gets
+    captured into archive_ii."""
+    segments = [s for s in path.strip("/").split("/") if s]
+    if not segments:
+        return False
+    last = segments[-1]
+    if _SINGLE_JOB_POSTING_SUFFIX_RE.search(last):
+        return True
+    if _TRAILING_NUMERIC_POSTING_ID_RE.search(last) and last.count("-") >= 2:
+        return True
+    if _JOB_ROLE_ENDING_WORDS_RE.search(last) and _JOB_POSTING_TITLE_WORDS_RE.search(last):
+        return True
+    return False
+
+
 # 2026-09: real confirmed gap — infotech.com's /about/careers page (one of
 # CAREER_PATHS' own guesses) is a pure landing page; its actual listings
 # sit behind an "Explore Roles" button that goes to
@@ -297,10 +360,19 @@ def _extract_job_listing_link_candidates(html: str, base_url: str) -> list[tuple
                 a_node.attributes.get("aria-label") or "",
                 a_node.attributes.get("title") or "",
             ])
+            path = urlparse(url).path
+            # 2026-09: reject a link straight to one specific job's own
+            # page BEFORE scoring it — a "view openings"/"apply now"-style
+            # CTA on a landing page pointing at a single job (e.g.
+            # ".../events-marketing-manager-job-description") used to score
+            # via the text signal alone and get followed as if it were the
+            # real listings page. See _looks_like_single_job_posting_path's
+            # docstring for the confirmed false-positive.
+            if _looks_like_single_job_posting_path(path):
+                continue
             score = 0
             if _JOB_LISTING_LINK_RE.search(text_sources):
                 score += 1
-            path = urlparse(url).path
             if (CAREER_LIKE_RE.search(path)
                     and not _BLOG_LIKE_PATH_RE.search(path)
                     and not _looks_like_sentence_slug(path)):
@@ -796,6 +868,12 @@ def _looks_like_real_career_page(url: str, text_len: int, has_hiring_vocab: bool
     path = urlparse(url).path.strip("/")
     if path == "" and url.rstrip("/") == origin.rstrip("/"):
         return False
+    # 2026-09: a single job's own page is long and full of hiring
+    # vocabulary by its very nature, so it trivially cleared both checks
+    # above — this is the final backstop, independent of how the candidate
+    # was reached (link-follow, sitemap, or a CAREER_PATHS guess).
+    if _looks_like_single_job_posting_path(urlparse(url).path):
+        return False
     return True
 
 
@@ -998,20 +1076,78 @@ _OBSERVABILITY_RE = re.compile(
     r'(?:datadoghq\.com|dynatrace\.com|newrelic\.com|nr-data\.net|sentry\.io|js\.sentry-cdn\.com|'
     r'appdynamics\.com|instana\.io|splunkcloud\.com)', re.I)
 
-# 2026-09: raised from 20 to 35 — see WEBGRAPH_RANK_BANDS' 2026-09
-# RECALIBRATION comment for the concrete failure case (olphnm.org, a
-# small parish church site with zero other real signals, cleared the old
-# 20-point bar purely off WebGraph rank alone). 35 is chosen specifically
-# so that no single signal in this file — including WebGraph's new,
-# already-lowered S+ ceiling of 20 points — can clear the bar alone
-# anymore; every acceptance now requires at least two independent real
-# signals to combine (e.g. Organization schema + a regulator/registrar
-# listing, both requiring real, checkable filings, sums to exactly 35).
-# This is a deliberate precision-over-recall tradeoff matching the
-# project's new target (established 200+-employee companies specifically,
-# not "any real business") — expect meaningfully fewer archive_ii
-# acceptances than before, by design.
-QUALITY_INDEX_THRESHOLD = 35
+# 2026-09 (this session): three graduated ranks instead of one pass/fail
+# bar — S+ (score>=50), S (score>=35, the old single bar), F (score>=20).
+# See the original 2026-09 RECALIBRATION comment on WEBGRAPH_RANK_BANDS
+# above for the olphnm.org false positive (a small parish church site
+# cleared the old bar purely off WebGraph rank alone) — that history is
+# exactly why a bare score cutoff alone was never going to be safe again
+# once a lower F-tier floor was reintroduced. The actual fix lives in
+# _quality_index_rank() below: it isn't just the score, it's ALSO a
+# composition check — WebGraph-only and weak-signal-only acceptances are
+# rejected outright regardless of score, so neither a bare link-authority
+# rank nor a pile of cheap/common signals (compliance banner, legal-entity
+# suffix, observability tooling) can qualify alone or in combination with
+# each other; something else has to be present too.
+QUALITY_INDEX_F_MIN = 20
+QUALITY_INDEX_THRESHOLD = 35  # "S" — kept as the old name; still referenced elsewhere
+QUALITY_INDEX_SPLUS_MIN = 50
+
+# The two "not enough on their own" buckets _quality_index_rank checks
+# against. webgraph_rank_b/compliance_banner/observability/
+# legal_entity_suffix are ALL nominally 5-point "weak" signals — 5-pointer
+# webgraph_rank_b is listed under the webgraph set, not the weak set, so
+# the two buckets stay disjoint and the composition check below only has
+# to test "is every signal in (webgraph | weak)", not worry about overlap.
+_QUALITY_INDEX_WEBGRAPH_SIGNALS = frozenset({
+    "webgraph_rank_splus", "webgraph_rank_s", "webgraph_rank_a", "webgraph_rank_b",
+})
+_QUALITY_INDEX_WEAK_SIGNALS = frozenset({
+    "compliance_banner", "observability", "legal_entity_suffix",
+})
+
+
+def _quality_index_rank(score: int, signals: list[str]) -> str:
+    """Returns "S+", "S", "F", or "" (reject) — the score decides WHICH
+    rank, but a composition check decides whether the candidate qualifies
+    for any rank at all: if every signal that fired is drawn from
+    WebGraph's rank bands and/or the weak-signal set, this returns ""
+    (reject) no matter how high the score is. This directly closes two
+    confirmed false-positive doors at once — a bare WebGraph rank alone
+    (the historical olphnm.org parish-site case) AND a pile of cheap, near-
+    universal signals alone (a real registered business of any size can
+    trivially clear compliance_banner + legal_entity_suffix + observability
+    without being remotely large) — including the two COMBINED (WebGraph +
+    weak signals only, still nothing substantive), which a simpler
+    "webgraph alone is banned" rule would have missed. At least one signal
+    outside both buckets — org_schema, employee_count, a regulator listing,
+    enterprise martech/HCM/mail-security/ITSM, corp footer links, etc. — is
+    required for a real rank."""
+    if score < QUALITY_INDEX_F_MIN:
+        return ""
+    has_real_signal = any(
+        s not in _QUALITY_INDEX_WEBGRAPH_SIGNALS and s not in _QUALITY_INDEX_WEAK_SIGNALS
+        for s in signals
+    )
+    if not has_real_signal:
+        return ""
+    if score >= QUALITY_INDEX_SPLUS_MIN:
+        return "S+"
+    if score >= QUALITY_INDEX_THRESHOLD:
+        return "S"
+    return "F"
+
+
+# 2026-09: which rank(s) a run should actually persist to archive_ii —
+# opendata_probe.py/common_crawl_probe.py expose this as three independent
+# CLI checkboxes (--include-splus/--include-s/--include-f, S+ and S on by
+# default, F off) rather than the old single QUALITY_INDEX_INCLUDE_F
+# boolean, so a run can take any combination. Threaded through as an
+# explicit parameter (crawl_batch -> crawl_one), not read from the
+# environment at import time, since both probes parse argparse flags AFTER
+# `import node` already ran — an import-time os.environ.get() read here
+# would always see stale/default values.
+DEFAULT_QUALITY_INDEX_INCLUDE_RANKS = frozenset({"S+", "S"})
 
 # ── DNS MX-record provider (2026-09) ────────────────────────────────────
 # Two tiers, scored differently because they mean different things:
@@ -1027,14 +1163,19 @@ QUALITY_INDEX_THRESHOLD = 35
 #  - No MX record, or the lookup times out/fails: no score change either
 #    way — DNS lookups fail for benign, unrelated reasons often enough
 #    that penalizing on a miss would be its own source of noise.
+# 2026-09: raised from 15 to 20 as part of this session's clean 20/15/10/5
+# rescale (see the "SIGNAL RELIABILITY" header comment's 2026-09 update
+# further down) — a dedicated, IT-procured enterprise mail-security
+# gateway is genuinely hard to fake and effectively never present on a
+# tiny operation.
 _MX_ENTERPRISE_GATEWAY_RE = re.compile(
     r'(?:mimecast\.com|pphosted\.com|ppe-hosted\.com|iphmx\.com|barracudanetworks\.com|'
     r'forcepoint\.com|mailcontrol\.com|messagelabs\.com)', re.I)
-# Weighted 2026-09 down to +3 (from +5) in the reliability rebalance —
-# Workspace/M365 is used by companies of every size, including solo
-# founders; it only rules out a dead/parked domain, nothing more.
-_MX_MAINSTREAM_HOSTED_RE = re.compile(
-    r'(?:google\.com|googlemail\.com|aspmx\.l\.google\.com|outlook\.com|protection\.outlook\.com)', re.I)
+# 2026-09: hosted_business_email (Google Workspace/M365 MX, previously +3)
+# REMOVED ENTIRELY at the user's explicit request — Workspace/M365 is used
+# by companies of literally every size including solo founders, so it never
+# said anything about scale, only "this domain has working email" — noise,
+# not signal, for this gate specifically.
 MX_LOOKUP_TIMEOUT = 3.0  # seconds — DNS should be fast; never worth blocking the crawl over
 
 _mx_resolver = None  # lazy singleton, reused across every crawl_one call
@@ -1069,9 +1210,7 @@ async def _mx_provider_score(domain: str) -> tuple[int, str | None]:
     if not hosts:
         return 0, None
     if _MX_ENTERPRISE_GATEWAY_RE.search(hosts):
-        return 15, "enterprise_mail_security"
-    if _MX_MAINSTREAM_HOSTED_RE.search(hosts):
-        return 3, "hosted_business_email"
+        return 20, "enterprise_mail_security"
     return 0, None
 
 
@@ -1196,8 +1335,8 @@ WEBGRAPH_RANK_BANDS = (
     # see this section's 2026-09 RECALIBRATION comment above for why.
     ("S+", 1_000_000, 20),
     ("S", 10_000_000, 15),
-    ("A", 25_000_000, 12),
-    ("B", 40_000_000, 8),
+    ("A", 25_000_000, 10),  # 2026-09: 12 -> 10, part of the clean 20/15/10/5 rescale
+    ("B", 40_000_000, 5),   # 2026-09: 8 -> 5, same rescale
 )
 
 _webgraph_ranks: dict[str, str] | None = None  # domain -> band label ("S+".."B"), lazy singleton
@@ -1395,11 +1534,52 @@ async def _webgraph_score(session: aiohttp.ClientSession, domain: str) -> tuple[
     return 0, None
 
 
+# 2026-09: three new signals added on top of the existing set, all held to
+# the same "SURE this is medium-to-large-corporation-specific" bar the user
+# set — no new government-registry/regulator-style signal (the just-
+# completed SEC IAPD/FINRA research showed the bulk of registrants there
+# are small; not worth repeating that mistake with a new registry).
+#
+# enterprise_hcm: Workday, SAP SuccessFactors, and UKG (formerly Ultimate
+# Software — ultipro.com is its still-live legacy domain) are dedicated
+# Human Capital Management platforms — six-to-seven-figure, months-long
+# implementations bought by companies with a real, sizable HR function.
+# A two-person shop never runs one of these; this is as hard to fake as
+# the existing enterprise_martech/enterprise_mail_security signals, and
+# arguably a stronger scale tell since these products are specifically
+# priced/scaled for hundreds-to-thousands of employees.
+_ENTERPRISE_HCM_RE = re.compile(
+    r'(?:myworkday\.com|workday\.com|successfactors\.com|successfactors\.eu|'
+    r'ultipro\.com|ukg\.com|ukg\.net)', re.I)
+# credit_rating_mention: a bond/credit rating from Moody's, S&P Global
+# Ratings, or Fitch is issued only to organizations raising debt at real
+# scale — rating agencies charge substantial fees and only rate
+# established borrowers, making this a hard-to-fake, if less common,
+# signal of real financial scale. Not a government/regulator signal (these
+# are private rating agencies), so it's outside the "skip the registry
+# signal" guidance from the SEC research above.
+_CREDIT_RATING_MENTION_RE = re.compile(
+    r'(?:moodys\.com|spglobal\.com/ratings|standardandpoors\.com|fitchratings\.com)', re.I)
+# enterprise_itsm: ServiceNow is an enterprise IT-service-management
+# platform — real, but adopted by upper-mid-size orgs too (not as
+# exclusively "large" as the HCM platforms above), so weighted one tier
+# lower.
+_ENTERPRISE_ITSM_RE = re.compile(r'(?:service-now\.com|servicenow\.com)', re.I)
+
+
 def _quality_index_score(html: str) -> tuple[int, list[str]]:
     """Scores how much a homepage looks like an established, multi-person
     company site rather than a micro-site — purely from HTML already in
     hand (no extra requests). Returns (score, [matched signal names]) —
-    the names are for stats/debugging, not stored anywhere yet."""
+    the names are for stats/debugging, not stored anywhere yet.
+
+    2026-09: points rescaled onto one clean 20/15/10/5 scale (nothing in
+    between) across every signal in this function and in
+    _quality_index_score_async below, based on how hard a signal is to
+    fake AND how specifically it correlates with an established
+    medium-to-large company (not just "a real registered business of any
+    size") — see WEBGRAPH_RANK_BANDS' matching rescale and this section's
+    own new-signal comments above for the same reasoning applied there."""
     score = 0
     signals: list[str] = []
     if _ORG_SCHEMA_TYPE_RE.search(html):
@@ -1407,13 +1587,23 @@ def _quality_index_score(html: str) -> tuple[int, list[str]]:
         signals.append("org_schema")
         employee_match = _ORG_EMPLOYEE_COUNT_RE.search(html)
         if employee_match and int(employee_match.group(1)) >= EMPLOYEE_COUNT_MIN_FOR_CREDIT:
-            score += 10
+            # 2026-09: raised 10 -> 20 — the single most DIRECT size claim
+            # in this whole function (an explicit >=200-employee number),
+            # now weighted as a top-tier signal instead of a moderate one.
+            score += 20
             signals.append("employee_count")
         if _ORG_AUTHORITY_SAMEAS_RE.search(html):
             score += 10
             signals.append("authority_sameas")
         if _ORG_REGULATOR_SAMEAS_RE.search(html):
-            score += 20
+            # 2026-09: lowered 20 -> 10 — this session's own research (SEC
+            # IAPD/FINRA registrant-size data) confirmed what this
+            # signal's own long-standing comment already said: a company/
+            # financial registry covers businesses of every size, not just
+            # large ones. Still hard to fake (a real legal filing), so it
+            # stays a real contributor — just no longer weighted as if it
+            # were scale-specific evidence.
+            score += 10
             signals.append("regulator_listing")
     if _CORP_FOOTER_LINKS_RE.search(html):
         score += 15
@@ -1430,6 +1620,15 @@ def _quality_index_score(html: str) -> tuple[int, list[str]]:
     if _LEGAL_ENTITY_SUFFIX_RE.search(html):
         score += 5
         signals.append("legal_entity_suffix")
+    if _ENTERPRISE_HCM_RE.search(html):
+        score += 20
+        signals.append("enterprise_hcm")
+    if _CREDIT_RATING_MENTION_RE.search(html):
+        score += 15
+        signals.append("credit_rating_mention")
+    if _ENTERPRISE_ITSM_RE.search(html):
+        score += 10
+        signals.append("enterprise_itsm")
     return score, signals
 
 
@@ -1475,7 +1674,11 @@ async def _wikipedia_mention_score(session: aiohttp.ClientSession, html: str,
     except Exception:
         return 0, None
     if domain.lower() in article_html.lower():
-        return 15, "wikipedia_mention_verified"
+        # 2026-09: raised 15 -> 20 — this is the one fully independently
+        # VERIFIED signal in the whole file (a live fetch confirming a real
+        # external page really does reference this domain), arguably as
+        # hard to fake as WebGraph's link-authority measure.
+        return 20, "wikipedia_mention_verified"
     return 0, None
 
 
@@ -1527,6 +1730,17 @@ def log_quality_index_summary(stats: dict) -> None:
     accepted = stats.get("quality_gated_accepted", 0)
     if not accepted:
         return
+    # 2026-09: rank breakdown alongside the existing signal-mix line — every
+    # candidate's actual score/rank is already logged individually as it's
+    # checked (see crawl_one's gate block); this is just the run-level
+    # roll-up of what was actually accepted.
+    rank_prefix = "quality_rank__"
+    rank_counts = {k[len(rank_prefix):]: v for k, v in stats.items() if k.startswith(rank_prefix)}
+    if rank_counts:
+        rank_breakdown = "  ".join(f"{name}={count:,} ({count / accepted * 100:.1f}%)"
+                                    for name, count in sorted(rank_counts.items(),
+                                                               key=lambda kv: -kv[1]))
+        log.info(f"  Quality Index rank breakdown ({accepted:,} accepted this run): {rank_breakdown}")
     prefix = "quality_signal__"
     signal_counts = {k[len(prefix):]: v for k, v in stats.items() if k.startswith(prefix)}
     if not signal_counts:
@@ -1825,6 +2039,7 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                      target_geo_countries: set[str] = ACCEPT_ANY_COUNTRY,
                      capture_inhouse: bool = True,
                      apply_maturity_gate: bool = True,
+                     quality_index_include_ranks: frozenset[str] = DEFAULT_QUALITY_INDEX_INCLUDE_RANKS,
                      ) -> tuple[list[tuple[str, str, str, str, str, str | None, str | None]], dict | None]:
     """Homepage -> career paths -> sitemap (guessed, then robots.txt).
     Every page fetched at a hit-bearing tier is merged (_collapse_hits),
@@ -1847,10 +2062,14 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
     instead, or no page cleared the quality gate)."""
     loop = asyncio.get_running_loop()
 
-    def _capture(career_url: str) -> dict:
-        return {
+    def _capture(career_url: str, qi_score: int | None = None, qi_rank: str | None = None) -> dict:
+        row = {
             "career_page_url": career_url, "website_url": f"https://{domain}",
         }
+        if qi_score is not None:
+            row["qi_score"] = qi_score
+            row["qi_rank"] = qi_rank or None
+        return row
 
     async with sem:
         stats["companies_attempted"] += 1
@@ -2003,25 +2222,35 @@ async def crawl_one(session: aiohttp.ClientSession, sem: asyncio.Semaphore, doma
                 # (in-house capture); archive_i (known-ATS hits, returned
                 # earlier in this function) is never touched by this.
                 quality_score, quality_signals = await _quality_index_score_async(session, html, domain)
-                if quality_score < QUALITY_INDEX_THRESHOLD:
+                quality_rank = _quality_index_rank(quality_score, quality_signals)
+                # 2026-09: EVERY candidate reaching this gate is logged at
+                # INFO with its actual score+rank, not just the ones that
+                # get accepted — the user explicitly asked to be able to
+                # see where each entry ranks, accepted or not.
+                log.info(f"  archive_ii candidate: {domain} QI score={quality_score} "
+                         f"rank={quality_rank or 'reject'} signals={quality_signals}")
+                if not quality_rank or quality_rank not in quality_index_include_ranks:
                     stats["inhouse_dropped_low_quality"] += 1
-                    log.debug(f"  archive_ii candidate dropped (Quality Index={quality_score} "
-                              f"< {QUALITY_INDEX_THRESHOLD}, signals={quality_signals}): {domain}")
                     return [], None
-                # 2026-09: per-signal acceptance tally — lets a run report
-                # "what % of accepted archive_ii entries used each signal"
-                # (see opendata_probe.py/common_crawl_probe.py's end-of-run
+                # 2026-09: per-signal AND per-rank acceptance tallies — lets
+                # a run report "what % of accepted archive_ii entries used
+                # each signal" and "how many landed at each rank" (see
+                # opendata_probe.py's/common_crawl_probe.py's end-of-run
                 # summary) instead of just the pass/fail count above, which
-                # said nothing about WHICH signals actually did the work.
-                # quality_gated_accepted is the denominator: only entries
-                # that actually went through this gate (apply_maturity_gate
-                # True) ever computed quality_signals at all — a
-                # capture_inhouse_domains-based caller's accepted rows never
-                # reach this branch, so they're correctly excluded rather
-                # than silently diluting the percentages.
+                # said nothing about WHICH signals did the work or how
+                # entries split across S+/S/F. quality_gated_accepted is the
+                # denominator: only entries that actually went through this
+                # gate (apply_maturity_gate True) ever computed
+                # quality_signals at all — a capture_inhouse_domains-based
+                # caller's accepted rows never reach this branch, so they're
+                # correctly excluded rather than silently diluting the
+                # percentages.
                 stats["quality_gated_accepted"] += 1
+                stats[f"quality_rank__{quality_rank}"] += 1
                 for signal_name in quality_signals:
                     stats[f"quality_signal__{signal_name}"] += 1
+                stats["inhouse_career_page_captured"] += 1  # -> archive_ii
+                return [], _capture(best_inhouse["url"], quality_score, quality_rank)
             stats["inhouse_career_page_captured"] += 1  # -> archive_ii
             return [], _capture(best_inhouse["url"])
         return [], None
@@ -2249,7 +2478,11 @@ async def write_career_pages_to_archive_ii(session: aiohttp.ClientSession, rows:
     """rows: {"career_page_url","website_url",
     "discovery_method"} (from crawl_one's career_page_capture — only ever
     produced when no known ATS matched — plus discovery_method attached by
-    crawl_batch). Upserts on website_url (2026-08: root_domain was dropped
+    crawl_batch), plus two optional keys — "qi_score"/"qi_rank" — present
+    only for rows that actually went through the Quality Index gate (see
+    crawl_one's apply_maturity_gate branch); a capture_inhouse_domains-based
+    caller's rows never carry these two keys at all, matching the columns'
+    own nullability. Upserts on website_url (2026-08: root_domain was dropped
     as a pure duplicate of this field, so website_url is now archive_ii's
     identity key instead) — a re-crawled company updates career_page_url
     in place rather than duplicating. date_added is deliberately left OUT
@@ -2672,6 +2905,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
                        capture_inhouse_domains: set[str] | None = None,
                        shard_index: int | None = None, shard_count: int | None = None,
                        start_at: int = 0,
+                       quality_index_include_ranks: frozenset[str] = DEFAULT_QUALITY_INDEX_INCLUDE_RANKS,
                        ) -> tuple[int, float, float, bool]:
     """Crawls a list of domains in sub-batches, writing each sub-batch to
     Supabase as it completes. One driver for every seed source — used to
@@ -2748,7 +2982,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     apply_maturity_gate = capture_inhouse_domains is None
 
     tasks = [crawl_one(session, sem, d, stats, parse_pool, target_geo_countries, _capture_for(d),
-                        apply_maturity_gate)
+                        apply_maturity_gate, quality_index_include_ranks)
              for d in domains]
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
