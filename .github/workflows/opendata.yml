@@ -40,6 +40,21 @@ on:
         description: "Resume override per shard. Blank = auto-resume. 0 = full restart"
         required: false
         default: ""
+      quality_index_include_splus:
+        description: "Quality Index: include S+ rank candidates"
+        required: false
+        type: boolean
+        default: true
+      quality_index_include_s:
+        description: "Quality Index: include S rank candidates"
+        required: false
+        type: boolean
+        default: true
+      quality_index_include_f:
+        description: "Quality Index: include F rank candidates (loosest tier)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: opendata-${{ github.ref }}
@@ -193,9 +208,16 @@ jobs:
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
             RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
+          # 2026-09: three independent Quality Index rank checkboxes — see
+          # opendata_probe.py's --include-splus/--include-s/--include-f
+          # (argparse.BooleanOptionalAction). ${{ }} always renders 'true'
+          # or 'false' for a boolean input, so this just picks the matching flag.
           python OpenData/opendata_probe.py \
             --shard-index ${{ matrix.shard }} \
             --shard-count ${{ github.event.inputs.shard_count || '15' }} \
             --concurrency ${{ github.event.inputs.concurrency || '400' }} \
             --time-budget-minutes ${{ github.event.inputs.run_time_minutes || '330' }} \
+            --${{ github.event.inputs.quality_index_include_splus == 'false' && 'no-include-splus' || 'include-splus' }} \
+            --${{ github.event.inputs.quality_index_include_s == 'false' && 'no-include-s' || 'include-s' }} \
+            --${{ github.event.inputs.quality_index_include_f == 'true' && 'include-f' || 'no-include-f' }} \
             "${RESTART_ARGS[@]}"
