@@ -101,13 +101,31 @@ _exhausted_providers_today: set[str] = set()
 _exhausted_providers_lock = threading.Lock()
 
 
+def _mark_exhausted(name: str, reason: str) -> None:
+    """2026-09 (explicit user request): 'should any provider fail, it's
+    immediately logged, no more traffic goes to it, and its remaining
+    work is rerouted to the other free providers.' Originally this only
+    fired for a confirmed DAILY quota error; now it fires for ANY reason
+    _ai_call gives up on a provider — exhausted retries, a hard non-
+    retryable API error, all of it. Logs once per provider per run (not
+    once per failed batch — a struggling provider can fail many batches
+    in a row, and this project's own logs got noisy from that before),
+    then every later call short-circuits instantly with no network hit."""
+    with _exhausted_providers_lock:
+        already_known = name in _exhausted_providers_today
+        _exhausted_providers_today.add(name)
+    if not already_known:
+        log.error(f"{name} failed ({reason}) — no more traffic to {name} for the rest of this run, "
+                  f"rerouting its remaining work to other providers")
+
+
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
     Returns response text or None on failure."""
     name = provider["name"]
     if name in _exhausted_providers_today:
-        # Already confirmed out for today (see is_daily_limit below) —
-        # skip the wasted network call and the repeat log line entirely.
+        # Already confirmed out for this run (see _mark_exhausted) — skip
+        # the wasted network call and the repeat log line entirely.
         # Callers see this exactly like any other failed call (None), so
         # the existing cross-provider failover path still applies.
         return None
@@ -136,6 +154,7 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_BASE_DELAY)
                     continue
+                _mark_exhausted(name, "returned null content after all retries")
                 return None
             return content.strip()
         except Exception as e:
@@ -169,19 +188,21 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
             )
 
             if is_daily_limit:
-                with _exhausted_providers_lock:
-                    already_known = name in _exhausted_providers_today
-                    _exhausted_providers_today.add(name)
-                if not already_known:
-                    log.error(f"{name} daily quota reached — skipping remaining AI calls for {name} today")
+                _mark_exhausted(name, "daily quota reached")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
                 log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
                 time.sleep(delay)
                 continue
-            log.error(f"{name} API error (attempt {attempt + 1}): {e}")
+            # Every remaining path is a genuine give-up on this provider
+            # for this call — exhausted retries on an ordinary rate limit,
+            # or any other non-retryable API error. Per the circuit-breaker
+            # policy above, this now marks the provider exhausted for the
+            # rest of the run too, not just this one batch.
+            _mark_exhausted(name, f"API error: {e}")
             return None
+    _mark_exhausted(name, "exhausted all retries")
     return None
 
 
@@ -531,7 +552,7 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     # no other signal, so if a provider's API key is missing this run,
     # that's the single most useful line for explaining an unexpectedly
     # low role-match count.
-    _known_role_providers = {"groq", "nvidia"}
+    _known_role_providers = {"gemini", "groq"}
     _active = {p["name"] for p in providers}
     _missing = _known_role_providers - _active
     if _missing:
@@ -1536,7 +1557,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     # were actually left — nothing said the others were missing. This is
     # the single most likely explanation for "why did so few jobs get a
     # real AI verdict this run."
-    _known_location_providers = {"gemini", "openai", "nvidia"}
+    _known_location_providers = {"nvidia", "openai", "groq"}
     _active = {p["name"] for p in providers}
     _missing = _known_location_providers - _active
     if _missing:
