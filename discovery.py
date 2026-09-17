@@ -836,13 +836,45 @@ _BARE_HEX_HASH_RE = re.compile(r"^[0-9a-f]{16,64}$", re.I)
 # shared guard.
 _LOCALE_CODE_RE = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
 
+# 2026-09: confirmed real contamination — "executive-director-job-description"
+# came in via fetch_feashliaa_slugs() (the GitHub bulk-slug source), which
+# already calls _looks_like_real_slug() on every candidate, and STILL got
+# through: this guard had nothing that checked for "this reads like a
+# specific JOB POSTING's own title, not a company tenant slug" — a source's
+# own upstream scrape can mislabel a job-title-derived string as if it were
+# a company slug, and a live per-ATS verifier later (Verification/
+# verification.py) only checks whether the page responds, which a real
+# job-shaped URL often does, so a bad-shape row can slip past BOTH the
+# ingestion guard and the liveness check. Same reasoning/pattern as node.py's
+# _looks_like_single_job_posting_path (career-page context) — kept as
+# separate regexes here rather than a shared import since this operates on
+# a bare slug string, not a URL path, and discovery.py has no existing
+# dependency on node.py to justify adding one just for this.
+_JOB_POSTING_SLUG_SUFFIX_RE = re.compile(
+    r"-(?:job-description|job-details?|jobdescription|jobdetails?|"
+    r"position-details?|position-description|role-details?|"
+    r"job-posting|jobposting|job-vacancy|vacancy-details?|"
+    r"job-listing|job-opening)$", re.I)
+_JOB_POSTING_TRAILING_ID_RE = re.compile(r"-\d{3,}$")
+_JOB_ROLE_ENDING_WORDS_RE = re.compile(
+    r"-(?:manager|director|specialist|coordinator|analyst|engineer|executive|officer|"
+    r"assistant|associate|representative|supervisor|administrator|technician|consultant|"
+    r"lead|head)$", re.I)
+_JOB_POSTING_TITLE_WORDS_RE = re.compile(
+    r"\b(?:job|jobs|position|vacancy|vacancies|posting|opening|openings)\b", re.I)
+
 
 def _looks_like_real_slug(candidate: str) -> bool:
     """Shared guard for path-segment-based extractors: rejects the
     confirmed-in-production shapes of "this isn't a company slug" — a
     filename with a known static-asset extension, a bare hex hash/id with
-    no extension at all (e.g. a CDN object key), or a bare locale code
-    (e.g. "en-US") picked up from a locale-prefixed path."""
+    no extension at all (e.g. a CDN object key), a bare locale code (e.g.
+    "en-US") picked up from a locale-prefixed path, or (2026-09) a string
+    that reads like one specific job posting's own title rather than a
+    company tenant name (a job-posting-page marker suffix, a trailing
+    multi-word numeric posting/req ID, or a specific job-title word
+    combined with "job"/"position"/"vacancy"/"posting"/"opening" appearing
+    anywhere in the string)."""
     if not candidate:
         return False
     if _ASSET_FILENAME_RE.search(candidate):
@@ -850,6 +882,12 @@ def _looks_like_real_slug(candidate: str) -> bool:
     if _BARE_HEX_HASH_RE.match(candidate):
         return False
     if _LOCALE_CODE_RE.match(candidate):
+        return False
+    if _JOB_POSTING_SLUG_SUFFIX_RE.search(candidate):
+        return False
+    if _JOB_POSTING_TRAILING_ID_RE.search(candidate) and candidate.count("-") >= 2:
+        return False
+    if _JOB_ROLE_ENDING_WORDS_RE.search(candidate) and _JOB_POSTING_TITLE_WORDS_RE.search(candidate):
         return False
     return True
 
