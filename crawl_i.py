@@ -376,24 +376,39 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 matched_confidences.append("match")
-            # "uncertain" and "no_match" → both DROP (2026-09 policy change,
-            # explicit user request). Previously "uncertain" was KEPT at
-            # PRIORITY_UNSURE ("plausible match, benefit of the doubt") —
-            # real case that closed this: a GFL Environmental "Account
-            # Manager" posting in Indianapolis, IN (careers.gflenv.com,
-            # confirmed via direct Supabase lookup: location="" — the
-            # crawler never captured any location text for it at all — and
-            # location_priority=3/PRIORITY_UNSURE) got written to the jobs
-            # table despite being an ordinary local US role with zero
-            # global-hiring evidence anywhere. "We don't know" was being
-            # treated as "maybe include it" instead of what it actually is:
-            # no evidence this role is open globally. Only an AFFIRMATIVE
-            # match_global/match_africa signal (keyword or AI) keeps a job
-            # now; PRIORITY_UNSURE/"kept at lower confidence" no longer
-            # exists as an outcome. A provider that never got to look at
-            # the job at all (see no_ai_read in ai_classify_locations) is
-            # exactly as unproven as a provider that looked and said
-            # UNCERTAIN — same drop, no special case for either.
+            elif label == "uncertain" and provider_name is not None:
+                # 2026-09 policy change (refined per explicit user
+                # follow-up): a GENUINE AI-reviewed uncertainty — the AI
+                # actually read the title/description and still couldn't
+                # tell — is kept at PRIORITY_UNSURE, same as before. What
+                # changed is the OTHER case: provider_name is None exactly
+                # when no provider ever actually classified this job (see
+                # ai_classify_locations' results default of
+                # ('uncertain', None) — every real classification writes a
+                # non-None provider_name, so None only survives here if
+                # every provider failed/was exhausted/was never reached).
+                # That "never reviewed at all" case used to be
+                # indistinguishable from a genuine AI verdict and got kept
+                # right alongside it — real case that closed this: a GFL
+                # Environmental "Account Manager" posting in Indianapolis,
+                # IN (careers.gflenv.com, confirmed via direct Supabase
+                # lookup: location="" — the crawler never captured any
+                # location text for it — and location_priority=3) got
+                # written to the jobs table despite being an ordinary
+                # local US role with zero global-hiring evidence anywhere
+                # AND, separately, a real extraction bug that meant the AI
+                # never got a clean look at its actual location text
+                # either (see ats_scrapers.py/crawl_ii.py fixes). Both
+                # regex AND a genuine AI review coming back empty-handed
+                # is a real "we looked and couldn't tell" — worth keeping
+                # at low confidence. Never having a provider actually
+                # review the job at all is not that; it's dropped now.
+                job["clearance"] = provider_name
+                job["location_priority"] = PRIORITY_UNSURE
+                matched.append(job)
+                matched_confidences.append("uncertain")
+            # "no_match" → drop. "uncertain" with provider_name is None
+            # (no provider ever actually reviewed this job) → also drop.
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
