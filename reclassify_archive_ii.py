@@ -65,11 +65,10 @@ sys.path.insert(0, _MAIN_DIR)
 
 import node  # noqa: E402 — reuse detect_page_hits, _follow_career_listing_links,
              # _best_inhouse_candidate, _fetch_page, _collapse_hits, new_connector,
-             # new_parse_pool, write_ats_hits_to_archive_i, _quality_index_score_async,
-             # _quality_index_rank
+             # new_parse_pool, write_ats_hits_to_archive_i
 from supabase_handler import (  # noqa: E402
     get_archive_ii_pages, delete_archive_ii_rows, update_archive_ii_career_pages,
-    update_archive_ii_quality_scores, SupabaseFetchError, log_egress_summary,
+    SupabaseFetchError, log_egress_summary,
 )
 
 logging.basicConfig(
@@ -82,36 +81,15 @@ CONCURRENCY = int(os.environ.get("RECLASSIFY_CONCURRENCY", "60"))
 TIME_BUDGET_MINUTES = int(os.environ.get("RECLASSIFY_TIME_BUDGET_MINUTES", "300"))
 
 
-def _domain_from_website_url(website_url: str) -> str:
-    """archive_ii.website_url is always stored as a bare "https://{domain}"
-    (see node.py's crawl_one._capture) — this just strips the scheme (and
-    a leading "www." for safety, in case an older row predates that
-    convention) so node._quality_index_score_async has the plain domain it
-    needs for its MX/WebGraph lookups."""
-    netloc = urlparse(website_url).netloc or website_url
-    return netloc[4:] if netloc.startswith("www.") else netloc
-
-
 async def reclassify_row(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                           parse_pool: concurrent.futures.Executor, row: dict,
                           stats: dict) -> dict | None:
     """Visits one archive_ii row's career_page_url and decides its fate.
-    Returns None (bad data, or the page is unreachable — genuinely nothing
-    to do) or a dict describing the write(s) to make:
+    Returns None (leave alone) or a dict describing the write to make:
     {"action": "promote", "website_url", "hit_rows": [(ats, slug, matched_url), ...]}
-      — no "quality" key: the row is about to be DELETED from archive_ii
-      (promoted to archive_i instead), so reranking it would be wasted work.
-    {"action": "update", "website_url", "career_page_url", "quality": {"qi_score", "qi_rank"}}
-      — a better in-house page was found; quality is reranked against THAT
-      page's content, since that's what the row will point at going forward.
-    {"website_url", "quality": {"qi_score", "qi_rank"}}
-      — no "action" key: nothing better found than what's already on file,
-      but the row still gets its Quality Index rerun against the currently-
-      captured content and its qi_score/qi_rank refreshed regardless (2026-09,
-      added at the user's request — every row in the table should reflect
-      the CURRENT scoring rules, not just newly-captured ones going forward).
+    {"action": "update", "website_url", "career_page_url"}
     Never raises — a dead page, timeout, or parse failure is just another
-    "nothing to do", same as every other tier in node.py's crawl_one."""
+    "leave alone", same as every other tier in node.py's crawl_one."""
     async with sem:
         stats["rows_attempted"] += 1
         career_url = row.get("career_page_url")
@@ -151,21 +129,13 @@ async def reclassify_row(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                     "hit_rows": list(merged)}
 
         best_inhouse = node._best_inhouse_candidate([candidate] + follow_results, origin)
-        domain = _domain_from_website_url(website_url)
-        rerank_html = html
-        result: dict = {"website_url": website_url}
         if best_inhouse and best_inhouse["url"] not in (final_url, career_url):
             stats["updated_inhouse"] += 1
-            result["action"] = "update"
-            result["career_page_url"] = best_inhouse["url"]
-            rerank_html = best_inhouse["html"]
-        else:
-            stats["kept_unchanged"] += 1
+            return {"action": "update", "website_url": website_url,
+                    "career_page_url": best_inhouse["url"]}
 
-        qi_score, qi_signals = await node._quality_index_score_async(session, rerank_html, domain)
-        qi_rank = node._quality_index_rank(qi_score, qi_signals)
-        result["quality"] = {"qi_score": qi_score, "qi_rank": qi_rank}
-        return result
+        stats["kept_unchanged"] += 1
+        return None
 
 
 async def _run_shard(shard: int, total_shards: int) -> None:
@@ -194,7 +164,6 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     promote_hit_rows = []       # flattened (ats, slug, matched_url, website_url) for logging
     promote_website_urls = set()
     update_rows = []            # {"career_page_url","website_url","discovery_method"}
-    quality_update_rows = []    # {"website_url","qi_score","qi_rank"} — every non-promoted row
 
     try:
         async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
@@ -214,32 +183,20 @@ async def _run_shard(shard: int, total_shards: int) -> None:
                 for decision in results:
                     if not decision:
                         continue
-                    action = decision.get("action")
-                    if action == "promote":
+                    if decision["action"] == "promote":
                         promote_website_urls.add(decision["website_url"])
                         for ats, slug, matched_url in decision["hit_rows"]:
                             promote_hit_rows.append({
                                 "ats": ats, "slug": slug,
                                 "discovery_method": "archive_ii",
                             })
-                        continue  # about to be deleted — never rerank a promoted row
-                    if action == "update":
+                    elif decision["action"] == "update":
                         update_rows.append({
                             "career_page_url": decision["career_page_url"],
                             "website_url": decision["website_url"],
                         })
-                    # 2026-09: every row that wasn't promoted — whether its
-                    # career_page_url changed or was left exactly as-is —
-                    # gets its Quality Index rerun and its qi_score/qi_rank
-                    # refreshed, so archive_ii always reflects the CURRENT
-                    # scoring rules, not just whatever they were when the
-                    # row was first captured.
-                    quality = decision.get("quality")
-                    if quality:
-                        quality_update_rows.append({"website_url": decision["website_url"], **quality})
                 log.info(f"  ...{min(i + BATCH, len(rows))}/{len(rows)} rows checked "
-                         f"({len(promote_website_urls)} to promote, {len(update_rows)} to update, "
-                         f"{len(quality_update_rows)} reranked so far)")
+                         f"({len(promote_website_urls)} to promote, {len(update_rows)} to update so far)")
 
             # 2026-09 fix: dedupe by each write's own on_conflict key before
             # sending. A single upsert command touching the same conflict
@@ -267,11 +224,6 @@ async def _run_shard(shard: int, total_shards: int) -> None:
                 update_rows = list({r["website_url"]: r for r in update_rows}.values())
                 log.warning(f"  {before - len(update_rows)} duplicate website_url update(s) collapsed "
                             f"before writing to archive_ii")
-            if len(quality_update_rows) != len({r["website_url"] for r in quality_update_rows}):
-                before = len(quality_update_rows)
-                quality_update_rows = list({r["website_url"]: r for r in quality_update_rows}.values())
-                log.warning(f"  {before - len(quality_update_rows)} duplicate website_url rerank(s) "
-                            f"collapsed before writing qi_score/qi_rank")
 
             written_archive_i = 0
             if promote_hit_rows:
@@ -308,14 +260,8 @@ async def _run_shard(shard: int, total_shards: int) -> None:
             written_archive_ii = 0
             if update_rows:
                 written_archive_ii = update_archive_ii_career_pages(update_rows)
-
-            written_quality = 0
-            if quality_update_rows:
-                written_quality = update_archive_ii_quality_scores(quality_update_rows)
     finally:
         parse_pool.shutdown(wait=False)
-
-    rank_breakdown = node.Counter(r["qi_rank"] or "reject" for r in quality_update_rows)
 
     log.info("── Summary ──")
     log.info(f"  Rows checked: {stats['rows_attempted']} attempted, {stats['page_unreachable']} unreachable")
@@ -325,8 +271,6 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     log.info(f"  Left unchanged: {stats['kept_unchanged']}")
     log.info(f"  Career-link follow: {stats['career_link_follow_attempted']} links followed, "
              f"{stats['career_link_follow_ats_hit']} of those hit a known ATS")
-    log.info(f"  Reranked: {written_quality}/{len(quality_update_rows)} rows written "
-             f"— {dict(rank_breakdown)}")
 
     log_egress_summary(label=f"reclassify_archive_ii shard {shard}/{total_shards}")
 
