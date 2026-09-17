@@ -28,6 +28,7 @@ adds more capacity.
 import re
 import time
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
 import geo
@@ -85,11 +86,31 @@ _last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
 for _p in LOCATION_PROVIDERS:
     _last_call_times[_p["name"]] = 0.0
 
+# 2026-09: once a provider hits its DAILY quota (not an ordinary transient
+# rate limit — see is_daily_limit below), retrying it again later in the
+# SAME run is guaranteed to fail immediately: a daily quota only resets
+# once a day, never mid-run. Previously every subsequent batch still got
+# sent to that provider anyway, each wasting a real HTTP round trip and
+# re-logging the identical "daily quota reached" error line — confirmed
+# live (the same "gemini daily quota reached" message repeating for the
+# rest of a run). Tracked at MODULE level, shared by role AND location
+# classification (a provider name like "nvidia" is the same underlying
+# account/quota for both stages), reset only by a fresh process start —
+# which matches how this project actually runs (one process per CI job).
+_exhausted_providers_today: set[str] = set()
+_exhausted_providers_lock = threading.Lock()
+
 
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
     Returns response text or None on failure."""
     name = provider["name"]
+    if name in _exhausted_providers_today:
+        # Already confirmed out for today (see is_daily_limit below) —
+        # skip the wasted network call and the repeat log line entirely.
+        # Callers see this exactly like any other failed call (None), so
+        # the existing cross-provider failover path still applies.
+        return None
     interval = provider.get("min_call_interval", 0.0)
 
     if interval > 0:
@@ -148,7 +169,11 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
             )
 
             if is_daily_limit:
-                log.error(f"{name} daily quota reached — skipping remaining AI calls for {name} today")
+                with _exhausted_providers_lock:
+                    already_known = name in _exhausted_providers_today
+                    _exhausted_providers_today.add(name)
+                if not already_known:
+                    log.error(f"{name} daily quota reached — skipping remaining AI calls for {name} today")
                 return None
             if is_rate_limit and attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
@@ -164,7 +189,14 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
 # STAGE 1 & 2: ROLE CLASSIFICATION
 # ═══════════════════════════════════════════════════════
 
-INCLUDE_KEYWORDS = [
+# 2026-09: split into 4 named category lists (CS/AM/PM/OM) so every job
+# can be tagged with which of the 4 this project actually recruits for —
+# see classify_role_category() below and its "role_category" DB column
+# (explicit user request). INCLUDE_KEYWORDS itself is unchanged (still the
+# flat concatenation every existing keyword_classify_role() call site
+# already expects) — this is a pure refactor of how the list is BUILT,
+# not a behavior change to role keyword matching.
+CS_KEYWORDS = [
     # Customer/Client Success
     r"customer\s*success", r"client\s*success", r"partner\s*success",
     r"merchant\s*success", r"\bcsm\b", r"success\s*manager",
@@ -196,6 +228,18 @@ INCLUDE_KEYWORDS = [
     # Customer/Client Advocate
     r"customer\s*advocate", r"client\s*advocate",
 
+    # Retention / Renewal (customer-success-adjacent, not its own category)
+    r"customer\s*retention", r"client\s*retention",
+    r"retention\s*(manager|lead|specialist|director)",
+    r"renewal\s*(manager|lead|specialist|director)",
+
+    # Onboarding / Implementation (customer-facing, same reasoning)
+    r"customer\s*onboarding", r"client\s*onboarding",
+    r"onboarding\s*(manager|lead|specialist)",
+    r"implementation\s*(manager|lead|specialist|consultant)",
+]
+
+AM_KEYWORDS = [
     # Account Management
     r"account\s*manager", r"account\s*management",
     r"client\s*account\s*manag", r"customer\s*account\s*manag",
@@ -206,17 +250,9 @@ INCLUDE_KEYWORDS = [
     r"global\s*account\s*manag", r"account\s*lead", r"account\s*director",
     r"senior\s*account\s*manag", r"junior\s*account\s*manag",
     r"account\s*executive\s*.*(?:success|retention|renewal)",
+]
 
-    # Retention / Renewal
-    r"customer\s*retention", r"client\s*retention",
-    r"retention\s*(manager|lead|specialist|director)",
-    r"renewal\s*(manager|lead|specialist|director)",
-
-    # Onboarding / Implementation (customer-facing)
-    r"customer\s*onboarding", r"client\s*onboarding",
-    r"onboarding\s*(manager|lead|specialist)",
-    r"implementation\s*(manager|lead|specialist|consultant)",
-
+PM_KEYWORDS = [
     # Project Management
     r"project\s*manag(?:er|ement)", r"project\s*lead\b",
     r"project\s*director", r"project\s*coordinator",
@@ -226,7 +262,9 @@ INCLUDE_KEYWORDS = [
     r"technical\s*project\s*manag", r"it\s*project\s*manag",
     r"digital\s*project\s*manag", r"senior\s*project\s*manag",
     r"junior\s*project\s*manag",
+]
 
+OM_KEYWORDS = [
     # Operations Manager / Management
     r"operations\s*manag(?:er|ement)", r"operations\s*lead\b",
     r"operations\s*director", r"operations\s*coordinator",
@@ -237,6 +275,45 @@ INCLUDE_KEYWORDS = [
     r"global\s*operations\s*manag", r"senior\s*operations\s*manag",
     r"junior\s*operations\s*manag", r"head\s*of\s*.*operations",
 ]
+
+INCLUDE_KEYWORDS = CS_KEYWORDS + AM_KEYWORDS + PM_KEYWORDS + OM_KEYWORDS
+
+# Checked in this order — a title matching more than one category's
+# regexes (rare, e.g. a hybrid "Customer Success / Account Manager" title)
+# gets whichever category is listed first here. CS first since it's the
+# largest, most foundational bucket (support/experience/retention/
+# onboarding all fold into it); AM/PM/OM follow in the same order as
+# their own keyword blocks above.
+_ROLE_CATEGORY_RE = [
+    ("CS", [re.compile(kw, re.I) for kw in CS_KEYWORDS]),
+    ("AM", [re.compile(kw, re.I) for kw in AM_KEYWORDS]),
+    ("PM", [re.compile(kw, re.I) for kw in PM_KEYWORDS]),
+    ("OM", [re.compile(kw, re.I) for kw in OM_KEYWORDS]),
+]
+
+
+def classify_role_category(title: str) -> str:
+    """2026-09 (explicit user request): tag every included job as CS
+    (Customer Success), AM (Account Management), PM (Project Management),
+    or OM (Operations Management) — a separate DB column, not a
+    replacement for the existing include/exclude role filter.
+
+    Pure regex against the SAME keyword groups keyword_classify_role()
+    already uses to decide include/exclude (see CS_KEYWORDS/AM_KEYWORDS/
+    PM_KEYWORDS/OM_KEYWORDS above) — this never re-decides whether a role
+    belongs in this pipeline at all, only which of the 4 buckets an
+    already-included role falls into. Returns "" (unknown) for a title
+    that keyword_classify_role only included via a broader AI verdict and
+    doesn't match any of these narrower category regexes itself — that's
+    expected for a genuinely novel title phrasing the AI caught but the
+    keyword lists didn't, and is a real, honestly-reported gap rather
+    than a guess."""
+    if not title:
+        return ""
+    for category, patterns in _ROLE_CATEGORY_RE:
+        if any(rx.search(title) for rx in patterns):
+            return category
+    return ""
 
 EXCLUDE_KEYWORDS = [
     # Engineering / technical build roles
@@ -315,8 +392,18 @@ Respond ONLY with lines like:
 2 NO"""
 
 
-def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, bool]:
-    """Classify a single batch of titles using a specific provider."""
+def _classify_role_batch(batch: list[str], provider: dict, client) -> tuple[dict[str, bool], bool]:
+    """Classify a single batch of titles using a specific provider.
+
+    Returns (results, call_ok) — same call_ok contract as
+    _classify_location_batch (False only when the underlying API call
+    itself failed, e.g. exhausted retries or a daily quota). 2026-09 fix:
+    this used to return a bare dict defaulting every title to False on a
+    failed call, indistinguishable from a real AI verdict — so
+    ai_classify_roles' failover logic (which only ever triggered on a
+    raised exception) never saw these as failures at all, and a title
+    just silently landed as 'excluded' instead of being rerouted to
+    another provider."""
     numbered = "\n".join(f"{j+1}. {t}" for j, t in enumerate(batch))
     user_msg = f"Titles:\n{numbered}"
     max_tokens = max(500, len(batch) * 4)
@@ -324,10 +411,10 @@ def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, 
 
     results = {}
     if text is None:
-        log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, defaulting to exclude")
+        log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, rerouting to another provider")
         for t in batch:
             results[t] = False
-        return results
+        return results, False
 
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
@@ -342,7 +429,7 @@ def _classify_role_batch(batch: list[str], provider: dict, client) -> dict[str, 
     for t in batch:
         if t not in results:
             results[t] = False
-    return results
+    return results, True
 
 
 def _build_role_batches(titles: list[str], max_chars: int = 400_000) -> list[list[str]]:
@@ -477,9 +564,18 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             for future in as_completed(future_map):
                 pname, batch = future_map[future]
                 try:
-                    batch_results = future.result()
-                    results.update(batch_results)
-                    no_ai_read.difference_update(batch)
+                    batch_results, call_ok = future.result()
+                    if call_ok:
+                        results.update(batch_results)
+                        no_ai_read.difference_update(batch)
+                    else:
+                        # 2026-09 fix: same bug class as ai_classify_locations
+                        # — a graceful call failure (call_ok=False, no
+                        # exception) never used to reach failed_batches, so
+                        # it skipped the failover round entirely and just
+                        # kept _classify_role_batch's default-False verdict.
+                        failed_batches.append((pname, batch))
+                        no_ai_read.update(batch)
                 except Exception as e:
                     log.error(f"Role classification error ({pname}): {e}")
                     failed_batches.append((pname, batch))
@@ -951,6 +1047,13 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # workplace_type="Hybrid"). See has_non_remote_workplace_type's
     # docstring for the real Infor/Pinpoint posting this closes. ──
     if has_non_remote_workplace_type(job):
+        return "no_match", None
+
+    # ── 0.6. HARD OVERRIDE (2026-09, explicit user request): the TITLE
+    # itself carries a physical-presence qualifier ("... (Hybrid)",
+    # "... - Onsite"), independent of the workplace_type field above. See
+    # has_non_remote_title_signal's docstring. ──
+    if has_non_remote_title_signal(job):
         return "no_match", None
 
     # ── 0.75. HARD OVERRIDE: an affirmative country-specific work-
@@ -1497,11 +1600,31 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
                 pname, orig_indices, batch = future_map[future]
                 try:
                     batch_results, call_ok = future.result()
-                    for j, label in enumerate(batch_results):
-                        results[orig_indices[j]] = (label, pname)
                     if call_ok:
+                        for j, label in enumerate(batch_results):
+                            results[orig_indices[j]] = (label, pname)
                         no_ai_read.difference_update(orig_indices)
                     else:
+                        # 2026-09 fix: this is the actual bug behind
+                        # "keeps as uncertain instead of rerouting to
+                        # another provider" — a call that FAILED (bad key,
+                        # daily quota, exhausted retries — anything
+                        # _ai_call itself gave up on, returning call_ok=
+                        # False with no exception raised) used to just
+                        # write the default 'uncertain' straight into
+                        # results and move on. Only a raised Python
+                        # exception (below) ever reached failed_batches,
+                        # so a graceful-but-failed call NEVER went through
+                        # the cross-provider failover a few lines down —
+                        # confirmed live (Gemini hitting its daily quota
+                        # kept landing jobs as bare 'uncertain' instead of
+                        # being retried on OpenAI/NVIDIA). Route it through
+                        # the identical failed_batches path an exception
+                        # takes; results already defaults to
+                        # ('uncertain', None) so nothing needs writing
+                        # here — only the failover round (or, if that also
+                        # fails, the final default) decides the outcome.
+                        failed_batches.append((pname, orig_indices, batch))
                         no_ai_read.update(orig_indices)
                 except Exception as e:
                     log.error(f"Location classification error ({pname}): {e}")
@@ -1794,6 +1917,30 @@ _NON_REMOTE_WORKPLACE_RE = re.compile(
     r"\b(hybrid|on[\s\-]?site|in[\s\-]?office|in[\s\-]?person)\b", re.I
 )
 _REMOTE_WORKPLACE_RE = re.compile(r"\bremote\b", re.I)
+
+
+def has_non_remote_title_signal(job: dict) -> bool:
+    """2026-09 (explicit user request): a job whose TITLE itself carries a
+    physical-presence qualifier — "Account Manager (Hybrid)", "Customer
+    Success Manager - Onsite", "Project Manager (In-Office)" — is a real,
+    company-stated hiring-scope signal exactly like has_non_remote_
+    workplace_type's structured workplace_type field, just expressed in
+    the title text instead of a dedicated field. Same hard override, same
+    reasoning: a company that tags the ROLE ITSELF as hybrid/on-site is
+    telling you this specific posting requires physical presence,
+    regardless of what a separate location/workplace_type field says (or
+    doesn't say — this also catches titles with no other location signal
+    at all, which previously fell through to 'unsure' and got kept, e.g.
+    the GFL Environmental Indianapolis, IN case that prompted this).
+    Same "remote alongside it" exception as the workplace_type check: a
+    title mentioning both ("Hybrid/Remote") is not excluded here — that's
+    not a hybrid-only requirement."""
+    title = job.get("title") or ""
+    if not isinstance(title, str) or not title:
+        return False
+    if _REMOTE_WORKPLACE_RE.search(title):
+        return False
+    return bool(_NON_REMOTE_WORKPLACE_RE.search(title))
 
 
 def has_non_remote_workplace_type(job: dict) -> bool:
