@@ -599,6 +599,11 @@ def _build_row(job: dict, location_confidence: str, source_pipeline: str = "craw
         # without it set, rather than silently sorting as if it were tier 0.
         "location_priority": job.get("location_priority", 3),
         "source_pipeline": source_pipeline,
+        # 2026-09 (explicit user request): "CS"/"AM"/"PM"/"OM", set by
+        # filter_roles()/_filter_roles() via classifier.classify_role_category().
+        # "" (unknown) for the rare AI-only include with no matching
+        # category regex — see that function's docstring.
+        "role_category": job.get("role_category", ""),
     }
 
 
