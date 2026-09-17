@@ -49,6 +49,7 @@ from classifier import (
     keyword_classify_location, ai_classify_locations,
     detect_visa_sponsorship,
     _keyword_classify_location_detail,
+    classify_role_category,
     PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
 from supabase_handler import (
@@ -284,13 +285,19 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set
 
 
 def filter_roles(jobs: list[dict]) -> list[dict]:
-    """Stage 1+2: Keep only CSM/AM roles."""
+    """Stage 1+2: Keep only CSM/AM roles.
+
+    2026-09 (explicit user request): every included job is also tagged
+    job["role_category"] — one of "CS"/"AM"/"PM"/"OM" (see classifier.py's
+    classify_role_category()) — persisted as its own DB column by
+    supabase_handler._build_row/_build_row_raw."""
     included = []
     unsure = []
 
     for job in jobs:
         result = keyword_classify_role(job["title"])
         if result == "include":
+            job["role_category"] = classify_role_category(job["title"])
             included.append(job)
         elif result == "unsure":
             unsure.append(job)
@@ -302,6 +309,7 @@ def filter_roles(jobs: list[dict]) -> list[dict]:
         ai_results = ai_classify_roles(unsure_titles)
         for job in unsure:
             if ai_results.get(job["title"], False):
+                job["role_category"] = classify_role_category(job["title"])
                 included.append(job)
 
     log.info(f"After role filter: {len(included)} CSM/AM jobs")
@@ -315,10 +323,19 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     Also tags each matched job with job["location_priority"]:
       1 = Global   (explicit worldwide/anywhere/global-hiring signal)
       2 = Africa   (Africa continent, or bare EMEA)
-      3 = Unsure   (kept as a plausible remote match, but AI/keyword
-                    evidence didn't confirm which of the above it is)
     This is what jobs.location_priority (already in the schema) sorts on,
-    so Global rows surface before Africa rows before "maybe" rows.
+    so Global rows surface before Africa rows.
+
+    2026-09 policy change (explicit user request): there is no more
+    "Unsure, kept anyway" tier. A job only survives this filter with
+    AFFIRMATIVE evidence of global/Africa hiring — a keyword match, or an
+    AI match_global/match_africa verdict. Anything the keyword+AI stages
+    can't actually confirm (AI genuinely said UNCERTAIN, AI never got to
+    look at all, or plain "no_match") is dropped, full stop. See the
+    "uncertain"/"no_match" branch below for the real posting (GFL
+    Environmental, a local Indianapolis, IN role with zero location text
+    captured at all) that got kept under the old policy and shouldn't
+    have been.
     """
     matched = []
     matched_confidences = []
@@ -359,12 +376,24 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 matched_confidences.append("match")
-            elif label == "uncertain":
-                job["clearance"] = provider_name or "ai"
-                job["location_priority"] = PRIORITY_UNSURE
-                matched.append(job)
-                matched_confidences.append("uncertain")
-            # "no_match" → drop; AI failure defaults to "uncertain" (included)
+            # "uncertain" and "no_match" → both DROP (2026-09 policy change,
+            # explicit user request). Previously "uncertain" was KEPT at
+            # PRIORITY_UNSURE ("plausible match, benefit of the doubt") —
+            # real case that closed this: a GFL Environmental "Account
+            # Manager" posting in Indianapolis, IN (careers.gflenv.com,
+            # confirmed via direct Supabase lookup: location="" — the
+            # crawler never captured any location text for it at all — and
+            # location_priority=3/PRIORITY_UNSURE) got written to the jobs
+            # table despite being an ordinary local US role with zero
+            # global-hiring evidence anywhere. "We don't know" was being
+            # treated as "maybe include it" instead of what it actually is:
+            # no evidence this role is open globally. Only an AFFIRMATIVE
+            # match_global/match_africa signal (keyword or AI) keeps a job
+            # now; PRIORITY_UNSURE/"kept at lower confidence" no longer
+            # exists as an outcome. A provider that never got to look at
+            # the job at all (see no_ai_read in ai_classify_locations) is
+            # exactly as unproven as a provider that looked and said
+            # UNCERTAIN — same drop, no special case for either.
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
