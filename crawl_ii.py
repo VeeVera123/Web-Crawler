@@ -577,33 +577,58 @@ _MIN_JOB_DETAIL_TEXT_CHARS = 200
 # grabbing an unrelated sentence that happens to contain a place name.
 _HEURISTIC_LOCATION_RE = re.compile(
     r"(?:primary\s*location|job\s*location|work\s*location|location)\s*[:\-]\s*"
-    r"([A-Z][^:]{1,80}?)"
+    r"([A-Z][^:\n]{1,80}?)"
     r"(?=\s+(?:Apply|Department|Job\s*Type|Employment|Requirements|Responsibilities|"
     r"Qualifications|About|Benefits|Salary|Schedule|Description|Overview|Summary|"
     r"Who\s|What\s|We\s|Click|View|Full[- ]?Time|Part[- ]?Time|Posted|Date|Category)\b"
-    r"|[.]\s|$)",
+    r"|[.]\s|\n|$)",
     re.I,
 )
+
+
+# 2026-09 BUG FIX #2 (avidtr.com — see _JD_NARROWING_QUALIFIER_RE's note
+# above for the full story): the real posting's location tag was
+# "Remote, California", sitting in plain text right under the title with
+# NO "Location:"-style label in front of it at all — so
+# _HEURISTIC_LOCATION_RE never matched it, location stayed blank, and the
+# job fell through to _enrich_location_from_description instead (which
+# then had its own separate bug). This second, narrower pattern catches
+# the common unlabeled "Remote, <City/State/Country>" short-tag
+# convention directly. Restricted to the first 400 characters of the
+# page text specifically so it can ONLY match a tag near the title —
+# never a sentence buried in body copy that happens to start with the
+# word "Remote" (e.g. "Remote work has become the norm, California-based
+# companies report..." deep in a JD would NOT match this, since it's well
+# past the 400-char window).
+_BARE_REMOTE_TAG_RE = re.compile(
+    r"\bRemote\s*,\s*([A-Z][a-zA-Z.]+(?:\s+[A-Z][a-zA-Z.]+){0,2})\b"
+)
+_HEURISTIC_LOCATION_SEARCH_WINDOW = 400
 
 
 def _extract_heuristic_location(text: str) -> str:
     """Best-effort "Location:"/"Primary Location:"/"Job Location:" label
     scan over a heuristic hit's own page text (see _HEURISTIC_LOCATION_RE
-    above for the real posting this closes). Returns "" on no match —
-    NEVER guesses or falls back to something else; classifier.py's
-    existing blank/unsure handling still applies if this finds nothing,
-    exactly as before this fix existed."""
+    above for the real posting this closes), falling back to the
+    unlabeled "Remote, <place>" near-title tag pattern (see
+    _BARE_REMOTE_TAG_RE above) if the labeled scan finds nothing. Returns
+    "" only if NEITHER pattern matches — classifier.py's existing
+    blank/unsure handling still applies in that case."""
     m = _HEURISTIC_LOCATION_RE.search(text)
-    if not m:
-        return ""
-    loc = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
-    # A label match with almost nothing captured after it, or an
-    # implausibly long run-on (the lookahead failed to find a real
-    # boundary), is more likely noise than a real place name — skip it
-    # rather than write something worse than blank.
-    if not loc or len(loc) > 80:
-        return ""
-    return loc
+    if m:
+        loc = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+        # A label match with almost nothing captured after it, or an
+        # implausibly long run-on (the lookahead failed to find a real
+        # boundary), is more likely noise than a real place name — skip
+        # it rather than write something worse than blank.
+        if loc and len(loc) <= 80:
+            return loc
+
+    m2 = _BARE_REMOTE_TAG_RE.search(text[:_HEURISTIC_LOCATION_SEARCH_WINDOW])
+    if m2:
+        return f"Remote, {m2.group(1).strip()}"
+
+    return ""
 
 
 def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) -> dict | None:
@@ -1029,8 +1054,6 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
 _JD_STRONG_GLOBAL_HIRING_RE = tuple(re.compile(p, re.I) for p in (
     r"\bwork\s*from\s*anywhere\b",
     r"\bwfa\b",
-    r"\bhire\s*(globally|worldwide|anywhere)\b",
-    r"\bhiring\s*(globally|worldwide|anywhere)\b",
     r"\bopen\s*to\s*(all|any)\s*location",
     r"\bopen\s*to\s*(all|any)\s*countr",
     r"\blocation\s*[\-–—:]?\s*anywhere\b",
@@ -1049,8 +1072,17 @@ _JD_STRONG_GLOBAL_HIRING_RE = tuple(re.compile(p, re.I) for p in (
     r"\birrespective\s*of\s*(location|country)\b",
     r"\bcountry[\-\s]*agnostic\b",
     r"\bwork\s*from\s*any\s*(country|location)\b",
-    r"\bhire\s*talent\s*(globally|worldwide|from\s*anywhere)\b",
     r"\bopen\s*to\s*(candidates|applicants)\s*(worldwide|globally|from\s*anywhere|in\s*any\s*country)\b",
+    # 2026-09 BUG FIX (avidtr.com Senior Project Manager — see BUG FIX note
+    # below): "hire/hiring globally" and "hire talent globally" REMOVED
+    # from this list. They read as candidate-eligibility signals in
+    # isolation, but in real postings they're just as likely to be generic
+    # company-branding or EEO-boilerplate copy ("We're proud to hire
+    # talent globally...") that says nothing about whether THIS role is
+    # open worldwide. The "open to (candidates|applicants) ..." phrase
+    # above stays — it's explicitly framed around who can apply, not the
+    # company's general reach — and is the safer way to catch the
+    # legitimate version of this same claim.
 ))
 _BARE_LOCATION_VALUES = ("", "remote", "remote worker", "remote job", "fully remote")
 
@@ -1072,11 +1104,36 @@ _BARE_LOCATION_VALUES = ("", "remote", "remote worker", "remote job", "fully rem
 # _JD_STRONG_GLOBAL_HIRING_RE uniformly (not just "work from anywhere"),
 # since any of them could just as easily be followed/preceded by "...in
 # the US" / "...within Canada" / etc. in real posting text.
+#
+# 2026-09 BUG FIX #2 (avidtr.com "Senior Project Manager — Remote,
+# California"): the on-page location tag was literally "Remote,
+# California" — a single-STATE restriction — but got written as
+# "Worldwide" anyway. Live re-fetch found none of this file's global-
+# hiring trigger phrases anywhere on the page, so the actual cause here
+# wasn't a missing qualifier check on a real phrase — it's the phrase
+# list itself being too permissive (see the "hire/hiring globally"
+# removal above) combined with this qualifier list having NO US state
+# names at all, only countries. A posting whose real restriction is "one
+# US state" rather than "the whole US" was invisible to this check
+# either way. Fixed on both fronts: the riskiest phrase removed above,
+# and every US state (plus DC) added below so a state-level restriction
+# right next to a trigger phrase is caught exactly like a country-level
+# one already was.
+_US_STATES_RE_FRAGMENT = (
+    r"Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|"
+    r"Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|"
+    r"Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New\s+Hampshire|New\s+Jersey|"
+    r"New\s+Mexico|New\s+York|North\s+Carolina|North\s+Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|"
+    r"Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|Virginia|"
+    r"Washington|West\s+Virginia|Wisconsin|Wyoming|District\s+of\s+Columbia"
+)
 _JD_QUALIFIER_WINDOW = 80  # chars scanned on each side of a phrase hit
 _JD_NARROWING_QUALIFIER_RE = re.compile(
     r"\b(?:US|U\.S\.|USA|U\.S\.A\.|United\s+States|UK|U\.K\.|United\s+Kingdom|Canada|Australia|"
     r"Germany|France|Netherlands|Mexico|Philippines|Nigeria|Kenya|South\s+Africa|India|Ireland|"
-    r"Spain|Italy|Brazil|Japan|Singapore|China|APAC|LATAM|ANZ|NAM|MENA)\b",
+    r"Spain|Italy|Brazil|Japan|Singapore|China|Sweden|Norway|Denmark|Finland|Poland|Portugal|"
+    r"Switzerland|Austria|Belgium|New\s+Zealand|Israel|UAE|United\s+Arab\s+Emirates|Egypt|Ghana|"
+    r"APAC|LATAM|ANZ|NAM|MENA|" + _US_STATES_RE_FRAGMENT + r")\b",
     re.I,
 )
 
