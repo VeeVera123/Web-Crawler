@@ -35,18 +35,35 @@ cleanup).
      means this is correct no matter how many times a day the whole
      pipeline runs — a row is only ever offered here once, however many
      runs it takes postfix to actually catch it (see that function's
-     docstring). ONLY six fields are ever written to a page, by explicit
-     instruction: title, job_url, date_added, salary, role_category, and
-     the Supabase id (the join key step 1 reads back). Company/ATS/
-     location/etc. are deliberately left alone.
+     docstring). Seven fields are ever written to a page, by explicit
+     instruction (Company Name added 2026-09 at explicit request): title,
+     company_name, job_url, date_added, salary, role_category, and the
+     Supabase id (the join key step 1 reads back). ATS/location/etc. are
+     deliberately left alone.
 
      NOTE ON NOTION PROPERTY NAMES: Notion treats property names as exact,
      case-sensitive strings — "Status" and "status" are two different
      properties as far as the API is concerned, and a page create/query
      against a name that doesn't match EXACTLY what's in the database
      either silently no-ops that field or gets rejected outright. The
-     PROP_* constants below must match your Notion database's actual
-     property names byte-for-byte (capitalization included).
+     PROP_* constants below are only a best-guess starting point — 2026-09
+     real-world testing hit live 400s ("Job Title is expected to be
+     rich_text", "Job URL is not a property that exists", "Status is not
+     a property that exists") proving a hardcoded name/type assumption is
+     too fragile to rely on. So as of that fix, this module fetches the
+     database's LIVE schema once per process (_get_schema()) and checks
+     every property against it before ever including it in a request:
+       - the title-type property (every Notion database has exactly one,
+         it can be named anything) is auto-detected by type rather than
+         assumed to be named "Job Title" — see _title_property_name().
+       - every other PROP_* constant is looked up by name in the live
+         schema; if it's missing, or present under a different type than
+         expected, that single field is skipped with a warning instead of
+         either corrupting the request or taking the whole page-create
+         down with a 400. Get the name/type mismatch logged, fix the
+         PROP_* constant (or the Notion column) to match, re-run — no
+         data is lost in the meantime since the row simply isn't marked
+         notion_synced_at until its page is actually created.
 
 Both passes are best-effort and self-disabling: if NOTION_TOKEN or
 NOTION_DATABASE_ID isn't set, each logs one clear line and returns
@@ -81,8 +98,11 @@ NOTION_API = "https://api.notion.com/v1"
 # ID as "Number", the rest as their obvious types). Nothing here creates
 # or alters Notion's schema; a missing property just makes that one
 # page's create/read a no-op for that field, logged, not fatal.
-PROP_TITLE = "Job Title"
+PROP_TITLE = "Job Title"  # only used as a fallback label in logs — the
+                          # real title property is auto-detected by TYPE
+                          # at runtime, see _title_property_name()
 PROP_URL = "Job URL"
+PROP_COMPANY_NAME = "Company Name"
 PROP_DATE_ADDED = "Date Added"
 PROP_SALARY = "Salary"
 PROP_ROLE_CATEGORY = "Role Category"
@@ -150,6 +170,41 @@ def _request(method: str, path: str, json_body: dict | None = None, max_retries:
     return None
 
 
+_schema_cache: dict | None = None
+
+
+def _get_schema(force: bool = False) -> dict:
+    """Fetches the Notion database's live property schema
+    (name -> {"type": ..., ...}) and caches it for the rest of this
+    process — one extra API call per run, not per page. This is what lets
+    every other function here check a property's real name/type before
+    using it instead of trusting the PROP_* constants blindly (see the
+    module docstring's "NOTE ON NOTION PROPERTY NAMES")."""
+    global _schema_cache
+    if _schema_cache is not None and not force:
+        return _schema_cache
+    data = _request("GET", f"/databases/{NOTION_DATABASE_ID}")
+    if data is None:
+        log.warning("Could not fetch Notion database schema — "
+                     "property name/type checks will be skipped this run")
+        _schema_cache = {}
+    else:
+        _schema_cache = data.get("properties", {}) or {}
+    return _schema_cache
+
+
+def _title_property_name(schema: dict) -> str | None:
+    """Every Notion database has exactly one property of type 'title',
+    and it can be named anything — this finds it by type instead of
+    assuming it's named PROP_TITLE. Falls back to PROP_TITLE only if the
+    schema fetch itself failed (empty schema), so a page-create attempt
+    still goes out rather than silently doing nothing."""
+    for name, meta in schema.items():
+        if meta.get("type") == "title":
+            return name
+    return PROP_TITLE if not schema else None
+
+
 # ── Step 1: Notion statuses → Supabase ──────────────────────────────────
 
 def sync_notion_statuses_to_supabase() -> dict:
@@ -164,6 +219,18 @@ def sync_notion_statuses_to_supabase() -> dict:
     from supabase_handler import update_application_statuses_bulk
 
     log.info("── Notion: reconciling statuses back to Supabase ──")
+
+    schema = _get_schema()
+    if schema:
+        for prop_name, expected_type in ((PROP_SUPABASE_ID, "number"), (PROP_STATUS, "select")):
+            meta = schema.get(prop_name)
+            if meta is None:
+                log.warning(f"Notion property {prop_name!r} not found in database schema — "
+                             f"status reconciliation will not see it on any page")
+            elif meta.get("type") != expected_type:
+                log.warning(f"Notion property {prop_name!r} is type {meta.get('type')!r}, "
+                             f"expected {expected_type!r} — status reconciliation will not see it")
+
     updates = []
     cursor = None
     while True:
@@ -200,22 +267,55 @@ def sync_notion_statuses_to_supabase() -> dict:
 
 # ── Step 2: new Supabase rows → Notion ──────────────────────────────────
 
-def _build_page_properties(row: dict) -> dict:
-    props = {
-        PROP_TITLE: {"title": [{"text": {"content": (row.get("title") or "")[:2000]}}]},
-        PROP_URL: {"url": row.get("job_url") or None},
-        PROP_SUPABASE_ID: {"number": row.get("id")},
-        PROP_STATUS: {"select": {"name": STATUS_NOT_APPLIED}},
-    }
+def _build_page_properties(row: dict, schema: dict) -> dict:
+    """Builds the page-create payload's "properties" object, checking
+    every field against the database's live schema first (see
+    _get_schema()) instead of trusting the PROP_* constants blindly. A
+    field whose name isn't in the schema, or whose type doesn't match
+    what's expected, is skipped with a warning rather than sent anyway —
+    that's what turns a single wrong property name into "one field
+    missing from this page, logged" instead of "this whole page create
+    400s and the row never syncs at all"."""
+    props: dict = {}
+
+    def _add(prop_name: str, expected_type: str, value):
+        meta = schema.get(prop_name)
+        if meta is None:
+            log.warning(f"Notion property {prop_name!r} not found in database schema — "
+                         f"skipping this field (row id {row.get('id')})")
+            return
+        if meta.get("type") != expected_type:
+            log.warning(f"Notion property {prop_name!r} is type {meta.get('type')!r}, "
+                         f"expected {expected_type!r} — skipping this field (row id {row.get('id')})")
+            return
+        props[prop_name] = value
+
+    title_prop = _title_property_name(schema)
+    if title_prop:
+        props[title_prop] = {"title": [{"text": {"content": (row.get("title") or "")[:2000]}}]}
+    else:
+        log.warning("Notion database has no title-type property — page create will likely fail")
+
+    _add(PROP_URL, "url", {"url": row.get("job_url") or None})
+    _add(PROP_SUPABASE_ID, "number", {"number": row.get("id")})
+    _add(PROP_STATUS, "select", {"select": {"name": STATUS_NOT_APPLIED}})
+
+    company_name = row.get("company_name")
+    if company_name:
+        _add(PROP_COMPANY_NAME, "rich_text", {"rich_text": [{"text": {"content": company_name[:2000]}}]})
+
     date_added = row.get("date_added")
     if date_added:
-        props[PROP_DATE_ADDED] = {"date": {"start": date_added}}
+        _add(PROP_DATE_ADDED, "date", {"date": {"start": date_added}})
+
     salary = row.get("salary")
     if salary:
-        props[PROP_SALARY] = {"rich_text": [{"text": {"content": salary[:2000]}}]}
+        _add(PROP_SALARY, "rich_text", {"rich_text": [{"text": {"content": salary[:2000]}}]})
+
     role_category = row.get("role_category")
     if role_category:
-        props[PROP_ROLE_CATEGORY] = {"select": {"name": role_category}}
+        _add(PROP_ROLE_CATEGORY, "select", {"select": {"name": role_category}})
+
     return props
 
 
@@ -238,11 +338,13 @@ def push_pending_jobs_to_notion() -> dict:
     if not pending:
         return summary
 
+    schema = _get_schema()
+
     created_ids = []
     for row in pending:
         body = {
             "parent": {"database_id": NOTION_DATABASE_ID},
-            "properties": _build_page_properties(row),
+            "properties": _build_page_properties(row, schema),
         }
         result = _request("POST", "/pages", body)
         if result is not None:
