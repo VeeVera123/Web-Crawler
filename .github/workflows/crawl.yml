@@ -50,7 +50,7 @@ name: Crawl
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 6:00 UTC = 7:00 AM WAT — Crawl I only, Crawl II always skipped here (blank `scope` on this trigger)
+    - cron: "0 6 * * 1-5"   # 6:00 UTC = 7:00 AM WAT, Mon-Fri only — Crawl I only, Crawl II always skipped here (blank `scope` on this trigger)
   workflow_dispatch:
     inputs:
       scope:
@@ -233,16 +233,21 @@ jobs:
   # ── Postfix - Notion — new Supabase jobs -> Notion, then cleanup ────────
   # 2026-09 (explicit user instruction): merges the old crawl-i-finalize +
   # crawl-ii-finalize into ONE job that runs once both crawl-i and crawl-ii
-  # are done (`needs: [crawl-i, crawl-ii]` + `if: always()` — still runs
-  # even if a shard failed/timed out, or if crawl-ii was skipped entirely
-  # by `scope`, same as the two old finalize jobs did separately). Named
-  # for what it writes TO: it takes whatever's new in Supabase and pushes
-  # it to Notion, THEN does the regular stale-job cleanup — see
+  # are done (`needs: [crawl-i, crawl-ii]` + `if: ${{ !cancelled() }}` —
+  # still runs even if a shard failed/timed out, or if crawl-ii was
+  # skipped entirely by `scope`, same as the two old finalize jobs did
+  # separately — but, unlike `always()`, does NOT run if the whole
+  # workflow run was manually cancelled. 2026-09 fix at explicit user
+  # request: `always()` was firing this job even after a manual cancel,
+  # which reads as "cancelling did nothing" — `!cancelled()` keeps the
+  # failure/skip-tolerant behavior but actually stops on a real cancel).
+  # Named for what it writes TO: it takes whatever's new in Supabase and
+  # pushes it to Notion, THEN does the regular stale-job cleanup — see
   # postfix_notion.py for the two clearly-separated steps and why Crawl
   # II's cleanup is conditional on Crawl II having actually run this cycle.
   postfix-notion:
     needs: [crawl-i, crawl-ii]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
