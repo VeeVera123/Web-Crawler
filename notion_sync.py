@@ -5,20 +5,48 @@ calling Notion's REST API directly — no Edge Function/relay needed for
 either, since neither side of this is ever a browser (that's the only
 reason a CORS relay was ever on the table).
 
-  1. sync_notion_statuses_to_supabase() — read every page's Status
-     property out of the Notion working-set database, write whatever
-     isn't "Not Applied" back into Supabase's jobs.application_status.
-     Applied/Rejected/etc. pages are left in Notion (not archived) per
-     explicit instruction — this only ever reads Notion and writes
-     Supabase, never touches the Notion page itself.
+2026-09 (second pass, at explicit user instruction): split OUT of
+crawl_i.py/crawl_ii.py entirely and into two standalone CI steps that
+bookend the actual crawl shards — see prefix_supabase.py and
+postfix_notion.py. crawl_i.py/crawl_ii.py no longer import this module at
+all; they're back to being pure Supabase writers. Reasoning: each shard
+runs as its own GitHub Actions job with no shared memory, so "push
+whatever THIS shard just inserted" doesn't compose cleanly across N
+parallel shards — a single step that runs once, after every shard is
+done, is simpler and matches the mental model ("Prefix - Supabase" reads
+Notion writes Supabase; crawl-i/crawl-ii only ever touch Supabase;
+"Postfix - Notion" reads Supabase writes Notion, then does the regular
+cleanup).
 
-  2. push_new_jobs_to_notion(new_rows) — for jobs that were JUST inserted
-     into Supabase this run (see supabase_handler.add_jobs_batch, which
-     now hands back each new row's id), create one Notion page per job.
-     ONLY six fields are ever written here, by explicit instruction:
-     title, job_url, date_added, salary, role_category, and the
-     Supabase id (the join key step 1 reads back). Company/ATS/location/
-     etc. are deliberately left alone.
+  1. sync_notion_statuses_to_supabase() — called once by prefix_supabase.py
+     BEFORE any shard starts. Reads every page's Status property out of
+     the Notion working-set database, writes whatever isn't "Not Applied"
+     back into Supabase's jobs.application_status. Applied/Rejected/etc.
+     pages are left in Notion (not archived) per explicit instruction —
+     this only ever reads Notion and writes Supabase, never touches the
+     Notion page itself.
+
+  2. push_pending_jobs_to_notion() — called once by postfix_notion.py
+     AFTER every crawl-i/crawl-ii shard has finished. Reads every
+     Supabase row that's never been pushed to Notion (jobs.notion_synced_at
+     IS NULL — see supabase_handler.get_jobs_pending_notion_sync()),
+     creates one Notion page per row, then stamps notion_synced_at on the
+     ones that succeeded. Using that marker instead of "added today"
+     means this is correct no matter how many times a day the whole
+     pipeline runs — a row is only ever offered here once, however many
+     runs it takes postfix to actually catch it (see that function's
+     docstring). ONLY six fields are ever written to a page, by explicit
+     instruction: title, job_url, date_added, salary, role_category, and
+     the Supabase id (the join key step 1 reads back). Company/ATS/
+     location/etc. are deliberately left alone.
+
+     NOTE ON NOTION PROPERTY NAMES: Notion treats property names as exact,
+     case-sensitive strings — "Status" and "status" are two different
+     properties as far as the API is concerned, and a page create/query
+     against a name that doesn't match EXACTLY what's in the database
+     either silently no-ops that field or gets rejected outright. The
+     PROP_* constants below must match your Notion database's actual
+     property names byte-for-byte (capitalization included).
 
 Both passes are best-effort and self-disabling: if NOTION_TOKEN or
 NOTION_DATABASE_ID isn't set, each logs one clear line and returns
@@ -191,17 +219,27 @@ def _build_page_properties(row: dict) -> dict:
     return props
 
 
-def push_new_jobs_to_notion(new_rows: list[dict]) -> dict:
-    """new_rows: the actual Supabase rows just inserted this run (from
-    supabase_handler.add_jobs_batch's second return value) — each already
-    has its Supabase `id`. Creates one Notion page per row. Only the six
-    fields named in this module's docstring are ever written."""
-    summary = {"attempted": len(new_rows), "created": 0}
-    if not new_rows or not _configured():
+def push_pending_jobs_to_notion() -> dict:
+    """Called once by postfix_notion.py, after every crawl-i/crawl-ii
+    shard has finished. Fetches every Supabase row with no Notion page
+    yet (see supabase_handler.get_jobs_pending_notion_sync()), creates a
+    page for each, and marks the successful ones synced so they're never
+    offered again — see this module's docstring for why that marker
+    (rather than "added today") is what makes this safe to run any
+    number of times a day."""
+    from supabase_handler import get_jobs_pending_notion_sync, mark_notion_synced
+
+    summary = {"attempted": 0, "created": 0}
+    if not _configured():
         return summary
 
-    log.info(f"── Notion: pushing {len(new_rows)} new job(s) ──")
-    for row in new_rows:
+    pending = get_jobs_pending_notion_sync()
+    summary["attempted"] = len(pending)
+    if not pending:
+        return summary
+
+    created_ids = []
+    for row in pending:
         body = {
             "parent": {"database_id": NOTION_DATABASE_ID},
             "properties": _build_page_properties(row),
@@ -209,5 +247,8 @@ def push_new_jobs_to_notion(new_rows: list[dict]) -> dict:
         result = _request("POST", "/pages", body)
         if result is not None:
             summary["created"] += 1
-    log.info(f"  {summary['created']}/{summary['attempted']} new jobs created in Notion")
+            created_ids.append(row["id"])
+
+    if created_ids:
+        mark_notion_synced(created_ids)
     return summary
