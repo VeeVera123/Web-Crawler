@@ -108,7 +108,10 @@ from supabase_handler import (  # noqa: E402
     get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
     log_egress_summary,
 )
-import notion_sync  # noqa: E402 — best-effort Notion working-set mirror, see that module
+# 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
+# prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
+# see notion_sync.py's module docstring for why. This file is back to
+# being a pure Supabase writer.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1189,10 +1192,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
                           time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
                           batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
     """Crawls archive_ii pages, then classifies and writes everything ONCE
-    at the end, then pushes whatever was genuinely new straight to Notion
-    (see notion_sync.py — every job here already cleared Supabase's own
-    dedup by the time it reaches that push, so nothing further is needed
-    to know it's new). Returns (pages_done, jobs_added, time_budget_hit).
+    at the end. Returns (pages_done, jobs_added, time_budget_hit).
 
     2026-09 restructure, at explicit user instruction: previously this
     fetched+extracted a sub-batch of pages, immediately ran that
@@ -1291,14 +1291,9 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         job["visa_sponsorship"] = detect_visa_sponsorship(job)
 
     log.info("── Writing to Supabase ──")
-    added, inserted_rows = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE,
-                                           existing_urls=existing_urls)
+    added, _inserted_rows = add_jobs_batch(global_jobs, confidences, source_pipeline=SOURCE_PIPELINE,
+                                            existing_urls=existing_urls)
     log.info(f"  {added} new jobs written")
-
-    try:
-        notion_sync.push_new_jobs_to_notion(inserted_rows)
-    except Exception as e:
-        log.warning(f"Notion push failed (Supabase write already succeeded, unaffected): {e}")
 
     return pages_done, added, time_budget_hit
 
@@ -1344,11 +1339,6 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     log.info("=" * 60)
     log.info(f"CRAWL II — starting (shard {shard}/{total_shards})")
     log.info("=" * 60)
-
-    try:
-        notion_sync.sync_notion_statuses_to_supabase()
-    except Exception as e:
-        log.warning(f"Notion status sync failed (crawl continues unaffected): {e}")
 
     log.info("── Getting entries ──")
     try:
