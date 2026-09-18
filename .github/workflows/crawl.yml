@@ -113,7 +113,12 @@ jobs:
     needs: prepare-matrix
     if: ${{ github.event.inputs.scope != 'archive_ii' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 2026-09: was 90 — not enough for a shard to get through its slice
+    # in one run. Raised to 350, same headroom-under-the-hard-ceiling
+    # pattern opendata.yml (345)/common_crawl.yml (350) already use —
+    # GitHub hard-caps a single hosted-runner job at 360 minutes (6h),
+    # so this is as high as it can go without a self-hosted runner.
+    timeout-minutes: 350
     strategy:
       fail-fast: false   # one bad shard shouldn't cancel the rest
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.archive_i_matrix) }}
@@ -198,7 +203,9 @@ jobs:
     needs: prepare-matrix
     if: ${{ github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 2026-09: same reasoning as crawl-i's timeout-minutes above — raised
+    # 90 -> 350 (GitHub's 360min hard ceiling for a hosted-runner job).
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.archive_ii_matrix) }}
