@@ -1271,6 +1271,26 @@ MATCH_GLOBAL — positive evidence of genuinely worldwide hiring:
   supports global openness (e.g. "our fully remote team spans 30+ \
   countries across 6 continents")
 
+DO NOT treat as MATCH_GLOBAL evidence — generic company-branding/EEO \
+boilerplate that is NOT about candidate eligibility at all:
+- "We hire globally" / "we hire talent globally" / "hiring globally" \
+  used as a mission-statement or About-Us-style sentence about the \
+  COMPANY's general reach, not this specific role's eligibility (e.g. \
+  buried in "About [Company]" copy, or paired with "without bias" / \
+  "regardless of background" — that phrasing pattern is Equal \
+  Opportunity Employer language about WHO can apply once eligible, not \
+  a statement about WHERE candidates may be located)
+- Any "diversity"/"inclusion"/"equal opportunity" sentence that mentions \
+  a broad geography in passing — these are about non-discrimination, \
+  not location eligibility, and must not be read as one
+- The safest test: does the sentence say something concrete about WHERE \
+  a candidate for THIS role may be based (a place, a region, "anywhere \
+  you are"), or does it just use "global"/"worldwide" as flavor text \
+  about company culture/reach/values? Only the former counts as \
+  evidence. If genuinely unsure which it is, that sentence contributes \
+  nothing — keep reading for something more concrete, and if nothing \
+  concrete exists anywhere in the posting, say UNCERTAIN.
+
 MATCH_AFRICA — positive evidence of hiring across the African continent \
 (as a continent, not a single African country) or across the EMEA region:
 - Description or title explicitly says "Africa" (as a hiring region, \
@@ -1316,6 +1336,23 @@ NO_MATCH — evidence of a country- or narrow-region-specific restriction:
   one specific country, with no global/EMEA/Africa language elsewhere
 - Description context makes it obvious the role is for one country \
   (e.g. references to US-specific regulations, UK employment law)
+- A short unlabeled location tag naming a single US state, Canadian \
+  province, or other sub-national region near the title or at the top \
+  of the posting (e.g. "Remote, California", "Remote - Ontario", \
+  "Remote (Texas)") — this is a real, specific eligibility restriction \
+  even though it isn't introduced by the word "Location:". Treat ANY \
+  single state/province named this way as equivalent to "must be \
+  authorized to work in [that place]" unless the description elsewhere \
+  contains genuine MATCH_GLOBAL/MATCH_AFRICA-level language that clearly \
+  overrides it (a company having ONE state-restricted team while \
+  another sentence says "we hire from anywhere" is rare — read the \
+  whole posting before assuming an override exists)
+  A REAL EXAMPLE THAT WAS MISSED BEFORE (do not repeat this mistake): a \
+  posting titled "Senior Project Manager" had "Remote, California" \
+  directly under the title with no further label, and was WRONGLY let \
+  through as globally open because no sentence anywhere used the exact \
+  words "must be located in" — the bare state tag itself IS the \
+  restriction; don't wait for boilerplate phrasing to confirm it.
 
 UNCERTAIN — cannot determine either way after reading everything given:
 - No description available, or description genuinely says nothing about \
