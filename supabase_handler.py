@@ -1005,6 +1005,68 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
     return added, inserted_rows
 
 
+def get_jobs_pending_notion_sync() -> list[dict]:
+    """Rows that have never been pushed to the Notion working-set database
+    (notion_synced_at IS NULL) — the postfix step's input. Using this
+    marker instead of "added today" means the push is correct no matter
+    how many times the pipeline runs in a day: a row only ever shows up
+    here once, however many runs it takes for postfix to actually catch
+    it. Only pulls the columns notion_sync.py actually writes to a Notion
+    page (see that module's docstring for the fixed six-field policy)."""
+    rows: list[dict] = []
+    offset = 0
+    batch_size = 1000
+    try:
+        while True:
+            page = _get(
+                "jobs",
+                f"select=id,title,job_url,date_added,salary,role_category"
+                f"&notion_synced_at=is.null&offset={offset}",
+                limit=batch_size,
+            )
+            if not page:
+                break
+            rows.extend(page)
+            if len(page) < batch_size:
+                break
+            offset += batch_size
+    except SupabaseFetchError as e:
+        log.warning(f"get_jobs_pending_notion_sync: fetch failed after retries, "
+                    f"proceeding with {len(rows)} rows known so far: {e}")
+    log.info(f"Found {len(rows)} jobs never pushed to Notion")
+    return rows
+
+
+def mark_notion_synced(ids: list[int]) -> int:
+    """Stamps notion_synced_at=now() on rows that were just successfully
+    created in Notion, so get_jobs_pending_notion_sync() never re-offers
+    them. Chunked PATCH by id, same pattern as touch_archive_i_last_seen."""
+    if not ids:
+        return 0
+    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    CHUNK = 200
+    touched = 0
+    for i in range(0, len(ids), CHUNK):
+        chunk = ids[i:i + CHUNK]
+        try:
+            r = http_requests.patch(
+                f"{REST}/jobs", headers=headers, json={"notion_synced_at": now_iso},
+                params={"id": f"in.({','.join(str(x) for x in chunk)})"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            touched += _content_range_count(r, len(chunk))
+        except Exception as e:
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f" | body: {resp.text[:500]}"
+            log.error(f"Supabase notion_synced_at update failed for chunk of {len(chunk)}: {e}{detail}")
+    log.info(f"Marked {touched}/{len(ids)} jobs as synced to Notion")
+    return touched
+
+
 def update_application_statuses_bulk(updates: list[dict]) -> int:
     """Write Notion-driven status changes back into `jobs`, matched by
     Supabase `id` (the same id notion_sync.push_new_jobs_to_notion()
