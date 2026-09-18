@@ -668,6 +668,78 @@ def _url_to_slug_greenhouse(url: str) -> str | None:
     return None
 
 
+# 2026-09: Greenhouse's "Job Board" embed — a THIRD real deployment mode,
+# distinct from both cases _url_to_slug_greenhouse already handles. Here
+# the job lives on the CUSTOMER'S OWN domain with the numeric job id in a
+# `gh_jid` query param (e.g. https://www.example.com/careers/?gh_jid=123),
+# not on any *.greenhouse.io host at all — so _GREENHOUSE_BOARD_HOSTS'
+# exact-host check (correctly) never matches it, and this job was falling
+# through to a generic/unknown-ATS scrape that only ever sees a thin
+# meta-description fallback (the real content loads client-side via
+# Greenhouse's own API) — confirmed live on two real postings
+# (spins.com/work-at-spins/?gh_jid=..., zesty.ai/open-jobs?gh_jid=...),
+# both of which fetch as an empty JS shell with a plain GET.
+#
+# gh_jid alone is NOT proof of Greenhouse — a site can reuse that exact
+# query-param name for its own unrelated job id (confirmed real-world:
+# a HubSpot careers page uses gh_jid as HubSpot's own id, unconnected to
+# any Greenhouse board) — so this is a two-step process: recover a
+# CANDIDATE board token from the page's own HTML (never guessed from the
+# hostname), then the caller (node._resolve_gh_jid_hits) must verify that
+# token+id against Greenhouse's real API before trusting it.
+_GH_JID_RE = re.compile(r"[?&]gh_jid=(\d+)")
+
+# Every documented/observed way a Greenhouse embed leaves its board token
+# sitting in the page's own HTML, checked in order of confidence:
+#   1. the standard embeddable-widget script tag (support.greenhouse.io
+#      "Host internal job board outside of Greenhouse")
+#   2. the job_app iframe/embed URL (used by boards.greenhouse.io/embed/
+#      job_app?for=SLUG&token=ID — the application-iframe variant)
+#   3. a data-* attribute on the widget's mount element some custom
+#      integrations use instead of (or alongside) the script tag
+#   4. an inline JS variable assignment (gh_slug/ghSlug) some hand-rolled
+#      or page-builder (e.g. Webflow) integrations use instead of the
+#      standard script tag entirely
+# All checked as plain substring/regex scans over the raw HTML text (not
+# just <script src>) since the embed URL can just as easily sit inside an
+# iframe's src, an inline <script> block, or already-escaped JSON — the
+# same reasoning _extract_candidate_urls' Method B raw-text scan uses.
+_GH_EMBED_TOKEN_PATTERNS = (
+    re.compile(r"greenhouse\.io/embed/job_board(?:/js)?\?[^\"'\s>]*\bfor=([a-zA-Z0-9_-]+)", re.I),
+    re.compile(r"greenhouse\.io/embed/job_app\?[^\"'\s>]*\bfor=([a-zA-Z0-9_-]+)", re.I),
+    re.compile(r"data-(?:board-)?token=[\"']([a-zA-Z0-9_-]+)[\"']", re.I),
+    re.compile(r"\b(?:gh_slug|ghSlug)\s*[=:]\s*[\"']([a-zA-Z0-9_-]+)[\"']"),
+)
+
+
+def extract_gh_jid_ids(url: str, html: str) -> set[str]:
+    """All gh_jid numeric ids found on this page — the current page's own
+    URL (the common case: the job itself was fetched at a ?gh_jid= URL)
+    plus any gh_jid-carrying links elsewhere in its HTML (a listing page
+    linking out to several individual jobs). Returns ids, not URLs — the
+    caller already has the page's html to re-derive a token from."""
+    ids = set(_GH_JID_RE.findall(url))
+    ids.update(_GH_JID_RE.findall(html))
+    return ids
+
+
+def extract_greenhouse_embed_token(html: str) -> str | None:
+    """Best-effort Greenhouse board-token recovery from a page's raw HTML —
+    see _GH_EMBED_TOKEN_PATTERNS' comment for the specific signals tried,
+    in confidence order. Returns None (never a guess) when no signal is
+    present; the caller (node._resolve_gh_jid_hits) is responsible for
+    verifying whatever token this DOES return against the real Greenhouse
+    API before treating it as fact — a found token is a candidate, not a
+    confirmed fact, exactly like every other slug this file extracts."""
+    for pattern in _GH_EMBED_TOKEN_PATTERNS:
+        m = pattern.search(html)
+        if m:
+            token = m.group(1)
+            if token and token.lower() not in SKIP_SLUGS:
+                return token
+    return None
+
+
 def _url_to_slug_lever(url: str) -> str | None:
     """2026-08: removed the old second fallback branch (`"lever" in host
     and ".co" in host`) — confirmed via research to be a real false-
