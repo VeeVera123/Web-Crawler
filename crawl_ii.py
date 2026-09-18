@@ -1050,22 +1050,60 @@ _JD_STRONG_GLOBAL_HIRING_RE = tuple(re.compile(p, re.I) for p in (
 ))
 _BARE_LOCATION_VALUES = ("", "remote", "remote worker", "remote job", "fully remote")
 
+# 2026-09 BUG FIX: a real posting (ehryourway.com Senior CSM — Enterprise)
+# said "Fully remote — work from anywhere in the United States." and got
+# written to the DB as location="Worldwide" — a straight false positive
+# that then sailed through classifier.py's location gate as a top-tier
+# Global match. Root cause: _JD_STRONG_GLOBAL_HIRING_RE matched the bare
+# phrase "work from anywhere" and stopped there, never checking what
+# immediately qualifies it. "anywhere in the United States" is not
+# "anywhere" — it's exactly one country, stated three words later.
+#
+# This mirrors a lesson classifier.py's own location-FIELD parser already
+# learned (see its "residue check" comments): a keyword hit alone is not
+# evidence — you have to also confirm nothing narrowing survives right
+# next to it. This JD-body enrichment (added after that lesson, for a
+# different input source) was written without the equivalent check, so it
+# had the identical blind spot. Fix applies to every phrase in
+# _JD_STRONG_GLOBAL_HIRING_RE uniformly (not just "work from anywhere"),
+# since any of them could just as easily be followed/preceded by "...in
+# the US" / "...within Canada" / etc. in real posting text.
+_JD_QUALIFIER_WINDOW = 80  # chars scanned on each side of a phrase hit
+_JD_NARROWING_QUALIFIER_RE = re.compile(
+    r"\b(?:US|U\.S\.|USA|U\.S\.A\.|United\s+States|UK|U\.K\.|United\s+Kingdom|Canada|Australia|"
+    r"Germany|France|Netherlands|Mexico|Philippines|Nigeria|Kenya|South\s+Africa|India|Ireland|"
+    r"Spain|Italy|Brazil|Japan|Singapore|China|APAC|LATAM|ANZ|NAM|MENA)\b",
+    re.I,
+)
+
 
 def _enrich_location_from_description(job: dict) -> None:
     """Mutates job["location"] in place — see module note above. No-op
-    when location already has real content, or when the description
-    carries none of the narrow phrase set."""
+    when location already has real content, when the description carries
+    none of the narrow phrase set, or when every phrase hit found is
+    itself narrowed to one specific country/region right next to it
+    (e.g. "work from anywhere in the United States" — see BUG FIX note
+    above). In that last case the location is deliberately left bare
+    rather than guessed at, so classifier.py's existing blank→"unsure"→AI
+    path still gets a look at it instead of being short-circuited."""
     loc = (job.get("location") or "").strip()
     if loc.lower() not in _BARE_LOCATION_VALUES and not PLACEHOLDER_LOC_RE.match(loc):
         return
     desc = job.get("description") or ""
     if not desc:
         return
-    if any(rx.search(desc) for rx in _JD_STRONG_GLOBAL_HIRING_RE):
-        # A bare "Remote" is worth keeping (distinguishes "remote, open
-        # worldwide" from a placeholder like "TBD"/"See description",
-        # which carries no information worth preserving).
-        job["location"] = f"{loc}, Worldwide" if loc.lower() in ("remote", "remote worker", "remote job", "fully remote") else "Worldwide"
+    for rx in _JD_STRONG_GLOBAL_HIRING_RE:
+        for m in rx.finditer(desc):
+            start = max(0, m.start() - _JD_QUALIFIER_WINDOW)
+            end = min(len(desc), m.end() + _JD_QUALIFIER_WINDOW)
+            before, after = desc[start:m.start()], desc[m.end():end]
+            if _JD_NARROWING_QUALIFIER_RE.search(before) or _JD_NARROWING_QUALIFIER_RE.search(after):
+                continue  # narrowed to one country/region right here — not real evidence
+            # A bare "Remote" is worth keeping (distinguishes "remote, open
+            # worldwide" from a placeholder like "TBD"/"See description",
+            # which carries no information worth preserving).
+            job["location"] = f"{loc}, Worldwide" if loc.lower() in ("remote", "remote worker", "remote job", "fully remote") else "Worldwide"
+            return
 
 
 # ── Classification + push (mirrors crawl_i.py's role/location/visa funnel) ──
