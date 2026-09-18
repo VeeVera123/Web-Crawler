@@ -39,7 +39,9 @@ sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # geo.py/discovery.py live here
 
 import geo  # noqa: E402
-from discovery import URL_TO_SLUG  # noqa: E402
+from discovery import (  # noqa: E402
+    URL_TO_SLUG, extract_gh_jid_ids, extract_greenhouse_embed_token,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
@@ -1722,6 +1724,51 @@ async def _resolve_grnh_se_hits(session: aiohttp.ClientSession, html: str,
     return hits
 
 
+_MAX_GH_JID_VERIFY_PER_PAGE = 3  # same bound/reasoning as _MAX_GRNH_SE_PER_PAGE
+
+
+async def _resolve_gh_jid_hits(session: aiohttp.ClientSession, html: str, url: str,
+                                stats: dict) -> list[tuple[str, str, str]]:
+    """Greenhouse's customer-domain "Job Board" embed — see
+    discovery.extract_gh_jid_ids/extract_greenhouse_embed_token for the
+    full background (a ?gh_jid= URL on the company's OWN domain, whose
+    real content only loads via Greenhouse's API — the plain-GET page is
+    an empty JS shell, confirmed live on real postings that were
+    consequently getting classified from a thin fallback snippet with no
+    restriction language, a false-positive source).
+
+    A recovered embed token is only a CANDIDATE — this is the mandatory
+    verification step: call the real Greenhouse API for (token, gh_jid)
+    and only accept it if the API actually returns a job with that exact
+    id. Without this, a site that reuses the `gh_jid` param name for its
+    own unrelated id (confirmed real-world: a HubSpot careers page does
+    exactly this) would get mis-attributed to whatever Greenhouse token
+    happens to also be on the page. Best-effort throughout, same as
+    _resolve_grnh_se_hits: no token found, or a failed/mismatched
+    verification, just yields no hit — never a guess."""
+    ids = extract_gh_jid_ids(url, html)
+    if not ids:
+        return []
+    token = extract_greenhouse_embed_token(html)
+    if not token:
+        return []
+    hits: list[tuple[str, str, str]] = []
+    for gh_jid in list(ids)[:_MAX_GH_JID_VERIFY_PER_PAGE]:
+        api_url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs/{gh_jid}"
+        page = await _fetch_page(session, api_url, stats)
+        if not page:
+            continue
+        _, body = page
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError):
+            continue
+        if str(data.get("id", "")) != str(gh_jid):
+            continue  # API responded but not with THIS job — reject, don't guess
+        hits.append(("greenhouse", token, url))
+    return hits
+
+
 async def _fetch_sitemap(session: aiohttp.ClientSession, origin: str, stats: dict):
     """Tier 3: guessed paths (SITEMAP_INDEX_PATHS). Tier 4, only if those
     both miss: robots.txt's `Sitemap:` directive — the actual standard way
@@ -1856,7 +1903,10 @@ async def detect_page_hits(session: aiohttp.ClientSession, parse_pool: concurren
     duplicating logic): runs _parse_detect in the thread pool, then merges
     in any live grnh.se short-link resolution (needs a real HTTP redirect,
     so it can't run inside _parse_detect's pure-string thread-pool call —
-    same reasoning as crawl_one's original inline version).
+    same reasoning as crawl_one's original inline version), and any
+    Greenhouse gh_jid embed resolution (also needs a real HTTP call, to
+    verify the recovered token against the live API — see
+    _resolve_gh_jid_hits).
 
     Returns (hits, country, method, text_len, has_hiring_vocab) — crawl_one's
     local _detect wrapper additionally tracks best_country/best_method
@@ -1869,6 +1919,12 @@ async def detect_page_hits(session: aiohttp.ClientSession, parse_pool: concurren
     grnh_hits = await _resolve_grnh_se_hits(session, html, stats)
     if grnh_hits:
         hits = _collapse_hits([hits, grnh_hits])
+    if not any(h[0] == "greenhouse" for h in hits):
+        # Only worth the extra HTTP round-trip when nothing already found
+        # this page's company as Greenhouse another way.
+        gh_jid_hits = await _resolve_gh_jid_hits(session, html, url, stats)
+        if gh_jid_hits:
+            hits = _collapse_hits([hits, gh_jid_hits])
     return hits, country, method, text_len, has_hiring_vocab
 
 
