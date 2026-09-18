@@ -60,7 +60,10 @@ from supabase_handler import (
     SupabaseFetchError,
     log_egress_summary,
 )
-import notion_sync  # noqa: E402 — best-effort Notion working-set mirror, see that module
+# 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
+# prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
+# see notion_sync.py's module docstring for why. This file is back to
+# being a pure Supabase writer.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -423,11 +426,6 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
     2026-08: job board aggregators (RemoteOK, Remotive, etc. — see
     job_board_scrapers.py) were disabled and the file removed entirely —
     ATS boards are now the only source Crawl I scrapes."""
-    try:
-        notion_sync.sync_notion_statuses_to_supabase()
-    except Exception as e:
-        log.warning(f"Notion status sync failed (crawl continues unaffected): {e}")
-
     report_id = start_scan_report()
 
     try:
@@ -532,13 +530,8 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         # crawl_ii.py's 2026-09 restructure (see its crawl_batch_ii
         # docstring) brought IT in line with this, not the other way round.
         log.info("── Writing to Supabase ──")
-        added, inserted_rows = add_jobs_batch(global_jobs, confidences, existing_urls=existing_urls)
+        added, _inserted_rows = add_jobs_batch(global_jobs, confidences, existing_urls=existing_urls)
         log.info(f"  {added} new jobs written")
-
-        try:
-            notion_sync.push_new_jobs_to_notion(inserted_rows)
-        except Exception as e:
-            log.warning(f"Notion push failed (Supabase write already succeeded, unaffected): {e}")
 
         # Finalize this run's report. `duplicates` now counts BOTH kinds:
         # pre-classification skips (already_seen) and any post-classification
