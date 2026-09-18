@@ -19,6 +19,7 @@ import requests
 from bs4 import BeautifulSoup
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 import geo
+from discovery import _GH_JID_RE, extract_greenhouse_embed_token
 
 log = logging.getLogger(__name__)
 
@@ -5384,9 +5385,31 @@ def _fetch_greenhouse_questions(job: dict) -> str:
     # Extract board slug and job ID from URL
     # https://job-boards.greenhouse.io/SLUG/jobs/JOBID
     m = re.search(r"greenhouse\.io/([^/]+)/jobs/(\d+)", url)
-    if not m:
-        return ""
-    slug, job_id = m.group(1), m.group(2)
+    if m:
+        slug, job_id = m.group(1), m.group(2)
+    else:
+        # 2026-09: Greenhouse's customer-domain "Job Board" embed —
+        # ?gh_jid=<id> on the company's OWN domain, no greenhouse.io host
+        # or path shape for the regex above to match at all. The real
+        # slug isn't in this URL — it has to be recovered from the job
+        # page's own HTML (the embed script/iframe/data-attr Greenhouse's
+        # widget leaves behind — see discovery.extract_greenhouse_embed_token),
+        # so this branch does its own fetch of the job page first. See
+        # discovery.py's _GH_JID_RE/extract_gh_jid_ids/
+        # extract_greenhouse_embed_token comments for the full background
+        # (confirmed live false positives on spins.com/zesty.ai postings
+        # that were classified from a thin fallback snippet because this
+        # embed shape was never recognized anywhere in the pipeline).
+        jid_match = _GH_JID_RE.search(url)
+        if not jid_match:
+            return ""
+        job_id = jid_match.group(1)
+        page = _get(url)
+        if not page:
+            return ""
+        slug = extract_greenhouse_embed_token(page.text)
+        if not slug:
+            return ""
     api_url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{job_id}?questions=true"
     r = _get(api_url)
     if not r:
@@ -5394,6 +5417,16 @@ def _fetch_greenhouse_questions(job: dict) -> str:
     try:
         data = r.json()
     except Exception:
+        return ""
+    # A recovered gh_jid-embed token is only a candidate (see
+    # extract_greenhouse_embed_token's docstring) — reject unless the API
+    # actually returned THIS job. Guards against a site reusing the
+    # `gh_jid` query-param name for its own unrelated id (confirmed
+    # real-world: a HubSpot careers page does exactly this) getting
+    # mis-attributed to whatever Greenhouse token happens to also be on
+    # the page. Applied even on the standard-URL path above — cheap and
+    # correct either way.
+    if str(data.get("id", "")) != str(job_id):
         return ""
 
     questions = data.get("questions") or []
