@@ -910,57 +910,25 @@ def update_archive_ii_career_pages(updates: list[dict]) -> int:
     return updated
 
 
-def update_archive_ii_quality_scores(updates: list[dict]) -> int:
-    """Writes {"qi_score", "qi_rank"} for existing archive_ii rows, keyed on
-    website_url — 2026-09, added for reclassify_archive_ii.py's rerank pass
-    (recomputes node.py's Quality Index for every row currently on file, not
-    just newly-captured ones). Same "PATCH not upsert" reasoning as
-    update_archive_ii_career_pages above: a mismatched website_url just
-    updates 0 rows instead of falling back to an INSERT that would violate
-    discovery_method's NOT NULL constraint and take out the whole chunk.
-
-    rank is sent as an explicit null (not omitted) when a row's rerank comes
-    back "" (score below the F floor, or a WebGraph/weak-signal-only
-    composition) — see node.py's _quality_index_rank(). Omitting the key
-    entirely would leave a stale rank from a PREVIOUS rerank in place; an
-    explicit null clears it, matching what "this row no longer qualifies"
-    actually means."""
-    if not updates:
-        return 0
-    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
-    updated = 0
-    for row in updates:
-        website_url = row.get("website_url")
-        if not website_url or "qi_score" not in row:
-            continue
-        rank = row.get("qi_rank") or None
-        try:
-            r = http_requests.patch(
-                f"{REST}/archive_ii", headers=headers,
-                json={"qi_score": row["qi_score"], "qi_rank": rank},
-                params={"website_url": f"eq.{website_url}"},
-                timeout=30,
-            )
-            r.raise_for_status()
-            updated += _content_range_count(r, 1)
-        except Exception as e:
-            detail = ""
-            resp = getattr(e, "response", None)
-            if resp is not None:
-                detail = f" | body: {resp.text[:500]}"
-            log.error(f"Supabase qi_score/qi_rank update failed for {website_url}: {e}{detail}")
-    log.info(f"Updated qi_score/qi_rank for {updated}/{len(updates)} archive_ii rows (rerank)")
-    return updated
-
-
 # ── Job insertion ────────────────────────────────────────
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
                     source_pipeline: str = "crawl_i",
-                    existing_urls: set[str] | None = None) -> int:
+                    existing_urls: set[str] | None = None) -> tuple[int, list[dict]]:
     """
     Upsert jobs in bulk. New jobs are inserted; existing jobs get
-    last_seen and is_active updated.  Returns count of new jobs added.
+    last_seen and is_active updated.
+
+    Returns (added_count, inserted_rows) — inserted_rows is the actual
+    Supabase rows for the jobs that were genuinely new this call
+    (including the `id` Postgres just assigned each one), NOT the input
+    `jobs` list. 2026-09: added so callers can hand freshly-inserted jobs
+    straight to notion_sync.push_new_jobs_to_notion() without a second
+    round-trip to look their ids back up — the id is already sitting in
+    this response. Requires the insert POST to ask for
+    `Prefer: return=representation` instead of `return=minimal` (see
+    below); previously this function's insert step didn't get row data
+    back from Supabase at all because nothing needed it yet.
 
     `source_pipeline` tags true first-inserts only — see _build_row's
     docstring. Crawl II (crawl_ii.py) calls this with source_pipeline=
@@ -1001,7 +969,12 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
     # refreshed) rather than failing the whole chunk.
     new_rows = _dedupe_rows_by_job_url(new_rows)
     added = 0
-    headers = {**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
+    inserted_rows: list[dict] = []
+    # return=representation (was return=minimal): the ONLY change needed
+    # to get each new row's id back in the same response — no separate
+    # query. Costs a slightly bigger response body per chunk; negligible
+    # at the ~dozens-per-run volume this table actually sees.
+    headers = {**HEADERS, "Prefer": "return=representation,resolution=merge-duplicates"}
     for i in range(0, len(new_rows), 100):
         chunk = new_rows[i:i + 100]
         try:
@@ -1011,6 +984,10 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
             )
             r.raise_for_status()
             added += len(chunk)
+            try:
+                inserted_rows.extend(r.json())
+            except Exception:
+                pass  # count is still right even if the body can't be parsed for some reason
         except Exception as e:
             detail = ""
             resp = getattr(e, "response", None)
@@ -1025,7 +1002,57 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
     log.info(f"Added {added} new jobs to Supabase "
              f"({len(seen_jobs)} existing touched, "
              f"{len(jobs) - len(new_rows) - len(seen_jobs)} no-url skipped)")
-    return added
+    return added, inserted_rows
+
+
+def update_application_statuses_bulk(updates: list[dict]) -> int:
+    """Write Notion-driven status changes back into `jobs`, matched by
+    Supabase `id` (the same id notion_sync.push_new_jobs_to_notion()
+    stamped onto each page as its join key — see that module).
+
+    `updates` is [{"id": <int>, "application_status": <str>}, ...].
+    status_updated_at is set to "now" for every row in this call — good
+    enough for a periodic (not real-time) reconciliation; see
+    notion_sync's module docstring for why exact Notion edit time isn't
+    tracked. Grouped by status value so this is a handful of batched
+    PATCHes (one per distinct status this run), not one request per job —
+    same pattern as touch_archive_i_last_seen."""
+    if not updates:
+        return 0
+    headers = {**HEADERS, "Prefer": "return=minimal,count=exact"}
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    by_status: dict[str, list[int]] = {}
+    for u in updates:
+        job_id = u.get("id")
+        status = u.get("application_status")
+        if job_id is None or not status:
+            continue
+        by_status.setdefault(status, []).append(job_id)
+
+    CHUNK = 200
+    touched = 0
+    for status, ids in by_status.items():
+        for i in range(0, len(ids), CHUNK):
+            chunk = ids[i:i + CHUNK]
+            try:
+                r = http_requests.patch(
+                    f"{REST}/jobs", headers=headers,
+                    json={"application_status": status, "status_updated_at": now_iso},
+                    params={"id": f"in.({','.join(str(x) for x in chunk)})"},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                touched += _content_range_count(r, len(chunk))
+            except Exception as e:
+                detail = ""
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    detail = f" | body: {resp.text[:500]}"
+                log.error(f"Supabase status update failed for status={status!r} "
+                          f"chunk of {len(chunk)}: {e}{detail}")
+    log.info(f"Updated application_status for {touched}/{len(updates)} jobs from Notion")
+    return touched
 
 
 def _touch_last_seen(seen_jobs: list[tuple[dict, str]], today: str):
