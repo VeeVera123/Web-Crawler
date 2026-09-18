@@ -666,15 +666,142 @@ def _guess_apply_url(job_url: str) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc}{path}/apply"
 
 
+# 2026-09: real "Apply" link discovery, in place of guessing a `/apply`
+# sibling path from the job URL's shape alone (_guess_apply_url above) —
+# that guess only ever fires for a narrow URL shape (opaque trailing id)
+# and, even then, is just a shape match, not evidence the link actually
+# exists. Screening questions (work-authorization/visa/sponsorship — the
+# exact restriction language _HAS_VISA_OR_CLEARANCE_SIGNAL_RE looks for)
+# often live only on the real apply/application page, so finding the link
+# the page ITSELF already points to is both more accurate and covers far
+# more sites than the shape-based guess.
+#
+# Deliberately HTML-only: this scores links already present in the
+# page's own markup and fetches whatever wins — it never executes
+# JavaScript or simulates a click. A JS-only apply flow (href="#" /
+# "javascript:..." with no literal URL recoverable from the element's own
+# attributes or its inline onclick handler) is left alone; that job just
+# keeps whatever description text was already extracted, exactly like
+# before this existed.
+_APPLY_VOCAB_RE = re.compile(
+    r"apply\s*(now|online|for\s+this\s+(job|position|role))?|"
+    r"submit\s+(your\s+)?application|start\s+application|begin\s+application", re.I)
+_APPLY_HREF_HINT_RE = re.compile(r"/(apply|application|applications|candidate|candidates)(?:/|$|\?)", re.I)
+_BAD_HREF_RE = re.compile(r"^(javascript:|mailto:|tel:|#)", re.I)
+# Matches the first quoted string that looks like a path/URL inside an
+# onclick (or similar) handler's literal source — e.g.
+# onclick="openApply('/jobs/123/apply')" — WITHOUT evaluating any JS.
+_INLINE_HANDLER_URL_RE = re.compile(r"""['"]((?:https?://|/)[^'"\s]{2,300})['"]""")
+_APPLY_DATA_ATTRS = ("data-apply-url", "data-application-url", "data-apply-href", "data-href", "data-url")
+
+
+def _score_apply_candidate(href: str, text: str, aria_label: str, title: str, class_attr: str) -> int:
+    score = 0
+    if _APPLY_VOCAB_RE.search(text or ""):
+        score += 100
+    if _APPLY_VOCAB_RE.search(aria_label or ""):
+        score += 80
+    if _APPLY_VOCAB_RE.search(title or ""):
+        score += 50
+    if _APPLY_HREF_HINT_RE.search(href or ""):
+        score += 40
+    if re.search(r"apply|application", class_attr or "", re.I):
+        score += 20
+    return score
+
+
+def _find_apply_url_in_html(html: str, page_url: str) -> str | None:
+    """Best-effort real "Apply" URL, scored from links/elements already in
+    `html` — see the module comment above for what this deliberately does
+    NOT do (execute JS). Checked, in order: scored <a>/<button> hrefs,
+    then an iframe's own src (an embedded application widget, e.g.
+    Greenhouse's job_app iframe, IS the apply target), then data-* apply
+    attributes, then a literal URL sitting inside an onclick handler.
+    Returns None (never a guess) when nothing usable is found."""
+    try:
+        tree = LexborHTMLParser(html)
+    except Exception:
+        return None
+
+    best_url, best_score = None, 0
+    for node_ in tree.css("a[href], button"):
+        href = node_.attributes.get("href") or ""
+        if href and _BAD_HREF_RE.match(href.strip()):
+            href = ""
+        text = node_.text(strip=True) or ""
+        aria_label = node_.attributes.get("aria-label") or ""
+        title = node_.attributes.get("title") or ""
+        class_attr = node_.attributes.get("class") or ""
+        score = _score_apply_candidate(href, text, aria_label, title, class_attr)
+        if href and score > best_score:
+            try:
+                best_url, best_score = urljoin(page_url, href), score
+            except Exception:
+                continue
+        if not href and score >= 100:
+            # Strong "Apply"-labeled control with no usable href — check
+            # its own onclick (or similar) attribute for a literal URL
+            # before giving up on it, per the module comment above.
+            for attr in ("onclick", "data-onclick"):
+                handler = node_.attributes.get(attr) or ""
+                m = _INLINE_HANDLER_URL_RE.search(handler)
+                if m:
+                    try:
+                        candidate = urljoin(page_url, m.group(1))
+                    except Exception:
+                        continue
+                    if score > best_score:
+                        best_url, best_score = candidate, score
+                    break
+    if best_url and best_score >= 40:
+        return best_url
+
+    try:
+        iframe = tree.css_first("iframe[src]")
+        if iframe:
+            src = iframe.attributes.get("src") or ""
+            if src and not _BAD_HREF_RE.match(src.strip()):
+                return urljoin(page_url, src)
+    except Exception:
+        pass
+
+    try:
+        for node_ in tree.css("[" + "], [".join(_APPLY_DATA_ATTRS) + "]"):
+            for attr in _APPLY_DATA_ATTRS:
+                val = node_.attributes.get(attr)
+                if val and not _BAD_HREF_RE.match(val.strip()):
+                    return urljoin(page_url, val)
+    except Exception:
+        pass
+
+    return None
+
+
 async def _augment_with_apply_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                                    stats: dict, job: dict) -> None:
-    """Mutates job["description"] in place if the guessed /apply page is
-    reachable and actually carries visa/clearance-relevant text — never
-    raises, never removes/blocks the posting either way."""
+                                    stats: dict, job: dict, html: str | None = None) -> None:
+    """Mutates job["description"] in place if the job's real Apply page
+    (or, failing that, a guessed /apply sibling) is reachable and
+    actually carries visa/clearance-relevant text — never raises, never
+    removes/blocks the posting either way.
+
+    `html` is the page this job's own posting was extracted from (its
+    detail page, or the listing page for a JSON-LD job extracted
+    directly off it) — when given, _find_apply_url_in_html is tried
+    first since it's real evidence rather than a URL-shape guess;
+    _guess_apply_url remains the fallback for when no real link is found
+    (or no html was passed in), same as before this existed."""
     if _HAS_VISA_OR_CLEARANCE_SIGNAL_RE.search(job.get("description") or ""):
         return
-    apply_url = _guess_apply_url(job.get("url", ""))
+    job_url = job.get("url", "")
+    apply_url = None
+    if html:
+        try:
+            apply_url = _find_apply_url_in_html(html, job_url)
+        except Exception:
+            apply_url = None
     if not apply_url:
+        apply_url = _guess_apply_url(job_url)
+    if not apply_url or apply_url == job_url:
         return
     try:
         async with sem:
@@ -728,7 +855,7 @@ async def _extract_via_jsonld_or_heuristic(session: aiohttp.ClientSession, sem: 
     if jsonld_jobs:
         stats["jsonld_pages"] += 1
         stats["jsonld_postings"] += len(jsonld_jobs)
-        await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j) for j in jsonld_jobs))
+        await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j, html) for j in jsonld_jobs))
         return jsonld_jobs
 
     candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, page_url)
@@ -737,18 +864,23 @@ async def _extract_via_jsonld_or_heuristic(session: aiohttp.ClientSession, sem: 
     stats["heuristic_pages"] += 1
     candidates = candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
 
-    async def _fetch_and_confirm(cand: dict) -> dict | None:
+    async def _fetch_and_confirm(cand: dict) -> tuple[dict, str] | None:
         async with sem:
             detail = await node._fetch_page(session, cand["url"], stats)
         if not detail:
             return None
         _, detail_html = detail
-        return await loop.run_in_executor(parse_pool, _confirm_and_build_posting, detail_html, cand, company)
+        built = await loop.run_in_executor(parse_pool, _confirm_and_build_posting, detail_html, cand, company)
+        if not built:
+            return None
+        return built, detail_html
 
     results = await asyncio.gather(*(_fetch_and_confirm(c) for c in candidates))
-    confirmed = [r for r in results if r]
+    confirmed_pairs = [r for r in results if r]
+    confirmed = [job for job, _detail_html in confirmed_pairs]
     stats["heuristic_postings"] += len(confirmed)
-    await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j) for j in confirmed))
+    await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, job, detail_html)
+                            for job, detail_html in confirmed_pairs))
     return confirmed
 
 
