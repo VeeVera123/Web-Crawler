@@ -35,11 +35,13 @@ cleanup).
      means this is correct no matter how many times a day the whole
      pipeline runs — a row is only ever offered here once, however many
      runs it takes postfix to actually catch it (see that function's
-     docstring). Seven fields are ever written to a page, by explicit
-     instruction (Company Name added 2026-09 at explicit request): title,
-     company_name, job_url, date_added, salary, role_category, and the
-     Supabase id (the join key step 1 reads back). ATS/location/etc. are
-     deliberately left alone.
+     docstring). Eight fields are ever written to a page, by explicit
+     instruction (Company Name and Globally Hiring both added 2026-09 at
+     explicit request): title, company_name, job_url, date_added, salary,
+     role_category, globally_hiring (derived from location_priority —
+     see _LOCATION_PRIORITY_TO_NOTION below), and the Supabase id (the
+     join key step 1 reads back). ATS/location/etc. are deliberately left
+     alone.
 
      NOTE ON NOTION PROPERTY NAMES: Notion treats property names as exact,
      case-sensitive strings — "Status" and "status" are two different
@@ -108,8 +110,22 @@ PROP_SALARY = "Salary"
 PROP_ROLE_CATEGORY = "Role Category"
 PROP_SUPABASE_ID = "Supabase ID"
 PROP_STATUS = "Status"
+PROP_GLOBALLY_HIRING = "Globally Hiring"
 
 STATUS_NOT_APPLIED = "Not Applied"
+
+# classifier.py's jobs.location_priority (1/2/3 — see its own
+# PRIORITY_GLOBAL/PRIORITY_AFRICA/PRIORITY_UNSURE constants) is exactly
+# the signal behind this field: 1 = an explicit worldwide/anywhere/
+# global-hiring match, 2 = Africa-the-continent or a bare EMEA match,
+# 3 = kept as a plausible role but geographic scope was never actually
+# confirmed. Mapped to the three Notion Select options at 2026-09
+# explicit request.
+_LOCATION_PRIORITY_TO_NOTION = {
+    1: "Global",
+    2: "EMEA",
+    3: "Uncertain",
+}
 
 # Notion Status select label -> Supabase jobs.application_status value
 # (the CHECK constraint on that column only allows these five).
@@ -315,6 +331,10 @@ def _build_page_properties(row: dict, schema: dict) -> dict:
     role_category = row.get("role_category")
     if role_category:
         _add(PROP_ROLE_CATEGORY, "select", {"select": {"name": role_category}})
+
+    globally_hiring = _LOCATION_PRIORITY_TO_NOTION.get(row.get("location_priority"))
+    if globally_hiring:
+        _add(PROP_GLOBALLY_HIRING, "select", {"select": {"name": globally_hiring}})
 
     return props
 
