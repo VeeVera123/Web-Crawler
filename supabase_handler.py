@@ -1012,7 +1012,8 @@ def get_jobs_pending_notion_sync() -> list[dict]:
     how many times the pipeline runs in a day: a row only ever shows up
     here once, however many runs it takes for postfix to actually catch
     it. Only pulls the columns notion_sync.py actually writes to a Notion
-    page (see that module's docstring for the fixed seven-field policy)."""
+    page (see that module's docstring for the fixed eight-field policy —
+    location_priority added 2026-09 to feed the "Globally Hiring" field)."""
     rows: list[dict] = []
     offset = 0
     batch_size = 1000
@@ -1020,7 +1021,7 @@ def get_jobs_pending_notion_sync() -> list[dict]:
         while True:
             page = _get(
                 "jobs",
-                f"select=id,title,company_name,job_url,date_added,salary,role_category"
+                f"select=id,title,company_name,job_url,date_added,salary,role_category,location_priority"
                 f"&notion_synced_at=is.null&offset={offset}",
                 limit=batch_size,
             )
