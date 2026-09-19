@@ -1321,6 +1321,21 @@ def scrape_brassring(slug: str) -> list[dict]:
     # issued by the Home page load, or it 500s. A plain POST without this
     # step is indistinguishable from "the API is dead" (see module notes
     # above) — it isn't, it just needs a session first.
+    # 2026-09 BUG FIX: every failure path in this function used to just
+    # `return []`/`break` on a real request/parse failure — completely
+    # indistinguishable, to crawl_i.py's per-platform aggregator, from
+    # "this employer genuinely has zero open postings." That's what let
+    # entire platforms (brassring, paycom, jobylon, eploy, jobadder,
+    # softgarden, isolvedhire) go silently to 0 jobs across EVERY single
+    # board while still reporting "(0 failed)" — the aggregator only
+    # counts a board as failed when scrape_board() *raises*, and nothing
+    # here ever did. Fix: a failure on the FIRST page/request (session
+    # priming, or page 1 itself) now raises instead of swallowing, so it
+    # shows up as a real failure count and (via crawl_i.py's "log first 3
+    # errors per platform") an actual diagnostic message next run. A
+    # failure on a LATER page (pagination already yielded real jobs) is
+    # left as a soft stop — that's "got some jobs, then couldn't get
+    # more," not "got nothing."
     try:
         _get_session().get(
             home_url,
@@ -1329,8 +1344,7 @@ def scrape_brassring(slug: str) -> list[dict]:
             timeout=REQUEST_TIMEOUT,
         )
     except Exception as e:
-        log.debug(f"BrassRing: session-priming GET failed for {slug}: {e}")
-        return []
+        raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
 
     all_jobs = []
     page = 1
@@ -1350,10 +1364,16 @@ def scrape_brassring(slug: str) -> list[dict]:
                 timeout=REQUEST_TIMEOUT,
             )
             if r.status_code != 200:
+                if page == 1:
+                    raise RuntimeError(f"BrassRing: API returned {r.status_code} for {slug} page 1")
                 log.debug(f"BrassRing: API returned {r.status_code} for {slug} page {page}")
                 break
             data = r.json()
+        except RuntimeError:
+            raise
         except Exception as e:
+            if page == 1:
+                raise RuntimeError(f"BrassRing: request failed for {slug}: {e}") from e
             log.debug(f"BrassRing: request failed for {slug}: {e}")
             break
 
@@ -2139,7 +2159,11 @@ def scrape_softgarden(slug: str) -> list[dict]:
         if r:
             break
     if not r:
-        return []
+        # 2026-09 BUG FIX: was `return []` — see scrape_brassring's note
+        # above; a total fetch failure across both path variants is a
+        # real failure, not an empty vacancy list, and needs to be
+        # counted as one instead of silently reported as "0 jobs, active."
+        raise RuntimeError(f"Softgarden: vacancy-list fetch failed for {slug}")
 
     jobs = []
     seen = set()
@@ -2660,7 +2684,14 @@ def scrape_eploy(slug: str) -> list[dict]:
         if r:
             break
     if not r:
-        return []
+        # 2026-09 BUG FIX: this used to `return []` here — indistinguishable
+        # from "the page loaded fine and genuinely has zero vacancies
+        # listed" to crawl_i.py's per-platform aggregator (see
+        # scrape_brassring's note above for the full explanation of why
+        # that hid every real failure across an entire ATS platform).
+        # Every candidate path failing means the request never actually
+        # succeeded — a real failure, not an empty result.
+        raise RuntimeError(f"Eploy: all vacancy-list URL variants failed for {slug}")
 
     jobs = []
     seen = set()
@@ -2783,7 +2814,12 @@ def scrape_jobadder(slug: str) -> list[dict]:
 
     r = _get(base, headers=headers)
     if not r:
-        return []
+        # 2026-09 BUG FIX: was `return []` — see scrape_brassring's note
+        # above for why that's indistinguishable from a genuinely empty
+        # board to the platform-level failure count. Raise instead so a
+        # total fetch failure is counted and diagnosed, not silently
+        # reported as "0 jobs, board active."
+        raise RuntimeError(f"JobAdder: board fetch failed for {slug}")
 
     jobs = []
     seen = set()
@@ -3347,16 +3383,30 @@ def _jobylon_sitemap_urls() -> list[str]:
     if cached and time.time() - cached[0] < _JOBYLON_SITEMAP_TTL:
         return cached[1]
 
+    # 2026-09 BUG FIX: this used to `return []` on a fetch/parse failure —
+    # identical to "the sitemap is just empty," which every one of the
+    # ~118 companies scraped this run would then silently inherit as "0
+    # jobs, active board" (see scrape_jobylon's own note below for the
+    # full explanation). Now raises instead, so scrape_jobylon's caller
+    # actually sees a failure. A short NEGATIVE cache (distinct from the
+    # long positive _JOBYLON_SITEMAP_TTL) stops a real outage from
+    # triggering a fresh failing fetch for every single company in the
+    # same run — one real request's worth of retrying, not ~118.
+    failed_cached = _jobylon_sitemap_cache.get("sitemap_failed_at")
+    if failed_cached and time.time() - failed_cached < 60:
+        raise RuntimeError("Jobylon: sitemap fetch failed recently, not retrying yet this run")
+
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     r = _get("https://emp.jobylon.com/sitemap.xml", headers=headers)
     if not r:
-        return []
+        _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
+        raise RuntimeError("Jobylon: sitemap.xml fetch failed")
 
     try:
         root = ET.fromstring(r.content)
     except Exception as e:
-        log.debug(f"Jobylon: sitemap XML parse failed: {e}")
-        return []
+        _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
+        raise RuntimeError(f"Jobylon: sitemap XML parse failed: {e}") from e
 
     urls = []
     for loc in root.iter():
@@ -3396,8 +3446,10 @@ def scrape_jobylon(slug: str) -> list[dict]:
 
     jobs = []
     fetched = 0
+    hit_cap = False
     for job_url in job_urls:
         if fetched >= _JOBYLON_MAX_DETAIL_FETCHES:
+            hit_cap = True
             log.debug(f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) "
                       f"for {slug}, stopping")
             break
@@ -3450,6 +3502,23 @@ def scrape_jobylon(slug: str) -> list[dict]:
             "source_ats": "Jobylon",
             "slug": slug,
         })
+
+    # 2026-09 BUG FIX: exhausting the whole per-company fetch budget
+    # (_JOBYLON_MAX_DETAIL_FETCHES sitemap entries checked) without ever
+    # finding one matching job is a much stronger signal of "the shared
+    # sitemap scan never got far enough to reach this company's postings"
+    # than of "this company genuinely has zero open roles" — a real
+    # zero-postings company wouldn't need hundreds of unrelated pages
+    # checked to establish that. Flag it as a failure rather than a
+    # silent 0 so it's visible instead of indistinguishable from a
+    # genuinely quiet employer (see the sitemap-fetch fix above for the
+    # other half of this same problem).
+    if hit_cap and not jobs:
+        raise RuntimeError(
+            f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) for {slug} "
+            f"without finding any of its postings in the sitemap — likely budget "
+            f"exhaustion, not a genuinely empty board"
+        )
 
     return jobs
 
@@ -3693,11 +3762,18 @@ def _paycom_bootstrap(clientkey: str) -> tuple[str, str] | None:
     if cached:
         return cached
 
+    # 2026-09 BUG FIX: this returning None on ANY failure (fetch, or
+    # token/base regex miss) is what let scrape_paycom silently report
+    # "0 jobs" for every single tenant — see scrape_brassring's note
+    # above for the general problem. Callers (scrape_paycom,
+    # _fetch_paycom_description) now distinguish "no bootstrap" from
+    # "genuinely 0 jobs" by raising instead of quietly returning [].
     r = _get(
         f"https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/career-page",
         headers={"User-Agent": random.choice(USER_AGENTS)},
     )
     if not r:
+        log.debug(f"Paycom: bootstrap page fetch failed for {clientkey}")
         return None
 
     token_match = _PAYCOM_TOKEN_RE.search(r.text)
@@ -3729,7 +3805,7 @@ def scrape_paycom(slug: str) -> list[dict]:
 
     bootstrap = _paycom_bootstrap(clientkey)
     if not bootstrap:
-        return []
+        raise RuntimeError(f"Paycom: bootstrap (token/API base) failed for {clientkey}")
     token, base = bootstrap
     search_url = f"{base}api/ats/job-posting-previews/search"
     headers = {
@@ -3750,9 +3826,15 @@ def scrape_paycom(slug: str) -> list[dict]:
         try:
             resp = _get_session().post(search_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
             if resp.status_code != 200:
+                if skip == 0:
+                    raise RuntimeError(f"Paycom: search API returned {resp.status_code} for {clientkey}")
                 break
             data = resp.json()
-        except Exception:
+        except RuntimeError:
+            raise
+        except Exception as e:
+            if skip == 0:
+                raise RuntimeError(f"Paycom: search API request failed for {clientkey}: {e}") from e
             break
 
         total = data.get("jobPostingPreviewsCount", 0)
@@ -4135,28 +4217,37 @@ def scrape_isolvedhire(slug: str) -> list[dict]:
     job here gets description_snippet="" and relies on DESCRIPTION_FETCHERS
     (_fetch_generic_description against item['jobUrl']) for enrichment,
     same convention as ADP/Jobvite/etc above."""
+    # 2026-09 BUG FIX: three failure points below — board-page fetch,
+    # domain_id extraction, and the JSON API call — all used to
+    # `return []`/log.debug and swallow the failure, identical to "this
+    # employer genuinely has zero open jobs" from crawl_i.py's per-
+    # platform aggregator's point of view (see scrape_brassring's note
+    # above for the full explanation). Given this platform is a Vue SPA
+    # (per this function's own docstring — the domain_id "is enough to
+    # find... in the common case", i.e. not guaranteed), a domain_id
+    # extraction miss is a real and likely candidate for why every board
+    # came back empty at once, and needs to be visible, not silent.
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     board_url = f"https://{slug}.isolvedhire.com/jobs/"
     r = _get(board_url, headers=headers)
     if not r:
-        return []
+        raise RuntimeError(f"isolvedhire: board page fetch failed for {slug}")
 
     m = _ISOLVEDHIRE_DOMAIN_ID_RE.search(r.text)
     if not m:
-        log.debug(f"isolvedhire: couldn't find domain_id for {slug}")
-        return []
+        raise RuntimeError(f"isolvedhire: couldn't find domain_id for {slug} — "
+                            f"page markup may have changed (SPA bootstrap not in static HTML)")
     domain_id = m.group(1)
 
     r2 = _get(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
                headers={**headers, "Accept": "application/json"},
                params={"getParams": '{"isInternal":0}'})
     if not r2:
-        return []
+        raise RuntimeError(f"isolvedhire: jobs API fetch failed for {slug} (domain_id={domain_id})")
     try:
         payload = r2.json()
     except Exception as e:
-        log.debug(f"isolvedhire: JSON parse failed for {slug}: {e}")
-        return []
+        raise RuntimeError(f"isolvedhire: JSON parse failed for {slug}: {e}") from e
 
     items = (payload.get("data") or {}).get("jobs", [])
     if not isinstance(items, list):
@@ -4279,16 +4370,28 @@ SCRAPERS = {
 
 
 def scrape_board(ats: str, slug: str) -> list[dict]:
-    """Dispatch to the correct scraper."""
+    """Dispatch to the correct scraper.
+
+    2026-09 BUG FIX: this used to catch every exception a scraper raised,
+    log it, and return [] — which meant NO individual scraper's failure
+    could ever reach crawl_i.py's per-platform aggregator (_do_scrape's
+    `except Exception: platform_failed += 1`), no matter what that
+    scraper itself raised. That's the actual root cause of whole
+    platforms (brassring, paycom, jobylon, eploy, jobadder, softgarden,
+    isolvedhire) reporting "(0 failed)" across every single board even
+    once those scrapers were fixed to raise on a real request/parse
+    failure instead of silently returning [] (see each one's own BUG FIX
+    comment) — this dispatcher was swallowing that signal right back into
+    an empty list one level up, before crawl_i.py ever saw it.
+    Re-raising here (instead of catching) is what finally lets a genuine
+    failure register as failed, and lets crawl_i.py's own "log first 3
+    errors per platform" line show the real reason — a handful of clean
+    log lines, not one per board."""
     fn = SCRAPERS.get(ats.lower())
     if not fn:
         log.warning(f"Unknown ATS: {ats}")
         return []
-    try:
-        return fn(slug)
-    except Exception as e:
-        log.error(f"Error scraping {ats}/{slug}: {e}")
-        return []
+    return fn(slug)
 
 
 # ── Second-pass: fetch individual job descriptions ─────
