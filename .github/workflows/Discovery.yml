@@ -242,7 +242,11 @@ jobs:
       - name: Install dependencies
         # pyarrow: needed by the Latmay/Edward/Open Jobs Daily H.F sources
         # to read Hugging Face's auto-converted Parquet dataset exports.
-        run: pip install requests python-dotenv google-cloud-bigquery pyarrow
+        # psycopg2-binary: needed by the ct_logs source, which queries
+        # crt.sh's public Postgres database directly (its HTTP endpoint's
+        # own robots.txt disallows automated access — see discovery.py's
+        # module comment above CRTSH_PG_HOST for the full explanation).
+        run: pip install requests python-dotenv google-cloud-bigquery pyarrow psycopg2-binary
 
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
         env:
