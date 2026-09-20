@@ -1247,19 +1247,34 @@ def _url_to_slug_softgarden(url: str) -> str | None:
     is their STANDARD/default career-page domain (not just the .io form),
     with a real live example found (alloheim.career.softgarden.de). The
     old code only recognized .softgarden.io and silently missed every
-    customer on this default domain."""
+    customer on this default domain.
+
+    2026-09 BUG FIX: added a `"." not in slug` guard. A real Softgarden
+    slug is always a single DNS label (e.g. "alloheim") — it can never
+    itself contain a dot, since it's exactly the part of the hostname
+    before one of the suffixes above. Real malformed examples that got
+    through without this guard: "koelnbaeder.dekoelnbaeder" (a
+    Wayback-Machine-sourced URL whose captured host didn't cleanly match
+    any suffix above, so the fallback below let a dot-containing, clearly
+    non-single-label string through), "app.career" and "aegps.comaegps"
+    (same shape). None of these were ever going to resolve as a real
+    tenant subdomain, so scrape_softgarden failed on every one of them —
+    rejecting a dot-containing "slug" up front turns that into a clean
+    skip at discovery time instead of a guaranteed scrape failure later."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
     for suffix in (".softgarden.io", ".career.softgarden.de", ".softgarden.de"):
         if host.endswith(suffix):
             slug = host[: -len(suffix)].lower()
-            if slug and slug not in SKIP_SLUGS and slug != "www":
+            if slug and slug not in SKIP_SLUGS and slug != "www" and "." not in slug:
                 return slug
     # Also handle api.softgarden.io/api/.../jobboards/{channelId}
     if "softgarden" in host:
         path_match = re.search(r"/jobboards/([^/]+)", parsed.path)
         if path_match:
-            return path_match.group(1)
+            candidate = path_match.group(1)
+            if candidate and "." not in candidate:
+                return candidate
     return None
 
 
@@ -1361,13 +1376,27 @@ def _url_to_slug_personio(url: str) -> str | None:
 
 def _url_to_slug_eploy(url: str) -> str | None:
     """Extract slug from Eploy URLs.
-    Pattern: {slug}.eploy.net/candidate/jobboard/..."""
+    Pattern: {slug}.eploy.net/candidate/jobboard/...
+
+    2026-09 BUG FIX: this used to check `"eploy.net" not in host` (a bare
+    substring test) and strip via `host.replace(".eploy.net", "")` — both
+    of which are fooled by any domain that merely CONTAINS "eploy.net" as
+    a substring without actually being a *.eploy.net subdomain. Real
+    example that got through: jawsdeploy.net ("...jaws-d[eploy.net]") —
+    an unrelated deployment-tooling domain that happens to spell "eploy"
+    right after a "d". The substring check let it past validation, and
+    since the host doesn't contain the literal ".eploy.net" (with a
+    leading dot), .replace() was a silent no-op — the "slug" ended up
+    being the entire hostname (app.jawsdeploy.net, www.jawsdeploy.net,
+    status.jawsdeploy.net), none of which are real Eploy customers at
+    all. Fixed with a proper suffix check (same pattern already used by
+    _url_to_slug_hrmdirect above)."""
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if "eploy.net" not in host:
+    if not host.endswith(".eploy.net"):
         return None
-    slug = host.replace(".eploy.net", "").lower()
-    if slug and slug not in SKIP_SLUGS and slug != "www":
+    slug = host[: -len(".eploy.net")].lower()
+    if slug and slug not in SKIP_SLUGS and slug != "www" and "." not in slug:
         return slug
     return None
 
