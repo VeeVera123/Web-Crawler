@@ -67,6 +67,11 @@ Sources:
   14. Aramente H.F — REMOVED 2026-09 at the user's request (see main()'s
      Source 14 comment). fetch_eutechjobs_slugs() itself is left
      defined/unused.
+  15. Certificate Transparency logs (--source ct_logs; 2026-09, new —
+     crt.sh's free CT-log index, queried directly, no seed file/dataset
+     needed. Covers 18 subdomain-per-tenant platforms — see
+     fetch_ct_log_slugs docstring and the CT_LOG_SUFFIXES comment above it
+     for exactly which platforms this can/can't help and why.)
 
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
@@ -108,6 +113,7 @@ Usage:
     python discovery.py --source openpostings  # OpenPostings only
     python discovery.py --source commoncrawl   # Common Crawl only
     python discovery.py --source wayback       # Wayback CDX (all platforms) only
+    python discovery.py --source ct_logs       # Certificate Transparency (crt.sh) only
     python discovery.py --source latmay        # Latmay H.F (Hugging Face) only
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source openjobsdaily # Open Jobs Daily H.F (Hugging Face) only
@@ -3331,6 +3337,178 @@ def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None,
 
 
 # ══════════════════════════════════════════════════════════
+# SOURCE 5b: Certificate Transparency logs (crt.sh)
+# ══════════════════════════════════════════════════════════
+#
+# 2026-09, added at the user's request. CT logs (every publicly-trusted CA
+# is required to log every cert it issues, since ~2018) let you enumerate
+# every hostname that has EVER had a certificate issued for it under a
+# given domain SUFFIX — crt.sh indexes this and exposes it as a free public
+# SQL-backed lookup (`?q=%.suffix&output=json`). This is a genuinely
+# different discovery mechanism from Common Crawl/Wayback above: those find
+# a tenant only if some crawled page happened to link to it; CT logs find
+# EVERY tenant that ever requested HTTPS for their subdomain, whether or
+# not any page on the public web links to it yet, with none of Common
+# Crawl/Wayback's crawl-frequency lag.
+#
+# Critically, this ONLY works for platforms where the tenant identity
+# lives in the SUBDOMAIN itself (each customer gets their own hostname, so
+# each one shows up as its own cert). It does NOT help for:
+#   - SuccessFactors Career Site Builder: every tenant runs on its own
+#     fully custom BRANDED domain (careers.company.com) — there's no
+#     shared suffix to query in the first place. This is exactly why
+#     SuccessFactors has no URL_TO_SLUG/CC_PLATFORM_PATTERNS entry at all
+#     (see the comment above _url_to_slug_breezyhr) and is instead found
+#     via node.py's content-fingerprint check.
+#   - Platforms that put the tenant in the PATH on a shared host, not the
+#     subdomain — Greenhouse, Lever, Ashby, SmartRecruiters, Jobvite,
+#     JobAdder, ADP, BrassRing, Jobylon, PageUp, Paylocity, Join.com — a
+#     CT query here would just return the platform's own one or two fixed
+#     hosts, over and over, with zero new information.
+#   - Workday, Taleo, and Oracle Cloud HCM: these DO put the tenant in the
+#     subdomain, so CT logs would confirm a tenant exists — but the
+#     scrape-ready slug also needs a site_id/section/org value that only
+#     lives in the URL PATH or a query param, not the hostname, so a CT
+#     hit alone isn't enough to build a usable slug for these three (a bare
+#     tenant hostname resolves to None in _url_to_slug_workday/_taleo/
+#     _oracle_cloud). Left out of CT_LOG_SUFFIXES below for that reason —
+#     revisit if a reliable default site_id/org pattern is ever confirmed.
+#
+# For every platform below, this reuses the EXACT SAME real, already-
+# hardened URL_TO_SLUG extractor each other source uses — a discovered
+# hostname is turned into a synthetic "https://{host}/" URL and run
+# through that platform's own extractor, so every existing validation
+# guard (SKIP_SLUGS, _looks_like_real_slug, reserved-subdomain lists, the
+# softgarden/csod fallback logic, etc.) applies unchanged. No new parsing
+# logic was written — this is a new URL SOURCE, not a new URL parser.
+CT_LOG_SUFFIXES: dict[str, list[str]] = {
+    "bamboohr": [".bamboohr.com"],
+    "icims": [".icims.com"],
+    "rippling": [".rippling.com"],
+    "workable": [".workable.com"],
+    "recruitee": [".recruitee.com"],
+    "teamtailor": [".teamtailor.com"],
+    "breezyhr": [".breezy.hr"],
+    "hrmdirect": [".hrmdirect.com", ".clearcompany.com"],
+    "softgarden": [".softgarden.io", ".career.softgarden.de", ".softgarden.de"],
+    "zoho": [".zohorecruit.com", ".zohorecruit.eu", ".zohorecruit.com.au"],
+    "eploy": [".eploy.net"],
+    "pinpoint": [".pinpointhq.com"],
+    "isolvedhire": [".isolvedhire.com"],
+    "flatchr": [".flatchr.io"],
+    "getro": [".getro.com"],
+    "jazzhr": [".applytojob.com"],
+    "csod": [".csod.com"],
+    "avature": [".avature.net"],
+}
+
+CRTSH_URL = "https://crt.sh/"
+# crt.sh has no documented per-IP rate limit, but it's a small, free,
+# community-run service backed by a single Postgres instance — a short
+# sleep between queries is just good citizenship, same spirit as the
+# 0.3s sleep _drop_dead_cc_slugs' predecessor used per-slug.
+_CRTSH_QUERY_SLEEP_SECONDS = 1.0
+_CRTSH_MAX_RETRIES = 3
+
+
+def _fetch_crtsh_hostnames(suffix: str) -> set[str]:
+    """All distinct hostnames crt.sh has ever seen a certificate issued for
+    under `suffix` (e.g. ".bamboohr.com"). `output=json` returns one row
+    per matching CERTIFICATE, not per hostname — a single cert's
+    `name_value` field can itself contain multiple SANs newline-separated
+    (e.g. a wildcard cert or a multi-domain cert), so every row's
+    name_value is split on newlines and each line is checked against the
+    suffix independently, rather than assuming one hostname per row.
+
+    crt.sh is a free, best-effort community service (a single Postgres
+    instance behind a web UI, not a paid API) — it can be slow or briefly
+    503 under load, so this retries a couple of times with backoff before
+    giving up on this one suffix (not the whole source)."""
+    last_error = None
+    for attempt in range(1, _CRTSH_MAX_RETRIES + 1):
+        try:
+            r = requests.get(
+                CRTSH_URL,
+                params={"q": f"%{suffix}", "output": "json"},
+                timeout=90,
+                headers={"User-Agent": _ROBOTS_UA},
+            )
+            r.raise_for_status()
+            rows = r.json()
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < _CRTSH_MAX_RETRIES:
+                time.sleep(5 * attempt)
+            continue
+    else:
+        log.warning(f"crt.sh: query failed for {suffix} after {_CRTSH_MAX_RETRIES} "
+                    f"attempts: {last_error}")
+        return set()
+
+    hostnames: set[str] = set()
+    if not isinstance(rows, list):
+        return hostnames
+    for row in rows:
+        name_value = (row or {}).get("name_value", "")
+        for line in name_value.splitlines():
+            host = line.strip().lower().lstrip("*.")
+            if host.endswith(suffix.lstrip(".")) or (suffix.startswith(".") and host.endswith(suffix)):
+                hostnames.add(host)
+    return hostnames
+
+
+def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]]:
+    """Query crt.sh's Certificate Transparency index for every platform in
+    CT_LOG_SUFFIXES (or the subset named in `platforms`), turn each
+    discovered hostname into a slug via that platform's own URL_TO_SLUG
+    extractor, and live-drop dead ones exactly like Common Crawl/Wayback —
+    see the module comment above CT_LOG_SUFFIXES for which platforms this
+    can and can't help, and why.
+
+    Unlike Wayback/Common Crawl, this needs no CDX-style pagination — a
+    single crt.sh query returns crt.sh's FULL known history for that
+    suffix in one response (crt.sh itself doesn't page this endpoint)."""
+    slugs_by_ats: dict[str, set[str]] = {}
+
+    if not _robots_allows("https://crt.sh", "/"):
+        log.warning("crt.sh: disallowed by crt.sh/robots.txt (or robots.txt "
+                    "unreachable) — skipping CT log discovery entirely.")
+        return slugs_by_ats
+
+    target_platforms = platforms if platforms is not None else list(CT_LOG_SUFFIXES.keys())
+
+    for ats in target_platforms:
+        suffixes = CT_LOG_SUFFIXES.get(ats)
+        extractor = URL_TO_SLUG.get(ats)
+        if not suffixes or not extractor:
+            continue
+
+        hostnames: set[str] = set()
+        for suffix in suffixes:
+            log.info(f"crt.sh: querying %{suffix}")
+            found = _fetch_crtsh_hostnames(suffix)
+            log.info(f"  crt.sh: {len(found)} distinct hostnames")
+            hostnames.update(found)
+            time.sleep(_CRTSH_QUERY_SLEEP_SECONDS)
+
+        slugs: set[str] = set()
+        for host in hostnames:
+            try:
+                slug = extractor(f"https://{host}/")
+            except Exception:
+                continue
+            if slug:
+                slugs.add(slug)
+
+        if slugs:
+            log.info(f"  {ats}: {len(slugs)} companies from CT logs")
+            slugs_by_ats[ats] = slugs
+
+    return _drop_dead_cc_slugs(slugs_by_ats, "CT logs")
+
+
+# ══════════════════════════════════════════════════════════
 # SOURCE 6: Y Combinator (yc-oss/api)
 # ══════════════════════════════════════════════════════════
 #
@@ -5266,7 +5444,7 @@ def main():
     parser.add_argument(
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
-                 "wayback", "theirstack", "httparchive",
+                 "wayback", "ct_logs", "theirstack", "httparchive",
                  "latmay", "edwarddgao", "openjobsdaily",
                  "icims_hrjobs", "github", "all"],
         default="all",
@@ -5515,6 +5693,28 @@ def main():
             grand_total += upserted
         else:
             grand_total += wb_total
+
+    # Source 5b: Certificate Transparency logs (crt.sh) — 2026-09, new.
+    # Only helps the subdomain-per-tenant platforms in CT_LOG_SUFFIXES —
+    # see that dict's module comment for the full reasoning.
+    if args.source in ("ct_logs", "all"):
+        log.info("\n--- CERTIFICATE TRANSPARENCY LOGS (crt.sh) ---")
+        ct_slugs = fetch_ct_log_slugs()
+        ct_total = sum(len(s) for s in ct_slugs.values())
+        log.info(f"CT logs total: {ct_total} slugs across {len(ct_slugs)} platforms")
+
+        if not args.dry_run:
+            # NOTE: archive_i.source has a CHECK constraint allowlist —
+            # 'ct_logs' must be added to it (ALTER TABLE ... DROP/ADD
+            # CONSTRAINT archive_i_source_check) before this upsert will
+            # succeed. See the chat history for the exact migration SQL —
+            # it was blocked from being applied directly from this session
+            # by the same auto-mode classifier that blocks mass deletes.
+            upserted = upsert_to_supabase(ct_slugs, source="ct_logs",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += ct_total
 
     # Source 6 (Y Combinator) REMOVED 2026-09 at the user's request: YC-
     # batch companies aren't ATS-specific — they surface through Common
