@@ -9,6 +9,11 @@ on:
         description: "Per-job timeout, in minutes"
         required: false
         default: "300"
+      only_ct_logs:
+        description: "Run ONLY the CT logs (crt.sh) shards, skip every other source"
+        required: false
+        type: boolean
+        default: false
 
 # Belt-and-suspenders, same reasoning as daily_scan.yml's concurrency block —
 # GitHub already serializes same-workflow schedule/workflow_dispatch runs by
@@ -33,7 +38,7 @@ jobs:
   # that the budget it was freed for no longer exists. Latmay stays a
   # single unsharded job, same single-Parquet-file reasoning as always.
   #
-  # 24-job matrix over 12 sources, all running in parallel — instead of one
+  # 23-job matrix over 12 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -43,6 +48,13 @@ jobs:
   # sources/shards are safe: every upsert already goes through
   # `on_conflict=ats,slug` per-row, so there's no shared mutable state to
   # race on.
+  #
+  # 2026-09 rebalance: wayback cut from 5 shards to 3, httparchive
+  # restored to 1 unsharded job (it wasn't actually benefiting from 3 —
+  # see its own comment below), and those freed slots handed to ct_logs,
+  # which went from 1 unsharded job to 4 platform-sharded ones (see the
+  # ct_logs comment below for why a full unsharded sweep was worth
+  # splitting). Net matrix size unchanged.
   #
   # 2026-09: Y Combinator removed (companies surface via Common Crawl/
   # OpenPostings/the HF sources just as well — see discovery.py's module
@@ -72,7 +84,7 @@ jobs:
   # this conversation's own shard-count discussion). See discovery.py's
   # fetch_commoncrawl_slugs docstring for how the platform-sharding works.
   #
-  # wayback runs as 5 separate jobs (platform-sharded, via --wayback-shard/
+  # wayback runs as 3 separate jobs (platform-sharded, via --wayback-shard/
   # --wayback-total-shards, same scheme as commoncrawl above) — added
   # 2026-09 alongside raising discovery.py's _WAYBACK_MAX_PAGES from 25 to
   # 500. That cap was getting hit on every Greenhouse pattern in the same
@@ -80,34 +92,47 @@ jobs:
   # raising it lets a heavily-archived platform actually finish fetching,
   # but only makes sense paired with sharding — otherwise all that extra
   # allowed pagination would just stack onto one job's wall-clock instead
-  # of running across 5 in parallel. See fetch_wayback_slugs' docstring.
+  # of running across shards in parallel. Cut from 5 shards to 3 in the
+  # same 2026-09 rebalance that split ct_logs into 4 shards below — 5 was
+  # more than this account's concurrent-job cap could usefully run at
+  # once for a source that isn't the matrix's bottleneck. See
+  # fetch_wayback_slugs' docstring.
   #
-  # httparchive runs as 3 separate jobs (date-sharded, via --ha-shard/
-  # --ha-total-shards) — this source's single ~90min job was the slowest
-  # thing left in the matrix. Briefly cut to 1 unsharded job 2026-09 to
-  # free matrix slots for a batch of new HF sources, then restored back
-  # to 3 immediately after two of those sources (Aramente H.F, Zalize
-  # H.F) were removed again — the cut was a zero-cost matrix-budget trade
-  # either way, since `httparchive.crawl.pages` is partitioned by `date`,
-  # not by `technology`: splitting the resolved crawl-date list means each
-  # shard scans roughly its own fraction of the same partition bytes,
-  # summed across shards identical to one job scanning the whole range.
+  # httparchive runs as 1 unsharded job again (was 3, date-sharded via
+  # --ha-shard/--ha-total-shards). Cut to 1 briefly in 2026-09 to free
+  # matrix slots for a batch of new HF sources, restored to 3 right after,
+  # then cut back to 1 for good in the same rebalance that gave ct_logs
+  # 4 shards — those 2 freed slots is what ct_logs' extra 3 shards cost.
+  # Confirmed cost-neutral either way: `httparchive.crawl.pages` is
+  # partitioned by `date`, not by `technology`, so splitting the resolved
+  # crawl-date list just spreads the SAME total scanned bytes across N
+  # jobs instead of scanning them all in one — no BigQuery cost or
+  # correctness difference, purely a matrix-budget/wall-clock trade.
   # Deliberately NOT sharded by ATS tech instead — that WOULD multiply
   # BigQuery cost by the shard count, since technology isn't a partition/
   # clustering key. See fetch_httparchive_candidate_urls' docstring for
   # the full reasoning.
   #
-  # 2026-09: added ct_logs (single job, unsharded — crt.sh's Certificate
-  # Transparency index, queried directly, no seed file/dataset. Covers 18
-  # subdomain-per-tenant platforms in one pass; each of the 18 is a single,
-  # fast, non-paginated crt.sh lookup (unlike wayback/commoncrawl's CDX
-  # pagination), so this doesn't need its own platform-sharding the way
-  # those two do. See discovery.py's CT_LOG_SUFFIXES comment for exactly
-  # which platforms this can/can't help and why. NOTE: archive_i.source's
-  # CHECK constraint must include 'ct_logs' before this job's Supabase
-  # upsert will succeed — see this repo's own migration history/chat log
-  # for the exact ALTER TABLE statement; it has to be run manually in the
-  # Supabase SQL editor.
+  # ct_logs runs as 4 separate jobs (platform-sharded, via --ct-shard/
+  # --ct-total-shards, same scheme as commoncrawl/wayback above) — was 1
+  # unsharded job covering all ~20 CT-logs platforms sequentially,
+  # confirmed live 2026-09 to take 30-60+ minutes end to end (crt.sh's own
+  # pool-exhaustion retries, plus for the Class B platforms a live HTTP
+  # fetch per candidate host). discovery.py's fetch_ct_log_slugs also now
+  # upserts each platform's verified slugs to Supabase AS SOON AS that
+  # platform clears live verification, not once at the very end — between
+  # the two changes, a killed/interrupted run now loses at most whatever
+  # hadn't finished yet, not everything. Covers ~20 subdomain-per-tenant/
+  # live-resolve platforms; see discovery.py's CT_LOG_SUFFIXES/
+  # CT_LOG_LIVE_RESOLVE comments for exactly which platforms this can/
+  # can't help and why. This job can also be run BY ITSELF, skipping
+  # every other source, via the `only_ct_logs` workflow_dispatch input
+  # above — useful for iterating on CT-logs specifically without waiting
+  # on/paying for the rest of the matrix. NOTE: archive_i.source's CHECK
+  # constraint must include 'ct_logs' before this job's Supabase upsert
+  # will succeed — see this repo's own migration history/chat log for the
+  # exact ALTER TABLE statement; it has to be run manually in the Supabase
+  # SQL editor.
   #
   # 2026-09: added github (single job, unsharded — a short,
   # manually-curated list of known public GitHub repos, currently just
@@ -160,6 +185,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJson(inputs.timeout_minutes || '300') }}
     name: ${{ matrix.name }}
+    # 2026-09: only_ct_logs (workflow_dispatch input) lets a manual run
+    # cover JUST the ct_logs shards, skipping every other source's job
+    # entirely (shown as "skipped" in the run, not queued/run then
+    # discarded) — added so a CT-logs-only iteration doesn't have to wait
+    # on/pay for the other ~20 unrelated jobs in this matrix. `matrix.*`
+    # is available here because this `if` is evaluated per generated
+    # matrix job, not once for the whole `discover` job. On the schedule
+    # trigger (no workflow_dispatch inputs at all) `inputs.only_ct_logs`
+    # is unset/falsy, so `!inputs.only_ct_logs` is true and every job runs
+    # normally — this only changes behavior for a manual dispatch that
+    # explicitly ticks the box.
+    if: ${{ !inputs.only_ct_logs || matrix.source == 'ct_logs' }}
     strategy:
       fail-fast: false   # one bad source/shard shouldn't cancel the rest
       matrix:
@@ -181,21 +218,25 @@ jobs:
             extra_args: "--cc-shard 2 --cc-total-shards 3"
           - source: wayback
             name: wayback 1
-            extra_args: "--wayback-shard 0 --wayback-total-shards 5"
+            extra_args: "--wayback-shard 0 --wayback-total-shards 3"
           - source: wayback
             name: wayback 2
-            extra_args: "--wayback-shard 1 --wayback-total-shards 5"
+            extra_args: "--wayback-shard 1 --wayback-total-shards 3"
           - source: wayback
             name: wayback 3
-            extra_args: "--wayback-shard 2 --wayback-total-shards 5"
-          - source: wayback
-            name: wayback 4
-            extra_args: "--wayback-shard 3 --wayback-total-shards 5"
-          - source: wayback
-            name: wayback 5
-            extra_args: "--wayback-shard 4 --wayback-total-shards 5"
+            extra_args: "--wayback-shard 2 --wayback-total-shards 3"
           - source: ct_logs
-            name: CT logs (crt.sh)
+            name: CT logs 1 (crt.sh)
+            extra_args: "--ct-shard 0 --ct-total-shards 4"
+          - source: ct_logs
+            name: CT logs 2 (crt.sh)
+            extra_args: "--ct-shard 1 --ct-total-shards 4"
+          - source: ct_logs
+            name: CT logs 3 (crt.sh)
+            extra_args: "--ct-shard 2 --ct-total-shards 4"
+          - source: ct_logs
+            name: CT logs 4 (crt.sh)
+            extra_args: "--ct-shard 3 --ct-total-shards 4"
           - source: latmay
             name: Latmay H.F
           - source: icims_hrjobs
@@ -212,14 +253,7 @@ jobs:
             name: Edward H.F 3
             extra_args: "--hf-shard 2 --hf-total-shards 3"
           - source: httparchive
-            name: http archive 1
-            extra_args: "--ha-shard 0 --ha-total-shards 3"
-          - source: httparchive
-            name: http archive 2
-            extra_args: "--ha-shard 1 --ha-total-shards 3"
-          - source: httparchive
-            name: http archive 3
-            extra_args: "--ha-shard 2 --ha-total-shards 3"
+            name: http archive
           - source: openjobsdaily
             name: Open Jobs Daily H.F 1
             extra_args: "--hf-shard 0 --hf-total-shards 3"
