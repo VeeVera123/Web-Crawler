@@ -3344,43 +3344,86 @@ def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None,
 # is required to log every cert it issues, since ~2018) let you enumerate
 # every hostname that has EVER had a certificate issued for it under a
 # given domain SUFFIX — crt.sh indexes this and exposes it as a free public
-# SQL-backed lookup (`?q=%.suffix&output=json`). This is a genuinely
-# different discovery mechanism from Common Crawl/Wayback above: those find
-# a tenant only if some crawled page happened to link to it; CT logs find
-# EVERY tenant that ever requested HTTPS for their subdomain, whether or
-# not any page on the public web links to it yet, with none of Common
-# Crawl/Wayback's crawl-frequency lag.
+# SQL-backed lookup. This is a genuinely different discovery mechanism
+# from Common Crawl/Wayback above: those find a tenant only if some
+# crawled page happened to link to it; CT logs find EVERY tenant that
+# ever requested HTTPS for their subdomain, whether or not any page on
+# the public web links to it yet, with none of Common Crawl/Wayback's
+# crawl-frequency lag.
 #
-# Critically, this ONLY works for platforms where the tenant identity
-# lives in the SUBDOMAIN itself (each customer gets their own hostname, so
-# each one shows up as its own cert). It does NOT help for:
-#   - SuccessFactors Career Site Builder: every tenant runs on its own
-#     fully custom BRANDED domain (careers.company.com) — there's no
-#     shared suffix to query in the first place. This is exactly why
-#     SuccessFactors has no URL_TO_SLUG/CC_PLATFORM_PATTERNS entry at all
-#     (see the comment above _url_to_slug_breezyhr) and is instead found
-#     via node.py's content-fingerprint check.
-#   - Platforms that put the tenant in the PATH on a shared host, not the
-#     subdomain — Greenhouse, Lever, Ashby, SmartRecruiters, Jobvite,
-#     JobAdder, ADP, BrassRing, Jobylon, PageUp, Paylocity, Join.com — a
-#     CT query here would just return the platform's own one or two fixed
-#     hosts, over and over, with zero new information.
-#   - Workday, Taleo, and Oracle Cloud HCM: these DO put the tenant in the
-#     subdomain, so CT logs would confirm a tenant exists — but the
-#     scrape-ready slug also needs a site_id/section/org value that only
-#     lives in the URL PATH or a query param, not the hostname, so a CT
-#     hit alone isn't enough to build a usable slug for these three (a bare
-#     tenant hostname resolves to None in _url_to_slug_workday/_taleo/
-#     _oracle_cloud). Left out of CT_LOG_SUFFIXES below for that reason —
-#     revisit if a reliable default site_id/org pattern is ever confirmed.
+# 2026-09 REVISION #1: the original HTTP endpoint (crt.sh/?q=...&output=
+# json) is DEAD ON ARRIVAL — crt.sh's own robots.txt disallows automated
+# access to it, confirmed two independent ways (a live fetch of
+# crt.sh/robots.txt itself returns disallow, and a real run hit the
+# identical "disallowed" skip). robots.txt governs HTTP crawling
+# specifically though, not a raw database connection — crt.sh separately
+# exposes its backing data as a public, read-only PostgreSQL database
+# (`certwatch` on crt.sh:5432, user `guest`, no password), not subject to
+# the web UI's robots.txt at all. Confirmed schema/access details three
+# independent ways: real production OSS recon tooling (projectdiscovery/
+# subfinder's crtsh source uses this same connection), and — decisively —
+# this project's OWN prior, already-proven `ctlogs_seed.py` /
+# `ctlogs_probe.py` scripts, which already ran this exact query shape
+# successfully (24,991 net-new BambooHR slugs, among others) before a
+# later table rename (slug_registry -> archive_i) left those two scripts
+# pointed at tables that no longer exist. This module folds that
+# already-proven logic in here instead of it living in two more files
+# writing to dead tables.
 #
-# For every platform below, this reuses the EXACT SAME real, already-
-# hardened URL_TO_SLUG extractor each other source uses — a discovered
-# hostname is turned into a synthetic "https://{host}/" URL and run
-# through that platform's own extractor, so every existing validation
-# guard (SKIP_SLUGS, _looks_like_real_slug, reserved-subdomain lists, the
-# softgarden/csod fallback logic, etc.) applies unchanged. No new parsing
-# logic was written — this is a new URL SOURCE, not a new URL parser.
+# 2026-09 REVISION #2: crt.sh's guest Postgres role has REAL, confirmed
+# pool-exhaustion behavior under concurrent connections ("no more
+# connections allowed (max_client_conn)", and a bare connection sometimes
+# gets dropped with "server closed the connection unexpectedly") — this
+# is normal for small, free, heavily-shared infrastructure, not a sign
+# anything here is misconfigured. `ctlogs_seed.py` already solved this
+# with a fresh-connection-per-page + exponential-backoff retry loop
+# (`connect_with_retry`); that exact approach is reused below rather than
+# reinvented, since it's the one already proven to work at real volume.
+# Also confirmed live (2026-09): this only works from an ordinary
+# residential/office IP — both this codebase's own dev sandbox and a
+# real GitHub Actions runner get a connection-level timeout/"Network is
+# unreachable" on port 5432, never even reaching PgBouncer, almost
+# certainly because crt.sh (or something in front of it) filters known
+# cloud/datacenter IP ranges — a common defense against exactly this kind
+# of bulk scraping. So --source ct_logs is a MANUAL, run-it-yourself-
+# occasionally source, not something the GitHub Actions matrix can ever
+# successfully run — see Discovery.yml's ct_logs job comment.
+#
+# CLASS C (subdomain IS the whole slug) vs CLASS B (subdomain confirms a
+# tenant but the full slug also needs a path/query segment no certificate
+# can carry) — terminology and platform list both carried over verbatim
+# from ctlogs_seed.py's own history:
+#   Class C, all already tried and kept: bamboohr, icims, rippling,
+#   teamtailor, breezyhr, personio, recruitee, softgarden, zoho,
+#   hrmdirect, avature, eploy (+ pinpoint/isolvedhire/flatchr/getro/
+#   jazzhr/csod, added independently below — same shape, not yet tried
+#   against real crt.sh volume the way the others were).
+#   Class B, LIVE-RESOLVE (fetches the confirmed host to recover the
+#   missing path/query piece): taleo, oracle_cloud_hcm. See
+#   CT_LOG_LIVE_RESOLVE below.
+#   Class B, TRIED AND ABANDONED: workday — two live runs found crt.sh
+#   only surfaces ~115-123 hosts total for myworkdayjobs.com, over 90% of
+#   which is Workday's OWN internal/staging infrastructure, not customer
+#   tenants; what's left after filtering is single-digit, all already
+#   known. Not re-added here for that reason.
+#   Class A (single shared host, a cert gives ~0 tenant signal
+#   regardless): Greenhouse, Lever, Ashby, SmartRecruiters, Jobvite,
+#   JobAdder, ADP, BrassRing, Jobylon, PageUp, Paylocity, Join.com —
+#   confirmed explicitly for jobadder/brassring (both live on ONE shared
+#   host with the tenant in a path/query param, no subdomain shape at
+#   all) despite each having its own individual customer boards.
+#
+# SuccessFactors is DELIBERATELY NOT included as Class B here, despite
+# ctlogs_seed.py having tried it (successfactors.com/.eu, sapsf.com/.eu):
+# every SuccessFactors slug already in archive_i is a fully custom
+# BRANDED domain (arcareers.arkansas.gov, careers.telus.com, ...), not a
+# subdomain of successfactors.com/sapsf.com — and this project's own
+# GREYLIST_ATS.md already documents those legacy shared SAP-owned
+# hostnames as robots.txt-blocked. Extracting new slugs there would just
+# add rows this project has already deliberately chosen not to scrape.
+# Revisit only if that robots.txt status is confirmed to have changed, or
+# if ats_scrapers.py grows a way to handle the legacy-domain case
+# specifically.
 CT_LOG_SUFFIXES: dict[str, list[str]] = {
     "bamboohr": [".bamboohr.com"],
     "icims": [".icims.com"],
@@ -3400,173 +3443,267 @@ CT_LOG_SUFFIXES: dict[str, list[str]] = {
     "jazzhr": [".applytojob.com"],
     "csod": [".csod.com"],
     "avature": [".avature.net"],
+    "personio": [".jobs.personio.de", ".jobs.personio.com"],
 }
 
-# 2026-09 REVISION: the HTTP endpoint (crt.sh/?q=...&output=json) this
-# originally used is DEAD ON ARRIVAL — crt.sh's own robots.txt disallows
-# automated access to it, confirmed two independent ways: a live fetch of
-# crt.sh/robots.txt itself returns disallow, and a real discovery.py run
-# hit the identical "disallowed" skip. robots.txt governs HTTP crawling
-# specifically, though, not a raw database connection — crt.sh separately
-# exposes its backing data as a public, read-only PostgreSQL database
-# (`certwatch` on crt.sh:5432, user `guest`, no password), explicitly
-# intended for exactly this kind of bulk/programmatic query and NOT
-# subject to the web UI's robots.txt at all. This is the same connection
-# real, widely-used OSS recon tools (e.g. projectdiscovery/subfinder's
-# crtsh source) use instead of the HTTP endpoint.
-#
-# NOT independently verified live from this codebase's own dev sandbox —
-# that environment's outbound networking only tunnels HTTPS through a
-# policy proxy, so a raw Postgres wire-protocol connection on port 5432
-# has no path out and times out there regardless of whether crt.sh itself
-# is reachable. Verify this actually connects from wherever this runs for
-# real (a local machine, GitHub Actions) before trusting it in CI — e.g.
-# `psql -h crt.sh -p 5432 -U guest certwatch -c "select 1"`.
-#
-# Schema: the modern, actively-used view is `certificate_and_identities`
-# (aliased `cai` below) — NOT the older bare `certificate_identity` table
-# some tutorials still reference, which real production tooling (subfinder)
-# has already moved off of. Key columns: CERTIFICATE_ID, CERTIFICATE,
-# NAME_TYPE, NAME_VALUE. `identities(cai.CERTIFICATE)` returns a tsvector
-# of every identity (SAN) a cert covers; `plainto_tsquery(...) @@ ...`
-# uses that as a fast index-backed PRE-filter, then `NAME_VALUE ILIKE
-# '%.suffix'` does the actual precise suffix match (the FTS index alone
-# would also match e.g. "bamboohr.com.evil.com" — the ILIKE is what makes
-# this a real suffix check, not just a substring hit).
-#
-# crt.sh's Postgres is fronted by PgBouncer in STATEMENT POOLING mode —
-# multi-statement transactions are rejected outright, so the connection
-# MUST be put in autocommit mode before any query, or every query fails
-# with "FATAL: transaction blocks not allowed in statement pooling mode".
-# Long-running queries also get killed server-side after roughly a
-# minute or two (it's shared, free infrastructure) — a generous
-# statement_timeout plus a hard LIMIT keeps a single misbehaving suffix
-# from wedging (or getting killed mid-query and wasting the round trip)
-# rather than just returning fewer rows than the true total.
+# Class B: root domain to sweep + a best-effort landing path guess for the
+# live-resolve fetch (see resolve_hosts_live below). Both values and the
+# path guesses are carried over verbatim from ctlogs_seed.py, where they
+# were already tuned against real tenants.
+CT_LOG_LIVE_RESOLVE: dict[str, dict] = {
+    "taleo": {"root": "taleo.net", "guess_path": "/careersection/2/jobsearch.ftl"},
+    "oracle_cloud_hcm": {"root": "oraclecloud.com", "guess_path": "/hcmUI/CandidateExperience/en/sites/CX_1"},
+}
+
 CRTSH_PG_HOST = "crt.sh"
 CRTSH_PG_PORT = 5432
 CRTSH_PG_DATABASE = "certwatch"
 CRTSH_PG_USER = "guest"
-_CRTSH_QUERY_LIMIT = 50_000  # safety cap per suffix, not a real observed ceiling
+_CRTSH_PAGE_SIZE = 5000
+_CRTSH_MAX_PAGES = 500  # safety backstop, not the normal stopping condition
+_CRTSH_CONNECT_RETRIES = 4
+_CRTSH_CONNECT_BACKOFF_SECONDS = 5      # 5s, 10s, 20s, 40s ~= 75s worst case
+_CRTSH_QUERY_TIMEOUT_RETRIES = 3
+_CRTSH_QUERY_TIMEOUT_BACKOFF_SECONDS = 8  # 8s, 16s, 24s ~= 48s worst case
 _CRTSH_STATEMENT_TIMEOUT_MS = 45_000
-_CRTSH_MAX_RETRIES = 2
+_CRTSH_LIVE_RESOLVE_CONCURRENCY = 25
+_CRTSH_LIVE_RESOLVE_TIMEOUT = 10
+
+# Infra-noise filter, carried over verbatim from ctlogs_seed.py — a raw
+# crt.sh sweep of a big vendor's root domain also surfaces THAT VENDOR's
+# own internal/staging/status infrastructure (status.foo.com, cdn.foo.com,
+# staging-foo.com, ...), which is exactly what made Workday's Class-B
+# attempt a bust (>90% internal infra). Applied to every CT-derived slug
+# below, not just the platforms that have already hit this in practice.
+_CRTSH_INFRA_KEYWORDS = {
+    "status", "api", "cdn", "s3", "blog", "staging", "stage", "jenkins",
+    "argocd", "internal", "test", "dev", "admin", "vpn", "mail", "docs",
+    "help", "support", "app", "apps", "static", "assets", "images", "img",
+    "cache", "edge", "ci", "build", "deploy", "monitor", "grafana",
+    "prometheus", "sandbox", "demo", "beta", "alpha", "preview",
+    "onboarding", "integration", "perform",
+}
 
 
-def _crtsh_pg_connect():
-    """One connection for the whole fetch_ct_log_slugs() run (not per
-    suffix/query) — opening a fresh Postgres connection per suffix would
-    be wasteful and slower for no benefit, since a single connection can
-    run each suffix's query one after another. Raises on failure; the
-    caller decides how to handle a totally unreachable database (skip the
-    whole source, matching how every other source here fails)."""
+def _crtsh_looks_like_infra(slug: str) -> bool:
+    if "." in slug:
+        return True
+    lowered = slug.lower()
+    if lowered in _CRTSH_INFRA_KEYWORDS:
+        return True
+    return any(tok in _CRTSH_INFRA_KEYWORDS for tok in re.split(r"[-_]", lowered))
+
+
+def _crtsh_connect_with_retry():
+    """Ported from ctlogs_seed.py's connect_with_retry() — a FRESH
+    connection per page (not one long-lived connection reused across an
+    entire sweep), with exponential backoff, is what actually survives
+    crt.sh's real, confirmed pool-exhaustion behavior ("no more
+    connections allowed (max_client_conn)", or a bare connection dropped
+    with "server closed the connection unexpectedly") — both hit live
+    during this project's own testing. Returns None (not a raised
+    exception) after exhausting retries, so a caller mid-sweep can just
+    stop that one query cleanly rather than crash the whole source."""
     import psycopg2
-    conn = psycopg2.connect(
-        host=CRTSH_PG_HOST, port=CRTSH_PG_PORT, dbname=CRTSH_PG_DATABASE,
-        user=CRTSH_PG_USER, connect_timeout=30,
-    )
-    # Required — see the module comment above: PgBouncer statement pooling
-    # rejects any multi-statement transaction outright.
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute(f"SET statement_timeout = {_CRTSH_STATEMENT_TIMEOUT_MS};")
-    return conn
+    last_err = None
+    for attempt in range(1, _CRTSH_CONNECT_RETRIES + 1):
+        try:
+            conn = psycopg2.connect(
+                host=CRTSH_PG_HOST, port=CRTSH_PG_PORT, dbname=CRTSH_PG_DATABASE,
+                user=CRTSH_PG_USER, connect_timeout=30,
+            )
+            conn.autocommit = True  # required: PgBouncer statement pooling
+            # rejects any multi-statement transaction outright.
+            with conn.cursor() as cur:
+                cur.execute(f"SET statement_timeout = {_CRTSH_STATEMENT_TIMEOUT_MS};")
+            return conn
+        except Exception as e:
+            last_err = e
+            if attempt < _CRTSH_CONNECT_RETRIES:
+                wait = _CRTSH_CONNECT_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                log.warning(f"  crt.sh: connect attempt {attempt}/{_CRTSH_CONNECT_RETRIES} "
+                            f"failed ({e}) — retrying in {wait}s.")
+                time.sleep(wait)
+    log.error(f"  crt.sh: could not (re)connect after {_CRTSH_CONNECT_RETRIES} attempts: {last_err}")
+    return None
 
 
-_CRTSH_SUFFIX_QUERY = f"""
-    SELECT DISTINCT cai.NAME_VALUE
-    FROM certificate_and_identities cai
-    WHERE plainto_tsquery('certwatch', %(bare)s) @@ identities(cai.CERTIFICATE)
-      AND cai.NAME_VALUE ILIKE %(pattern)s
-      AND cai.NAME_TYPE = 'dNSName'
-    LIMIT {_CRTSH_QUERY_LIMIT};
-"""
+_CRTSH_HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$")
 
 
-def _fetch_crtsh_hostnames(conn, suffix: str) -> set[str]:
-    """All distinct hostnames crt.sh has ever seen a certificate issued for
-    under `suffix` (e.g. ".bamboohr.com"), via the direct Postgres query —
-    see the module comment above for the schema and why this isn't the
-    HTTP endpoint. `NAME_VALUE` can be a wildcard entry (e.g.
-    "*.bamboohr.com") — those are stripped of the "*." prefix and folded
-    into the same bare-hostname form the extractors expect, matching how
-    the old HTTP-JSON version handled multi-SAN certs.
+def _query_crtsh_pages(root_domain: str):
+    """Keyset-paginated generator over every hostname crt.sh has ever seen
+    a certificate issued for under `root_domain` (e.g. "bamboohr.com"),
+    yielding each page's host set as soon as it's fetched — ported from
+    ctlogs_seed.py's query_certwatch_pages (see _crtsh_connect_with_retry
+    for why a fresh connection per page, not one shared connection, is
+    load-bearing here, not incidental).
 
-    Retries a couple of times on a transient failure (crt.sh is free,
-    shared, best-effort infrastructure and does kill long-running queries
-    server-side) before giving up on this one suffix — not the whole run."""
-    bare = suffix.lstrip(".")
-    pattern = f"%.{bare}"
-    last_error = None
-    for attempt in range(1, _CRTSH_MAX_RETRIES + 1):
+    Uses `NAME_VALUE > last_seen ORDER BY NAME_VALUE LIMIT` rather than
+    OFFSET-based paging — OFFSET would re-scan everything before it on
+    every page, which gets slower each page on a big platform (BambooHR
+    alone is tens of thousands of rows); keyset pagination stays O(page
+    size) regardless of how many pages came before."""
+    import psycopg2
+    suffix = "." + root_domain
+    last_seen = ""
+    page = 1
+    timeout_retries_left = _CRTSH_QUERY_TIMEOUT_RETRIES
+
+    while page <= _CRTSH_MAX_PAGES:
+        conn = _crtsh_connect_with_retry()
+        if conn is None:
+            log.error(f"  crt.sh: could not get a connection for page {page} of "
+                       f"{root_domain} — stopping this sweep.")
+            return
         try:
             with conn.cursor() as cur:
-                cur.execute(_CRTSH_SUFFIX_QUERY, {"bare": bare, "pattern": pattern})
+                cur.execute(
+                    """
+                    SELECT DISTINCT NAME_VALUE
+                    FROM certificate_and_identities cai
+                    WHERE plainto_tsquery('certwatch', %s) @@ identities(cai.CERTIFICATE)
+                      AND cai.NAME_VALUE ILIKE %s
+                      AND cai.NAME_VALUE > %s
+                    ORDER BY NAME_VALUE
+                    LIMIT %s
+                    """,
+                    (root_domain, f"%{suffix}", last_seen, _CRTSH_PAGE_SIZE),
+                )
                 rows = cur.fetchall()
-            break
-        except Exception as e:
-            last_error = e
-            if attempt < _CRTSH_MAX_RETRIES:
-                time.sleep(3 * attempt)
+        except psycopg2.errors.QueryCanceled:
+            conn.rollback()
+            if timeout_retries_left > 0:
+                timeout_retries_left -= 1
+                wait = _CRTSH_QUERY_TIMEOUT_BACKOFF_SECONDS * (_CRTSH_QUERY_TIMEOUT_RETRIES - timeout_retries_left)
+                log.warning(f"  crt.sh: page {page} of {root_domain} timed out "
+                            f"({timeout_retries_left} retries left) — retrying in {wait}s.")
+                conn.close()
+                time.sleep(wait)
+                continue
+            log.error(f"  crt.sh: page {page} of {root_domain} timed out after "
+                       f"{_CRTSH_QUERY_TIMEOUT_RETRIES} retries — stopping this sweep.")
+            conn.close()
+            return
+        except psycopg2.OperationalError as e:
+            log.warning(f"  crt.sh: page {page} of {root_domain} connection error ({e}) — retrying.")
+            conn.close()
             continue
-    else:
-        log.warning(f"crt.sh (Postgres): query failed for {suffix} after "
-                    f"{_CRTSH_MAX_RETRIES} attempts: {last_error}")
-        return set()
 
-    hostnames: set[str] = set()
-    for (name_value,) in rows:
-        if not name_value:
-            continue
-        host = name_value.strip().lower().lstrip("*.")
-        if host.endswith(bare):
-            hostnames.add(host)
-    return hostnames
+        conn.close()
+        timeout_retries_left = _CRTSH_QUERY_TIMEOUT_RETRIES
+
+        if not rows:
+            log.info(f"  crt.sh: page {page} of {root_domain} — 0 rows, end of range.")
+            return
+
+        page_hosts: set[str] = set()
+        for (name_value,) in rows:
+            if not name_value:
+                continue
+            name = name_value.strip().lower()
+            if name.startswith("*."):
+                continue
+            if not (name.endswith(suffix) or name == root_domain):
+                continue
+            if not _CRTSH_HOSTNAME_RE.match(name):
+                continue
+            page_hosts.add(name)
+
+        log.info(f"  crt.sh: page {page} of {root_domain} — {len(rows)} rows -> "
+                 f"{len(page_hosts)} hosts")
+        yield page_hosts
+
+        last_seen = rows[-1][0]
+        if len(rows) < _CRTSH_PAGE_SIZE:
+            return
+        page += 1
+        time.sleep(1)
+
+
+def _resolve_hosts_live(hosts: set[str], ats: str, guess_path: str) -> dict[str, str]:
+    """Class B slug resolution: CT logs only confirm the HOSTNAME exists,
+    but taleo/oracle_cloud_hcm also need a path or query segment (a
+    careersection id, a site number) that no certificate carries — ported
+    from ctlogs_seed.py's resolve_slugs_live (kept synchronous + threaded
+    here to match the rest of this file's style, rather than introducing
+    asyncio/aiohttp as a new discovery.py dependency). Fetches each host's
+    best-guess landing path (bounded concurrency, short timeout — this
+    hits real third-party servers) and feeds the RESOLVED final URL
+    (after redirects) through the platform's own URL_TO_SLUG extractor;
+    falls back to the bare-hostname resolver result on any fetch failure
+    (None for taleo, a partial host-only slug for oracle_cloud_hcm, since
+    its extractor already has a graceful hostname-only fallback)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    resolver = URL_TO_SLUG.get(ats)
+    if not resolver:
+        return {}
+
+    out: dict[str, str] = {}
+
+    def _resolve_one(host: str):
+        fallback_slug = resolver(f"https://{host}/")
+        live_slug = None
+        try:
+            r = requests.get(f"https://{host}{guess_path}", timeout=_CRTSH_LIVE_RESOLVE_TIMEOUT,
+                              headers={"User-Agent": _ROBOTS_UA}, allow_redirects=True)
+            live_slug = resolver(r.url)
+        except Exception:
+            pass
+        slug = live_slug or fallback_slug
+        if slug and not _crtsh_looks_like_infra(slug):
+            return host, slug
+        return host, None
+
+    with ThreadPoolExecutor(max_workers=_CRTSH_LIVE_RESOLVE_CONCURRENCY) as pool:
+        futures = [pool.submit(_resolve_one, h) for h in hosts]
+        for future in as_completed(futures):
+            host, slug = future.result()
+            if slug:
+                out[slug] = host
+    return out
 
 
 def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]]:
     """Query crt.sh's Certificate Transparency data (via its public
-    Postgres database, see the module comment above CRTSH_PG_HOST) for
-    every platform in CT_LOG_SUFFIXES (or the subset named in
+    Postgres database — see the module comment above CT_LOG_SUFFIXES for
+    the full history of why this is a direct DB connection, not the HTTP
+    endpoint) for every Class C platform in CT_LOG_SUFFIXES and every
+    Class B platform in CT_LOG_LIVE_RESOLVE (or the subset named in
     `platforms`), turn each discovered hostname into a slug via that
     platform's own URL_TO_SLUG extractor, and live-drop dead ones exactly
-    like Common Crawl/Wayback — see the module comment above
-    CT_LOG_SUFFIXES for which platforms this can and can't help, and why.
+    like Common Crawl/Wayback.
 
     Needs the `psycopg2` (or `psycopg2-binary`) package installed — if
-    it's missing, or the database is simply unreachable (e.g. a sandboxed
-    environment whose outbound networking only permits HTTPS — this
-    doesn't speak HTTP at all, it's the raw Postgres wire protocol), this
-    logs a warning and returns no slugs rather than failing the whole
-    discovery run."""
+    it's missing, or the database is simply unreachable (confirmed: this
+    only works from an ordinary residential/office IP, not from this
+    codebase's own dev sandbox or a GitHub Actions runner — see the
+    module comment above), this logs a warning per platform and returns
+    whatever it managed to get rather than failing the whole discovery
+    run."""
     slugs_by_ats: dict[str, set[str]] = {}
+    target_platforms = platforms if platforms is not None else (
+        list(CT_LOG_SUFFIXES.keys()) + list(CT_LOG_LIVE_RESOLVE.keys())
+    )
 
     try:
-        conn = _crtsh_pg_connect()
+        import psycopg2  # noqa: F401  (import check only — real use is inside the helpers above)
     except ImportError:
         log.warning("crt.sh: psycopg2 is not installed — skipping CT log "
                      "discovery entirely (pip install psycopg2-binary).")
         return slugs_by_ats
-    except Exception as e:
-        log.warning(f"crt.sh: couldn't connect to crt.sh's public Postgres "
-                     f"database ({CRTSH_PG_HOST}:{CRTSH_PG_PORT}) — skipping "
-                     f"CT log discovery entirely: {e}")
-        return slugs_by_ats
 
-    try:
-        target_platforms = platforms if platforms is not None else list(CT_LOG_SUFFIXES.keys())
-
-        for ats in target_platforms:
-            suffixes = CT_LOG_SUFFIXES.get(ats)
+    for ats in target_platforms:
+        if ats in CT_LOG_SUFFIXES:
             extractor = URL_TO_SLUG.get(ats)
-            if not suffixes or not extractor:
+            if not extractor:
                 continue
-
             hostnames: set[str] = set()
-            for suffix in suffixes:
-                log.info(f"crt.sh (Postgres): querying %{suffix}")
-                found = _fetch_crtsh_hostnames(conn, suffix)
-                log.info(f"  crt.sh: {len(found)} distinct hostnames")
-                hostnames.update(found)
+            for suffix in CT_LOG_SUFFIXES[ats]:
+                root = suffix.lstrip(".")
+                log.info(f"crt.sh: sweeping {root} (Class C: {ats})")
+                for page_hosts in _query_crtsh_pages(root):
+                    hostnames.update(page_hosts)
 
             slugs: set[str] = set()
             for host in hostnames:
@@ -3574,14 +3711,24 @@ def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]
                     slug = extractor(f"https://{host}/")
                 except Exception:
                     continue
-                if slug:
+                if slug and not _crtsh_looks_like_infra(slug):
                     slugs.add(slug)
 
-            if slugs:
-                log.info(f"  {ats}: {len(slugs)} companies from CT logs")
-                slugs_by_ats[ats] = slugs
-    finally:
-        conn.close()
+        elif ats in CT_LOG_LIVE_RESOLVE:
+            cfg = CT_LOG_LIVE_RESOLVE[ats]
+            hostnames = set()
+            log.info(f"crt.sh: sweeping {cfg['root']} (Class B, live-resolve: {ats})")
+            for page_hosts in _query_crtsh_pages(cfg["root"]):
+                hostnames.update(page_hosts)
+            resolved = _resolve_hosts_live(hostnames, ats, cfg["guess_path"])
+            slugs = set(resolved.keys())
+
+        else:
+            continue
+
+        if slugs:
+            log.info(f"  {ats}: {len(slugs)} companies from CT logs")
+            slugs_by_ats[ats] = slugs
 
     return _drop_dead_cc_slugs(slugs_by_ats, "CT logs")
 
