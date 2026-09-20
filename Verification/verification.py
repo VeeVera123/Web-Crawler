@@ -39,12 +39,12 @@ above, alone) — scrape_board() can itself return an empty list on a
 transient scrape error, so an "empty" count is a best-effort read, not
 an authoritative one, while "dead" always is.
 
-WHY 19 OF 26 ATS PLATFORMS, NOT ALL: 2026-08, four parallel research
+WHY 21 OF 26 ATS PLATFORMS, NOT ALL: 2026-08, four parallel research
 passes empirically tested real vs fake slugs against every SCRAPERS-
 registered platform's actual endpoint (WebFetch against live real and
 obviously-fake slugs, cross-checked against each platform's own docs).
-19 platforms have a confirmed-safe, structurally distinct "does not
-exist" signal. 7 do not (see _UNVERIFIABLE_ATS below) — either the
+21 platforms have a confirmed-safe, structurally distinct "does not
+exist" signal. 5 do not (see _UNVERIFIABLE_ATS below) — either the
 platform returns an identical-looking response for "doesn't exist" and
 "real board, 0 jobs" (oracle_cloud_hcm, confirmed empirically: a real
 empty tenant returns the exact same 200+empty-array shape a nonexistent
@@ -55,9 +55,10 @@ shared per-instance load balancer, so DNS doesn't help here either;
 smartrecruiters — the one documented safe check needs api.smartrecruiters.com,
 which robots.txt disallows, confirmed live 2026-09, not just "suspected"),
 or no live example could be found/reached to confirm a rule at all
-(breezyhr, jobadder — jobadder's "Nothing here I'm afraid..." page was
-found to be plausibly the SAME message a real empty board shows, an
-explicitly UNSAFE signal — folkshr, adp). 2026-09: Hireology and
+(jobadder — "Nothing here I'm afraid..." was found to be plausibly the
+SAME message a real empty board shows, an explicitly UNSAFE signal —
+folkshr, adp — adp specifically has a promising-but-unconfirmed signal
+now, see _UNVERIFIABLE_ATS's adp comment). 2026-09: Hireology and
 isolvedhire (both brand-new platforms this session) were ALSO confirmed
 verifiable and added straight to ARCHIVE_II_VERIFIERS — see
 _verify_hireology/_verify_isolvedhire's own docstrings for the full
@@ -67,7 +68,11 @@ this file's whole methodology is built around. Taleo moved OUT of this bucket
 fetch tool) that it's genuinely subdomain-per-tenant like avature/eploy,
 so a nonexistent tenant's subdomain simply doesn't resolve; see
 _verify_taleo's docstring for the exact evidence, including one archive_i
-row that DNS-check already flagged as a real, currently-dead tenant. Rows
+row that DNS-check already flagged as a real, currently-dead tenant.
+BreezyHR ALSO moved out of this bucket 2026-09 — a follow-up research
+pass found real live customer examples via web search that the original
+note said couldn't be found; see _verify_breezyhr's docstring for the
+confirmed status-code signal. Rows
 on unverifiable platforms, plus successfactors (JS-rendered, no scraper
 at all — see ats_scrapers.py's SCRAPERS dict; NOT brassring, which DOES
 have a working scraper — see BLACKLISTED_ATS.md and SCRAPERS, brassring
@@ -383,7 +388,12 @@ _UNVERIFIABLE_ATS = {
     "smartrecruiters",   # CONFIRMED live 2026-09: the one documented safe check needs
                           # api.smartrecruiters.com, which robots.txt disallows outright
                           # (fetch tooling itself refuses the URL for this reason).
-    "breezyhr",           # no live customer example could be found/reached to confirm any rule
+    # "breezyhr" MOVED OUT 2026-09 — a follow-up research pass found real
+    # live customer examples via web search (continued.breezy.hr,
+    # servers-com.breezy.hr, seasats.breezy.hr, every-org.breezy.hr) that
+    # this platform's original note said couldn't be found; see
+    # _verify_breezyhr's docstring below for the confirmed status-code
+    # signal.
     # "taleo" MOVED OUT 2026-09 — confirmed subdomain-per-tenant (same DNS-
     # only signal as avature/eploy below); see _verify_taleo's docstring.
     "oracle_cloud_hcm",   # CONFIRMED UNSAFE: a real, empty tenant returns the exact same
@@ -391,7 +401,16 @@ _UNVERIFIABLE_ATS = {
     "jobadder",           # CONFIRMED UNSAFE: "Nothing here I'm afraid..." could be the same
                           # message a real, empty board shows — no way to distinguish
     "folkshr",            # no live customer example could be found/reached to confirm any rule
-    "adp",                 # no live customer example could be found/reached to confirm any rule
+    "adp",                 # 2026-09 follow-up: found a promising signal (the real public
+                          # job-requisitions API — workforcenow.adp.com/mascsr/default/
+                          # careercenter/public/events/staffing/v1/job-requisitions —
+                          # cleanly 404s for a fabricated cid/ccId pair and 200s + real
+                          # JSON for a real one, confirmed live) but could NOT confirm it
+                          # against a real tenant with zero CURRENT postings, so the
+                          # oracle_cloud_hcm-style empty-vs-dead trap isn't ruled out yet.
+                          # Left here on purpose rather than trusting an unconfirmed signal
+                          # for a real deletion path — a real candidate for a follow-up pass
+                          # that finds a known-empty real ADP board to test against.
     "brassring",          # NOT lack of a scraper (it has one, re-enabled 2026-09 — see
                           # SCRAPERS/BLACKLISTED_ATS.md) — purely lack of a confirmed
                           # dead-signal, not yet researched live. A real candidate for
@@ -644,6 +663,31 @@ async def _dns_dead_check(session: aiohttp.ClientSession, url: str) -> bool:
         raise  # some other connection failure (refused, unreachable) — ambiguous
 
 
+async def _verify_breezyhr(session: aiohttp.ClientSession, slug: str) -> bool:
+    """BreezyHR (2026-09 follow-up — this platform's original
+    _UNVERIFIABLE_ATS note said no live customer example could be found;
+    a web search this pass turned up several: continued.breezy.hr,
+    servers-com.breezy.hr, seasats.breezy.hr, every-org.breezy.hr,
+    nooks.breezy.hr). Confirmed live: a real tenant (continued.breezy.hr,
+    checked directly) 200s with its own branded careers page and current
+    openings regardless of count, while a fabricated subdomain (zzz-
+    totally-fake-tenant-99999.breezy.hr) cleanly 404s — plain status
+    code, no DNS-wildcard or redirect-bounce ambiguity like applytojob.
+    com/Workday. Not separately confirmed against a real-but-currently-
+    empty tenant (none was found with zero open roles at research time),
+    but a 404 vs 200 split on a server-rendered (non-SPA) page is the
+    same low-risk shape already trusted for getro/pageup/hireology
+    above, not the oracle_cloud_hcm 200-vs-200 JSON-shape trap — any
+    non-404/200 status is left ambiguous via raise_for_status() below."""
+    url = f"https://{slug}.breezy.hr/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                            headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_avature(session: aiohttp.ClientSession, slug: str) -> bool:
     return await _dns_dead_check(session, f"https://{slug}.avature.net/careers/SearchJobs")
 
@@ -800,6 +844,10 @@ ARCHIVE_II_VERIFIERS = {
     # oracle_cloud_hcm-style trap in the obvious (job-list) query before
     # landing on the board-metadata query as the actual safe signal.
     "gem": _verify_gem,
+    # 2026-09 follow-up (see _UNVERIFIABLE_ATS's breezyhr note above for
+    # why this moved out of there): _verify_breezyhr's own docstring has
+    # the live evidence.
+    "breezyhr": _verify_breezyhr,
 }
 
 
