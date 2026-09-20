@@ -3024,6 +3024,9 @@ _CC_LIVE_CHECK = {
 #    until that research happens — same list to extend in both files.
 
 
+_DROP_DEAD_PROGRESS_EVERY = 100  # see _drop_dead_cc_slugs's log line
+
+
 def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -> dict:
     """Applied to a CC/Wayback fetch_*_slugs() result right before it's
     returned — see the module comment above _CC_LIVE_CHECK for why only
@@ -3077,6 +3080,11 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -
         return ats, slug, name, is_dead
 
     if work:
+        total_work = len(work)
+        log.info(f"{label}: live pre-check starting on {total_work} candidate slug(s) "
+                 f"({max_workers} at a time — this step has no per-slug log line "
+                 f"otherwise, so progress is reported every "
+                 f"{_DROP_DEAD_PROGRESS_EVERY} slugs below)")
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_check_one, ats, slug, name) for ats, slug, name in work]
             for future in as_completed(futures):
@@ -3086,6 +3094,9 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -
                     dropped += 1
                 else:
                     kept_by_ats[ats][slug] = name
+                if checked % _DROP_DEAD_PROGRESS_EVERY == 0 or checked == total_work:
+                    log.info(f"{label}: live pre-check progress: {checked}/{total_work} "
+                             f"checked, {dropped} confirmed dead so far")
 
     for ats in kept_by_ats:
         kept = kept_by_ats[ats]
@@ -3782,6 +3793,9 @@ def _query_crtsh_pages(root_domain: str):
         time.sleep(1)
 
 
+_LIVE_RESOLVE_PROGRESS_EVERY = 100  # see _resolve_hosts_live's log line
+
+
 def _resolve_hosts_live(hosts: set[str], ats: str, guess_path: str) -> dict[str, str]:
     """Class B slug resolution: CT logs only confirm the HOSTNAME exists,
     but taleo/oracle_cloud_hcm also need a path or query segment (a
@@ -3816,16 +3830,29 @@ def _resolve_hosts_live(hosts: set[str], ats: str, guess_path: str) -> dict[str,
             return host, slug
         return host, None
 
+    total = len(hosts)
+    log.info(f"  crt.sh: live-resolving {total} candidate host(s) for '{ats}' "
+             f"({_CRTSH_LIVE_RESOLVE_CONCURRENCY} at a time, up to "
+             f"{_CRTSH_LIVE_RESOLVE_TIMEOUT}s each — this step has no per-host "
+             f"log line otherwise, so progress is reported every "
+             f"{_LIVE_RESOLVE_PROGRESS_EVERY} hosts below)")
+    done = 0
     with ThreadPoolExecutor(max_workers=_CRTSH_LIVE_RESOLVE_CONCURRENCY) as pool:
         futures = [pool.submit(_resolve_one, h) for h in hosts]
         for future in as_completed(futures):
             host, slug = future.result()
+            done += 1
             if slug:
                 out[slug] = host
+            if done % _LIVE_RESOLVE_PROGRESS_EVERY == 0 or done == total:
+                log.info(f"  crt.sh: '{ats}' live-resolve progress: {done}/{total} "
+                         f"hosts checked, {len(out)} resolved to a slug so far")
     return out
 
 
-def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]]:
+def fetch_ct_log_slugs(platforms: list[str] | None = None,
+                        ct_shard: int | None = None, ct_total_shards: int = 1,
+                        on_platform_verified=None) -> dict[str, set[str]]:
     """Query crt.sh's Certificate Transparency data (via its public
     Postgres database — see the module comment above CT_LOG_SUFFIXES for
     the full history of why this is a direct DB connection, not the HTTP
@@ -3834,6 +3861,31 @@ def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]
     `platforms`), turn each discovered hostname into a slug via that
     platform's own URL_TO_SLUG extractor, and live-drop dead ones exactly
     like Common Crawl/Wayback.
+
+    ct_shard/ct_total_shards (2026-09) split the PLATFORM LIST across
+    `ct_total_shards` independent runs, same platform-sharding scheme as
+    fetch_wayback_slugs' wb_shard/wb_total_shards — added because a full
+    unsharded sweep covers ~20 platforms back-to-back in one job (each a
+    genuinely independent crt.sh query + live-check), so splitting by
+    platform parallelizes cleanly with no shared state. If `platforms` is
+    ALSO given explicitly, sharding is applied on top of that narrowed
+    list, not on the full CT_LOG_SUFFIXES/CT_LOG_LIVE_RESOLVE set.
+
+    2026-09: verification + reporting moved from "accumulate every
+    platform's raw candidates, then run _drop_dead_cc_slugs and upsert
+    ONCE at the very end" to per-platform — each platform's candidates
+    are live-verified (_drop_dead_cc_slugs) as soon as that platform's
+    crt.sh sweep finishes, not batched with the other ~19. Confirmed live
+    this session: a full sweep can run 30-60+ minutes end to end (crt.sh's
+    own pool-exhaustion retries plus, for Class B, a live HTTP fetch per
+    candidate host), during which NOTHING reached Supabase under the old
+    all-at-once design — a run that got killed or interrupted partway
+    lost everything, not just whatever hadn't finished yet. If
+    `on_platform_verified(ats, verified_slugs)` is given, it's called
+    immediately after each platform's own verification finishes — main()
+    uses this to upsert that platform's slugs to Supabase right away,
+    instead of waiting for every other platform in the sweep to finish
+    first (see the ct_logs block in main()).
 
     Needs the `psycopg2` (or `psycopg2-binary`) package installed — if
     it's missing, or the database is simply unreachable (confirmed: this
@@ -3846,6 +3898,12 @@ def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]
     target_platforms = platforms if platforms is not None else (
         list(CT_LOG_SUFFIXES.keys()) + list(CT_LOG_LIVE_RESOLVE.keys())
     )
+    if ct_shard is not None and ct_total_shards > 1:
+        target_platforms = [p for i, p in enumerate(target_platforms)
+                             if i % ct_total_shards == ct_shard]
+        log.info(f"crt.sh: shard {ct_shard}/{ct_total_shards} — "
+                 f"{len(target_platforms)} platform(s) assigned to this shard: "
+                 f"{target_platforms}")
 
     try:
         import psycopg2  # noqa: F401  (import check only — real use is inside the helpers above)
@@ -3854,7 +3912,9 @@ def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]
                      "discovery entirely (pip install psycopg2-binary).")
         return slugs_by_ats
 
-    for ats in target_platforms:
+    total_platforms = len(target_platforms)
+    for idx, ats in enumerate(target_platforms, 1):
+        log.info(f"crt.sh: [{idx}/{total_platforms}] starting platform '{ats}'")
         if ats in CT_LOG_SUFFIXES:
             extractor = URL_TO_SLUG.get(ats)
             if not extractor:
@@ -3887,11 +3947,22 @@ def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]
         else:
             continue
 
-        if slugs:
-            log.info(f"  {ats}: {len(slugs)} companies from CT logs")
-            slugs_by_ats[ats] = slugs
+        if not slugs:
+            log.info(f"  {ats}: 0 companies from CT logs")
+            continue
 
-    return _drop_dead_cc_slugs(slugs_by_ats, "CT logs")
+        log.info(f"  {ats}: {len(slugs)} raw candidate(s) from CT logs — verifying now")
+        verified = _drop_dead_cc_slugs({ats: slugs}, "CT logs").get(ats, set())
+        if not verified:
+            log.info(f"  {ats}: 0 companies survived live verification")
+            continue
+
+        log.info(f"  {ats}: {len(verified)} companies from CT logs (verified)")
+        slugs_by_ats[ats] = verified
+        if on_platform_verified:
+            on_platform_verified(ats, verified)
+
+    return slugs_by_ats
 
 
 # ══════════════════════════════════════════════════════════
@@ -5871,6 +5942,19 @@ def main():
              "one unsharded run into a single long sequential job.",
     )
     parser.add_argument(
+        "--ct-shard", type=int, default=None,
+        help="Which CT-logs (crt.sh) platform-shard this run covers "
+             "(0-indexed, used with --ct-total-shards). Default: None = "
+             "all platforms in one run. See fetch_ct_log_slugs docstring.",
+    )
+    parser.add_argument(
+        "--ct-total-shards", type=int, default=1,
+        help="Total number of CT-logs (crt.sh) platform-shards (default: "
+             "1, i.e. no sharding). discovery.yml runs this as 4 as "
+             "separate matrix jobs, each covering a slice of the ~20 "
+             "CT-logs platforms.",
+    )
+    parser.add_argument(
         "--theirstack-max", type=int, default=40,
         help="Max companies to pull from TheirStack per run, across all "
              "platforms (default: 40, under the free tier's 50/month)",
@@ -6085,22 +6169,35 @@ def main():
     # see that dict's module comment for the full reasoning.
     if args.source in ("ct_logs", "all"):
         log.info("\n--- CERTIFICATE TRANSPARENCY LOGS (crt.sh) ---")
-        ct_slugs = fetch_ct_log_slugs()
+        # 2026-09: upsert INCREMENTALLY, per platform, as each one clears
+        # live verification — not once at the very end after every
+        # platform in the (possibly sharded) run has finished. A full
+        # sweep can run tens of minutes; with the old all-at-the-end
+        # design, nothing reached Supabase until the whole thing
+        # completed, so an interrupted/killed run lost everything instead
+        # of just whatever hadn't finished yet. dry-run still only counts,
+        # never writes (on_platform_ready is only wired up for real runs).
+        ct_running_total = 0
+
+        def _ct_upsert_now(ats: str, verified_slugs: set) -> None:
+            nonlocal ct_running_total
+            upserted = upsert_to_supabase({ats: verified_slugs}, source="ct_logs",
+                                           dry_run=False)
+            ct_running_total += upserted
+
+        # NOTE: archive_i.source has a CHECK constraint allowlist —
+        # 'ct_logs' must be added to it (ALTER TABLE ... DROP/ADD
+        # CONSTRAINT archive_i_source_check) before this upsert will
+        # succeed. See the chat history for the exact migration SQL —
+        # it was blocked from being applied directly from this session
+        # by the same auto-mode classifier that blocks mass deletes.
+        ct_slugs = fetch_ct_log_slugs(
+            ct_shard=args.ct_shard, ct_total_shards=args.ct_total_shards,
+            on_platform_verified=None if args.dry_run else _ct_upsert_now)
         ct_total = sum(len(s) for s in ct_slugs.values())
         log.info(f"CT logs total: {ct_total} slugs across {len(ct_slugs)} platforms")
 
-        if not args.dry_run:
-            # NOTE: archive_i.source has a CHECK constraint allowlist —
-            # 'ct_logs' must be added to it (ALTER TABLE ... DROP/ADD
-            # CONSTRAINT archive_i_source_check) before this upsert will
-            # succeed. See the chat history for the exact migration SQL —
-            # it was blocked from being applied directly from this session
-            # by the same auto-mode classifier that blocks mass deletes.
-            upserted = upsert_to_supabase(ct_slugs, source="ct_logs",
-                                           dry_run=args.dry_run)
-            grand_total += upserted
-        else:
-            grand_total += ct_total
+        grand_total += ct_total if args.dry_run else ct_running_total
 
     # Source 6 (Y Combinator) REMOVED 2026-09 at the user's request: YC-
     # batch companies aren't ATS-specific — they surface through Common
