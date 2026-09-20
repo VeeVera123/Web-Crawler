@@ -2819,6 +2819,133 @@ def _cc_dns_dead_check(url: str) -> bool | None:
         return None
 
 
+# ── 2026-09: closes the CT-logs verification gap — these 8 platforms
+# (pinpoint, isolvedhire, flatchr, getro, jazzhr, csod, breezyhr,
+# oracle_cloud_hcm) are all in CT_LOG_SUFFIXES/CT_LOG_LIVE_RESOLVE above
+# but had NO entry here, so their CT-derived candidates were reaching
+# archive_i completely unverified. isolvedhire/jazzhr are direct sync
+# ports of verification.py's own already-proven ARCHIVE_II_VERIFIERS
+# checkers (_verify_isolvedhire/_verify_jazzhr); flatchr/getro/breezyhr/
+# csod are new research done this session (see each function's
+# docstring for the live evidence); pinpoint/oracle_cloud_hcm are NOT
+# given a checker — see the "NOT included" comment below _CC_LIVE_CHECK
+# for why those two specifically stay unverified on purpose. ──
+
+def _cc_check_isolvedhire(slug: str) -> bool | None:
+    """Sync port of verification.py's _verify_isolvedhire (already
+    live-confirmed there, not re-researched here): a nonexistent/
+    unregistered {slug}.isolvedhire.com subdomain is redirected by
+    isolvedhire's own shared infra to a literal notset.php?{subdomain}
+    handler; a real tenant — including a real one with zero current
+    postings — stays on its own /jobs/ page with no redirect at all."""
+    try:
+        r = requests.get(f"https://{slug}.isolvedhire.com/jobs/", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA}, allow_redirects=True)
+    except Exception:
+        return None
+    if "notset.php" in urlparse(r.url).path:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_jazzhr(slug: str) -> bool | None:
+    """Sync port of verification.py's _verify_jazzhr (already
+    live-confirmed there): applytojob.com wildcards DNS the same way
+    Workday does, so a fake {slug}.applytojob.com still resolves — it
+    just 302s to JazzHR's own jazzhr.com/www.jazzhr.com marketing page,
+    while a real tenant serves its own board directly with no redirect.
+    The signal is the redirect TARGET HOST, not resolution or status."""
+    try:
+        r = requests.get(f"https://{slug}.applytojob.com", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA}, allow_redirects=True)
+    except Exception:
+        return None
+    final_host = (urlparse(r.url).hostname or "").lower()
+    if final_host in ("jazzhr.com", "www.jazzhr.com"):
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_flatchr(slug: str) -> bool | None:
+    """GET careers.flatchr.io/company/{slug}.json: confirmed live
+    (verification.py's own research, re-confirmed this session) that a
+    nonexistent company cleanly 404s while a real one 200s with a
+    {"items":[...]} body, whether or not it currently lists any openings.
+
+    Safe to enable HERE specifically even though verification.py itself
+    leaves flatchr in _UNVERIFIABLE_ATS for a DATA reason, not an API
+    reason: ~92% of flatchr's EXISTING archive_i rows hold a corrupted
+    per-vacancy slug from a since-documented bug in the old CC/Wayback
+    path extractor (_url_to_slug_flatchr misreading a one-segment
+    '/vacancy/{vacancy-slug}' URL as a company slug). CT-log-derived
+    flatchr candidates never go through that extractor at all — they
+    come straight off the '.flatchr.io' subdomain (CT_LOG_SUFFIXES),
+    which is always a genuine company slug — so that corruption simply
+    doesn't apply to what this checker is filtering."""
+    try:
+        r = requests.get(f"https://careers.flatchr.io/company/{slug}.json", timeout=10,
+                          headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_getro(slug: str) -> bool | None:
+    """New research this session: confirmed live against real boards
+    (coinbase.getro.com, mayfield.getro.com, etc.) that {slug}.getro.com
+    /jobs 200s with real listings for a real tenant and cleanly 404s for
+    a fabricated one — no DNS-wildcard ambiguity like applytojob.com/
+    Workday, so status code alone is a safe signal here."""
+    try:
+        r = requests.get(f"https://{slug}.getro.com/jobs", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_breezyhr(slug: str) -> bool | None:
+    """New research this session — verification.py's own _UNVERIFIABLE_
+    ATS entry for breezyhr says 'no live customer example could be
+    found/reached to confirm any rule'; this session found several real
+    ones (continued.breezy.hr, servers-com.breezy.hr, seasats.breezy.hr,
+    every-org.breezy.hr) via web search and confirmed live: a real
+    tenant 200s with its branded careers page regardless of current open
+    -role count, while a fabricated subdomain (zzz-totally-fake-tenant-
+    99999.breezy.hr) cleanly 404s. Same status-code-only shape as
+    getro/flatchr above, not a redirect-based or DNS-based signal."""
+    try:
+        r = requests.get(f"https://{slug}.breezy.hr/", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA}, allow_redirects=True)
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_csod(slug: str) -> bool | None:
+    """slug is 'tenant|siteId' (see discovery._url_to_slug_csod; CT-log
+    Class C candidates default siteId to '1' since a bare CT-derived
+    hostname carries no path to read a real siteId from). New research
+    this session: confirmed live that a fabricated {tenant}.csod.com
+    subdomain fails DNS resolution outright (getaddrinfo 'Name or
+    service not known') — each real CSOD tenant gets its own real DNS
+    entry, same per-tenant-provisioning behavior already relied on for
+    avature/eploy/taleo — while a real tenant (henkel.csod.com, checked
+    live) resolves and serves its bootstrap page regardless of whether
+    the guessed siteId happens to be correct. Reuses _cc_dns_dead_check
+    rather than duplicating its DNS-failure-string matching."""
+    parts = slug.split("|", 1)
+    tenant = parts[0]
+    site_id = parts[1] if len(parts) == 2 and parts[1] else "1"
+    return _cc_dns_dead_check(f"https://{tenant}.csod.com/ux/ats/careersite/{site_id}/home")
+
+
 _CC_LIVE_CHECK = {
     "greenhouse": lambda slug: _cc_check_status(
         f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"),
@@ -2846,17 +2973,51 @@ _CC_LIVE_CHECK = {
     "eploy": lambda slug: _cc_dns_dead_check(
         f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx"),
     "taleo": lambda slug: _cc_dns_dead_check(f"https://{slug.split('|', 1)[0]}.taleo.net/"),
+    # 2026-09: closes the CT-logs verification gap — see the block
+    # comment above _cc_check_isolvedhire for the full context.
+    "isolvedhire": _cc_check_isolvedhire,
+    "jazzhr": _cc_check_jazzhr,
+    "flatchr": _cc_check_flatchr,
+    "getro": _cc_check_getro,
+    "breezyhr": _cc_check_breezyhr,
+    "csod": _cc_check_csod,
 }
 # NOT included, deliberately:
-#  - workday, smartrecruiters, breezyhr, oracle_cloud_hcm, jobadder,
-#    folkshr, adp, brassring — same platforms in verification.py's own
+#  - workday, smartrecruiters, oracle_cloud_hcm, jobadder, folkshr, adp,
+#    brassring — same platforms in verification.py's own
 #    _UNVERIFIABLE_ATS, for the exact same researched reasons (e.g.
 #    Workday: confirmed 2026-09 that a fake tenant subdomain resolves
 #    anyway, so there's no safe "doesn't exist" signal to check at all —
 #    verification.py never checks these either, archive_i rows on them
-#    are left completely alone, only counted).
-#  - jazzhr, pageup, pinpoint, flatchr, jobylon — newer CC_PLATFORM_
-#    PATTERNS entries that simply haven't been researched into
+#    are left completely alone, only counted). oracle_cloud_hcm
+#    specifically: CONFIRMED UNSAFE, not just unresearched — a real,
+#    empty tenant returns the exact same 200 + {"items":[],"count":0}
+#    shape a nonexistent one plausibly would, so no live-check could
+#    ever safely tell the two apart (same reasoning verification.py
+#    documents for it). adp: this session found a promising signal (the
+#    real public job-requisitions API 404s for a fabricated cid/ccId
+#    pair and 200s + real JSON for a real one — see search evidence in
+#    this session's transcript) but could NOT confirm live against a
+#    real tenant with zero CURRENT postings, so the oracle_cloud_hcm-
+#    style empty-vs-dead trap isn't ruled out yet; left out of
+#    _CC_LIVE_CHECK on purpose until that's confirmed, rather than
+#    trusting an unconfirmed signal for a real deletion path.
+#  - pinpoint — CONFIRMED (verification.py's own research, current
+#    2026-09) that every live-check attempt made against pinpointhq.com,
+#    real tenant or fake, was refused by that platform's own
+#    tenant-level robots.txt before a response could even be inspected;
+#    no live-confirmed dead/alive signal exists as a result. A real
+#    candidate for future work via tooling that isn't robots-gated the
+#    way this research pass's fetch tooling was — not being skipped for
+#    lack of trying.
+#  - pageup, jobylon — pageup is Class A (single shared host,
+#    careers.pageuppeople.com, tenant identified by path not subdomain —
+#    see _cc_check_paylocity-style path-based signal verification.py
+#    already proved safe for it via _verify_pageup, not yet ported here
+#    since pageup isn't a CT-log platform); jobylon has no cheap
+#    per-company signal at all (see verification.py's own comment on it
+#    — the real scraper needs a full sitemap-wide crawl per row, not a
+#    single cheap request), structurally hard rather than unresearched.
 #    verification.py yet (no verifier AND no _UNVERIFIABLE_ATS entry —
 #    genuinely unresearched, not confirmed either way). Per this
 #    project's zero-guessed-claims rule, they stay unchecked here too
