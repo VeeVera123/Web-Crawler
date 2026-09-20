@@ -33,7 +33,7 @@ jobs:
   # that the budget it was freed for no longer exists. Latmay stays a
   # single unsharded job, same single-Parquet-file reasoning as always.
   #
-  # 23-job matrix over 11 sources, all running in parallel — instead of one
+  # 24-job matrix over 12 sources, all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -96,6 +96,18 @@ jobs:
   # BigQuery cost by the shard count, since technology isn't a partition/
   # clustering key. See fetch_httparchive_candidate_urls' docstring for
   # the full reasoning.
+  #
+  # 2026-09: added ct_logs (single job, unsharded — crt.sh's Certificate
+  # Transparency index, queried directly, no seed file/dataset. Covers 18
+  # subdomain-per-tenant platforms in one pass; each of the 18 is a single,
+  # fast, non-paginated crt.sh lookup (unlike wayback/commoncrawl's CDX
+  # pagination), so this doesn't need its own platform-sharding the way
+  # those two do. See discovery.py's CT_LOG_SUFFIXES comment for exactly
+  # which platforms this can/can't help and why. NOTE: archive_i.source's
+  # CHECK constraint must include 'ct_logs' before this job's Supabase
+  # upsert will succeed — see this repo's own migration history/chat log
+  # for the exact ALTER TABLE statement; it has to be run manually in the
+  # Supabase SQL editor.
   #
   # 2026-09: added github (single job, unsharded — a short,
   # manually-curated list of known public GitHub repos, currently just
@@ -182,6 +194,8 @@ jobs:
           - source: wayback
             name: wayback 5
             extra_args: "--wayback-shard 4 --wayback-total-shards 5"
+          - source: ct_logs
+            name: CT logs (crt.sh)
           - source: latmay
             name: Latmay H.F
           - source: icims_hrjobs
