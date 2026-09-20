@@ -3402,108 +3402,186 @@ CT_LOG_SUFFIXES: dict[str, list[str]] = {
     "avature": [".avature.net"],
 }
 
-CRTSH_URL = "https://crt.sh/"
-# crt.sh has no documented per-IP rate limit, but it's a small, free,
-# community-run service backed by a single Postgres instance — a short
-# sleep between queries is just good citizenship, same spirit as the
-# 0.3s sleep _drop_dead_cc_slugs' predecessor used per-slug.
-_CRTSH_QUERY_SLEEP_SECONDS = 1.0
-_CRTSH_MAX_RETRIES = 3
+# 2026-09 REVISION: the HTTP endpoint (crt.sh/?q=...&output=json) this
+# originally used is DEAD ON ARRIVAL — crt.sh's own robots.txt disallows
+# automated access to it, confirmed two independent ways: a live fetch of
+# crt.sh/robots.txt itself returns disallow, and a real discovery.py run
+# hit the identical "disallowed" skip. robots.txt governs HTTP crawling
+# specifically, though, not a raw database connection — crt.sh separately
+# exposes its backing data as a public, read-only PostgreSQL database
+# (`certwatch` on crt.sh:5432, user `guest`, no password), explicitly
+# intended for exactly this kind of bulk/programmatic query and NOT
+# subject to the web UI's robots.txt at all. This is the same connection
+# real, widely-used OSS recon tools (e.g. projectdiscovery/subfinder's
+# crtsh source) use instead of the HTTP endpoint.
+#
+# NOT independently verified live from this codebase's own dev sandbox —
+# that environment's outbound networking only tunnels HTTPS through a
+# policy proxy, so a raw Postgres wire-protocol connection on port 5432
+# has no path out and times out there regardless of whether crt.sh itself
+# is reachable. Verify this actually connects from wherever this runs for
+# real (a local machine, GitHub Actions) before trusting it in CI — e.g.
+# `psql -h crt.sh -p 5432 -U guest certwatch -c "select 1"`.
+#
+# Schema: the modern, actively-used view is `certificate_and_identities`
+# (aliased `cai` below) — NOT the older bare `certificate_identity` table
+# some tutorials still reference, which real production tooling (subfinder)
+# has already moved off of. Key columns: CERTIFICATE_ID, CERTIFICATE,
+# NAME_TYPE, NAME_VALUE. `identities(cai.CERTIFICATE)` returns a tsvector
+# of every identity (SAN) a cert covers; `plainto_tsquery(...) @@ ...`
+# uses that as a fast index-backed PRE-filter, then `NAME_VALUE ILIKE
+# '%.suffix'` does the actual precise suffix match (the FTS index alone
+# would also match e.g. "bamboohr.com.evil.com" — the ILIKE is what makes
+# this a real suffix check, not just a substring hit).
+#
+# crt.sh's Postgres is fronted by PgBouncer in STATEMENT POOLING mode —
+# multi-statement transactions are rejected outright, so the connection
+# MUST be put in autocommit mode before any query, or every query fails
+# with "FATAL: transaction blocks not allowed in statement pooling mode".
+# Long-running queries also get killed server-side after roughly a
+# minute or two (it's shared, free infrastructure) — a generous
+# statement_timeout plus a hard LIMIT keeps a single misbehaving suffix
+# from wedging (or getting killed mid-query and wasting the round trip)
+# rather than just returning fewer rows than the true total.
+CRTSH_PG_HOST = "crt.sh"
+CRTSH_PG_PORT = 5432
+CRTSH_PG_DATABASE = "certwatch"
+CRTSH_PG_USER = "guest"
+_CRTSH_QUERY_LIMIT = 50_000  # safety cap per suffix, not a real observed ceiling
+_CRTSH_STATEMENT_TIMEOUT_MS = 45_000
+_CRTSH_MAX_RETRIES = 2
 
 
-def _fetch_crtsh_hostnames(suffix: str) -> set[str]:
+def _crtsh_pg_connect():
+    """One connection for the whole fetch_ct_log_slugs() run (not per
+    suffix/query) — opening a fresh Postgres connection per suffix would
+    be wasteful and slower for no benefit, since a single connection can
+    run each suffix's query one after another. Raises on failure; the
+    caller decides how to handle a totally unreachable database (skip the
+    whole source, matching how every other source here fails)."""
+    import psycopg2
+    conn = psycopg2.connect(
+        host=CRTSH_PG_HOST, port=CRTSH_PG_PORT, dbname=CRTSH_PG_DATABASE,
+        user=CRTSH_PG_USER, connect_timeout=30,
+    )
+    # Required — see the module comment above: PgBouncer statement pooling
+    # rejects any multi-statement transaction outright.
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"SET statement_timeout = {_CRTSH_STATEMENT_TIMEOUT_MS};")
+    return conn
+
+
+_CRTSH_SUFFIX_QUERY = f"""
+    SELECT DISTINCT cai.NAME_VALUE
+    FROM certificate_and_identities cai
+    WHERE plainto_tsquery('certwatch', %(bare)s) @@ identities(cai.CERTIFICATE)
+      AND cai.NAME_VALUE ILIKE %(pattern)s
+      AND cai.NAME_TYPE = 'dNSName'
+    LIMIT {_CRTSH_QUERY_LIMIT};
+"""
+
+
+def _fetch_crtsh_hostnames(conn, suffix: str) -> set[str]:
     """All distinct hostnames crt.sh has ever seen a certificate issued for
-    under `suffix` (e.g. ".bamboohr.com"). `output=json` returns one row
-    per matching CERTIFICATE, not per hostname — a single cert's
-    `name_value` field can itself contain multiple SANs newline-separated
-    (e.g. a wildcard cert or a multi-domain cert), so every row's
-    name_value is split on newlines and each line is checked against the
-    suffix independently, rather than assuming one hostname per row.
+    under `suffix` (e.g. ".bamboohr.com"), via the direct Postgres query —
+    see the module comment above for the schema and why this isn't the
+    HTTP endpoint. `NAME_VALUE` can be a wildcard entry (e.g.
+    "*.bamboohr.com") — those are stripped of the "*." prefix and folded
+    into the same bare-hostname form the extractors expect, matching how
+    the old HTTP-JSON version handled multi-SAN certs.
 
-    crt.sh is a free, best-effort community service (a single Postgres
-    instance behind a web UI, not a paid API) — it can be slow or briefly
-    503 under load, so this retries a couple of times with backoff before
-    giving up on this one suffix (not the whole source)."""
+    Retries a couple of times on a transient failure (crt.sh is free,
+    shared, best-effort infrastructure and does kill long-running queries
+    server-side) before giving up on this one suffix — not the whole run."""
+    bare = suffix.lstrip(".")
+    pattern = f"%.{bare}"
     last_error = None
     for attempt in range(1, _CRTSH_MAX_RETRIES + 1):
         try:
-            r = requests.get(
-                CRTSH_URL,
-                params={"q": f"%{suffix}", "output": "json"},
-                timeout=90,
-                headers={"User-Agent": _ROBOTS_UA},
-            )
-            r.raise_for_status()
-            rows = r.json()
+            with conn.cursor() as cur:
+                cur.execute(_CRTSH_SUFFIX_QUERY, {"bare": bare, "pattern": pattern})
+                rows = cur.fetchall()
             break
         except Exception as e:
             last_error = e
             if attempt < _CRTSH_MAX_RETRIES:
-                time.sleep(5 * attempt)
+                time.sleep(3 * attempt)
             continue
     else:
-        log.warning(f"crt.sh: query failed for {suffix} after {_CRTSH_MAX_RETRIES} "
-                    f"attempts: {last_error}")
+        log.warning(f"crt.sh (Postgres): query failed for {suffix} after "
+                    f"{_CRTSH_MAX_RETRIES} attempts: {last_error}")
         return set()
 
     hostnames: set[str] = set()
-    if not isinstance(rows, list):
-        return hostnames
-    for row in rows:
-        name_value = (row or {}).get("name_value", "")
-        for line in name_value.splitlines():
-            host = line.strip().lower().lstrip("*.")
-            if host.endswith(suffix.lstrip(".")) or (suffix.startswith(".") and host.endswith(suffix)):
-                hostnames.add(host)
+    for (name_value,) in rows:
+        if not name_value:
+            continue
+        host = name_value.strip().lower().lstrip("*.")
+        if host.endswith(bare):
+            hostnames.add(host)
     return hostnames
 
 
 def fetch_ct_log_slugs(platforms: list[str] | None = None) -> dict[str, set[str]]:
-    """Query crt.sh's Certificate Transparency index for every platform in
-    CT_LOG_SUFFIXES (or the subset named in `platforms`), turn each
-    discovered hostname into a slug via that platform's own URL_TO_SLUG
-    extractor, and live-drop dead ones exactly like Common Crawl/Wayback —
-    see the module comment above CT_LOG_SUFFIXES for which platforms this
-    can and can't help, and why.
+    """Query crt.sh's Certificate Transparency data (via its public
+    Postgres database, see the module comment above CRTSH_PG_HOST) for
+    every platform in CT_LOG_SUFFIXES (or the subset named in
+    `platforms`), turn each discovered hostname into a slug via that
+    platform's own URL_TO_SLUG extractor, and live-drop dead ones exactly
+    like Common Crawl/Wayback — see the module comment above
+    CT_LOG_SUFFIXES for which platforms this can and can't help, and why.
 
-    Unlike Wayback/Common Crawl, this needs no CDX-style pagination — a
-    single crt.sh query returns crt.sh's FULL known history for that
-    suffix in one response (crt.sh itself doesn't page this endpoint)."""
+    Needs the `psycopg2` (or `psycopg2-binary`) package installed — if
+    it's missing, or the database is simply unreachable (e.g. a sandboxed
+    environment whose outbound networking only permits HTTPS — this
+    doesn't speak HTTP at all, it's the raw Postgres wire protocol), this
+    logs a warning and returns no slugs rather than failing the whole
+    discovery run."""
     slugs_by_ats: dict[str, set[str]] = {}
 
-    if not _robots_allows("https://crt.sh", "/"):
-        log.warning("crt.sh: disallowed by crt.sh/robots.txt (or robots.txt "
-                    "unreachable) — skipping CT log discovery entirely.")
+    try:
+        conn = _crtsh_pg_connect()
+    except ImportError:
+        log.warning("crt.sh: psycopg2 is not installed — skipping CT log "
+                     "discovery entirely (pip install psycopg2-binary).")
+        return slugs_by_ats
+    except Exception as e:
+        log.warning(f"crt.sh: couldn't connect to crt.sh's public Postgres "
+                     f"database ({CRTSH_PG_HOST}:{CRTSH_PG_PORT}) — skipping "
+                     f"CT log discovery entirely: {e}")
         return slugs_by_ats
 
-    target_platforms = platforms if platforms is not None else list(CT_LOG_SUFFIXES.keys())
+    try:
+        target_platforms = platforms if platforms is not None else list(CT_LOG_SUFFIXES.keys())
 
-    for ats in target_platforms:
-        suffixes = CT_LOG_SUFFIXES.get(ats)
-        extractor = URL_TO_SLUG.get(ats)
-        if not suffixes or not extractor:
-            continue
-
-        hostnames: set[str] = set()
-        for suffix in suffixes:
-            log.info(f"crt.sh: querying %{suffix}")
-            found = _fetch_crtsh_hostnames(suffix)
-            log.info(f"  crt.sh: {len(found)} distinct hostnames")
-            hostnames.update(found)
-            time.sleep(_CRTSH_QUERY_SLEEP_SECONDS)
-
-        slugs: set[str] = set()
-        for host in hostnames:
-            try:
-                slug = extractor(f"https://{host}/")
-            except Exception:
+        for ats in target_platforms:
+            suffixes = CT_LOG_SUFFIXES.get(ats)
+            extractor = URL_TO_SLUG.get(ats)
+            if not suffixes or not extractor:
                 continue
-            if slug:
-                slugs.add(slug)
 
-        if slugs:
-            log.info(f"  {ats}: {len(slugs)} companies from CT logs")
-            slugs_by_ats[ats] = slugs
+            hostnames: set[str] = set()
+            for suffix in suffixes:
+                log.info(f"crt.sh (Postgres): querying %{suffix}")
+                found = _fetch_crtsh_hostnames(conn, suffix)
+                log.info(f"  crt.sh: {len(found)} distinct hostnames")
+                hostnames.update(found)
+
+            slugs: set[str] = set()
+            for host in hostnames:
+                try:
+                    slug = extractor(f"https://{host}/")
+                except Exception:
+                    continue
+                if slug:
+                    slugs.add(slug)
+
+            if slugs:
+                log.info(f"  {ats}: {len(slugs)} companies from CT logs")
+                slugs_by_ats[ats] = slugs
+    finally:
+        conn.close()
 
     return _drop_dead_cc_slugs(slugs_by_ats, "CT logs")
 
