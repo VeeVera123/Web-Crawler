@@ -401,33 +401,11 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 matched_confidences.append("match")
-            elif label == "uncertain" and provider_name is not None and unsure_reason == "bare_remote":
+            elif label == "uncertain" and unsure_reason == "bare_remote":
                 # 2026-09 policy change (refined per explicit user
                 # follow-up): a GENUINE AI-reviewed uncertainty — the AI
                 # actually read the title/description and still couldn't
-                # tell — is kept at PRIORITY_UNSURE, same as before. What
-                # changed is the OTHER case: provider_name is None exactly
-                # when no provider ever actually classified this job (see
-                # ai_classify_locations' results default of
-                # ('uncertain', None) — every real classification writes a
-                # non-None provider_name, so None only survives here if
-                # every provider failed/was exhausted/was never reached).
-                # That "never reviewed at all" case used to be
-                # indistinguishable from a genuine AI verdict and got kept
-                # right alongside it — real case that closed this: a GFL
-                # Environmental "Account Manager" posting in Indianapolis,
-                # IN (careers.gflenv.com, confirmed via direct Supabase
-                # lookup: location="" — the crawler never captured any
-                # location text for it — and location_priority=3) got
-                # written to the jobs table despite being an ordinary
-                # local US role with zero global-hiring evidence anywhere
-                # AND, separately, a real extraction bug that meant the AI
-                # never got a clean look at its actual location text
-                # either (see ats_scrapers.py/crawl_ii.py fixes). Both
-                # regex AND a genuine AI review coming back empty-handed
-                # is a real "we looked and couldn't tell" — worth keeping
-                # at low confidence. Never having a provider actually
-                # review the job at all is not that; it's dropped now.
+                # tell — is kept at PRIORITY_UNSURE, same as before.
                 #
                 # 2026-09 (second refinement, explicit user request): that
                 # benefit-of-the-doubt is now reserved for `unsure_reason
@@ -444,20 +422,80 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # evidence no longer gets the same pass — see the
                 # `unsure_reason == "blank"` branch below, which drops it
                 # instead.
-                job["clearance"] = provider_name
+                #
+                # BUG FOUND & FIXED 2026-09 (AI-classification-stage
+                # audit, triggered by a live collapse from 1500+/day to
+                # <300/day survivors with csm_roles in the 10,000-17,000
+                # range per shard but global_jobs down to 11-75 — see
+                # scan_reports in Supabase, project mqkcmkwpfvpajzjrbdji):
+                # this branch used to ALSO require `provider_name is not
+                # None` (i.e. some LOCATION_PROVIDERS entry actually
+                # produced this job's verdict), which meant "no provider
+                # ever got a chance to review this job" (every provider
+                # exhausted/rate-limited/unavailable — see
+                # ai_classify_locations' results default of
+                # ('uncertain', None) in classifier.py, and _mark_exhausted's
+                # circuit breaker which, once ANY provider gives up once,
+                # marks it dead for the REST OF THE RUN with zero further
+                # network calls) was treated IDENTICALLY to a real
+                # "no_match" and dropped outright.
+                #
+                # That is a real, reproducible failure mode, not a
+                # hypothetical: this project runs one process per ATS
+                # shard (10+ concurrent GitHub Actions jobs), several of
+                # LOCATION_PROVIDERS' free-tier keys are SHARED across all
+                # of them (Groq's real pool is only 8K TPM, shared with
+                # role classification too — see config.py), and once one
+                # provider trips the circuit breaker early in a run (a
+                # burst of 429s, a transient outage, a bad key for that
+                # run), it never serves another request for the rest of
+                # that shard's ~3 hour run. If enough/all providers do
+                # this, EVERY remaining bare-remote job for the rest of
+                # the run gets provider_name=None and was being silently
+                # rejected — even though the job's OWN location field
+                # ("Remote") is a real, unconditional signal from the
+                # company that doesn't actually depend on the AI ever
+                # confirming it; that's exactly what PRIORITY_UNSURE
+                # exists for ("kept as a plausible match, but geographic
+                # scope wasn't confirmed by keyword OR AI evidence" — see
+                # classifier.py's PRIORITY_UNSURE constant). Verified
+                # empirically: with every LOCATION_PROVIDERS client
+                # unable to complete a real call (invalid keys / no
+                # network route, standing in for "every provider
+                # exhausted its rate limit mid-run"), ai_classify_locations
+                # returns ('uncertain', None) for 100% of a 30-job batch of
+                # synthetic bare-"Remote" jobs, and this branch's OLD
+                # `provider_name is not None` condition dropped all 30 of
+                # them instead of keeping them at PRIORITY_UNSURE.
+                #
+                # Fix: drop the `provider_name is not None` requirement
+                # here. A bare_remote job is kept at PRIORITY_UNSURE
+                # whether the AI genuinely reviewed it and said UNCERTAIN,
+                # or never got reviewed at all — both cases collapse to
+                # "we have a real Remote signal and no dis-confirming
+                # evidence", which is the bar PRIORITY_UNSURE was designed
+                # for. This does NOT touch the separate, deliberately
+                # stricter 'blank' handling below (still requires a real
+                # match_global/match_africa AI verdict to survive) — that
+                # one exists to guard against scraper extraction bugs
+                # (GFL Environmental, Inabia/JazzHR, Sonepar/
+                # SuccessFactors — see history above), which bare_remote
+                # was never meant to be conflated with.
+                job["clearance"] = provider_name or "ai_unreviewed"
                 job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            # "no_match" → drop. "uncertain" with provider_name is None
-            # (no provider ever actually reviewed this job) → also drop.
-            # "uncertain" with unsure_reason == "blank" (a blank location
-            # field the AI still couldn't back with real evidence) → also
-            # drop now, per the policy refinement above. A blank field
-            # only survives via the match_global/match_africa branches
-            # above, i.e. the AI found real textual evidence for it —
-            # never on "we looked and still can't tell" alone, since that
-            # can't be told apart from the location simply never having
-            # been captured in the first place.
+            # "no_match" → drop. "uncertain" with unsure_reason == "blank"
+            # (a blank location field the AI still couldn't back with real
+            # evidence, REGARDLESS of whether a provider actually reviewed
+            # it) → also drop — a blank field only survives via the
+            # match_global/match_africa branches above, i.e. the AI found
+            # real textual evidence for it — never on "we looked and still
+            # can't tell" (or "never got looked at") alone, since a blank
+            # field can't be told apart from the location simply never
+            # having been captured in the first place (see the bare_remote
+            # branch above for why that reasoning does NOT extend to a
+            # genuine "Remote" signal from the company).
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
