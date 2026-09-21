@@ -344,9 +344,15 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     matched = []
     matched_confidences = []
     unsure_jobs = []
+    # Parallel to unsure_jobs — 'blank' (location field was empty/
+    # placeholder, so possibly a scraper extraction bug rather than a
+    # genuinely unlisted location) or 'bare_remote' (location field said
+    # "Remote" with nothing else — a real signal, just not region-
+    # specific). See _keyword_classify_location_detail's docstring.
+    unsure_reasons = []
 
     for job in jobs:
-        result, priority = _keyword_classify_location_detail(job)
+        result, priority, unsure_reason = _keyword_classify_location_detail(job)
         if result == "match":
             job["clearance"] = "regex"
             job["location_priority"] = priority  # PRIORITY_GLOBAL or PRIORITY_AFRICA
@@ -354,12 +360,42 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             matched_confidences.append("match")
         elif result == "unsure":
             unsure_jobs.append(job)
+            unsure_reasons.append(unsure_reason)
 
     log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
 
+    # 2026-09 canary (explicit user request, after two real scraper bugs —
+    # JazzHR/inabia and SuccessFactors/sonepar — both silently produced
+    # location="" for postings the live page showed as ordinary, specific
+    # US roles): a blank location is now excluded more strictly (see the
+    # "blank" branch below), but that only protects THIS run — it doesn't
+    # tell anyone a given scraper's extraction just broke. A single ATS
+    # platform suddenly producing a much higher share of blank locations
+    # than usual is the actual early signal of a template change breaking
+    # a regex, so surface it in the log every run rather than relying on
+    # someone noticing a bad job slip through downstream again.
+    blank_by_ats: dict[str, int] = {}
+    total_by_ats: dict[str, int] = {}
+    for job in jobs:
+        ats_name = job.get("source_ats") or "unknown"
+        total_by_ats[ats_name] = total_by_ats.get(ats_name, 0) + 1
+    for job, reason in zip(unsure_jobs, unsure_reasons):
+        if reason == "blank":
+            ats_name = job.get("source_ats") or "unknown"
+            blank_by_ats[ats_name] = blank_by_ats.get(ats_name, 0) + 1
+    for ats_name, blanks in sorted(blank_by_ats.items(), key=lambda kv: -kv[1]):
+        ats_total = total_by_ats.get(ats_name, 0)
+        if ats_total >= 10 and blanks / ats_total >= 0.25:
+            log.warning(
+                f"Location filter: {ats_name} has {blanks}/{ats_total} jobs "
+                f"({blanks / ats_total:.0%}) with a BLANK location field this "
+                f"run — check whether {ats_name}'s scraper's location regex "
+                f"still matches that platform's current HTML/markup."
+            )
+
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
-        for job, (label, provider_name) in zip(unsure_jobs, ai_results):
+        for job, (label, provider_name), unsure_reason in zip(unsure_jobs, ai_results, unsure_reasons):
             # provider_name is whichever of LOCATION_PROVIDERS actually
             # classified this job — returned directly by ai_classify_locations
             # (2026-09: was re-derived here via a separate i%len(LOCATION_PROVIDERS)
@@ -380,7 +416,7 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 matched_confidences.append("match")
-            elif label == "uncertain" and provider_name is not None:
+            elif label == "uncertain" and provider_name is not None and unsure_reason == "bare_remote":
                 # 2026-09 policy change (refined per explicit user
                 # follow-up): a GENUINE AI-reviewed uncertainty — the AI
                 # actually read the title/description and still couldn't
@@ -407,12 +443,36 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # is a real "we looked and couldn't tell" — worth keeping
                 # at low confidence. Never having a provider actually
                 # review the job at all is not that; it's dropped now.
+                #
+                # 2026-09 (second refinement, explicit user request): that
+                # benefit-of-the-doubt is now reserved for `unsure_reason
+                # == "bare_remote"` — a job whose location field literally
+                # said "Remote" with nothing else, a real signal the
+                # company itself gave. A BLANK location field is a
+                # different animal: it's indistinguishable from a scraper
+                # extraction bug (confirmed live twice in the same week —
+                # Inabia/JazzHR and Sonepar/SuccessFactors both stored
+                # location="" for postings that were, on the live page,
+                # unambiguously and explicitly US-only) rather than a
+                # genuine "company just didn't say." A blank-location job
+                # the AI can't back with real match_global/match_africa
+                # evidence no longer gets the same pass — see the
+                # `unsure_reason == "blank"` branch below, which drops it
+                # instead.
                 job["clearance"] = provider_name
                 job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
                 matched_confidences.append("uncertain")
             # "no_match" → drop. "uncertain" with provider_name is None
             # (no provider ever actually reviewed this job) → also drop.
+            # "uncertain" with unsure_reason == "blank" (a blank location
+            # field the AI still couldn't back with real evidence) → also
+            # drop now, per the policy refinement above. A blank field
+            # only survives via the match_global/match_africa branches
+            # above, i.e. the AI found real textual evidence for it —
+            # never on "we looked and still can't tell" alone, since that
+            # can't be told apart from the location simply never having
+            # been captured in the first place.
 
     log.info(f"After location filter: {len(matched)} global/Africa jobs")
     return matched, matched_confidences
