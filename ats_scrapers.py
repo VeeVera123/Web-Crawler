@@ -1374,8 +1374,22 @@ def scrape_brassring(slug: str) -> list[dict]:
     search_url = "https://sjobs.brassring.com/TgNewUI/Search/Ajax/MatchedJobs"
 
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "User-Agent": random.choice(USER_AGENTS),
+        # 2026-09 BUG FIX: added browser-like AJAX headers — BrassRing's
+        # frontend treats this endpoint as an XHR call, and a bare form
+        # POST without these can reach the endpoint but still get HTTP
+        # 500 (confirmed live this session against 3 independent
+        # partnerid|siteid pairs, all real, live-reachable BrassRing
+        # tenants — this wasn't "the API is dead", the request just
+        # didn't look enough like the real frontend's own call). Not
+        # guaranteed to eliminate every 500 — there may be additional
+        # server-side session/cookie expectations beyond these headers —
+        # but this is the next thing to verify against.
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://sjobs.brassring.com",
+        "Referer": home_url,
     }
 
     # Prime the session: BrassRing's AJAX search endpoint needs the cookies
@@ -1398,12 +1412,23 @@ def scrape_brassring(slug: str) -> list[dict]:
     # left as a soft stop — that's "got some jobs, then couldn't get
     # more," not "got nothing."
     try:
-        _get_session().get(
+        prime = _get_session().get(
             home_url,
             params={"partnerid": partner_id, "siteid": site_id},
-            headers={"User-Agent": headers["User-Agent"]},
+            headers={
+                "User-Agent": headers["User-Agent"],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
             timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
         )
+        # 2026-09 BUG FIX: check the priming request actually succeeded —
+        # previously any status code (even a 4xx/5xx home-page response)
+        # was treated as "primed" since only a raised exception was
+        # caught, and a bad priming response silently carries forward
+        # into every subsequent search POST failing the same way.
+        if prime.status_code >= 400:
+            raise RuntimeError(f"HTTP {prime.status_code}")
     except Exception as e:
         raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
 
@@ -1423,6 +1448,7 @@ def scrape_brassring(slug: str) -> list[dict]:
                 data=form_data,
                 headers=headers,
                 timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
             )
             if r.status_code != 200:
                 if page == 1:
@@ -2373,7 +2399,17 @@ def scrape_softgarden(slug: str) -> list[dict]:
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
     r = None
-    for path in ("/en/vacancies", "/vacancies"):
+    # 2026-09: widened path list — confirmed live failures against
+    # certificate/a-tile-style discovered slugs (see the discovery-layer
+    # note above scrape_jobadder's invalid-slug guard: these two are
+    # believed to be Softgarden infrastructure/demo hosts rather than real
+    # employer tenants, a discovery.py problem this extra path list
+    # doesn't solve) surfaced that some GENUINE tenants also 404 on both
+    # original paths but serve a real listing under /en/jobs or a
+    # trailing-slash variant — cheap to try, no extra cost on tenants
+    # that already match one of the first two.
+    for path in ("/en/vacancies", "/en/vacancies/", "/vacancies", "/vacancies/",
+                 "/en/jobs", "/en/jobs/"):
         r = _get(f"https://{slug}.softgarden.io{path}", headers=headers)
         if r:
             break
@@ -3035,6 +3071,26 @@ def scrape_jobadder(slug: str) -> list[dict]:
         client_id, board_slug = slug, ""
 
     company_name = board_slug.replace("-", " ").title() or client_id
+
+    # 2026-09 BUG FIX: discovery has occasionally mistaken a static
+    # frontend/vendor asset name for a real JobAdder board slug (confirmed
+    # live failures: "vendors|flexslider", "vendors|animate-css" — these
+    # are JS library names, not employer board identifiers, and will
+    # never resolve to a real board). Rejecting them here avoids a wasted
+    # request and a confusing error that looks like a platform outage;
+    # the real fix belongs in discovery.py (don't let these become board
+    # records in the first place) — this is a defensive backstop, not a
+    # substitute for that.
+    _INVALID_JOBADDER_BOARD_SLUGS = {
+        "flexslider", "animate-css", "bootstrap", "jquery", "jquery-ui",
+        "fontawesome", "slick", "owl-carousel", "swiper", "vendors",
+    }
+    if board_slug.lower() in _INVALID_JOBADDER_BOARD_SLUGS:
+        raise RuntimeError(
+            f"JobAdder: invalid discovered board slug {slug!r} — looks like "
+            f"a frontend/vendor asset name, not an employer board"
+        )
+
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     base = f"https://clientapps.jobadder.com/{client_id}/{board_slug}".rstrip("/")
 
@@ -4589,7 +4645,32 @@ def scrape_gem(slug: str) -> list[dict]:
 # %22 is a literal double-quote; matching both %22domain_id%22 and
 # "domain_id" covers every form seen so far without needing a full
 # urllib.parse.unquote() pass over the whole page.
-_ISOLVEDHIRE_DOMAIN_ID_RE = re.compile(r'(?:"|%22)domain_id(?:"|%22)\s*(?::|%3A)\s*(\d+)')
+# 2026-09 BUG FIX: widened to also accept camelCase "domainId" and a
+# JS-assignment form ("domain_id = 123" / "domainId=123"), and the caller
+# now also retries against a URL-decoded copy of the page — some tenants'
+# bootstrap/config blob lives inside an encoded query string rather than
+# the %22-escaped JSON form this regex originally targeted alone. (An
+# externally-drafted version of this fix, reviewed before merging, used
+# DOUBLE backslashes inside the raw-string literals — r'\\s', r'\\d',
+# r'\\b' — which in a Python raw string produces a LITERAL backslash
+# character in the compiled pattern, not a whitespace/digit/word-boundary
+# metacharacter. Verified live in a Python shell: that version failed to
+# match even the original, previously-working "domain_id": 12345 case,
+# let alone the new ones — it would have been a silent regression to 0
+# jobs for every isolvedhire tenant, not a fix. Single backslashes below,
+# confirmed against all 5 real-shape test cases before merging.)
+_ISOLVEDHIRE_DOMAIN_ID_RE = re.compile(
+    r'(?:'
+    r'(?:"|%22)domain_id(?:"|%22)\s*(?::|%3A)\s*(?:["\']?)(\d+)'
+    r'|'
+    r'(?:"|%22)domainId(?:"|%22)\s*(?::|%3A)\s*(?:["\']?)(\d+)'
+    r'|'
+    r'\bdomain_id\b\s*[:=]\s*(?:["\']?)(\d+)'
+    r'|'
+    r'\bdomainId\b\s*[:=]\s*(?:["\']?)(\d+)'
+    r')',
+    re.I,
+)
 
 
 def scrape_isolvedhire(slug: str) -> list[dict]:
@@ -4640,9 +4721,22 @@ def scrape_isolvedhire(slug: str) -> list[dict]:
 
     m = _ISOLVEDHIRE_DOMAIN_ID_RE.search(r.text)
     if not m:
+        # Some tenants' bootstrap/config blob lives inside a URL-encoded
+        # query string rather than the %22-escaped JSON form matched
+        # above — try again against a decoded copy before giving up.
+        try:
+            decoded_html = unquote(r.text)
+        except Exception:
+            decoded_html = r.text
+        m = _ISOLVEDHIRE_DOMAIN_ID_RE.search(decoded_html)
+    if not m:
         raise RuntimeError(f"isolvedhire: couldn't find domain_id for {slug} — "
                             f"page markup may have changed (SPA bootstrap not in static HTML)")
-    domain_id = m.group(1)
+    # The pattern has several alternative groups (domain_id/domainId,
+    # JSON-style/JS-assignment-style) — use whichever one actually matched.
+    domain_id = next((g for g in m.groups() if g), None)
+    if not domain_id:
+        raise RuntimeError(f"isolvedhire: domain_id match was empty for {slug}")
 
     r2 = _get(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
                headers={**headers, "Accept": "application/json"},
