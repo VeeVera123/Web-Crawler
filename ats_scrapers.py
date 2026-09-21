@@ -3944,11 +3944,41 @@ def scrape_csod(slug: str) -> list[dict]:
 
 
 # ── Paycom ───────────────────────────────────────────────
-# 2026-09: REVERSED out of discovery-only (see discovery.py's
-# _url_to_slug_paycom comment and GREYLIST_ATS.md for the full evidence
-# trail). Confirmed live, twice, on two independent real Paycom tenants
-# (FUTEK — clientkey 5AA9970AFB7E7320DA597F2CF00E6958 — and a second
-# unrelated tenant on clientkey 74B8425BF3D1B3ACB19CC1353DC5FA0E):
+# 2026-09 STATUS: RE-REGISTERED — a real, verified, plain-HTTP fix, not a
+# headless-browser workaround. This went through three states this
+# session, in order: (1) "confirmed live" (the ORIGINAL writeup below),
+# (2) briefly pulled to discovery-only after shipping 0 jobs in
+# production and an initial (incorrect) diagnosis that the token could
+# only ever exist in JS runtime memory, (3) THIS state — the real bug
+# found and fixed.
+#
+# The actual root cause: the original implementation searched for a bare
+# `eyJ...`-shaped JWT string anywhere in the bootstrap page's HTML. That
+# is NOT how Paycom's own career-page bootstraps itself. Found via
+# external LLM consultation and independently CONFIRMED by fetching the
+# real, current source of elliottdehn/open-jobs' Paycom fetcher — a
+# working, maintained, plain-HTTP (no browser) scraper for this exact
+# platform: the session token lives inside a `configsFromHost = {...}`
+# JS assignment (a JSON object literal) under the key "sessionJWT", with
+# the API base nested inside a "libConfig" sub-object (itself a JSON
+# STRING needing its own parse) under "atsPortalMantleServiceUrl". A bare
+# eyJ-regex either never matched anything real or matched an unrelated
+# eyJ-shaped substring elsewhere on the page — either fully explains why
+# every single tenant, every run, got 0 jobs despite the search/detail
+# API steps below being completely real. Separately (also confirmed
+# against that same reference implementation): the token must be sent as
+# a lowercase `authorization: <token>` header with the raw JWT value —
+# NOT `Authorization: Bearer <token>`. See _paycom_bootstrap and
+# scrape_paycom's docstrings for the corrected implementation, and
+# GREYLIST_ATS.md for the full three-state writeup.
+#
+# ORIGINAL (2026-09) verification claim, preserved for the record — the
+# API shape it describes (search/detail endpoints, body schema, field
+# names) is still believed accurate; only the token-EXTRACTION step was
+# wrong, per the fix above. Confirmed live, twice, on two independent
+# real Paycom tenants (FUTEK — clientkey 5AA9970AFB7E7320DA597F2CF00E6958
+# — and a second unrelated tenant on clientkey
+# 74B8425BF3D1B3ACB19CC1353DC5FA0E):
 #   1. GET https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/career-page
 #      returns a real HTML document whose inline bootstrap script embeds
 #      (a) a genuine bearer JWT (confirmed working — a separate endpoint,
@@ -3978,6 +4008,8 @@ _PAYCOM_JOB_URL_RE = re.compile(
 )
 _PAYCOM_BASE_URL_RE = re.compile(r'"atsPortalMantleServiceUrl"\s*:\s*"([^"]+)"')
 _PAYCOM_TOKEN_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
+_PAYCOM_CONFIGS_MARKER = "configsFromHost = "
+_PAYCOM_DEFAULT_BASE = "https://portal-applicant-tracking.us-cent.paycomonline.net/"
 _PAYCOM_EMPTY_FILTERS = {
     "distanceFrom": 0, "workEnvironments": [], "positionTypes": [],
     "educationLevels": [], "categories": [], "travelTypes": [], "shiftTypes": [],
@@ -3991,14 +4023,49 @@ _paycom_bootstrap_cache: dict[str, tuple[str, str]] = {}
 _paycom_bootstrap_lock = threading.Lock()
 
 
-def _paycom_bootstrap(clientkey: str) -> tuple[str, str] | None:
+def _paycom_bootstrap(clientkey: str, force: bool = False) -> tuple[str, str] | None:
     """Fetch the tenant's career-page bootstrap HTML and extract (token,
     api_base_url). Cached per clientkey for this process's lifetime — the
     token is scoped to the tenant, not to a single request, and a fresh
-    one is cheap to re-derive next run."""
+    one is cheap to re-derive next run. force=True bypasses the cache —
+    used after a 401/403 (see scrape_paycom/_fetch_paycom_description's
+    refresh-and-retry-once logic) so a cached-but-expired token isn't
+    reused forever.
+
+    2026-09 BUG FIX #2 (this scraper shipped ZERO real jobs from every
+    tenant since being added — see GREYLIST_ATS.md's Paycom section for
+    the full story). Root cause, found via external LLM consultation and
+    independently verified by fetching the real, current
+    elliottdehn/open-jobs Paycom fetcher source (a working, maintained,
+    plain-HTTP scraper for this same platform — no headless browser
+    involved): the bootstrap page's session token does NOT sit loose in
+    the HTML as a bare `eyJ...` JWT-shaped string the way the original
+    implementation here assumed. It lives inside a
+    `configsFromHost = {...}` JS assignment — a JSON object literal —
+    under the key "sessionJWT", with the API base nested one level
+    deeper inside a "libConfig" sub-object (itself a JSON STRING that
+    needs its own json.loads call, not a plain nested object) under
+    "atsPortalMantleServiceUrl". A bare regex hunting for anything
+    eyJ-shaped in the page is exactly the kind of "grab whatever text
+    happens to look right nearby" fragility this project has already
+    hit on several OTHER platforms' LOCATION extraction (see the
+    _extract_tolerant_text/_bs4_find_location_near helpers above) — same
+    failure class, just applied to auth instead of location. It plausibly
+    either never matched anything real, or matched an unrelated
+    eyJ-shaped substring elsewhere on the page, either of which fully
+    explains a 100% failure rate. The OLD regex path is kept below as a
+    SECONDARY fallback, tried only when the configsFromHost marker itself
+    is missing, in case some tenant's page genuinely differs from the
+    confirmed-live example.
+
+    Separately (also confirmed against the same reference implementation,
+    field-for-field): the token must be sent as a lowercase
+    `authorization: <token>` header with the raw JWT as the value — NOT
+    `Authorization: Bearer <token>`. See scrape_paycom/
+    _fetch_paycom_description for that half of the fix."""
     with _paycom_bootstrap_lock:
         cached = _paycom_bootstrap_cache.get(clientkey)
-    if cached:
+    if cached and not force:
         return cached
 
     # 2026-09 BUG FIX: this returning None on ANY failure (fetch, or
@@ -4015,14 +4082,40 @@ def _paycom_bootstrap(clientkey: str) -> tuple[str, str] | None:
         log.debug(f"Paycom: bootstrap page fetch failed for {clientkey}")
         return None
 
-    token_match = _PAYCOM_TOKEN_RE.search(r.text)
-    base_match = _PAYCOM_BASE_URL_RE.search(r.text)
-    if not token_match or not base_match:
-        log.debug(f"Paycom: no bootstrap token/API base found for {clientkey}")
-        return None
+    token, base = None, None
 
-    token = token_match.group(0)
-    base = base_match.group(1).replace("\\/", "/")
+    marker_idx = r.text.find(_PAYCOM_CONFIGS_MARKER)
+    if marker_idx != -1:
+        start = marker_idx + len(_PAYCOM_CONFIGS_MARKER)
+        end = r.text.find(";\n", start)
+        blob = r.text[start:end] if end != -1 else r.text[start:start + 20000]
+        try:
+            cfg = json.loads(blob)
+            token = cfg.get("sessionJWT") or None
+            lib_config = cfg.get("libConfig")
+            if isinstance(lib_config, str):
+                try:
+                    lib_config = json.loads(lib_config)
+                except Exception:
+                    lib_config = {}
+            if isinstance(lib_config, dict):
+                base = lib_config.get("atsPortalMantleServiceUrl") or None
+        except Exception as e:
+            log.debug(f"Paycom: found configsFromHost but couldn't parse it for {clientkey}: {e}")
+
+    if not token or not base:
+        # Fallback — old bare-JWT-regex / raw-string search, only used
+        # when the confirmed-live configsFromHost shape isn't present.
+        token_match = _PAYCOM_TOKEN_RE.search(r.text)
+        base_match = _PAYCOM_BASE_URL_RE.search(r.text)
+        token = token or (token_match.group(0) if token_match else None)
+        base = base or (base_match.group(1).replace("\\/", "/") if base_match else None)
+
+    if not token:
+        log.debug(f"Paycom: no sessionJWT found (configsFromHost or fallback) for {clientkey}")
+        return None
+    if not base:
+        base = _PAYCOM_DEFAULT_BASE
     if not base.endswith("/"):
         base += "/"
 
@@ -4030,6 +4123,36 @@ def _paycom_bootstrap(clientkey: str) -> tuple[str, str] | None:
     with _paycom_bootstrap_lock:
         _paycom_bootstrap_cache[clientkey] = result
     return result
+
+
+def _paycom_normalize_location(value) -> str:
+    """Defensive normalizer for Paycom's location-ish fields (preview
+    items' "locations", detail items' "location"/"secondaryLocations").
+    The confirmed field list (from the same reference implementation
+    _paycom_bootstrap's docstring cites) names these fields but doesn't
+    pin down whether a given tenant returns a bare string, a list of
+    strings, or a list of {city, state, ...}-shaped objects — so this
+    never lets an unexpected shape reach job["location"] as a raw Python
+    repr (e.g. "[{'city': 'Tulsa'}]"). Falls back to "" rather than
+    guessing at something worse than blank, same policy as every other
+    ATS scraper's location extraction in this file."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = [str(value[k]) for k in
+                 ("city", "state", "stateProvince", "province", "country", "countryName")
+                 if value.get(k)]
+        return ", ".join(parts)
+    if isinstance(value, list):
+        pieces = []
+        for v in value:
+            piece = _paycom_normalize_location(v)
+            if piece and piece not in pieces:
+                pieces.append(piece)
+        return "; ".join(pieces)
+    return ""
 
 
 def scrape_paycom(slug: str) -> list[dict]:
@@ -4044,26 +4167,46 @@ def scrape_paycom(slug: str) -> list[dict]:
 
     bootstrap = _paycom_bootstrap(clientkey)
     if not bootstrap:
-        raise RuntimeError(f"Paycom: bootstrap (token/API base) failed for {clientkey}")
+        raise RuntimeError(f"Paycom: bootstrap (sessionJWT/API base) failed for {clientkey}")
     token, base = bootstrap
     search_url = f"{base}api/ats/job-posting-previews/search"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-        "Locale": "en-US",
-        "User-Agent": random.choice(USER_AGENTS),
-    }
+
+    def _headers(tok: str) -> dict:
+        # 2026-09 BUG FIX: "authorization: <token>" (lowercase key, raw
+        # JWT value) — NOT "Authorization: Bearer <token>". See
+        # _paycom_bootstrap's docstring for the reference implementation
+        # this was verified against.
+        return {
+            "Content-Type": "application/json",
+            "authorization": tok,
+            "Locale": "en-US",
+            "User-Agent": random.choice(USER_AGENTS),
+        }
 
     jobs = []
     seen = set()
     skip = 0
     take = 25
     total = None
+    refreshed_once = False
 
     while total is None or skip < total:
         payload = {"skip": skip, "take": take, "filtersForQuery": dict(_PAYCOM_EMPTY_FILTERS)}
         try:
-            resp = _get_session().post(search_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _get_session().post(search_url, json=payload, headers=_headers(token), timeout=REQUEST_TIMEOUT)
+            if resp.status_code in (401, 403) and not refreshed_once:
+                # Cached token likely expired (or was wrong to begin with)
+                # — force one fresh bootstrap and retry this same page
+                # once, mirroring the reference implementation's own
+                # refresh-and-retry-once pattern (see _paycom_bootstrap's
+                # docstring).
+                refreshed_once = True
+                bootstrap = _paycom_bootstrap(clientkey, force=True)
+                if not bootstrap:
+                    raise RuntimeError(f"Paycom: token refresh failed for {clientkey} after HTTP {resp.status_code}")
+                token, base = bootstrap
+                search_url = f"{base}api/ats/job-posting-previews/search"
+                resp = _get_session().post(search_url, json=payload, headers=_headers(token), timeout=REQUEST_TIMEOUT)
             if resp.status_code != 200:
                 if skip == 0:
                     raise RuntimeError(f"Paycom: search API returned {resp.status_code} for {clientkey}")
@@ -4090,11 +4233,11 @@ def scrape_paycom(slug: str) -> list[dict]:
                 "title": (item.get("jobTitle") or "").strip(),
                 "url": f"https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/jobs/{job_id}",
                 "company": "",  # filled in from the detail endpoint during enrichment
-                "location": item.get("locations", ""),
+                "location": _paycom_normalize_location(item.get("locations")),
                 "country": "",
                 "department": "",
-                "workplace_type": item.get("remoteType", ""),
-                "employment_type": item.get("positionType", ""),
+                "workplace_type": item.get("remoteType") or "",
+                "employment_type": item.get("positionType") or "",
                 "salary": "",
                 "description_snippet": _snippet(item.get("description", "")),
                 "source_ats": "Paycom",
@@ -4124,13 +4267,24 @@ def _fetch_paycom_description(job: dict) -> str:
         return job.get("description_snippet", "")
     token, base = bootstrap
 
-    r = _get(
-        f"{base}api/ats/job-postings/{job_id}",
-        headers={"Authorization": f"Bearer {token}", "Locale": "en-US",
-                 "User-Agent": random.choice(USER_AGENTS)},
-    )
+    def _detail_headers(tok: str) -> dict:
+        # See _paycom_bootstrap's docstring — raw JWT, lowercase header
+        # key, not "Authorization: Bearer <tok>".
+        return {"authorization": tok, "Locale": "en-US",
+                "User-Agent": random.choice(USER_AGENTS)}
+
+    r = _get(f"{base}api/ats/job-postings/{job_id}", headers=_detail_headers(token))
     if not r:
-        return job.get("description_snippet", "")
+        # Could be a genuinely dead job, or an expired/wrong cached token
+        # — _get() doesn't surface the status code, so cheaply try once
+        # more with a forced-fresh bootstrap rather than giving up.
+        bootstrap = _paycom_bootstrap(clientkey, force=True)
+        if not bootstrap:
+            return job.get("description_snippet", "")
+        token, base = bootstrap
+        r = _get(f"{base}api/ats/job-postings/{job_id}", headers=_detail_headers(token))
+        if not r:
+            return job.get("description_snippet", "")
     try:
         posting = r.json().get("jobPosting", {})
     except Exception:
@@ -4143,6 +4297,18 @@ def _fetch_paycom_description(job: dict) -> str:
     department = posting.get("jobCategory", "")
     if department and not job.get("department"):
         job["department"] = department
+    # 2026-09: the detail endpoint's own "location"/"secondaryLocations"
+    # fields are a second, often more complete source than the search
+    # endpoint's "locations" preview field — use them to backfill (never
+    # overwrite) a still-blank location, and fold in any secondary
+    # offices for a genuinely multi-location posting.
+    if not job.get("location"):
+        primary = _paycom_normalize_location(posting.get("location"))
+        secondary = _paycom_normalize_location(posting.get("secondaryLocations"))
+        combined = "; ".join(p for p in (primary, secondary) if p)
+        if combined:
+            job["location"] = combined
+            job["location_status"] = "extracted_from_detail_page"
     return desc or job.get("description_snippet", "")
 
 
@@ -4570,8 +4736,10 @@ SCRAPERS = {
     # 2026-09: Cornerstone OnDemand — REVERSED out of discovery-only, see
     # scrape_csod's block comment above for the full live-verified evidence.
     "csod": scrape_csod,
-    # 2026-09: Paycom — REVERSED out of discovery-only, see scrape_paycom's
-    # block comment above for the full live-verified evidence.
+    # 2026-09: Paycom — RE-REGISTERED. The earlier "requires a headless
+    # browser" diagnosis was wrong — see scrape_paycom's block comment
+    # above for the real bug (bootstrap token extraction, not a JS-only
+    # token) and the verified fix.
     "paycom": scrape_paycom,
     # 2026-09: SAP SuccessFactors (Career Site Builder tenants) — REVERSED
     # out of "genuinely blocked", see scrape_successfactors's block
