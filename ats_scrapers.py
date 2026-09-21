@@ -118,6 +118,35 @@ def _extract_tolerant_text(html: str, after_pos: int, window: int = 400) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _bs4_find_location_near(anchor, class_substrings=("location",), max_levels=3) -> tuple[str, str]:
+    """DOM-anchored replacement for the fixed-char-window fallback above.
+    Given a BeautifulSoup <a> tag for a job's link, walks up to
+    `max_levels` row/card-like ancestors (li/tr/div/article/section) and,
+    at each level, looks for a descendant whose class contains one of
+    `class_substrings` (e.g. "location", "vacancy-location"). Stops at
+    the FIRST ancestor level where a match is found, so it stays anchored
+    to the job's own semantic container rather than drifting into
+    unrelated page chrome the way an unbounded whole-page search could.
+
+    Returns (location_text, location_status), where status is one of
+    "extracted" / "marker_found_empty" / "marker_not_found" — the same
+    three-way distinction used elsewhere in this file so a downstream
+    canary can tell "found the field but it was blank" apart from "never
+    found a location field at all" (see the module-level comment on
+    per-ATS extraction-status logging)."""
+    selector = ", ".join(f'[class*="{c}"]' for c in class_substrings)
+    node = anchor
+    for _ in range(max_levels):
+        node = node.find_parent(["li", "tr", "div", "article", "section"])
+        if node is None:
+            break
+        loc_el = node.select_one(selector)
+        if loc_el is not None and loc_el is not anchor:
+            text = loc_el.get_text(" ", strip=True)
+            return (text, "extracted") if text else ("", "marker_found_empty")
+    return "", "marker_not_found"
+
+
 # ATS template placeholders that leak into raw description payloads when a
 # templating variable fails to resolve — e.g. "%LABEL_POSITION_TYPE_REMOTE_WITHIN%"
 # (confirmed live in an ADP/Workday-style feed, see geo.py history). These are
@@ -1806,13 +1835,30 @@ def _fetch_successfactors_description(job: dict) -> str:
     """Full description is server-rendered directly on the /job/ page
     (see scrape_successfactors's block comment) — fetches it and trims
     from the job title down to just before SAP's own standard
-    post-content boilerplate (see _SF_DESC_END_MARKERS)."""
+    post-content boilerplate (see _SF_DESC_END_MARKERS).
+
+    2026-09: also backfills job["location"] as a side-effect when it's
+    still blank after the listing-page parse (mirrors what
+    _fetch_generic_description already does for every OTHER platform
+    registered in DESCRIPTION_FETCHERS — this scraper's own fetcher never
+    had that side-effect, so a blank listing-page location for a
+    SuccessFactors job had no second chance to be recovered, unlike every
+    other platform's enrichment path). Tries the detail page's own
+    JSON-LD JobPosting data first via _extract_location_from_html — SAP's
+    Career Site Builder job pages often carry this even when the search
+    results page's HTML doesn't expose location cleanly — before falling
+    back to whatever the listing page already produced."""
     url = job.get("url", "")
     if not url:
         return job.get("description_snippet", "")
     r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if r is None:
         return job.get("description_snippet", "")
+    if not job.get("location"):
+        loc = _extract_location_from_html(r.text)
+        if loc:
+            job["location"] = loc
+            job["location_status"] = "extracted_from_detail_page"
     try:
         soup = BeautifulSoup(r.text, "html.parser")
         for tag in soup(["script", "style", "nav", "header", "footer"]):
@@ -1990,46 +2036,42 @@ def scrape_jazzhr(slug: str) -> list[dict]:
     #           <li><i class="fa fa-map-marker"></i>Location</li>
     #         </ul>
     #       </li>
-    for item_match in re.finditer(
-        r'<li[^>]*class="list-group-item"[^>]*>(.*?)</li>\s*(?=<li[^>]*class="list-group-item"|</ul>|$)',
-        r.text, re.I | re.DOTALL
-    ):
-        item_html = item_match.group(1)
-
-        # Extract title + URL from heading
-        link_match = re.search(
-            r'class="list-group-item-heading"[^>]*>.*?'
-            r'<a\s+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
-            item_html, re.I | re.DOTALL
-        )
-        if not link_match:
+    #
+    # 2026-09: migrated from regex item-splitting + a bare-adjacency
+    # location capture to BeautifulSoup. The regex version's location
+    # capture (`></i>\s*([^<]+)`) required the location text to be plain
+    # text immediately after the closing </i> with zero intervening
+    # markup — confirmed live broken on inabia.applytojob.com (Senior
+    # Project Manager – ITSM/ServiceNow) where the actual board wraps the
+    # text in extra markup, silently producing location="". A DOM parser
+    # doesn't have this problem: once the map-marker icon element is
+    # located, `.parent.get_text()` correctly picks up its sibling text
+    # regardless of how deeply it's nested or wrapped, with no adjacency
+    # assumption and no arbitrary window-size limit.
+    soup = BeautifulSoup(r.text, "html.parser")
+    for item in soup.select("li.list-group-item"):
+        heading = item.select_one(".list-group-item-heading a[href]")
+        if not heading:
             continue
-
-        url = link_match.group(1).strip()
-        title = link_match.group(2).strip()
+        url = (heading.get("href") or "").strip()
+        title = heading.get_text(strip=True)
+        if not url or not title:
+            continue
         if not url.startswith("http"):
             url = base_url + url
 
-        # Extract location from fa-map-marker icon. The text isn't always
-        # bare — some boards wrap it in a <span> or add sibling markup
-        # right after the icon (e.g. <i class="fa fa-map-marker"></i>
-        # <span>New York, NY</span>), which the old bare-text-only pattern
-        # (`></i>\s*([^<]+)`) fails to match at all, silently producing a
-        # blank location. Confirmed live on inabia.applytojob.com (Senior
-        # Project Manager – ITSM/ServiceNow, 2026-09) where the page shows
-        # "New York, NY" but the DB row stored "". Fix: find the icon,
-        # then strip any tags in a bounded window after it and take the
-        # first line of resulting text, instead of requiring plain text
-        # immediately after the closing </i>.
-        icon_match = re.search(r'fa-map-marker["\'][^>]*>\s*</i>', item_html, re.I)
         location = ""
-        if icon_match:
-            tail = item_html[icon_match.end():icon_match.end() + 300]
-            tail = re.split(r'</(?:li|ul|div|h\d)>', tail, maxsplit=1, flags=re.I)[0]
-            tail_text = unescape(re.sub(r'<[^>]+>', ' ', tail))
-            tail_text = re.sub(r'\s+', ' ', tail_text).strip()
-            if tail_text:
-                location = tail_text
+        location_status = "marker_not_found"
+        icon = item.select_one("i.fa-map-marker, i[class*='fa-map-marker']")
+        if icon is not None:
+            # The location text is the icon's own tail text plus any
+            # sibling elements' text within its immediate container —
+            # .parent.get_text() naturally covers both "bare text right
+            # after the icon" and "text wrapped in a further <span>".
+            container = icon.parent or icon
+            text = container.get_text(" ", strip=True)
+            location = text.strip()
+            location_status = "extracted" if location else "marker_found_empty"
 
         title_key = title.lower().strip()
         if url not in seen_urls and title_key not in seen_titles:
@@ -2040,6 +2082,7 @@ def scrape_jazzhr(slug: str) -> list[dict]:
                 "url": url,
                 "company": company_name,
                 "location": location,
+                "location_status": location_status,
                 "country": "",
                 "department": "",
                 "workplace_type": "",
@@ -2123,10 +2166,80 @@ def scrape_jazzhr(slug: str) -> list[dict]:
 
 # ── HRMDirect ───────────────────────────────────────────
 
+# 2026-09: HRMDirect used to assume the cells AFTER the title cell are
+# always [city, state, country] in that fixed order — a positional
+# assumption that silently shifts every field one column over if a tenant's
+# table has an extra inserted column (e.g. a "posted date" cell before
+# city), with no error raised anywhere. Two defenses added below, per
+# real-world scraping guidance from an external review of this exact
+# failure class:
+#   1. If the table has a header row (<th> cells, or a first row that
+#      looks like one), map columns by their HEADER TEXT instead of
+#      position — immune to column reordering/insertion as long as the
+#      header itself is present.
+#   2. Even without a header, sanity-check each candidate cell's CONTENT
+#      SHAPE before trusting it as a city/state — a date-looking or
+#      salary-looking string should never be silently accepted as a
+#      location field just because it landed in the "expected" column.
+_HRMD_HEADER_SYNONYMS = {
+    "city": {"city", "location", "job location", "office location", "work location"},
+    "state": {"state", "state/province", "province", "region"},
+    "country": {"country"},
+    "department": {"department", "dept", "team", "division"},
+}
+_HRMD_DATE_LIKE_RE = re.compile(
+    r'^\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'
+    r'|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}'
+    r'|\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{4})\s*$'
+)
+_HRMD_SALARY_LIKE_RE = re.compile(r'^\s*\$[\d,]+(\.\d+)?(\s*[-–—]\s*\$?[\d,]+(\.\d+)?)?\s*$')
+
+
+def _hrmd_looks_like_place(text: str) -> bool:
+    """Best-effort content-shape check: rejects an obviously-wrong value
+    (a date, a salary figure) that a positional guess might otherwise
+    assign to a city/state field. Not a positive proof the text IS a
+    place — just a guard against the clearest wrong-column cases."""
+    if not text:
+        return False
+    if _HRMD_DATE_LIKE_RE.match(text) or _HRMD_SALARY_LIKE_RE.match(text):
+        return False
+    return True
+
+
+def _hrmd_parse_header_row(html: str) -> dict[str, int] | None:
+    """Looks for a header row (<th> cells, or an early row that is ALL
+    short label-like text) and returns {canonical_field: cell_index}, or
+    None if no usable header is found. A tenant that renders headers as
+    an image, or omits them, falls back to the positional path below."""
+    thead_match = re.search(r'<thead[^>]*>(.*?)</thead>', html, re.I | re.DOTALL)
+    header_html = thead_match.group(1) if thead_match else html[:2000]
+    header_row_match = re.search(r'<tr[^>]*>(.*?)</tr>', header_html, re.I | re.DOTALL)
+    if not header_row_match:
+        return None
+    header_cells_html = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', header_row_match.group(1), re.I | re.DOTALL)
+    if len(header_cells_html) < 2:
+        return None
+    header_cells = [re.sub(r'<[^>]+>', '', c).strip().lower() for c in header_cells_html]
+
+    mapping: dict[str, int] = {}
+    for idx, label in enumerate(header_cells):
+        for canonical, synonyms in _HRMD_HEADER_SYNONYMS.items():
+            if label in synonyms and canonical not in mapping:
+                mapping[canonical] = idx
+    # Require at least a city/location column to trust this as a real
+    # header row — otherwise this was probably just a normal data row
+    # that happened to be short text, not an actual header.
+    return mapping if "city" in mapping else None
+
+
 def scrape_hrmdirect(slug: str) -> list[dict]:
     """HRMDirect / ClearCompany — HTML scrape of job openings table.
     Slug is the company subdomain (e.g. 'novabio').
-    Uses ?search=true to force all jobs to display (not just filter dropdowns)."""
+    Uses ?search=true to force all jobs to display (not just filter dropdowns).
+    Prefers header-based column mapping when a header row is present (see
+    _hrmd_parse_header_row); falls back to positional guessing (with
+    content-shape sanity checks) only when no header can be found."""
     company_name = slug.replace("-", " ").title()
     url = f"https://{slug}.hrmdirect.com/employment/openings.php?search=true"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
@@ -2134,6 +2247,8 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
     r = _get(url, headers=headers)
     if not r:
         return []
+
+    header_map = _hrmd_parse_header_row(r.text)
 
     jobs = []
     seen_urls = set()
@@ -2171,31 +2286,48 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
             text = re.sub(r'<[^>]+>', '', cell).strip()
             clean_cells.append(text)
 
-        # HRMDirect tables vary but commonly:
-        # [department?, title, city, state, country?] or [title, city, state]
-        # Find the cell index that contains the title to know the layout
-        title_idx = -1
-        for i, c in enumerate(clean_cells):
-            if title in c:
-                title_idx = i
-                break
-
         city = ""
         state = ""
         country = ""
         department = ""
+        location_status = "no_cells_found"
 
-        if title_idx >= 0:
-            remaining = clean_cells[title_idx + 1:]
-            if len(remaining) >= 1:
-                city = remaining[0]
-            if len(remaining) >= 2:
-                state = remaining[1]
-            if len(remaining) >= 3:
-                country = remaining[2]
-            # Department is usually before the title
-            if title_idx >= 1:
-                department = clean_cells[title_idx - 1]
+        if header_map:
+            # Header-based mapping — immune to an inserted/reordered
+            # column, as long as the header row itself matches.
+            def _cell(idx):
+                return clean_cells[idx] if 0 <= idx < len(clean_cells) else ""
+            city = _cell(header_map.get("city", -1))
+            state = _cell(header_map.get("state", -1))
+            country = _cell(header_map.get("country", -1))
+            department = _cell(header_map.get("department", -1))
+            location_status = "extracted_by_header" if (city or state or country) else "marker_found_empty"
+        else:
+            # No header found — fall back to the old positional guess
+            # (city/state/country are the cells right after the title),
+            # but sanity-check each value's shape first so an inserted
+            # date/salary column doesn't get silently accepted as a place.
+            # HRMDirect tables vary but commonly:
+            # [department?, title, city, state, country?] or [title, city, state]
+            title_idx = -1
+            for i, c in enumerate(clean_cells):
+                if title in c:
+                    title_idx = i
+                    break
+
+            if title_idx >= 0:
+                remaining = clean_cells[title_idx + 1:]
+                remaining = [c for c in remaining if _hrmd_looks_like_place(c)]
+                if len(remaining) >= 1:
+                    city = remaining[0]
+                if len(remaining) >= 2:
+                    state = remaining[1]
+                if len(remaining) >= 3:
+                    country = remaining[2]
+                # Department is usually before the title
+                if title_idx >= 1:
+                    department = clean_cells[title_idx - 1]
+                location_status = "extracted_positional" if (city or state or country) else "marker_found_empty"
 
         location = city
         if state and city:
@@ -2210,6 +2342,7 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
             "url": job_url,
             "company": company_name,
             "location": location,
+            "location_status": location_status,
             "country": country,
             "department": department,
             "workplace_type": "",
@@ -2782,30 +2915,34 @@ def scrape_eploy(slug: str) -> list[dict]:
     jobs = []
     seen = set()
 
-    for match in re.finditer(
-        r'href=["\']([^"\']*/vacancy/(\d+)/[^"\']*)["\'][^>]*>\s*([^<]+)</a>',
-        r.text, re.I
-    ):
-        path, vac_id, title = match.group(1), match.group(2), unescape(match.group(3)).strip()
+    # 2026-09: migrated location extraction from a fixed-char-window regex
+    # fallback to a DOM-anchored lookup (see _bs4_find_location_near) — the
+    # old approach silently produced "" whenever the location text was
+    # wrapped in extra markup within its window, or could in principle grab
+    # an unrelated sibling's text past the window boundary. Title/URL
+    # extraction stays regex-based (single-field, no adjacency risk).
+    soup = BeautifulSoup(r.text, "html.parser")
+    vacancy_href_re = re.compile(r'/vacancy/(\d+)/')
+    for anchor in soup.find_all("a", href=vacancy_href_re):
+        path = (anchor.get("href") or "").strip()
+        title = anchor.get_text(strip=True)
+        if not path or not title:
+            continue
         job_url = path if path.startswith("http") else base + path
-        if job_url in seen or not title:
+        if job_url in seen:
             continue
         seen.add(job_url)
 
-        # Location is frequently rendered as a sibling <span>/<div> right
-        # after the link inside the same list item — best-effort grab.
-        # 2026-09: was a bare `[^<]+` capture that failed silently (see
-        # _extract_tolerant_text's block comment) whenever the location
-        # text was itself wrapped in another tag.
-        window = r.text[match.end():match.end() + 400]
-        loc_open = re.search(r'class="[^"]*(?:location|vacancy-location)[^"]*"[^>]*>', window, re.I)
-        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
+        location, location_status = _bs4_find_location_near(
+            anchor, class_substrings=("location", "vacancy-location")
+        )
 
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company_name,
             "location": location,
+            "location_status": location_status,
             "country": "",
             "department": "",
             "workplace_type": "",
@@ -2913,27 +3050,28 @@ def scrape_jobadder(slug: str) -> list[dict]:
     jobs = []
     seen = set()
 
-    for match in re.finditer(
-        r'href=["\']([^"\']*/job/(\d+)[^"\']*)["\'][^>]*>\s*(?:<[^>]+>\s*)*([^<]+)</a>',
-        r.text, re.I
-    ):
-        path, job_id, title = match.group(1), match.group(2), unescape(match.group(3)).strip()
+    # 2026-09: migrated to DOM-anchored location lookup — see
+    # scrape_eploy's comment above / _bs4_find_location_near's docstring.
+    soup = BeautifulSoup(r.text, "html.parser")
+    job_href_re = re.compile(r'/job/(\d+)')
+    for anchor in soup.find_all("a", href=job_href_re):
+        path = (anchor.get("href") or "").strip()
+        title = anchor.get_text(strip=True)
+        if not path or not title:
+            continue
         job_url = path if path.startswith("http") else f"https://clientapps.jobadder.com{path}"
-        if job_url in seen or not title:
+        if job_url in seen:
             continue
         seen.add(job_url)
 
-        # 2026-09: bare `[^<]+` capture replaced — see
-        # _extract_tolerant_text's block comment.
-        window = r.text[match.end():match.end() + 400]
-        loc_open = re.search(r'class="[^"]*location[^"]*"[^>]*>', window, re.I)
-        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
+        location, location_status = _bs4_find_location_near(anchor, class_substrings=("location",))
 
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company_name,
             "location": location,
+            "location_status": location_status,
             "country": "",
             "department": "",
             "workplace_type": "",
@@ -2968,31 +3106,36 @@ def scrape_jobvite(slug: str) -> list[dict]:
     jobs = []
     seen = set()
 
-    for match in re.finditer(
-        r'href=["\']([^"\']*/' + re.escape(slug) + r'/job/([a-zA-Z0-9\-]+)[^"\']*)["\']'
-        r'[^>]*>\s*(?:<[^>]+>\s*)*([^<]+)</a>',
-        r.text, re.I
-    ):
-        path, job_id, title = match.group(1), match.group(2), unescape(match.group(3)).strip()
+    # 2026-09: migrated location AND department extraction to the
+    # DOM-anchored lookup — see scrape_eploy's comment above /
+    # _bs4_find_location_near's docstring. Same helper reused for
+    # "department" by passing different class substrings, since the
+    # fragility (bare-adjacency capture) was identical for both fields.
+    soup = BeautifulSoup(r.text, "html.parser")
+    job_href_re = re.compile(r'/' + re.escape(slug) + r'/job/[a-zA-Z0-9\-]+')
+    for anchor in soup.find_all("a", href=job_href_re):
+        path = (anchor.get("href") or "").strip()
+        title = anchor.get_text(strip=True)
+        if not path or not title:
+            continue
         job_url = path if path.startswith("http") else f"https://jobs.jobvite.com{path}"
-        if job_url in seen or not title:
+        if job_url in seen:
             continue
         seen.add(job_url)
 
-        # 2026-09: bare `[^<]+` captures replaced — see
-        # _extract_tolerant_text's block comment (same fragility applied
-        # to both the location and department fields here).
-        window = r.text[match.end():match.end() + 400]
-        loc_open = re.search(r'class="[^"]*(?:location|jv-job-list__location)[^"]*"[^>]*>', window, re.I)
-        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
-        dept_open = re.search(r'class="[^"]*(?:department|jv-job-list__department)[^"]*"[^>]*>', window, re.I)
-        department = _extract_tolerant_text(window, dept_open.end()) if dept_open else ""
+        location, location_status = _bs4_find_location_near(
+            anchor, class_substrings=("location", "jv-job-list__location")
+        )
+        department, _ = _bs4_find_location_near(
+            anchor, class_substrings=("department", "jv-job-list__department")
+        )
 
         jobs.append({
             "title": title,
             "url": job_url,
             "company": company_name,
             "location": location,
+            "location_status": location_status,
             "country": "",
             "department": department,
             "workplace_type": "",
@@ -3302,32 +3445,32 @@ def scrape_pageup(slug: str) -> list[dict]:
     jobs = []
     seen = set()
 
-    for match in re.finditer(
-        r'href=["\']([^"\']*/job/(\d+)/([^"\'?#]+))["\'][^>]*>\s*(?:<[^>]+>\s*)*([^<]+)</a>',
-        r.text, re.I
-    ):
-        path, job_id, title_slug, link_text = (
-            match.group(1), match.group(2), match.group(3), match.group(4)
-        )
+    # 2026-09: migrated location extraction to the DOM-anchored lookup —
+    # see scrape_eploy's comment above / _bs4_find_location_near's
+    # docstring.
+    soup = BeautifulSoup(r.text, "html.parser")
+    job_href_re = re.compile(r'/job/(\d+)/([^"\'?#]+)')
+    for anchor in soup.find_all("a", href=job_href_re):
+        path = (anchor.get("href") or "").strip()
+        if not path:
+            continue
+        href_match = job_href_re.search(path)
+        title_slug = href_match.group(2) if href_match else ""
         job_url = path if path.startswith("http") else "https://careers.pageuppeople.com" + path
         if job_url in seen:
             continue
         seen.add(job_url)
-        title = unescape(link_text).strip() or unquote(title_slug).replace("-", " ").title()
+        link_text = anchor.get_text(strip=True)
+        title = link_text or unquote(title_slug).replace("-", " ").title()
 
-        # Location is frequently rendered as a sibling element right after
-        # the link inside the same list item — best-effort grab.
-        # 2026-09: bare `[^<]+` capture replaced — see
-        # _extract_tolerant_text's block comment.
-        window = r.text[match.end():match.end() + 400]
-        loc_open = re.search(r'class="[^"]*location[^"]*"[^>]*>', window, re.I)
-        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
+        location, location_status = _bs4_find_location_near(anchor, class_substrings=("location",))
 
         jobs.append({
             "title": title,
             "url": job_url,
             "company": source.replace("-", " ").title(),
             "location": location,
+            "location_status": location_status,
             "country": "",
             "department": "",
             "workplace_type": "",
