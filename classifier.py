@@ -1023,11 +1023,33 @@ _AFRICAN_COUNTRY_RE = re.compile(
 )
 
 
-def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
+def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str | None]:
     """
-    Returns (result, priority) where result is 'match', 'no_match', or
-    'unsure', and priority (PRIORITY_GLOBAL / PRIORITY_AFRICA / None) is
-    only meaningful when result == 'match'.
+    Returns (result, priority, unsure_reason) where result is 'match',
+    'no_match', or 'unsure'; priority (PRIORITY_GLOBAL / PRIORITY_AFRICA /
+    None) is only meaningful when result == 'match'; unsure_reason is only
+    meaningful when result == 'unsure' and is one of:
+      'blank'       — location field was empty/placeholder. This is the
+                      ambiguous case: could be a genuinely unlisted
+                      location, OR a scraper extraction bug silently
+                      leaving the field blank (confirmed live twice —
+                      Inabia/JazzHR and Sonepar/SuccessFactors, both
+                      2026-09 — where the real posting was flat-out
+                      country-specific but a markup-parsing miss in the
+                      scraper produced location=""). Since a blank field
+                      can't be told apart from an extraction failure, this
+                      reason is held to a HIGHER bar downstream: it must
+                      get an AI verdict backed by real evidence
+                      (match_global/match_africa) to survive — a plain
+                      "AI looked and still couldn't tell" is NOT enough
+                      and gets dropped, unlike 'bare_remote' below. See
+                      crawl_i.py/crawl_ii.py's location-filter functions.
+      'bare_remote' — location field explicitly said "Remote" with no
+                      other qualifier. This IS a real signal the company
+                      itself provided (not a data gap), just one that
+                      doesn't say which region — kept at the same
+                      benefit-of-the-doubt policy as before (AI-uncertain
+                      still survives at PRIORITY_UNSURE).
 
     STRICT ALLOWLIST, rewritten 2026-08. The only ways a job can survive
     this filter:
@@ -1060,7 +1082,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # specific role's own "no sponsorship, must already be authorized"
     # statement) that slipped past classification without this. ──
     if has_hard_no_sponsorship_signal(job):
-        return "no_match", None
+        return "no_match", None, None
 
     # ── 0.5. HARD OVERRIDE: scraper-reported workplace_type says this
     # specific posting is Hybrid/On-site/In-office/In-person, regardless
@@ -1068,14 +1090,14 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # workplace_type="Hybrid"). See has_non_remote_workplace_type's
     # docstring for the real Infor/Pinpoint posting this closes. ──
     if has_non_remote_workplace_type(job):
-        return "no_match", None
+        return "no_match", None, None
 
     # ── 0.6. HARD OVERRIDE (2026-09, explicit user request): the TITLE
     # itself carries a physical-presence qualifier ("... (Hybrid)",
     # "... - Onsite"), independent of the workplace_type field above. See
     # has_non_remote_title_signal's docstring. ──
     if has_non_remote_title_signal(job):
-        return "no_match", None
+        return "no_match", None, None
 
     # ── 0.75. HARD OVERRIDE: an affirmative country-specific work-
     # authorization requirement (or a flagged work-auth/visa/sponsorship
@@ -1084,7 +1106,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # auth_signal's docstring for the two real JazzHR postings this
     # closes — one of which mentioned no "sponsor" wording at all. ──
     if has_hard_country_specific_auth_signal(job):
-        return "no_match", None
+        return "no_match", None, None
 
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
@@ -1107,7 +1129,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
 
     # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
-        return "unsure", None
+        return "unsure", None, "blank"
 
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
@@ -1132,11 +1154,11 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # distinct-countries rule, same as any other single African country.
     africa_continent_check = re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_lower)
     if re.search(r"\bafrica\b", africa_continent_check):
-        return "match", PRIORITY_AFRICA
+        return "match", PRIORITY_AFRICA, None
 
     african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
     if len(african_hits) >= 2:
-        return "match", PRIORITY_AFRICA
+        return "match", PRIORITY_AFRICA, None
 
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
@@ -1146,8 +1168,8 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
         if not check:
             # EMEA (Europe/Middle East/Africa) includes Africa but is
             # broader than "global" — bucketed with Africa, not Global.
-            return "match", PRIORITY_AFRICA
-        return "no_match", None
+            return "match", PRIORITY_AFRICA, None
+        return "no_match", None, None
 
     # ── 4. Explicit Global/Worldwide/International/Distributed/
     # Anywhere/... keyword (see GLOBAL_KEYWORDS, ~80 variants) ──
@@ -1156,7 +1178,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
     # left over — "Global (Remote, US Only)" should NOT match just
     # because "Global" appears; the leftover "us only" gives it away.
     if STANDALONE_GLOBAL_RE.search(loc.strip()):
-        return "match", PRIORITY_GLOBAL
+        return "match", PRIORITY_GLOBAL, None
 
     check = loc_lower
     matched_any = False
@@ -1169,8 +1191,8 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
         check = GLOBAL_FILLER_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
         if not check:
-            return "match", PRIORITY_GLOBAL
-        return "no_match", None
+            return "match", PRIORITY_GLOBAL, None
+        return "no_match", None, None
 
     # ── 5. Bare "Remote" with nothing else qualifying it → UNSURE
     # (send to AI). Any OTHER text attached to "remote" (a city, a
@@ -1180,14 +1202,14 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None]:
         stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
         if not stripped:
-            return "unsure", None
-        return "no_match", None
+            return "unsure", None, "bare_remote"
+        return "no_match", None, None
 
     # ── 6. REJECT everything else outright ────────────────
     # No Global/EMEA/Africa keyword, not blank, not bare "Remote" — this
     # is a job tied to a specific place (or places) with no explicit
     # broad-hiring signal, so it's rejected without going to the AI.
-    return "no_match", None
+    return "no_match", None, None
 
 
 def _text_has_global_evidence(text: str) -> bool:
@@ -1232,7 +1254,7 @@ def keyword_classify_location(job: dict) -> str:
     only need the verdict, not the priority tier (e.g. ats_scrapers.py's
     application-question enrichment, which only checks for "unsure").
     """
-    result, _ = _keyword_classify_location_detail(job)
+    result, _, _ = _keyword_classify_location_detail(job)
     return result
 
 
