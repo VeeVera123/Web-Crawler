@@ -1108,6 +1108,25 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_hard_country_specific_auth_signal(job):
         return "no_match", None, None
 
+    # ── 0.8. HARD OVERRIDE (2026-09, real posting: RethinkCare's "Senior
+    # Client Success Manager", JazzHR/rethink.applytojob.com): location
+    # field said bare "Remote" — a real, honest signal, not an extraction
+    # bug — but the DESCRIPTION separately stated "Remote opportunities
+    # are available to candidates who reside in the following states:
+    # AL, AZ, CT, FL, ... [30 US states]." That's a hard US-only
+    # eligibility restriction, but bare "Remote" alone used to sail this
+    # straight into the AI stage, and the AI came back "uncertain" (not
+    # "no_match") rather than reading and flagging that state list itself
+    # — which then hit this project's own "bare_remote AI-uncertain is
+    # kept at PRIORITY_UNSURE" policy and got written to the jobs table
+    # anyway. An enumerated list of specific U.S. state codes is
+    # unambiguous, deterministic evidence a posting is NOT global — no
+    # need to leave this up to an LLM's read of the full description when
+    # a cheap keyword check can catch it every time. See
+    # has_state_list_restriction_signal's docstring. ──
+    if has_state_list_restriction_signal(job):
+        return "no_match", None, None
+
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
     # key PRESENT with value None, not missing, so the "" default here
@@ -1601,6 +1620,34 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     length-N string doesn't unpack into 2 values unless N happens to be
     2. Caught live via a production crawl_i.py run once the location
     filter actually sent unsure jobs to the AI stage.
+
+    IMPORTANT for callers, re: `provider_name is None` (AI-classification-
+    stage audit, 2026-09): this happens when EVERY entry in
+    LOCATION_PROVIDERS failed/was rate-limited/was exhausted for this
+    job's batch (including the failover round) — see _mark_exhausted's
+    circuit breaker just above, which, once a provider gives up even
+    once in a run, marks it dead for calls for the REST of that run with
+    zero further network hits. Under real production load (10+ concurrent
+    ATS shards racing a handful of shared free-tier keys — Groq's real
+    pool is only 8K TPM, shared with role classification too, see
+    config.py), it's entirely plausible for one or more providers to trip
+    this breaker within the first few batches of a shard's ~3 hour run,
+    after which every remaining ambiguous job in that shard gets
+    ('uncertain', None) for the rest of the run. A caller that treats
+    `provider_name is None` as equivalent to "no_match" therefore risks
+    silently discarding real "Remote" signals purely because of upstream
+    rate-limiting, not because of anything about the job itself — this
+    was confirmed live as the root cause of csm_roles (10,000-17,000/
+    shard) collapsing to global_jobs of 11-75/shard (scan_reports,
+    Supabase project mqkcmkwpfvpajzjrbdji), and is now fixed in both
+    crawl_i.py's filter_locations() and crawl_ii.py's _filter_locations():
+    a bare_remote job is kept at PRIORITY_UNSURE regardless of whether
+    provider_name is None, since the job's own location field already
+    carries a real signal that doesn't depend on the AI confirming it.
+    (A BLANK location field is intentionally NOT covered by that fix —
+    it's still held to the stricter "needs a real match_global/
+    match_africa verdict" bar, since a blank field can't be told apart
+    from a scraper extraction bug; see those functions' docstrings.)
     """
     if not jobs:
         return []
@@ -1835,8 +1882,42 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
 
 _SPONSOR_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\r?\n+")
 
+# 2026-09 audit fix: a sentence is also split on coordinating conjunctions
+# ("and"/"but"/"or") and semicolons into separate CLAUSES before the
+# topic/negation check runs (see _sponsorship_sentence_has_negative_signal
+# below for why). This mirrors the sentence-boundary reasoning above one
+# level down: "topic + negation share a SENTENCE" was already looser than
+# real adjacency, but a compound sentence routinely joins two entirely
+# unrelated clauses ("We sponsor employee resource groups and do not
+# discriminate against any protected class") where the negation belongs
+# to the second clause, not the sponsorship one.
+_SPONSOR_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:,\s*(?:and|but|or)\s+|\s+(?:and|but)\s+|;\s*)\s*", re.I)
+
 _SPONSOR_TOPIC_RE = re.compile(
     r"\bsponsor(?:ship|ed|ing|s)?\b|\bwork\s*permits?\b|\bimmigration\s*sponsorship\b",
+    re.I,
+)
+
+# 2026-09 audit fix: "sponsor" is NOT specific to visa/immigration
+# sponsorship the way the module comment above originally assumed — real,
+# ordinary job-posting boilerplate uses it for: the ERISA "Plan Sponsor"
+# of a 401(k)/benefits plan, a company "sponsoring" employee resource
+# groups / Pride / a conference / a charity / a meetup as a DEI or
+# culture blurb, and "conference-sponsorship" professional-development
+# stipend programs. None of these have anything to do with work-visa
+# eligibility, but every one of them is exactly the kind of sentence that
+# ALSO contains an unrelated negation word nearby (an EEO "does not
+# discriminate" clause is near-universal, and pairs naturally with a DEI
+# sponsor mention in the same sentence). Any _SPONSOR_TOPIC_RE hit whose
+# immediate context matches this is not treated as the genuine topic —
+# see _sponsorship_sentence_has_negative_signal.
+_SPONSOR_NON_VISA_RE = re.compile(
+    r"\bplan\s+sponsor\b"
+    r"|\b(?:proud|official|corporate|event|title)\s+sponsor\b"
+    r"|\bsponsor(?:s|ed|ing)?\s+(?:of\s+)?(?:the\s+|a\s+|an\s+)?(?:local\s+)?"
+    r"(?:pride|parade|meet-?up|conference|hackathon|charity|non-?profit|scholarship|"
+    r"employee\s+resource\s+groups?|erg\b)"
+    r"|\bconference[\s-]?sponsorship\b",
     re.I,
 )
 
@@ -1866,16 +1947,42 @@ _VISA_YES_RE = re.compile(
 
 
 def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
-    """True if any sentence/line in `text` mentions the sponsorship/work-
-    permit topic AND carries negation or unavailability language
-    somewhere in that same sentence, in any order or distance apart."""
+    """True if any sentence/CLAUSE in `text` mentions the sponsorship/
+    work-permit topic (in a genuine visa/immigration sense — see
+    _SPONSOR_NON_VISA_RE) AND carries negation or unavailability
+    language somewhere in that same sentence/clause, in any order or
+    distance apart.
+
+    2026-09 audit fix: sentences are now also split into clauses on
+    "and"/"but"/"or"/";" before the check runs, and a bare _SPONSOR_
+    TOPIC_RE hit is discarded when its immediate surrounding text
+    matches a known non-visa sense of "sponsor" (plan sponsor, event/
+    conference/ERG sponsor, etc.). Without this, a routine compound EEO/
+    DEI sentence like "We sponsor employee resource groups and do not
+    discriminate against any protected class" or "As Plan Sponsor, the
+    Company does not guarantee continuation of the 401(k) match" would
+    hard-reject the job even though neither clause says anything about
+    visa/work-authorization sponsorship — the same class of bug as the
+    has_hard_country_specific_auth_signal fix above (a topic-adjacent
+    word standing in for the thing that's actually disqualifying).
+    """
     if not text:
         return False
     for sentence in _SPONSOR_SENTENCE_SPLIT_RE.split(text):
-        if not _SPONSOR_TOPIC_RE.search(sentence):
-            continue
-        if _SPONSOR_NEGATION_RE.search(sentence) or _SPONSOR_UNAVAILABLE_RE.search(sentence):
-            return True
+        for clause in _SPONSOR_CLAUSE_SPLIT_RE.split(sentence):
+            if not clause or not clause.strip():
+                continue
+            has_genuine_topic = False
+            for m in _SPONSOR_TOPIC_RE.finditer(clause):
+                window = clause[max(0, m.start() - 20):m.end() + 30]
+                if _SPONSOR_NON_VISA_RE.search(window):
+                    continue
+                has_genuine_topic = True
+                break
+            if not has_genuine_topic:
+                continue
+            if _SPONSOR_NEGATION_RE.search(clause) or _SPONSOR_UNAVAILABLE_RE.search(clause):
+                return True
     return False
 
 
@@ -1943,17 +2050,46 @@ def has_hard_no_sponsorship_signal(job: dict) -> bool:
 # demote it to the "unsure" tier — a country-specific authorization
 # question/statement should never even reach PRIORITY_UNSURE, let alone
 # PRIORITY_GLOBAL.
+# 2026-09: country list broadened from the original 8-entry US/UK/Canada/
+# Australia/NZ/Ireland/Germany/EU set — this pipeline scrapes ~38 ATS
+# platforms across a genuinely global set of employers, and the original
+# list missed live-confirmed real postings restricted to other countries
+# (e.g. a JumpCloud posting requiring "located in and authorized to work
+# in India" had no country-list entry to match against at all — a
+# pre-existing miss, independent of the phrasing-rigidity bug below).
+_COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
+    r"u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
+    r"canada|australia|new\s+zealand|ireland|germany|european\s+union|\beu\b|"
+    r"india|philippines|nigeria|kenya|south\s+africa|singapore|mexico|brazil|"
+    r"netherlands|france|spain|italy|sweden|norway|denmark|finland|poland|"
+    r"portugal|switzerland|austria|belgium|japan|china|u\.?a\.?e\.?|"
+    r"united\s+arab\s+emirates|egypt|ghana"
+)
+# 2026-09 FIX (live-sample validation, real postings): the ORIGINAL regex
+# required "authorized...to work in <country>" with no words allowed in
+# between, so it missed extremely common real phrasing variants —
+# Calendly: "authorized to work LAWFULLY in the United States"; Tines/
+# Renaissance Learning: "authorized to work in the United States FOR ANY
+# EMPLOYER" reordered as "must be authorized to work for any employer in
+# the U.S."; Upbound: a screening question literally titled "Is your work
+# authorization a U.S. Citizen?" (a citizenship phrasing this regex never
+# covered at all, in any version). Confirmed live via WebFetch against
+# each posting's real application-question/description text. Fixed by (1)
+# allowing "lawfully"/"for any employer" as optional interposed words
+# between "authorized to work" and "in <country>", in either order, and
+# (2) adding a standalone "<country-adjective> citizen(ship)" pattern.
 _COUNTRY_AUTH_RE = re.compile(
     r"\b(?:must\s+(?:be|have|currently\s+be)\s+)?(?:currently\s+)?"
-    r"(?:legally\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+in\s+"
-    r"(?:the\s+)?(?:u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|"
-    r"united\s+kingdom|canada|australia|new\s+zealand|ireland|germany|"
-    r"european\s+union|\beu\b)\b"
-    r"|\b(?:us|u\.s\.|uk|u\.k\.|canadian|australian|british)\s+work\s+authoriz"
-    r"|\bwork\s+authoriz\w*\s+(?:in|for)\s+(?:the\s+)?(?:us|u\.s\.|usa|united\s+states|uk|canada|australia)\b"
-    r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?(?:us|usa|united\s+states|uk|canada|australia)\b"
-    r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states|uk|canada|australia)\b"
-    r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian)\s+work\s+(?:visa|permit)\b",
+    r"(?:legally\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+"
+    r"(?:lawfully\s+)?(?:for\s+(?:any|an)\s+employer\s+)?(?:lawfully\s+)?(?:in|within)\s+"
+    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\b(?:us|u\.s\.|uk|u\.k\.|canadian|australian|british|indian|german|irish)\s+work\s+authoriz"
+    r"|\bwork\s+authoriz\w*\s+(?:in|for)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian|indian)\s+work\s+(?:visa|permit)\b"
+    r"|\b(?:u\.?s\.?a?\.?|united\s+states|u\.?k\.?|united\s+kingdom|canadian|australian|irish|german|indian)\s+"
+    r"citizen(?:ship)?\b",
     re.I,
 )
 
@@ -1965,18 +2101,99 @@ _COUNTRY_AUTH_RE = re.compile(
 # regardless of the exact wording used in that specific question.
 _APPLICATION_AUTH_QUESTION_MARKER = "Application Question:"
 
+# 2026-09: real, full 50-state-plus-DC set (2-letter USPS abbreviations)
+# used by has_state_list_restriction_signal below to validate a
+# comma-separated run of 2-letter tokens is genuinely a list of U.S.
+# states, not a coincidental run of unrelated 2-letter acronyms.
+_US_STATE_ABBRS = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC",
+}
+# 3+ comma-separated 2-letter uppercase tokens, anywhere in the text.
+_STATE_ABBR_RUN_RE = re.compile(r"\b([A-Z]{2}(?:\s*,\s*[A-Z]{2}){2,})\b")
+
+
+def has_state_list_restriction_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's description
+    contain a comma-separated run of 3+ genuine U.S. state abbreviations
+    (e.g. "available to candidates who reside in the following states:
+    AL, AZ, CT, FL, GA, ...")? An enumerated state list is, by
+    construction, a hard U.S.-only (and often not even nationwide —
+    usually a SUBSET of states) eligibility restriction — unambiguous
+    evidence a posting is not global, regardless of what a separate bare
+    "Remote" location field says.
+
+    Real posting this closes: RethinkCare's "Senior Client Success
+    Manager" (rethink.applytojob.com, JazzHR) had location="Remote" (a
+    real, honestly-reported field — not an extraction bug) but its
+    description read "Remote opportunities are available to candidates
+    who reside in the following states: AL, AZ, CT, FL, GA, HI, IA, IL,
+    IN, KY, LA, MD, MA, MI, MN, MO, MT, NC, NE, NH, NJ, NV, OH, OK, OR,
+    PA, RI, TN, TX, VA, WA, WI, WY" — 30 explicitly named states, nothing
+    close to global. The AI location stage reviewed this job and returned
+    "uncertain" rather than catching the list itself, which then hit this
+    project's "bare Remote + AI-uncertain is kept at PRIORITY_UNSURE"
+    policy and got written to the jobs table. Requires 80%+ of the tokens
+    in a matched run to be REAL state abbreviations (not just any
+    2-letter run) to avoid false-positiving on an unrelated acronym list.
+    """
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    for m in _STATE_ABBR_RUN_RE.finditer(text):
+        tokens = [t.strip() for t in m.group(1).split(",")]
+        valid = [t for t in tokens if t in _US_STATE_ABBRS]
+        if len(valid) >= 3 and len(valid) / len(tokens) >= 0.8:
+            return True
+    return False
+
 
 def has_hard_country_specific_auth_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter: does this job's description
     (including any appended application-question text) or title contain
     an AFFIRMATIVE country-specific work-authorization requirement, or a
-    work-authorization/visa/sponsorship screening question flagged by
-    enrich_application_questions()? Forces NO_MATCH — see the module
-    comment above _COUNTRY_AUTH_RE for the two real postings this closes.
+    country-specific work-authorization/visa/sponsorship screening
+    question flagged by enrich_application_questions()? Forces NO_MATCH —
+    see the module comment above _COUNTRY_AUTH_RE for the two real
+    postings this closes.
+
+    2026-09 CRITICAL FIX (real production data, not a hypothetical): the
+    PRIOR version of this function treated the mere PRESENCE of ANY
+    "Application Question: ..." line as an automatic hard no_match — full
+    stop, regardless of what that question actually said. Those lines are
+    appended by ats_scrapers.py's enrich_application_questions() whenever a
+    screening question matches _WORK_AUTH_RE, which matches ubiquitous,
+    industry-standard EEO/I-9 compliance screening language — "Are you
+    legally authorized to work in the country in which you are applying?",
+    "Will you now or in the future require sponsorship for employment visa
+    status?" — that the overwhelming majority of US-headquartered
+    companies ask on EVERY job application via one company-wide question
+    set, REGARDLESS of whether that specific posting is actually
+    restricted to one country. Asking the question proves nothing about
+    the required answer or about this role's actual eligibility.
+    Live scan_reports data confirmed the damage directly: role-matched
+    ("csm_roles") counts of 10,000-17,000 per crawl_i shard were
+    collapsing to 11-75 surviving jobs ("global_jobs") after the location
+    filter — a >99% rejection rate, across every ATS platform, not just
+    the handful of genuinely country-restricted postings this override
+    was written to catch. This is almost certainly the dominant cause of
+    the daily job count collapsing from 1500+ to under 300.
+    Fix: only treat an application-question hit as a hard signal when the
+    QUESTION TEXT ITSELF names a specific country via _COUNTRY_AUTH_RE —
+    "Are you legally authorized to work in the United States?" still
+    triggers this (it names a country), but the generic, country-agnostic
+    "Are you legally authorized to work in the country in which you are
+    applying?" no longer does, since it says nothing about which country
+    this particular job actually requires.
     """
     desc = job.get("description_snippet") or ""
-    if _APPLICATION_AUTH_QUESTION_MARKER in desc:
-        return True
+    for line in desc.splitlines():
+        if line.startswith(_APPLICATION_AUTH_QUESTION_MARKER) and _COUNTRY_AUTH_RE.search(line):
+            return True
     text = desc + " " + (job.get("title") or "")
     return bool(_COUNTRY_AUTH_RE.search(text))
 
