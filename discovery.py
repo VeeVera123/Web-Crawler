@@ -397,14 +397,16 @@ SUPPORTED_ATS = {
     # GREYLIST_ATS.md for the before/after writeup). Dayforce/Getro
     # remain discovery-only.
     "csod",
-    # 2026-09: Paycom — ALSO reversed out of discovery-only, same session,
-    # same pattern (a different anonymous bearer JWT embedded in its own
-    # career-page bootstrap HTML, honoring a real POST search API with no
-    # per-customer OAuth needed) — see ats_scrapers.scrape_paycom's block
-    # comment and GREYLIST_ATS.md. Slug format UNCHANGED (still just the
-    # 32-hex clientkey) — unlike Cornerstone, no per-tenant region/page-id
-    # value needs to travel in the slug; scrape_paycom discovers the
-    # tenant's regional API host itself from the bootstrap page.
+    # 2026-09: Paycom — RE-REGISTERED (was briefly pulled to
+    # discovery-only, same session, after an incorrect diagnosis that the
+    # bootstrap token could only exist in JS runtime memory). The real
+    # bug: the token extraction itself was wrong (bare eyJ-regex instead
+    # of parsing the `configsFromHost` JSON blob), not the underlying
+    # platform. Verified via external LLM consultation AND independently
+    # confirmed against the real elliottdehn/open-jobs Paycom fetcher
+    # source (a working, maintained, plain-HTTP scraper for this exact
+    # platform). See ats_scrapers.scrape_paycom's block comment and
+    # GREYLIST_ATS.md for the full three-state writeup.
     "paycom",
     # 2026-09: SAP SuccessFactors (Career Site Builder tenants only) —
     # REVERSED out of "genuinely blocked" for a DIFFERENT reason than
@@ -2560,9 +2562,8 @@ CC_PLATFORM_PATTERNS = {
     # reasoning SuccessFactors/Occupop are excluded above). Dayforce/
     # Getro stay excluded here — no scraper exists for them yet.
     "csod": ["*.csod.com/ux/ats/careersite/*"],
-    # 2026-09: Paycom — ALSO reversed, same reasoning (see SUPPORTED_ATS
-    # comment above and ats_scrapers.scrape_paycom). _url_to_slug_paycom's
-    # existing pattern already matches both real path shapes.
+    # 2026-09: Paycom — RE-REGISTERED, see SUPPORTED_ATS comment above and
+    # ats_scrapers.scrape_paycom's block comment for the real fix.
     "paycom": ["www.paycomonline.net/v4/ats/web.php/portal/*/jobs*",
                "www.paycomonline.net/v4/ats/web.php/portal/*/career-page*"],
     # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
@@ -2631,9 +2632,10 @@ CC_EXTRACTORS = {
     # above (see SUPPORTED_ATS comment for the reversal). _url_to_slug_csod
     # already returns the 'tenant|siteId' shape scrape_csod expects.
     "csod": _url_to_slug_csod,
-    # 2026-09: Paycom — kept in sync with CC_PLATFORM_PATTERNS above (see
-    # SUPPORTED_ATS comment for the reversal). _url_to_slug_paycom's
-    # existing 32-hex-clientkey extraction needs no changes.
+    # 2026-09: Paycom — RE-REGISTERED, kept in sync with
+    # CC_PLATFORM_PATTERNS above (see SUPPORTED_ATS comment).
+    # _url_to_slug_paycom's existing 32-hex-clientkey extraction needs no
+    # changes.
     "paycom": _url_to_slug_paycom,
     # New (2026-09): Hireology / isolvedhire — see CC_PLATFORM_PATTERNS above.
     "hireology": _url_to_slug_hireology,
