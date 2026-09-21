@@ -901,10 +901,34 @@ def _url_to_slug_workday(url: str) -> str | None:
 # so a future asset URL shape this project hasn't seen yet still can't
 # sneak through pattern (1) alone.
 _ASSET_FILENAME_RE = re.compile(
-    r"\.(png|jpe?g|gif|svg|webp|ico|bmp|css|js|mjs|woff2?|ttf|eot|pdf|mp4|webm|json|map)$",
+    r"\.(png|jpe?g|gif|svg|webp|ico|bmp|css|js|mjs|woff2?|ttf|eot|pdf|mp4|webm|json|map|txt|xml)$",
     re.I,
 )
 _BARE_HEX_HASH_RE = re.compile(r"^[0-9a-f]{16,64}$", re.I)
+# 2026-09 FIX (real production evidence — live crawl_i.py run logs, not
+# hypothetical): scrape_workday's own new failure logging (added this
+# session) immediately surfaced real archive_i rows with site_id values
+# of "assets" (anokacounty|wd1|assets, archgroup|wd1|assets) and
+# "robots.txt" (archgroup|wd1|robots.txt) — both 404ing against Workday's
+# real API with "not found: Job_Posting_Site_ID=...". Neither is a
+# filename with a known asset extension (the OLD _ASSET_FILENAME_RE list
+# had no ".txt"/".xml" — added above), a bare hex hash, a locale code, or
+# a job-posting-slug shape — so _looks_like_real_slug was letting them
+# straight through as if they were real Workday site ids. Both are
+# extremely common path segments to encounter when discovery sources
+# (Common Crawl/wayback/CT logs) surface ANY URL under a
+# *.wdN.myworkdayjobs.com host, since crawlers routinely fetch
+# /robots.txt and static-asset directories are commonly named /assets —
+# neither has anything to do with the tenant's real named career site.
+# This is a live, ongoing contamination source (new discovery runs keep
+# adding more of these), not just historical data — fixed with an
+# explicit blocklist of confirmed-junk path segments alongside the
+# extension/hash/locale checks already in place.
+_NON_SLUG_PATH_SEGMENTS = {
+    "assets", "static", "public", "robots.txt", "sitemap.xml", "sitemap",
+    "favicon.ico", "manifest.json", "wp-content", "wp-includes",
+    ".well-known", "cdn-cgi", "api", "health", "healthz", "ping",
+}
 # 2026-09: confirmed via real archive_i rows (_url_to_slug_rippling) —
 # ats.rippling.com/{locale}/{company}/jobs puts the locale code where
 # Pattern 1 blindly grabs parts[0], so a locale-prefixed board URL stored
@@ -959,10 +983,14 @@ def _looks_like_real_slug(candidate: str) -> bool:
     confirmed-in-production shapes of "this isn't a company slug" — a
     filename with a known static-asset extension, a bare hex hash/id with
     no extension at all (e.g. a CDN object key), a bare locale code
-    (e.g. "en-US") picked up from a locale-prefixed path, or (2026-09) a
-    slug shaped like one specific job posting's own page rather than a
-    company/tenant slug."""
+    (e.g. "en-US") picked up from a locale-prefixed path, a known generic
+    non-slug path segment (e.g. "assets", "robots.txt" — see
+    _NON_SLUG_PATH_SEGMENTS's docstring for the real archive_i rows this
+    closes), or (2026-09) a slug shaped like one specific job posting's
+    own page rather than a company/tenant slug."""
     if not candidate:
+        return False
+    if candidate.lower() in _NON_SLUG_PATH_SEGMENTS:
         return False
     if _ASSET_FILENAME_RE.search(candidate):
         return False
