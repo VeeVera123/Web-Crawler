@@ -86,6 +86,38 @@ def _get(url: str, **kwargs) -> requests.Response | None:
     return None
 
 
+# ── Shared markup-tolerant location extraction ────────────
+# 2026-09: several scrapers below extracted a location by regex-matching a
+# class/icon marker and then capturing "everything up to the next `<`"
+# immediately after it — e.g. `class="[^"]*location[^"]*"[^>]*>([^<]+)`.
+# That works only when the location text sits BARE right after the
+# opening tag; if a board wraps it in one more tag (a `<span>`, a nested
+# `<div>`, an icon wrapper), the very next character is `<`, the capture
+# group requires 1+ non-`<` characters, and the whole match silently
+# fails — producing location="" for a posting whose actual page clearly
+# shows a real, often country-specific, location. Confirmed live on two
+# independent platforms this session (JazzHR's inabia.applytojob.com and
+# SuccessFactors' career.sonepar.com) and, on audit, present in the same
+# shape across four more (Eploy, JobAdder, PageUp, Jobvite) and two shared
+# HTML-fallback helpers used by several other platforms. This helper
+# replaces the bare-capture pattern everywhere it was found: it takes the
+# END of an already-matched "marker" (an icon tag or a class-attribute
+# opening tag), grabs a bounded window of raw HTML after it, stops at the
+# next block-level closing tag (so it can't run into an unrelated
+# sibling's content), strips any tags inside that window instead of
+# requiring their absence, and returns the resulting plain text.
+def _extract_tolerant_text(html: str, after_pos: int, window: int = 400) -> str:
+    """Best-effort plain-text extraction starting at `after_pos` in `html`,
+    tolerant of any tags (spans, nested wrappers, icons) between the marker
+    and the real text. Stops at the next li/ul/div/td/tr/h1-6 closing tag
+    within `window` chars, so it can't bleed into an unrelated sibling
+    field. Returns "" if nothing usable is found."""
+    tail = html[after_pos:after_pos + window]
+    tail = re.split(r'</(?:li|ul|div|td|tr|h\d)>', tail, maxsplit=1, flags=re.I)[0]
+    text = unescape(re.sub(r'<[^>]+>', ' ', tail))
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 # ATS template placeholders that leak into raw description payloads when a
 # templating variable fails to resolve — e.g. "%LABEL_POSITION_TYPE_REMOTE_WITHIN%"
 # (confirmed live in an ADP/Workday-style feed, see geo.py history). These are
@@ -1610,6 +1642,25 @@ _SF_JOB_ROW_RE = re.compile(
 )
 _SF_LOCALE_RE = re.compile(r'[?&]locale=([a-z]{2}_[A-Z]{2})\b')
 _SF_TRAILING_DATE_RE = re.compile(r'\s*\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{4}\s*$')
+# Some CSB tenants (confirmed live 2026-09 on career.sonepar.com) render
+# each search-result card as ONE <a> wrapping title+location+date together,
+# instead of title-inside-the-anchor/location-after-it as the row regex
+# above assumes. When that happens, title_html swallows the whole card and
+# trailer_html is empty, so the plain "strip tags" fallback below produces
+# a garbled concatenated title and a blank location — exactly the Sonepar
+# DB row this was diagnosed from. SAP's default Career Site Builder
+# widgets commonly tag individual fields with a
+# data-careersite-propertyid="..." attribute (title / city / postingDate
+# are the common values); when present, this lets a tenant's field be
+# extracted precisely regardless of how the fields are nested/ordered.
+# This is a best-effort improvement based on that common CSB pattern, NOT
+# confirmed against this specific tenant's raw markup (this environment
+# can't fetch raw third-party HTML) — it only changes behavior when the
+# attribute is actually found, so a tenant without it keeps the exact
+# prior (already-working) behavior unchanged.
+_SF_PROPID_RE = re.compile(
+    r'data-careersite-propertyid=["\'](\w+)["\'][^>]*>(.*?)<', re.I | re.S
+)
 _SF_MAX_LOCALES = 10
 _SF_MAX_PAGES_PER_LOCALE = 200
 # SAP's own standard CSB template ends every job's real content with this
@@ -1703,6 +1754,27 @@ def scrape_successfactors(slug: str) -> list[dict]:
                 trailer = unescape(re.sub(r"<[^>]+>", " ", trailer_html))
                 trailer = re.sub(r"\s+", " ", trailer).strip()
                 location = _SF_TRAILING_DATE_RE.sub("", trailer).strip()
+
+                # Whole-card-in-one-<a> tenants (see _SF_PROPID_RE comment):
+                # title_html then holds title+location+date glued together
+                # and trailer_html is empty, which the block above turns
+                # into a garbled title and a blank location. If this card
+                # carries SAP's data-careersite-propertyid tags anywhere in
+                # it, prefer those for an exact split instead.
+                full_card_html = title_html + trailer_html
+                prop_fields = {
+                    key.lower(): unescape(re.sub(r"<[^>]+>", "", val)).strip()
+                    for key, val in _SF_PROPID_RE.findall(full_card_html)
+                }
+                if prop_fields.get("title"):
+                    title = prop_fields["title"]
+                prop_location = (
+                    prop_fields.get("city")
+                    or prop_fields.get("location")
+                    or prop_fields.get("joblocation")
+                )
+                if prop_location:
+                    location = prop_location
                 jobs.append({
                     "title": title,
                     "url": f"{origin}{job_path}",
@@ -1938,12 +2010,26 @@ def scrape_jazzhr(slug: str) -> list[dict]:
         if not url.startswith("http"):
             url = base_url + url
 
-        # Extract location from fa-map-marker icon
-        loc_match = re.search(
-            r'fa-map-marker["\'][^>]*></i>\s*([^<]+)',
-            item_html, re.I
-        )
-        location = loc_match.group(1).strip() if loc_match else ""
+        # Extract location from fa-map-marker icon. The text isn't always
+        # bare — some boards wrap it in a <span> or add sibling markup
+        # right after the icon (e.g. <i class="fa fa-map-marker"></i>
+        # <span>New York, NY</span>), which the old bare-text-only pattern
+        # (`></i>\s*([^<]+)`) fails to match at all, silently producing a
+        # blank location. Confirmed live on inabia.applytojob.com (Senior
+        # Project Manager – ITSM/ServiceNow, 2026-09) where the page shows
+        # "New York, NY" but the DB row stored "". Fix: find the icon,
+        # then strip any tags in a bounded window after it and take the
+        # first line of resulting text, instead of requiring plain text
+        # immediately after the closing </i>.
+        icon_match = re.search(r'fa-map-marker["\'][^>]*>\s*</i>', item_html, re.I)
+        location = ""
+        if icon_match:
+            tail = item_html[icon_match.end():icon_match.end() + 300]
+            tail = re.split(r'</(?:li|ul|div|h\d)>', tail, maxsplit=1, flags=re.I)[0]
+            tail_text = unescape(re.sub(r'<[^>]+>', ' ', tail))
+            tail_text = re.sub(r'\s+', ' ', tail_text).strip()
+            if tail_text:
+                location = tail_text
 
         title_key = title.lower().strip()
         if url not in seen_urls and title_key not in seen_titles:
@@ -2708,9 +2794,12 @@ def scrape_eploy(slug: str) -> list[dict]:
 
         # Location is frequently rendered as a sibling <span>/<div> right
         # after the link inside the same list item — best-effort grab.
+        # 2026-09: was a bare `[^<]+` capture that failed silently (see
+        # _extract_tolerant_text's block comment) whenever the location
+        # text was itself wrapped in another tag.
         window = r.text[match.end():match.end() + 400]
-        loc_match = re.search(r'class="[^"]*(?:location|vacancy-location)[^"]*"[^>]*>([^<]+)', window, re.I)
-        location = unescape(loc_match.group(1)).strip() if loc_match else ""
+        loc_open = re.search(r'class="[^"]*(?:location|vacancy-location)[^"]*"[^>]*>', window, re.I)
+        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
 
         jobs.append({
             "title": title,
@@ -2834,9 +2923,11 @@ def scrape_jobadder(slug: str) -> list[dict]:
             continue
         seen.add(job_url)
 
+        # 2026-09: bare `[^<]+` capture replaced — see
+        # _extract_tolerant_text's block comment.
         window = r.text[match.end():match.end() + 400]
-        loc_match = re.search(r'class="[^"]*location[^"]*"[^>]*>([^<]+)', window, re.I)
-        location = unescape(loc_match.group(1)).strip() if loc_match else ""
+        loc_open = re.search(r'class="[^"]*location[^"]*"[^>]*>', window, re.I)
+        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
 
         jobs.append({
             "title": title,
@@ -2888,11 +2979,14 @@ def scrape_jobvite(slug: str) -> list[dict]:
             continue
         seen.add(job_url)
 
+        # 2026-09: bare `[^<]+` captures replaced — see
+        # _extract_tolerant_text's block comment (same fragility applied
+        # to both the location and department fields here).
         window = r.text[match.end():match.end() + 400]
-        loc_match = re.search(r'class="[^"]*(?:location|jv-job-list__location)[^"]*"[^>]*>([^<]+)', window, re.I)
-        location = unescape(loc_match.group(1)).strip() if loc_match else ""
-        dept_match = re.search(r'class="[^"]*(?:department|jv-job-list__department)[^"]*"[^>]*>([^<]+)', window, re.I)
-        department = unescape(dept_match.group(1)).strip() if dept_match else ""
+        loc_open = re.search(r'class="[^"]*(?:location|jv-job-list__location)[^"]*"[^>]*>', window, re.I)
+        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
+        dept_open = re.search(r'class="[^"]*(?:department|jv-job-list__department)[^"]*"[^>]*>', window, re.I)
+        department = _extract_tolerant_text(window, dept_open.end()) if dept_open else ""
 
         jobs.append({
             "title": title,
@@ -3223,9 +3317,11 @@ def scrape_pageup(slug: str) -> list[dict]:
 
         # Location is frequently rendered as a sibling element right after
         # the link inside the same list item — best-effort grab.
+        # 2026-09: bare `[^<]+` capture replaced — see
+        # _extract_tolerant_text's block comment.
         window = r.text[match.end():match.end() + 400]
-        loc_match = re.search(r'class="[^"]*location[^"]*"[^>]*>([^<]+)', window, re.I)
-        location = unescape(loc_match.group(1)).strip() if loc_match else ""
+        loc_open = re.search(r'class="[^"]*location[^"]*"[^>]*>', window, re.I)
+        location = _extract_tolerant_text(window, loc_open.end()) if loc_open else ""
 
         jobs.append({
             "title": title,
@@ -4472,14 +4568,24 @@ def _extract_location_from_html(html: str) -> str:
                     return loc
 
     # ── 3. Common HTML patterns ────────────────────────────
+    # 2026-09: these used to capture directly with `([^<]+?)\s*<`, which
+    # (even under DOTALL, since `.*?`/`[^<]+?` is lazy) stops at the FIRST
+    # `<` it meets — so a location wrapped in one more tag right after the
+    # matched class/attribute (e.g. `class="job-location"><span>Berlin
+    # </span>`) captured an empty string instead of failing over to a
+    # later pattern. Reworked to find just the opening tag, then run it
+    # through _extract_tolerant_text so nested wrapper tags get stripped
+    # rather than treated as a stop signal. See that helper's block
+    # comment for the two live scraper bugs (JazzHR, SuccessFactors) this
+    # same fragility caused.
     for pat in [
-        r'class="[^"]*(?:job-location|jobLocation|location-name|posting-location)[^"]*"[^>]*>\s*([^<]+?)\s*<',
-        r'data-automation=["\']job-location["\'][^>]*>\s*([^<]+?)\s*<',
-        r'itemprop=["\']jobLocation["\'][^>]*>\s*([^<]+?)\s*<',
+        r'class="[^"]*(?:job-location|jobLocation|location-name|posting-location)[^"]*"[^>]*>',
+        r'data-automation=["\']job-location["\'][^>]*>',
+        r'itemprop=["\']jobLocation["\'][^>]*>',
     ]:
-        m = re.search(pat, html, re.I | re.DOTALL)
+        m = re.search(pat, html, re.I)
         if m:
-            loc = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            loc = _extract_tolerant_text(html, m.end(), window=300)
             if loc and len(loc) < 200:
                 return loc
 
@@ -4521,15 +4627,19 @@ def _extract_icims_location(html: str) -> str:
             if loc and len(loc) < 100:
                 return loc
 
-    # Pattern 4: iCIMS-specific location CSS classes
+    # Pattern 4: iCIMS-specific location CSS classes.
+    # 2026-09: reworked to use _extract_tolerant_text for the same reason
+    # as _extract_location_from_html's pattern 3 — a lazy `(.*?)`/`[^<]+?`
+    # capture stops at the FIRST `<` it meets, silently returning "" when
+    # the real text is one wrapper tag deeper than the matched class.
     for pat in [
-        r'class="[^"]*iCIMS_JobHeader(?:Location|Field)[^"]*"[^>]*>\s*(.*?)\s*<',
-        r'class="[^"]*header-location[^"]*"[^>]*>\s*(.*?)\s*<',
-        r'class="[^"]*location[^"]*"[^>]*>\s*([^<]+?)\s*<',
+        r'class="[^"]*iCIMS_JobHeader(?:Location|Field)[^"]*"[^>]*>',
+        r'class="[^"]*header-location[^"]*"[^>]*>',
+        r'class="[^"]*location[^"]*"[^>]*>',
     ]:
-        m = re.search(pat, html, re.I | re.DOTALL)
+        m = re.search(pat, html, re.I)
         if m:
-            loc = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            loc = _extract_tolerant_text(html, m.end(), window=300)
             if loc and len(loc) < 200:
                 return loc
 
