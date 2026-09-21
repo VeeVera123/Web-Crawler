@@ -1249,6 +1249,22 @@ def _url_to_slug_hrmdirect(url: str) -> str | None:
     return None
 
 
+# 2026-09 BUG FIX: confirmed live (WebFetch) — these are Softgarden's OWN
+# shared platform infrastructure subdomains, not customer tenants, but
+# they still end in ".softgarden.io"/".softgarden.de" so the suffix check
+# below let them straight through as if they were real employer slugs.
+# "a-tile"/"b-tile"/"c-tile" are Softgarden's map-tile CDN hosts (parallel
+# subdomains for browser connection fan-out, the same convention as
+# OpenStreetMap's own "a.tile."/"b.tile." hosts — confirmed live, this one
+# actually resolves to an OpenStreetMap tile server, not a Softgarden
+# career page at all); "certificate" is a certificate/credential-
+# verification microsite for Softgarden's own product, not a job board.
+# Real archive_i rows found for all 4 (confirmed via direct Supabase
+# query before this fix): a-tile, b-tile, c-tile, certificate — none of
+# which ever had any chance of returning real job data.
+_SOFTGARDEN_INFRA_SUBDOMAINS = {"certificate", "a-tile", "b-tile", "c-tile"}
+
+
 def _url_to_slug_softgarden(url: str) -> str | None:
     """2026-08: added .career.softgarden.de / .softgarden.de — confirmed
     via softgarden's own support docs that companyname.career.softgarden.de
@@ -1274,7 +1290,8 @@ def _url_to_slug_softgarden(url: str) -> str | None:
     for suffix in (".softgarden.io", ".career.softgarden.de", ".softgarden.de"):
         if host.endswith(suffix):
             slug = host[: -len(suffix)].lower()
-            if slug and slug not in SKIP_SLUGS and slug != "www" and "." not in slug:
+            if (slug and slug not in SKIP_SLUGS and slug != "www" and "." not in slug
+                    and slug not in _SOFTGARDEN_INFRA_SUBDOMAINS):
                 return slug
     # Also handle api.softgarden.io/api/.../jobboards/{channelId}
     if "softgarden" in host:
@@ -1428,6 +1445,25 @@ def _url_to_slug_folkshr(url: str) -> str | None:
     return None
 
 
+# 2026-09 BUG FIX: confirmed live via direct Supabase query — 12 real
+# archive_i rows where client_id is "vendors" or "lib" and board_slug is
+# a frontend JS/CSS library name (flexslider, animate-css, counterup,
+# flipster-slider, magnific-popup, nice-selector, owl-carousel, parallax,
+# revolution, swiper, bootstrap). These come from a JobAdder-hosted
+# client's own static-asset folder structure
+# (clientapps.jobadder.com/{client_id}/vendors/{library}/... or
+# /lib/{library}/...) getting matched by this extractor's bare
+# parts[0]/parts[1] logic as if "vendors"/"lib" were a real per-client
+# JobAdder tenant ID and the library name were a board slug. Neither
+# "vendors"/"lib" nor any library name is a filename-with-extension, a
+# hex hash, a locale code, or a job-posting-slug shape, so none of
+# _looks_like_real_slug's existing checks catch this — it needed its own
+# guard, keyed on the CLIENT_ID specifically (once client_id is one of
+# these, every board_slug found under it is guaranteed to be more of the
+# same asset-folder listing, not a real board name).
+_JOBADDER_INVALID_CLIENT_IDS = {"vendors", "lib"}
+
+
 def _url_to_slug_jobadder(url: str) -> str | None:
     """Extract slug from JobAdder URLs.
     Pattern: clientapps.jobadder.com/{client_id}/{board_slug}/...
@@ -1442,6 +1478,7 @@ def _url_to_slug_jobadder(url: str) -> str | None:
     if len(parts) >= 2 and parts[0] and parts[1]:
         client_id, board_slug = parts[0], parts[1]
         if (client_id.lower() not in SKIP_SLUGS and board_slug.lower() not in SKIP_SLUGS
+                and client_id.lower() not in _JOBADDER_INVALID_CLIENT_IDS
                 and _looks_like_real_slug(client_id) and _looks_like_real_slug(board_slug)):
             return f"{client_id}|{board_slug}"
     return None
