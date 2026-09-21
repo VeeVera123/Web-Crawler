@@ -5507,6 +5507,29 @@ _GITHUB_REGISTRY_ATS_MAP = {
 }
 
 _WORKDAY_WD_NUM_RE = re.compile(r"\.wd(\d+)\.myworkdayjobs\.com$", re.I)
+# 2026-09 FIX (real production evidence — live crawl_i.py run logs, not
+# hypothetical): scrape_workday's own new failure logging surfaced dozens
+# of confirmed-real archive_i rows shaped like "wd5|wd1|mvw",
+# "wd5|wd1|paciolan", "wd5|wd1|pgatourexternal", "wd5|wd1|neustar-careers"
+# — a whole cluster of DIFFERENT, individually-legitimate-looking site_ids
+# (paciolan, PGA Tour, Neustar, Overlake are all real companies) all
+# sharing the exact same literal "company" value "wd5" and wd-instance
+# "wd1". A real Workday tenant subdomain is never literally just the
+# wd-instance number itself — "wd5" is upstream openroles' OWN internal
+# wd-instance-number token (see _WORKDAY_WD_NUM_RE above, which strips
+# this same token out of a host like "2020companies.wd1.myworkdayjobs.com"
+# — for these bad rows, openroles' "slug" metadata field itself is the
+# literal string "wd5", i.e. the upstream dataset failed to resolve the
+# real per-company subdomain for this batch of entries and fell back to
+# echoing the wd-instance token as if it were the company slug). Every
+# job for every one of these company="wd5" rows 404s/422s against
+# Workday's real API, since "wd5.wd1.myworkdayjobs.com" back-formed from
+# this placeholder is not any real tenant's actual host. Since the real
+# site_id per row is unrecoverable from this data (we only know it isn't
+# "wd5"), these rows are rejected outright rather than guessed at — same
+# "detect and discard known-bad, don't fabricate a replacement" approach
+# as _looks_like_real_slug's junk-path-segment fix above.
+_WD_INSTANCE_PLACEHOLDER_RE = re.compile(r"^wd\d{1,3}$", re.I)
 
 
 def _assemble_workday_slug(entry: dict) -> str | None:
@@ -5518,12 +5541,17 @@ def _assemble_workday_slug(entry: dict) -> str | None:
     -> "2020companies|wd1|External_Careers". Returns None (skip the row)
     when metadata.site is missing — confirmed live that some entries omit
     it, and site_id isn't safely guessable (scrape_workday would just get
-    a 404 from a wrong guess, silently producing a dead slug)."""
+    a 404 from a wrong guess, silently producing a dead slug) — or when
+    `company` is itself a bare wd-instance-number placeholder like "wd5"
+    (see _WD_INSTANCE_PLACEHOLDER_RE's comment above for the real,
+    confirmed-broken archive_i rows this closes)."""
     meta = entry.get("metadata") or {}
     host = (meta.get("host") or "").strip()
     site = (meta.get("site") or "").strip()
     company = (entry.get("slug") or "").strip()
     if not company or not site:
+        return None
+    if _WD_INSTANCE_PLACEHOLDER_RE.match(company):
         return None
     m = _WORKDAY_WD_NUM_RE.search(host)
     if not m:
