@@ -1192,9 +1192,14 @@ def _filter_roles(jobs: list[dict]) -> list[dict]:
 
 def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     matched, confidences, unsure_jobs = [], [], []
+    # Parallel to unsure_jobs — 'blank' or 'bare_remote', see
+    # _keyword_classify_location_detail's docstring and crawl_i.py's
+    # filter_locations for the full reasoning on why these are treated
+    # differently below.
+    unsure_reasons = []
     for job in jobs:
         _enrich_location_from_description(job)
-        result, priority = _keyword_classify_location_detail(job)
+        result, priority, unsure_reason = _keyword_classify_location_detail(job)
         if result == "match":
             job["clearance"] = "regex"
             job["location_priority"] = priority
@@ -1202,10 +1207,34 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             confidences.append("match")
         elif result == "unsure":
             unsure_jobs.append(job)
+            unsure_reasons.append(unsure_reason)
+
+    # 2026-09 canary — see crawl_i.py's filter_locations for the full
+    # reasoning: a blank location is now excluded more strictly, but a
+    # single ATS platform's blank-location share spiking is the real
+    # early signal that platform's scraper regex just broke, so log it.
+    blank_by_ats: dict[str, int] = {}
+    total_by_ats: dict[str, int] = {}
+    for job in jobs:
+        ats_name = job.get("source_ats") or "unknown"
+        total_by_ats[ats_name] = total_by_ats.get(ats_name, 0) + 1
+    for job, reason in zip(unsure_jobs, unsure_reasons):
+        if reason == "blank":
+            ats_name = job.get("source_ats") or "unknown"
+            blank_by_ats[ats_name] = blank_by_ats.get(ats_name, 0) + 1
+    for ats_name, blanks in sorted(blank_by_ats.items(), key=lambda kv: -kv[1]):
+        ats_total = total_by_ats.get(ats_name, 0)
+        if ats_total >= 10 and blanks / ats_total >= 0.25:
+            log.warning(
+                f"Location filter: {ats_name} has {blanks}/{ats_total} jobs "
+                f"({blanks / ats_total:.0%}) with a BLANK location field this "
+                f"run — check whether {ats_name}'s scraper's location regex "
+                f"still matches that platform's current HTML/markup."
+            )
 
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
-        for job, (label, provider_name) in zip(unsure_jobs, ai_results):
+        for job, (label, provider_name), unsure_reason in zip(unsure_jobs, ai_results, unsure_reasons):
             # 2026-09: use the ACTUAL provider that classified this job
             # (now returned directly by ai_classify_locations — see its
             # docstring) instead of the literal string "ai", which is what
@@ -1223,7 +1252,7 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 confidences.append("match")
-            elif label == "uncertain" and provider_name is not None:
+            elif label == "uncertain" and provider_name is not None and unsure_reason == "bare_remote":
                 # 2026-09 policy change, refined per explicit user
                 # follow-up — see crawl_i.py's filter_locations for the
                 # full reasoning. Short version: a job an AI provider
@@ -1232,12 +1261,25 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # provider ever got to look at at all (provider_name is
                 # None — every provider failed/was exhausted/was never
                 # reached) is dropped, same as "no_match".
+                #
+                # 2026-09 (second refinement): that benefit-of-the-doubt
+                # now only applies when unsure_reason == "bare_remote" —
+                # the location field explicitly said "Remote", a real
+                # signal from the company. A BLANK location field can't be
+                # told apart from a scraper extraction bug (confirmed live
+                # twice this week — see ats_scrapers.py's scrape_jazzhr/
+                # scrape_successfactors fixes), so it no longer gets kept
+                # on "AI looked and still couldn't tell" alone — see the
+                # "blank" case in the comment below.
                 job["clearance"] = clearance
                 job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
                 confidences.append("uncertain")
             # "no_match" → drop. "uncertain" with no provider_name (never
-            # actually reviewed) → also drop.
+            # actually reviewed) → also drop. "uncertain" with
+            # unsure_reason == "blank" → also drop (see above) — a blank
+            # location field only survives via a real match_global/
+            # match_africa AI verdict, never on genuine AI uncertainty.
 
     return matched, confidences
 
