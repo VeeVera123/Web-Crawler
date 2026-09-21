@@ -696,7 +696,7 @@ def scrape_workday(slug: str) -> list[dict]:
     POST to /wday/cxs/{company}/{site_id}/jobs for paginated results."""
     parts = slug.split("|")
     if len(parts) != 3:
-        log.debug(f"Invalid Workday slug format: {slug}")
+        log.warning(f"[workday] Invalid slug format (expected 'company|wd#|site_id'): {slug!r}")
         return []
 
     company, wd, site_id = parts
@@ -728,16 +728,40 @@ def scrape_workday(slug: str) -> list[dict]:
             r = _get_session().post(
                 api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
             )
-            if r.status_code != 200:
-                break
+        except Exception as e:
+            log.warning(
+                f"[workday] Request failed for slug={slug!r} offset={offset} "
+                f"url={api_url}: {type(e).__name__}: {e}"
+            )
+            break
+
+        if r.status_code != 200:
+            log.warning(
+                f"[workday] Non-200 status for slug={slug!r} offset={offset} "
+                f"url={api_url}: status={r.status_code} "
+                f"body={r.text[:200]!r}"
+            )
+            break
+
+        try:
             data = r.json()
-        except Exception:
+        except Exception as e:
+            log.warning(
+                f"[workday] Failed to parse JSON for slug={slug!r} offset={offset} "
+                f"url={api_url}: {type(e).__name__}: {e} "
+                f"body={r.text[:200]!r}"
+            )
             break
 
         postings = data.get("jobPostings", [])
         total = data.get("total", 0)
 
         if not postings:
+            if offset == 0:
+                log.debug(
+                    f"[workday] slug={slug!r} returned 0 postings on first page "
+                    f"(reported total={total}) — tenant likely has no open jobs"
+                )
             break
 
         for post in postings:
@@ -2571,7 +2595,13 @@ def scrape_zoho(slug: str) -> list[dict]:
                         "company": company_name,
                         "location": loc.strip(),
                         "country": country.strip() if isinstance(country, str) else "",
-                        "department": (item.get("Department") or "").strip(),
+                        # 2026-09: live-verified against a real Zoho Recruit
+                        # career site (ziplyfiber.zohorecruit.com, 74 real
+                        # openings) that the embedded input#jobs JSON uses
+                        # "Department_Name", not "Department" — the field
+                        # previously looked up doesn't exist in current
+                        # payloads, so department was always blank.
+                        "department": (item.get("Department_Name") or item.get("Department") or "").strip(),
                         "workplace_type": (item.get("Remote_Job") or item.get("Work_Mode") or "").strip(),
                         "employment_type": (item.get("Job_Type") or item.get("jobtype") or "").strip(),
                         "salary": str(salary).strip() if salary else "",
