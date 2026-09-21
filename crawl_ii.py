@@ -96,6 +96,7 @@ import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_
 # (2026-08: this file used to do all its HTML parsing inline on the event
 # loop with no pool at all — see extract_postings_from_page's docstring —
 # it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
+import location_diagnostics  # noqa: E402
 from classifier import (  # noqa: E402
     keyword_classify_role, ai_classify_roles,
     _keyword_classify_location_detail, ai_classify_locations,
@@ -1209,28 +1210,12 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             unsure_jobs.append(job)
             unsure_reasons.append(unsure_reason)
 
-    # 2026-09 canary — see crawl_i.py's filter_locations for the full
-    # reasoning: a blank location is now excluded more strictly, but a
-    # single ATS platform's blank-location share spiking is the real
-    # early signal that platform's scraper regex just broke, so log it.
-    blank_by_ats: dict[str, int] = {}
-    total_by_ats: dict[str, int] = {}
-    for job in jobs:
-        ats_name = job.get("source_ats") or "unknown"
-        total_by_ats[ats_name] = total_by_ats.get(ats_name, 0) + 1
-    for job, reason in zip(unsure_jobs, unsure_reasons):
-        if reason == "blank":
-            ats_name = job.get("source_ats") or "unknown"
-            blank_by_ats[ats_name] = blank_by_ats.get(ats_name, 0) + 1
-    for ats_name, blanks in sorted(blank_by_ats.items(), key=lambda kv: -kv[1]):
-        ats_total = total_by_ats.get(ats_name, 0)
-        if ats_total >= 10 and blanks / ats_total >= 0.25:
-            log.warning(
-                f"Location filter: {ats_name} has {blanks}/{ats_total} jobs "
-                f"({blanks / ats_total:.0%}) with a BLANK location field this "
-                f"run — check whether {ats_name}'s scraper's location regex "
-                f"still matches that platform's current HTML/markup."
-            )
+    # 2026-09 (Phase 2, "Do all 3") — see crawl_i.py's filter_locations for
+    # the full reasoning. Diagnostics now live in the shared
+    # location_diagnostics module (baseline-relative spike detection +
+    # location_status breakdown) so both pipelines report identically and
+    # share one persisted baseline file per ATS/pipeline combination.
+    location_diagnostics.report_and_update("CRAWL II", jobs, unsure_jobs, unsure_reasons)
 
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
