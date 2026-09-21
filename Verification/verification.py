@@ -189,7 +189,7 @@ sys.path.insert(0, _ROOT)  # for node.py
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for ats_scrapers.py (job-count reporting)
 import node  # noqa: E402
 from ats_scrapers import scrape_board  # noqa: E402
-from discovery import _looks_like_real_slug  # noqa: E402
+from discovery import _looks_like_real_slug, _WD_INSTANCE_PLACEHOLDER_RE  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
@@ -1176,6 +1176,55 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
 
 # ── orchestration ───────────────────────────────────────────────────
 
+# 2026-09 FIX (real production evidence — user-reported live crawl_i.py
+# logs, cross-checked against this file): Workday sits in
+# _UNVERIFIABLE_ATS because there's no safe LIVE "does this tenant exist"
+# signal for it — but that's a completely separate question from "is this
+# slug even shaped like a real one to begin with", which needs no network
+# call at all and is exactly what _looks_like_real_slug already does for
+# every OTHER platform via run_archive_i's dispatch below. The problem:
+# `_looks_like_real_slug` is applied to a slug as ONE whole string, but
+# Workday's slug format is a compound "company|wd#|site_id" — the actual
+# garbage discovery.py's two 2026-09 fixes were built to catch (a junk
+# site_id like "assets"/"robots.txt", or a company that's itself a bare
+# wd-instance-number placeholder like "wd5") only shows up once you split
+# the compound slug into its three real parts. Checking the whole
+# "anokacounty|wd1|assets" string against _looks_like_real_slug never
+# matches anything (no known asset extension, not a hex hash, not a
+# locale code) — so even for the platforms that DO reach that check, a
+# malformed compound Workday slug slips through it undetected. On top of
+# that, Workday rows never even reach that check in the first place:
+# run_archive_i's dispatch (see "skipped_rows" below) routes every
+# _UNVERIFIABLE_ATS row straight to counts["unverified"] and never calls
+# verify_archive_i_row on it at all, live check AND static shape check
+# both skipped together — when only the LIVE check is actually unsafe for
+# Workday; the static shape check needs no live signal and is exactly as
+# safe here as it is for every other platform.
+def _workday_slug_is_malformed(slug: str) -> bool:
+    """Cheap, no-network static shape check for Workday's compound
+    "company|wd#|site_id" slug — mirrors the two confirmed-real bugs
+    discovery.py's _url_to_slug_workday/_assemble_workday_slug were fixed
+    for (see their docstrings): a company that's itself a bare
+    wd-instance-number placeholder (e.g. "wd5"), or a site_id that's a
+    known junk path segment ("assets", "robots.txt", a bare locale code,
+    etc. — same _looks_like_real_slug guard every other platform's slug
+    already gets, just applied to the right individual component here
+    instead of the whole compound string)."""
+    parts = slug.split("|")
+    if len(parts) != 3:
+        return True
+    company, wd, site = parts
+    if not company or not wd or not site:
+        return True
+    if _WD_INSTANCE_PLACEHOLDER_RE.match(company):
+        return True
+    if not re.match(r"^wd\d+$", wd, re.I):
+        return True
+    if not _looks_like_real_slug(site):
+        return True
+    return False
+
+
 async def verify_archive_i_row(session: aiohttp.ClientSession, row: dict, dry_run: bool,
                                 sem: asyncio.Semaphore, executor: concurrent.futures.ThreadPoolExecutor,
                                 counts: dict, lock: asyncio.Lock) -> None:
@@ -1348,7 +1397,32 @@ async def run_archive_i(ats_filter: str | None, limit: int | None, dry_run: bool
 
         verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
         skipped_rows = [r for r in all_rows if r["ats"] not in ARCHIVE_II_VERIFIERS]
-        counts["unverified"] += len(skipped_rows)
+
+        # 2026-09 FIX: Workday has no safe LIVE not-found signal (that's
+        # why it's in _UNVERIFIABLE_ATS), but a malformed compound slug
+        # needs no live signal at all — see _workday_slug_is_malformed's
+        # docstring above for the two real bugs this closes. Split
+        # skipped_rows so Workday still gets this free, no-network check
+        # instead of being blanket-counted as unverified like the
+        # genuinely-unverifiable platforms (smartrecruiters etc.).
+        workday_skipped = [r for r in skipped_rows if r["ats"] == "workday"]
+        other_skipped = [r for r in skipped_rows if r["ats"] != "workday"]
+        counts["unverified"] += len(other_skipped)
+
+        if workday_skipped:
+            malformed = [r for r in workday_skipped if _workday_slug_is_malformed(r["slug"])]
+            log.info(f"  {len(workday_skipped)} workday rows: static shape check found "
+                     f"{len(malformed)} malformed (no live call needed either way)")
+            if dry_run:
+                counts["dead"] += len(malformed)
+                counts["unverified"] += len(workday_skipped) - len(malformed)
+            else:
+                deleted = 0
+                for r in malformed:
+                    if await delete_row(session, node.ARCHIVE_I_TABLE, r["id"]):
+                        deleted += 1
+                counts["dead"] += deleted
+                counts["unverified"] += len(workday_skipped) - deleted
 
         if limit is not None:
             verifiable_rows = verifiable_rows[:limit]
