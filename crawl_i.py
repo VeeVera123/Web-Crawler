@@ -43,6 +43,7 @@ import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import location_diagnostics
 from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions, SCRAPERS
 from classifier import (
     keyword_classify_role, ai_classify_roles,
@@ -364,34 +365,18 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 
     log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
 
-    # 2026-09 canary (explicit user request, after two real scraper bugs —
-    # JazzHR/inabia and SuccessFactors/sonepar — both silently produced
-    # location="" for postings the live page showed as ordinary, specific
-    # US roles): a blank location is now excluded more strictly (see the
-    # "blank" branch below), but that only protects THIS run — it doesn't
-    # tell anyone a given scraper's extraction just broke. A single ATS
-    # platform suddenly producing a much higher share of blank locations
-    # than usual is the actual early signal of a template change breaking
-    # a regex, so surface it in the log every run rather than relying on
-    # someone noticing a bad job slip through downstream again.
-    blank_by_ats: dict[str, int] = {}
-    total_by_ats: dict[str, int] = {}
-    for job in jobs:
-        ats_name = job.get("source_ats") or "unknown"
-        total_by_ats[ats_name] = total_by_ats.get(ats_name, 0) + 1
-    for job, reason in zip(unsure_jobs, unsure_reasons):
-        if reason == "blank":
-            ats_name = job.get("source_ats") or "unknown"
-            blank_by_ats[ats_name] = blank_by_ats.get(ats_name, 0) + 1
-    for ats_name, blanks in sorted(blank_by_ats.items(), key=lambda kv: -kv[1]):
-        ats_total = total_by_ats.get(ats_name, 0)
-        if ats_total >= 10 and blanks / ats_total >= 0.25:
-            log.warning(
-                f"Location filter: {ats_name} has {blanks}/{ats_total} jobs "
-                f"({blanks / ats_total:.0%}) with a BLANK location field this "
-                f"run — check whether {ats_name}'s scraper's location regex "
-                f"still matches that platform's current HTML/markup."
-            )
+    # 2026-09 (Phase 2, explicit user request — "Do all 3", following the
+    # two real scraper bugs — JazzHR/inabia and SuccessFactors/sonepar —
+    # that silently produced location="" for postings the live page showed
+    # as ordinary, specific US roles): a blank location is now excluded
+    # more strictly (see the "blank" branch below), but that only protects
+    # THIS run — it doesn't tell anyone a given scraper's extraction just
+    # broke. Diagnostics moved to a shared module (location_diagnostics.py,
+    # used identically by crawl_ii.py) that compares each ATS's blank rate
+    # against its own persisted historical baseline rather than one flat
+    # threshold, and breaks results down by location_status where scrapers
+    # populate it (marker_not_found vs. marker_found_empty vs. extracted).
+    location_diagnostics.report_and_update("CRAWL I", jobs, unsure_jobs, unsure_reasons)
 
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
