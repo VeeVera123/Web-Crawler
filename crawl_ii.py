@@ -587,7 +587,7 @@ _HEURISTIC_LOCATION_RE = re.compile(
 )
 
 
-# 2026-09 BUG FIX #2 (avidtr.com — see _JD_NARROWING_QUALIFIER_RE's note
+# 2026-09 BUG FIX #2 (avidtr.com — see _JD_NARROWING_QUALIFIER_RE_CI's note
 # above for the full story): the real posting's location tag was
 # "Remote, California", sitting in plain text right under the title with
 # NO "Location:"-style label in front of it at all — so
@@ -1129,37 +1129,95 @@ _US_STATES_RE_FRAGMENT = (
     r"Washington|West\s+Virginia|Wisconsin|Wyoming|District\s+of\s+Columbia"
 )
 _JD_QUALIFIER_WINDOW = 80  # chars scanned on each side of a phrase hit
-_JD_NARROWING_QUALIFIER_RE = re.compile(
-    r"\b(?:US|U\.S\.|USA|U\.S\.A\.|United\s+States|UK|U\.K\.|United\s+Kingdom|Canada|Australia|"
+# 2026-09 BUG FIX (real posting: IrisCX's "Customer Success Manager",
+# iriscx.com/career/, an in-house/archive_ii page): said "Calgary, AB or
+# Remote in Canada" as its actual location, plus "Work from anywhere (as
+# long as it's in the Pacific or Mountain time zones)" — a Canada-only,
+# two-timezone-restricted role that still got enriched all the way to
+# location="Worldwide" at PRIORITY_GLOBAL (the TOP tier). Two compounding
+# gaps, both fixed here: (1) this regex had no notion of a NAMED time
+# zone as a narrowing signal at all — "Pacific or Mountain time zones" is
+# every bit as narrowing as a named country, it just wasn't in the list;
+# (2) the window-based scan below only checked ±80 chars around the
+# trigger phrase itself, so "Calgary, AB or Remote in Canada" (from a
+# SEPARATE bullet/line elsewhere on the page) was never seen at all —
+# _enrich_location_from_description now also does a whole-description
+# scan for this same regex, not just a window around each phrase hit.
+# 2026-09: split into a case-INSENSITIVE pattern (full country/state/timezone
+# names — "Canada", "Alabama", "Pacific time zone" etc. don't collide with
+# ordinary lowercase English words, so matching them regardless of case is
+# safe) and a case-SENSITIVE pattern (bare "US"/"UK"-style abbreviations,
+# which DO collide with extremely common lowercase words — "us" as in "join
+# us"/"contact us"/"for us", "uk" far less commonly but still). Testing this
+# fix's whole-description scan against a synthetic genuinely-global posting
+# ("...we hire globally with no location restrictions...for us.") surfaced
+# this immediately: under a single case-insensitive regex, the word "us" in
+# "for us" matched the "US" alternative and incorrectly blocked the
+# Worldwide promotion for a posting with zero real narrowing content. Only
+# an ALL-CAPS "US"/"USA"/"UK" (or the dotted "U.S."/"U.S.A."/"U.K." forms,
+# which never collide with plain words) counts as a real narrowing signal.
+_JD_NARROWING_QUALIFIER_RE_CI = re.compile(
+    r"\b(?:U\.S\.|U\.S\.A\.|United\s+States|U\.K\.|United\s+Kingdom|Canada|Australia|"
     r"Germany|France|Netherlands|Mexico|Philippines|Nigeria|Kenya|South\s+Africa|India|Ireland|"
     r"Spain|Italy|Brazil|Japan|Singapore|China|Sweden|Norway|Denmark|Finland|Poland|Portugal|"
-    r"Switzerland|Austria|Belgium|New\s+Zealand|Israel|UAE|United\s+Arab\s+Emirates|Egypt|Ghana|"
-    r"APAC|LATAM|ANZ|NAM|MENA|" + _US_STATES_RE_FRAGMENT + r")\b",
+    r"Switzerland|Austria|Belgium|New\s+Zealand|Israel|United\s+Arab\s+Emirates|Egypt|Ghana|"
+    r"APAC|LATAM|ANZ|NAM|MENA|" + _US_STATES_RE_FRAGMENT + r"|"
+    # Named North American time zone(s), singular or an "X or Y" /
+    # "X and Y" disjunction right before "time zone(s)" — e.g. "Pacific
+    # time zone", "Pacific or Mountain time zones", "Eastern and Central
+    # time zones". A BARE "any time zone"/"any timezone" is NOT matched
+    # here (no named zone token) — that phrase is its own POSITIVE
+    # global-hiring signal in _JD_STRONG_GLOBAL_HIRING_RE above and is
+    # deliberately left alone.
+    r"(?:Pacific|Mountain|Central|Eastern|Atlantic|Hawaii|Alaska)"
+    r"(?:\s*(?:,|or|and)\s*(?:Pacific|Mountain|Central|Eastern|Atlantic|Hawaii|Alaska))*"
+    r"\s+time\s*zones?"
+    r")\b",
     re.I,
 )
+# Case-SENSITIVE: only an all-caps "US"/"USA"/"UK" counts — see note above.
+_JD_NARROWING_QUALIFIER_RE_CS = re.compile(r"\b(?:US|USA|UK)\b")
+
+
+def _narrowing_qualifier_search(text: str):
+    """Combined case-insensitive + case-sensitive narrowing-qualifier search
+    — see _JD_NARROWING_QUALIFIER_RE_CI/_CS above for why these can't just be
+    one case-insensitive regex."""
+    return _JD_NARROWING_QUALIFIER_RE_CI.search(text) or _JD_NARROWING_QUALIFIER_RE_CS.search(text)
 
 
 def _enrich_location_from_description(job: dict) -> None:
     """Mutates job["location"] in place — see module note above. No-op
     when location already has real content, when the description carries
-    none of the narrow phrase set, or when every phrase hit found is
-    itself narrowed to one specific country/region right next to it
+    none of the narrow phrase set, when every phrase hit found is itself
+    narrowed to one specific country/region/timezone right next to it
     (e.g. "work from anywhere in the United States" — see BUG FIX note
-    above). In that last case the location is deliberately left bare
-    rather than guessed at, so classifier.py's existing blank→"unsure"→AI
-    path still gets a look at it instead of being short-circuited."""
+    above), or (2026-09) when a narrowing qualifier appears ANYWHERE ELSE
+    in the description even if not adjacent to the trigger phrase (the
+    IrisCX case: the restriction was stated in a different bullet/line
+    entirely — see the BUG FIX note on _JD_NARROWING_QUALIFIER_RE_CI above).
+    In any of these cases the location is deliberately left bare rather
+    than guessed at, so classifier.py's existing blank→"unsure"→AI path
+    still gets a look at it instead of being short-circuited."""
     loc = (job.get("location") or "").strip()
     if loc.lower() not in _BARE_LOCATION_VALUES and not PLACEHOLDER_LOC_RE.match(loc):
         return
     desc = job.get("description") or ""
     if not desc:
         return
+    # Whole-description check FIRST — a narrowing qualifier stated
+    # anywhere on the page (not just next to the trigger phrase) is real
+    # evidence this isn't actually a global/worldwide-open posting, even
+    # if it's in a separate bullet from the "work from anywhere"-style
+    # phrase that would otherwise trigger the enrichment below.
+    if _narrowing_qualifier_search(desc):
+        return
     for rx in _JD_STRONG_GLOBAL_HIRING_RE:
         for m in rx.finditer(desc):
             start = max(0, m.start() - _JD_QUALIFIER_WINDOW)
             end = min(len(desc), m.end() + _JD_QUALIFIER_WINDOW)
             before, after = desc[start:m.start()], desc[m.end():end]
-            if _JD_NARROWING_QUALIFIER_RE.search(before) or _JD_NARROWING_QUALIFIER_RE.search(after):
+            if _narrowing_qualifier_search(before) or _narrowing_qualifier_search(after):
                 continue  # narrowed to one country/region right here — not real evidence
             # A bare "Remote" is worth keeping (distinguishes "remote, open
             # worldwide" from a placeholder like "TBD"/"See description",
@@ -1199,6 +1257,54 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     # differently below.
     unsure_reasons = []
     for job in jobs:
+        # 2026-09 BUG FIX (this investigation, crawl_ii's own bug — separate
+        # from both of today's earlier fixes): classifier.py is shared by
+        # both pipelines, but several of its location-funnel functions read
+        # job["description_snippet"] specifically, not job["description"]:
+        #   - _classify_location_batch (builds the AI location-classifier
+        #     prompt: `desc = job.get("description_snippet", "")` — used
+        #     verbatim as the "Description: ..." line the AI reads)
+        #   - ai_classify_locations' post-AI "safety net" (re-checks
+        #     title+description_snippet for keyword evidence before
+        #     trusting an AI match_global/match_africa verdict)
+        #   - has_hard_country_specific_auth_signal / has_state_list_
+        #     restriction_signal (both description_snippet-only)
+        # ats_scrapers.py (crawl_i.py's extractor) has always populated
+        # "description_snippet" on every job it returns. crawl_ii.py's own
+        # extractor (extract_postings_from_page, above) only ever set
+        # job["description"] and never mirrored it into
+        # "description_snippet" — not a crash anywhere (every reader above
+        # uses `.get(...) or ""`/`.get(..., "")`, so it fails silently), just
+        # every one of those functions seeing an empty string for every
+        # single crawl_ii job, forever.
+        #
+        # Confirmed live (synthetic repro, see test_description_snippet_
+        # backfill.py): a blank-location job with a description that
+        # plainly says "we hire globally, no location restrictions,
+        # candidates from every continent have joined us" still produces
+        # the literal AI prompt line `Description: [No description
+        # available]` — the AI is given zero JD text to work with and can
+        # only guess from title+blank-location, so it defaults to
+        # UNCERTAIN far more often than a sighted read of the same JD
+        # would. crawl_ii's in-house/unrecognized-ATS pages lean on this
+        # AI stage far more than crawl_i's structured-ATS pages do (messier
+        # location data → more "blank"/"bare_remote" unsure jobs reach it
+        # in the first place), so this blind spot hits crawl_ii's survival
+        # rate especially hard — independent of, and in addition to, the
+        # shared classifier.py has_hard_country_specific_auth_signal fix
+        # (which never even fired for crawl_ii jobs, since it's also
+        # description_snippet-only and was therefore already a permanent
+        # no-op here either way).
+        #
+        # Fix: mirror "description" into "description_snippet" right here,
+        # before any shared classifier.py function — or
+        # detect_visa_sponsorship, called on these same job dicts further
+        # down crawl_batch_ii, which has the identical description_snippet-
+        # only read — ever sees the job. Only backfills when missing/blank
+        # so a job that already carries a real description_snippet from
+        # some other source is left alone.
+        if not job.get("description_snippet"):
+            job["description_snippet"] = job.get("description") or ""
         _enrich_location_from_description(job)
         result, priority, unsure_reason = _keyword_classify_location_detail(job)
         if result == "match":
@@ -1237,34 +1343,49 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_AFRICA
                 matched.append(job)
                 confidences.append("match")
-            elif label == "uncertain" and provider_name is not None and unsure_reason == "bare_remote":
-                # 2026-09 policy change, refined per explicit user
-                # follow-up — see crawl_i.py's filter_locations for the
-                # full reasoning. Short version: a job an AI provider
-                # ACTUALLY reviewed and still couldn't classify (real
-                # provider_name) is kept at PRIORITY_UNSURE; a job no
-                # provider ever got to look at at all (provider_name is
-                # None — every provider failed/was exhausted/was never
-                # reached) is dropped, same as "no_match".
+            elif label == "uncertain" and unsure_reason == "bare_remote":
+                # 2026-09 policy, refined per explicit user follow-up —
+                # see crawl_i.py's filter_locations for the full
+                # reasoning. Short version: the location field explicitly
+                # said "Remote" — a real signal from the company — so it's
+                # kept at PRIORITY_UNSURE whether the AI actually reviewed
+                # it and said UNCERTAIN, or never got reviewed at all. A
+                # BLANK location field can't be told apart from a scraper
+                # extraction bug (confirmed live twice this week — see
+                # ats_scrapers.py's scrape_jazzhr/scrape_successfactors
+                # fixes), so it no longer gets kept on "AI looked (or
+                # didn't) and still couldn't tell" alone — see the "blank"
+                # case in the comment below.
                 #
-                # 2026-09 (second refinement): that benefit-of-the-doubt
-                # now only applies when unsure_reason == "bare_remote" —
-                # the location field explicitly said "Remote", a real
-                # signal from the company. A BLANK location field can't be
-                # told apart from a scraper extraction bug (confirmed live
-                # twice this week — see ats_scrapers.py's scrape_jazzhr/
-                # scrape_successfactors fixes), so it no longer gets kept
-                # on "AI looked and still couldn't tell" alone — see the
-                # "blank" case in the comment below.
-                job["clearance"] = clearance
+                # BUG FOUND & FIXED 2026-09 (AI-classification-stage
+                # audit — see the matching fix in crawl_i.py's
+                # filter_locations for the full writeup, including
+                # empirical repro): this branch used to ALSO require
+                # `provider_name is not None`, so a job whose AI review
+                # never actually happened (every LOCATION_PROVIDERS entry
+                # exhausted/rate-limited/unavailable — see classifier.py's
+                # _mark_exhausted circuit breaker, which keeps a provider
+                # dead for the rest of the run after just one give-up) was
+                # dropped identically to a genuine "no_match", even though
+                # its location field's own "Remote" text is real,
+                # unconditional evidence that doesn't depend on the AI
+                # ever confirming it. That's exactly the live failure mode
+                # behind csm_roles in the 10,000-17,000 range collapsing
+                # to global_jobs of 11-75 per shard (scan_reports,
+                # Supabase project mqkcmkwpfvpajzjrbdji): once a shared
+                # free-tier key (e.g. Groq's real 8K TPM pool, shared with
+                # role classification too) trips the circuit breaker early
+                # in a run, every later bare-remote job in that shard gets
+                # provider_name=None and was being silently rejected.
+                job["clearance"] = clearance if provider_name else "ai_unreviewed"
                 job["location_priority"] = PRIORITY_UNSURE
                 matched.append(job)
                 confidences.append("uncertain")
-            # "no_match" → drop. "uncertain" with no provider_name (never
-            # actually reviewed) → also drop. "uncertain" with
-            # unsure_reason == "blank" → also drop (see above) — a blank
-            # location field only survives via a real match_global/
-            # match_africa AI verdict, never on genuine AI uncertainty.
+            # "no_match" → drop. "uncertain" with unsure_reason == "blank"
+            # → also drop (see above), REGARDLESS of provider_name — a
+            # blank location field only survives via a real match_global/
+            # match_africa AI verdict, never on genuine (or missing) AI
+            # uncertainty alone.
 
     return matched, confidences
 
