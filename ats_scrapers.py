@@ -5690,8 +5690,9 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     if not to_enrich:
         return jobs
 
+    to_enrich_platforms = len(set(j["source_ats"] for j in to_enrich))
     log.info(f"Enriching {len(to_enrich)} jobs (missing description or location) "
-             f"across {len(set(j['source_ats'] for j in to_enrich))} platforms...")
+             f"across {to_enrich_platforms} platforms...")
 
     def _fetch_one(job):
         # 2026-09: track whether THIS fetch actually improved the job, not
@@ -5701,11 +5702,7 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
         # a truthy description_snippet BEFORE this fetch ran, so checking
         # the after-state alone counted it as "enriched" even when the
         # fetch found nothing new. That inflated the "Enriched X/Y" count
-        # above what this pass actually accomplished — confirmed live as
-        # the real cause of a "why don't the numbers add up" question
-        # (5791 "enriched" out of 7665, but the very next line's fallback
-        # count of jobs actually still missing a description didn't match
-        # 7665-5791 at all).
+        # above what this pass actually accomplished.
         before_len = len(job.get("description_snippet") or "")
         fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
         try:
@@ -5739,32 +5736,29 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
             except Exception:
                 pass
 
-    log.info(f"Enriched {enriched}/{len(to_enrich)} jobs with descriptions")
+    not_improved = len(to_enrich) - enriched
 
     # ── Fallback: fetch job URL directly for ANY job still missing a JD ──
     # Some ATS APIs don't return descriptions, but the job page itself has one.
     # This catches Workday, iCIMS, SuccessFactors, etc. where the API fetch failed.
     #
-    # NOTE: this scans ALL of `jobs`, not just `to_enrich` above — a
-    # DIFFERENT, wider population than the "Enriched X/Y" line reports on
-    # (to_enrich only covers DESCRIPTION_FETCHERS platforms whose
-    # description was short/missing; a job on some OTHER platform can
-    # still come back from its OWN list API with a genuinely blank
-    # description). That's why this count can be, and usually is,
-    # different from len(to_enrich) minus the enriched count above — it's
-    # not the same job set. Logged explicitly below so the two numbers
-    # don't look like they should match when they're answering different
-    # questions.
+    # NOTE: this scans ALL of `jobs`, not just `to_enrich` above, and uses a
+    # STRICTER definition of "missing" (completely empty description_snippet)
+    # than to_enrich's (short OR missing-location). So a job can be in
+    # to_enrich, fail to improve there, and still NOT show up here — e.g. it
+    # was only missing LOCATION (already had a full description), or it had
+    # a short-but-real description that the fetch just couldn't beat. The
+    # reconciliation numbers below make that explicit instead of leaving two
+    # similar-looking counts that don't obviously add up to each other.
     still_missing = [j for j in jobs if not j.get("description_snippet")
                      and j.get("url")]
+    from_enrich_pass = 0
+    other_platforms = 0
+    fallback_ok = 0
     if still_missing:
         still_missing_urls = {j["url"] for j in still_missing}
         from_enrich_pass = sum(1 for j in to_enrich if j.get("url") in still_missing_urls)
         other_platforms = len(still_missing) - from_enrich_pass
-        log.info(f"Fallback: fetching {len(still_missing)} job URLs directly for missing JDs "
-                 f"({from_enrich_pass} still empty after the pass above, "
-                 f"{other_platforms} from other platforms with a blank description)...")
-        fallback_ok = 0
 
         def _fetch_fallback(job):
             try:
@@ -5789,8 +5783,6 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
                 except Exception:
                     pass
 
-        log.info(f"Fallback enriched {fallback_ok}/{len(still_missing)} jobs from job URLs")
-
     # NOTE: Location-only pass removed — it was redundant.
     # _fetch_generic_description (used by both primary and fallback enrichment)
     # already extracts location as a side-effect via _extract_location_from_html.
@@ -5798,8 +5790,41 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     # achieving only ~0.2% success rate (1/616). Jobs still missing location
     # simply don't have parseable location data on their pages.
     no_location = sum(1 for j in jobs if not j.get("location"))
-    if no_location:
-        log.info(f"Note: {no_location} jobs still have no location (pages lack structured location data)")
+
+    # ── One consolidated, self-reconciling summary (2026-09) ──
+    # Replaces 4 separate log.info() calls that each reported a number
+    # without saying which population it was drawn from — readable only by
+    # tracing through this function's code. Every number below either sums
+    # to the line above it or explicitly says why it doesn't, so the whole
+    # picture is visible from the log alone.
+    partial_not_improved = not_improved - from_enrich_pass
+    still_empty_after_fallback = len(still_missing) - fallback_ok
+    summary_lines = [
+        "── Description/location enrichment summary ──",
+        f"  Stage 1 (API re-fetch): {len(to_enrich)} jobs needed enrichment "
+        f"(short/missing description OR missing location) across {to_enrich_platforms} platforms",
+        f"    -> {enriched} improved (got a new/longer description)",
+        f"    -> {not_improved} did not improve, of which:",
+        f"         {from_enrich_pass} were left with a COMPLETELY EMPTY description -> passed to Stage 2 below",
+        f"         {partial_not_improved} already had a short/partial description, or were only "
+        f"missing location -> not eligible for Stage 2 (which only targets completely-empty descriptions)",
+    ]
+    if still_missing:
+        summary_lines += [
+            f"  Stage 2 (direct job-page fetch): {len(still_missing)} jobs with a completely empty "
+            f"description ({from_enrich_pass} carried over from Stage 1 + {other_platforms} from OTHER "
+            f"platforms whose own list API returned a blank description, never part of Stage 1)",
+            f"    -> {fallback_ok} recovered a description directly from the job page",
+            f"    -> {still_empty_after_fallback} still completely empty after Stage 2 (dead link, JS-only "
+            f"page, or the page genuinely has no JD text)",
+        ]
+    else:
+        summary_lines.append("  Stage 2 (direct job-page fetch): skipped -- nothing was completely empty")
+    summary_lines.append(
+        f"  {no_location} jobs (out of all {len(jobs)} scraped, not just the {len(to_enrich)} above) "
+        f"still have NO location at all -- their pages have no parseable location data"
+    )
+    log.info("\n".join(summary_lines))
 
     return jobs
 
