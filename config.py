@@ -4,7 +4,7 @@ Configuration — multi-provider architecture.
 Role classification:     Gemini + Groq + Mistral, running concurrently
 Location classification: NVIDIA NIM + OpenAI + Groq + Mistral, running concurrently
 
-2026-09: added Mistral (mistral-small-latest) to both stages — explicit
+2026-09: added Mistral (mistral-small-2603, aka Mistral Small 4) to both stages — explicit
 user request for "another generous free AI provider" after the 82-batch
 cost/quota complaint. Mistral's free tier (1 RPS / 500K TPM / 1B
 tokens/month, no card) is the most generous of any provider here on both
@@ -146,7 +146,15 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     "Anonymous improvement data" in the account Privacy settings); this
 #     is a data-handling tradeoff to be aware of, not a functional
 #     limitation, and doesn't block use here since no PII/proprietary data
-#     is sent (only public job postings).
+#     is sent (only public job postings). Model id: mistral-small-2603
+#     ("Mistral Small 4", current as of 2026-09 per docs.mistral.ai/models/
+#     overview and docs.mistral.ai/getting-started/models) is used instead
+#     of a "mistral-small-latest" alias — checked live 2026-09 and that
+#     alias no longer appears in Mistral's current model listing at all
+#     (docs.mistral.ai/getting-started/models lists only dated ids;
+#     Mistral Small 3.1/3.2 are explicitly marked deprecated there). If
+#     Mistral ships a newer Small model later, update this dated id by
+#     hand rather than assuming a "-latest" alias will auto-follow it.
 _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single process
 _GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 calls/min
                                   # (6K TPM, 75% of cap — was 30s/2-calls-min, doubled
@@ -211,7 +219,9 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-small-latest — see the base-interval comment block
+    # Mistral: mistral-small-2603 (Mistral Small 4, current as of 2026-09 —
+    # see comment block below on why a dated id is used instead of a
+    # "-latest" alias) — see the base-interval comment block
     # above for the live-verified free-tier numbers (1 RPS / 500K TPM / 1B
     # tokens/month, no card). max_batch_chars kept modest here since titles
     # are short and there's no reason to approach anywhere near Mistral's
@@ -220,7 +230,7 @@ _ROLE_PROVIDER_DEFS = [
     _make_provider(
         "mistral",
         "MISTRAL_API_KEY",
-        "mistral-small-latest",
+        "mistral-small-2603",
         "https://api.mistral.ai/v1",
         max_batch_chars=300_000,
         min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
@@ -296,14 +306,14 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=6_000,
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-small-latest — same key/model/quota pool as the
+    # Mistral: mistral-small-2603 (Mistral Small 4) — same key/model/quota pool as the
     # role-classification entry above (same provider name "mistral", so
     # classifier.py's per-provider throttle correctly treats all Mistral
     # calls as sharing ONE real 500K-TPM/1-RPS pool, not two independent
     # ones). By far the most generous real budget of any of the four
     # location providers — added specifically to absorb more of the
     # per-run batch count that used to fall almost entirely on
-    # OpenAI/NVIDIA/Groq. max_batch_chars: mistral-small-latest's published
+    # OpenAI/NVIDIA/Groq. max_batch_chars: mistral-small-2603's published
     # context is 128K tokens; 0.8 headroom x ~4 chars/tok ≈ 400K, but
     # capped well below that in practice by MAX_JOBS_PER_BATCH's 5-10 job
     # ceiling (see classifier.py's _dynamic_job_cap) — this is a safety
@@ -311,7 +321,7 @@ _LOCATION_PROVIDER_DEFS = [
     _make_provider(
         "mistral",
         "MISTRAL_API_KEY",
-        "mistral-small-latest",
+        "mistral-small-2603",
         "https://api.mistral.ai/v1",
         max_batch_chars=400_000,
         min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
