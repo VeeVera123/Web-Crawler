@@ -44,7 +44,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import location_diagnostics
-from ats_scrapers import scrape_board, enrich_descriptions, enrich_application_questions, SCRAPERS
+from ats_scrapers import (scrape_board, enrich_descriptions, enrich_application_questions,
+                          SCRAPERS, log_scrape_failure_summary)
 from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
@@ -581,6 +582,16 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
                     total_jobs_raw=raw_scraped_count,
                 )
             return
+
+        # 2026-09 (explicit user request): print grouped scrape-failure
+        # summary (see ats_scrapers.get_scrape_failure_summary's docstring)
+        # right here, in the same "errors section" spot before location
+        # classification starts — replaces a wall of individual per-slug
+        # WARNING lines (Workday 403/422/etc, one per bad tenant) with one
+        # or two grouped lines like "[workday] 12 failed — breakthrought1d
+        # and 4 others: HTTP 422 (HTTP_422); brunswick and 6 others: HTTP
+        # 403 (S22)".
+        log_scrape_failure_summary()
 
         log.info("── Location check (open to global/Africa hires?) ──")
         # Enrich descriptions for platforms that lack them
