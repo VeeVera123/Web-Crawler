@@ -4,18 +4,31 @@ Configuration — multi-provider architecture.
 Role classification:     Gemini + Groq + Mistral, running concurrently
 Location classification: NVIDIA NIM + OpenAI + Groq + Mistral, running concurrently
 
-2026-09: added Mistral (mistral-small-2603, aka Mistral Small 4) to both stages — explicit
-user request for "another generous free AI provider" after the 82-batch
-cost/quota complaint. Mistral's free tier (1 RPS / 500K TPM / 1B
-tokens/month, no card) is the most generous of any provider here on both
-axes at once. Two alternatives were researched and rejected: GitHub Models
-is fully retired as of 2026-07-30; SambaNova's true no-card free tier caps
-at 20 requests/DAY, too low to be useful (its better-known "Developer
-Tier" numbers require a linked card). See the _MISTRAL_BASE_INTERVAL
-comment block below for full sourcing and the one real caveat (Mistral
-uses free-tier data for training by default, with a separate opt-out
-toggle in account Privacy settings — not a blocker for public job-posting
-data, but worth knowing).
+2026-09: added Mistral to both stages — explicit user request for
+"another generous free AI provider" after the 82-batch cost/quota
+complaint. Two alternatives were researched and rejected first: GitHub
+Models is fully retired as of 2026-07-30; SambaNova's true no-card free
+tier caps at 20 requests/DAY, too low to be useful (its better-known
+"Developer Tier" numbers require a linked card).
+
+Model choice within Mistral: mistral-large-2512 ("Mistral Large 3"), NOT
+mistral-small-2603 ("Mistral Small 4") as originally configured. Mistral's
+own generic help-center article quotes a single free-tier figure (1 RPS /
+500K TPM) that does NOT match reality — the account's own live per-model
+limits page (admin.mistral.ai/plateforme/limits, checked live 2026-09)
+shows each model has its OWN separate TPM budget at the same 1 RPS:
+mistral-small-2603 is actually stingy at just 20,000 TPM, while
+mistral-large-2512 gets 250,000 TPM — 12.5x more token budget for the
+IDENTICAL 1 RPS cost. Large is also the smarter model, so this is a
+straight upgrade with no tradeoff. (Also visible on that same limits page
+but not used here: ministral-3b-2512 at 1.3M TPM / 12.5 RPS — by far the
+highest throughput of anything on the account, but a much smaller/weaker
+3B model; worth revisiting if raw volume ever matters more than per-job
+classification accuracy.) See the _MISTRAL_BASE_INTERVAL comment block
+below for full sourcing and the one real caveat (Mistral uses free-tier
+data for training by default, with a separate opt-out toggle in account
+Privacy settings — not a blocker for public job-posting data, but worth
+knowing).
 
 2026-09: swapped Gemini and NVIDIA between the two stages, and added Groq
 to both (explicit user request). Gemini was repeatedly hitting its
@@ -128,33 +141,39 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     chat models as of 2026-09. Treated as a single pool shared by BOTH
 #     the role and location NVIDIA entries below (same provider name
 #     "nvidia", same key), since that's what's actually true of the quota.
-#   Mistral (help.mistral.ai/en/articles/225174-what-are-the-limits-of-the-free-tier,
-#     verified live 2026-09) — La Plateforme free tier: 1 request/second
-#     (=60 RPM), 500,000 tokens/minute, 1,000,000,000 tokens/month, org-wide,
-#     no credit card required. By far the most generous free tier of any
-#     provider here on BOTH RPM and TPM — added 2026-09 per explicit user
-#     request for "another free AI provider, generous AF". Two providers
-#     researched and REJECTED before this one: GitHub Models is fully
-#     retired as of 2026-07-30 (no longer usable at all); SambaNova's true
-#     no-card free tier is capped at 20 REQUESTS PER DAY (not per minute —
-#     confirmed via docs.sambanova.ai/docs/en/models/rate-limits), too low
-#     to be useful here — its more generous "Developer Tier" numbers
-#     reported by third-party comparison sites require linking a card,
-#     which this project's other providers deliberately avoid. Caveat:
-#     Mistral uses free-tier input/output for model training BY DEFAULT
-#     (separate opt-out toggle per help.mistral.ai/en/articles/455207 —
-#     "Anonymous improvement data" in the account Privacy settings); this
-#     is a data-handling tradeoff to be aware of, not a functional
-#     limitation, and doesn't block use here since no PII/proprietary data
-#     is sent (only public job postings). Model id: mistral-small-2603
-#     ("Mistral Small 4", current as of 2026-09 per docs.mistral.ai/models/
-#     overview and docs.mistral.ai/getting-started/models) is used instead
-#     of a "mistral-small-latest" alias — checked live 2026-09 and that
-#     alias no longer appears in Mistral's current model listing at all
-#     (docs.mistral.ai/getting-started/models lists only dated ids;
-#     Mistral Small 3.1/3.2 are explicitly marked deprecated there). If
-#     Mistral ships a newer Small model later, update this dated id by
-#     hand rather than assuming a "-latest" alias will auto-follow it.
+#   Mistral (admin.mistral.ai/plateforme/limits — the account's own live
+#     per-model limits page, checked live 2026-09; NOT
+#     help.mistral.ai/en/articles/225174, whose generic "1 RPS / 500K TPM"
+#     free-tier figure turned out not to match reality per-model) — every
+#     model on the account gets its own separate TPM budget at a shared
+#     1 request/second ceiling. mistral-small-2603 ("Mistral Small 4") is
+#     actually stingy at just 20,000 TPM; mistral-large-2512 ("Mistral
+#     Large 3") gets 250,000 TPM — 12.5x more token budget for the
+#     IDENTICAL 1 RPS cost, and it's the smarter model besides, so Large is
+#     used here, not Small. (Also on that limits page but not used:
+#     ministral-3b-2512 at 1.3M TPM / 12.5 RPS — much higher throughput,
+#     much weaker/smaller model; worth it later if raw volume ever matters
+#     more than per-job accuracy.) Added 2026-09 per explicit user request
+#     for "another free AI provider, generous AF". Two providers researched
+#     and REJECTED before Mistral: GitHub Models is fully retired as of
+#     2026-07-30 (no longer usable at all); SambaNova's true no-card free
+#     tier is capped at 20 REQUESTS PER DAY (not per minute — confirmed via
+#     docs.sambanova.ai/docs/en/models/rate-limits), too low to be useful
+#     here — its more generous "Developer Tier" numbers reported by
+#     third-party comparison sites require linking a card, which this
+#     project's other providers deliberately avoid. Caveat: Mistral uses
+#     free-tier input/output for model training BY DEFAULT (separate
+#     opt-out toggle per help.mistral.ai/en/articles/455207 — "Anonymous
+#     improvement data" in the account Privacy settings); this is a
+#     data-handling tradeoff to be aware of, not a functional limitation,
+#     and doesn't block use here since no PII/proprietary data is sent
+#     (only public job postings). mistral-large-2512 is a dated model id,
+#     not a "-latest" alias — checked live 2026-09 and Mistral's current
+#     model listing (docs.mistral.ai/getting-started/models) no longer
+#     carries "-latest" aliases at all; if Mistral ships a newer Large
+#     later, update this dated id by hand and re-check
+#     admin.mistral.ai/plateforme/limits for its real per-model TPM/RPS
+#     rather than assuming continuity.
 _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single process
 _GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 calls/min
                                   # (6K TPM, 75% of cap — was 30s/2-calls-min, doubled
@@ -169,10 +188,11 @@ _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verif
 # classification below, so both stages' calls draw from one 40 RPM pool,
 # not two separate ones. 60/40 = 1.5s/call single-process baseline.
 _NVIDIA_BASE_INTERVAL = 1.5
-# Mistral La Plateforme free tier — 1 request/second confirmed live via
-# help.mistral.ai (see comment block above). 1/1 = 1.0s/call single-process
-# baseline. Same provider name "mistral" is used in BOTH role and location
-# provider lists below, so its one real 500K-TPM/1-RPS pool is tracked as
+# Mistral: mistral-large-2512, 1 request/second confirmed live via
+# admin.mistral.ai/plateforme/limits (see comment block above). 1/1 =
+# 1.0s/call single-process baseline. Same provider name "mistral" is used
+# in BOTH role and location provider lists below, so its one real
+# 250K-TPM/1-RPS pool is tracked as
 # shared, not double-counted (same pattern as the shared Groq/NVIDIA keys).
 _MISTRAL_BASE_INTERVAL = 1.0
 
@@ -219,20 +239,22 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-small-2603 (Mistral Small 4, current as of 2026-09 —
-    # see comment block below on why a dated id is used instead of a
-    # "-latest" alias) — see the base-interval comment block
-    # above for the live-verified free-tier numbers (1 RPS / 500K TPM / 1B
-    # tokens/month, no card). max_batch_chars kept modest here since titles
-    # are short and there's no reason to approach anywhere near Mistral's
-    # real per-call ceiling for role classification — this budget is a
-    # safety net, not the real limiter (MAX_JOBS_PER_BATCH does that job).
+    # Mistral: mistral-large-2512 (Mistral Large 3 — see the base-interval
+    # comment block above for why Large is used instead of Small: 12.5x
+    # the real per-model TPM budget at the identical 1 RPS cost, per the
+    # account's own admin.mistral.ai/plateforme/limits page, live 2026-09).
+    # max_batch_chars derived from that real 250,000 TPM budget: at the
+    # 1 RPS single-process baseline (60 calls/min max), 250,000/60 ≈ 4,166
+    # tokens/call ≈ 16,700 chars at ~4 chars/token, then a ~72% safety
+    # margin -> 12,000. Kept modest here regardless since titles are short
+    # and role batches won't come close to this ceiling in practice — it's
+    # a safety net, not the real limiter (MAX_JOBS_PER_BATCH does that job).
     _make_provider(
         "mistral",
         "MISTRAL_API_KEY",
-        "mistral-small-2603",
+        "mistral-large-2512",
         "https://api.mistral.ai/v1",
-        max_batch_chars=300_000,
+        max_batch_chars=12_000,
         min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
@@ -306,24 +328,27 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=6_000,
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-small-2603 (Mistral Small 4) — same key/model/quota pool as the
-    # role-classification entry above (same provider name "mistral", so
-    # classifier.py's per-provider throttle correctly treats all Mistral
-    # calls as sharing ONE real 500K-TPM/1-RPS pool, not two independent
-    # ones). By far the most generous real budget of any of the four
-    # location providers — added specifically to absorb more of the
-    # per-run batch count that used to fall almost entirely on
-    # OpenAI/NVIDIA/Groq. max_batch_chars: mistral-small-2603's published
-    # context is 128K tokens; 0.8 headroom x ~4 chars/tok ≈ 400K, but
-    # capped well below that in practice by MAX_JOBS_PER_BATCH's 5-10 job
-    # ceiling (see classifier.py's _dynamic_job_cap) — this is a safety
-    # net, not the real limiter, same caveat as OpenAI/NVIDIA above.
+    # Mistral: mistral-large-2512 (Mistral Large 3) — same key/model/quota
+    # pool as the role-classification entry above (same provider name
+    # "mistral", so classifier.py's per-provider throttle correctly treats
+    # all Mistral calls as sharing ONE real 250K-TPM/1-RPS pool, not two
+    # independent ones — see the base-interval comment block above for why
+    # Large, not Small, is used, and for the max_batch_chars derivation:
+    # 250,000 TPM / 60 calls-per-min (1 RPS baseline) ≈ 4,166 tokens/call,
+    # ~72% margin -> 12,000 chars). Not the biggest char budget of the four
+    # location providers (OpenAI/NVIDIA's char budgets are effectively
+    # uncapped by comparison), but a real, meaningfully-sized fourth leg —
+    # added specifically to absorb more of the per-run batch count that
+    # used to fall almost entirely on OpenAI/NVIDIA/Groq. In practice
+    # MAX_JOBS_PER_BATCH's 5-10 job ceiling (see classifier.py's
+    # _dynamic_job_cap) still does most of the real batch-size limiting
+    # here, same as for the other three providers.
     _make_provider(
         "mistral",
         "MISTRAL_API_KEY",
-        "mistral-small-2603",
+        "mistral-large-2512",
         "https://api.mistral.ai/v1",
-        max_batch_chars=400_000,
+        max_batch_chars=12_000,
         min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
