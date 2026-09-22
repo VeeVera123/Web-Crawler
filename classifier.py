@@ -2121,11 +2121,26 @@ def has_hard_no_sponsorship_signal(job: dict) -> bool:
 # pre-existing miss, independent of the phrasing-rigidity bug below).
 _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
     r"u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
-    r"canada|australia|new\s+zealand|ireland|germany|european\s+union|\beu\b|"
+    r"canada|australia|new\s+zealand|(?:republic\s+of\s+)?ireland|germany|"
+    r"european\s+union|\beu\b|"
     r"india|philippines|nigeria|kenya|south\s+africa|singapore|mexico|brazil|"
     r"netherlands|france|spain|italy|sweden|norway|denmark|finland|poland|"
     r"portugal|switzerland|austria|belgium|japan|china|u\.?a\.?e\.?|"
     r"united\s+arab\s+emirates|egypt|ghana|"
+    # 2026-09 NEW (2nd cross-LLM review, real postings: BlueVoyant's "Must
+    # be authorized to work in the Republic of Ireland" — the ORIGINAL
+    # "ireland" entry above never allowed the "Republic of" prefix real
+    # postings actually use; Autopay's "100% remote for Mexico, Columbia,
+    # Venezuela and Guatemala, Argentina, Honduras, DR, Brazil applicants";
+    # Think Academy MY's "Remote Customer Service Representative (Malaysia
+    # Based)"): broadened country coverage well beyond the original 8/30-
+    # country lists, since this pipeline scrapes ~38 ATS platforms across a
+    # genuinely global employer base and every prior list kept getting
+    # caught out by a country nobody had added yet.
+    r"colombia|venezuela|guatemala|argentina|honduras|dominican\s+republic|"
+    r"malaysia|indonesia|vietnam|thailand|pakistan|chile|peru|ecuador|"
+    r"costa\s+rica|panama|israel|turkey|ukraine|russia|romania|hungary|"
+    r"czech\s+republic|greece|south\s+korea|taiwan|hong\s+kong|morocco|"
     # 2026-09 NEW (real postings surfaced by a cross-LLM review of live JD
     # links — see the module comment above _COUNTRY_BASED_RESTRICTION_RE
     # for the full evidence): CONTINENT/REGION names used the exact same
@@ -2225,15 +2240,75 @@ _COUNTRY_AUTH_RE = re.compile(
 # role, so timezone alone proves nothing about required physical location
 # and must stay a separate, unimplemented signal rather than being folded
 # in here.
+# 2026-09: full (not abbreviated) US state names, shared between the
+# residence-restriction regex below and the title-suffix check further
+# down — a single US state, spelled out in full, is exactly as reliable a
+# "not global" signal as a named country (Ninth Brain: "currently reside
+# in Michigan"; Ellevation: "must live in California"), and spelling it
+# out avoids the false-positive risk a 2-letter abbreviation would carry
+# ("IN", "OR", "HI" as ordinary English words).
+_US_STATE_FULL_NAMES_FRAGMENT = (
+    r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|"
+    r"delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|"
+    r"kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|"
+    r"mississippi|missouri|montana|nebraska|nevada|new\s+hampshire|"
+    r"new\s+jersey|new\s+mexico|new\s+york|north\s+carolina|north\s+dakota|"
+    r"ohio|oklahoma|oregon|pennsylvania|rhode\s+island|south\s+carolina|"
+    r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
+    r"west\s+virginia|wisconsin|wyoming"
+)
+# Countries/regions PLUS full US state names — used only by the residence-
+# verb regex below (a candidate can be told to "live in California" just
+# as validly as "live in Canada"), NOT by _COUNTRY_AUTH_RE's work-
+# authorization noun/verb forms above (a US state isn't a work-
+# authorization jurisdiction, so "authorized to work in Michigan" isn't a
+# real phrasing this project has seen and isn't worth the added risk).
+_RESIDENCE_PLACE_RE_FRAGMENT = _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _US_STATE_FULL_NAMES_FRAGMENT
+
+# 2026-09 FURTHER BROADENED (2nd cross-LLM review, real postings):
+#  - "permanently" as another optional interposed word — Scribe's "with a
+#    requirement to be based permanently in the United States or Canada"
+#    has neither "anywhere"/"only"/"solely"/"primarily" between "based"
+#    and "in", it has "permanently", which the prior version didn't allow.
+#  - "remote from <place>" as a THIRD "remote ___ <place>" shape alongside
+#    the existing "remote in/within <place>" — Tendril's "fully remote
+#    from Mexico".
+#  - "remote (?:<place>)" PARENTHETICAL shape — Kitsch's "remote
+#    (Philippines)" names the place in parens right after "remote" with no
+#    preposition at all.
+#  - a full US state name is now an acceptable place (see
+#    _RESIDENCE_PLACE_RE_FRAGMENT above) — Ninth Brain's "currently reside
+#    in Michigan", Ellevation's "must live in California".
 _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     r"\b(?:reside|residing|resides|live|living|lives|located|based)\s+"
-    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in|within)\s+"
-    r"(?:either\s+)?(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\bremote\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"(?:anywhere\s+)?(?:permanently\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in|within)\s+"
+    r"(?:either\s+)?(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\bremote\s+(?:in|within|from)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\bremote\s*\(\s*(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s*\)"
     r"|\bwork(?:ing)?\s+from\s+"
-    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
     re.I,
 )
+
+# 2026-09 NEW (2nd cross-LLM review, real postings: rePurpose Global's
+# "This position is remote-only for East Coast, US candidates."; Autopay's
+# "This position is 100% remote for Mexico, Columbia, Venezuela and
+# Guatemala, Argentina, Honduras, DR, Brazil applicants."): a distinct
+# sentence SHAPE — "remote (?:-only)? for ... <place> ... candidates/
+# applicants/residents" — that names the place with neither a residence
+# verb NOR an "in/within" preposition at all ("for X candidates", not "for
+# candidates in X"), and Autopay's version interposes a whole list of
+# OTHER country names between "for" and the ones this project's fragment
+# recognizes. Rather than try to match the place immediately after "for"
+# (which breaks on exactly this kind of list), this checks the SENTENCE
+# as a whole: does it contain the "remote ... for" trigger AND, anywhere
+# in that same sentence, at least one recognized place name AND one of
+# "candidates"/"applicants"/"residents"? All three conditions together are
+# specific enough to avoid false-positiving on an unrelated "remote-first
+# culture" sentence that happens to also mention a country in passing.
+_REMOTE_FOR_TRIGGER_RE = re.compile(r"\bremote[\s\-]*(?:only\s+)?for\b", re.I)
+_CANDIDATE_WORD_RE = re.compile(r"\b(?:candidates?|applicants?|residents?)\b", re.I)
+_ANY_RESIDENCE_PLACE_RE = re.compile(r"\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b", re.I)
 
 _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
     r"\b(?:team|office|headquarters|hq|company|organization|organisation|"
@@ -2292,7 +2367,12 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
         if not sentence.strip():
             continue
-        if _COUNTRY_BASED_RESTRICTION_RE.search(sentence) and not _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+        if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+            continue
+        if _COUNTRY_BASED_RESTRICTION_RE.search(sentence):
+            return True
+        if (_REMOTE_FOR_TRIGGER_RE.search(sentence) and _CANDIDATE_WORD_RE.search(sentence)
+                and _ANY_RESIDENCE_PLACE_RE.search(sentence)):
             return True
     return False
 
@@ -2344,32 +2424,39 @@ def has_hard_metadata_location_signal(job: dict) -> bool:
 # "IN" or "OR" as ordinary English words) since these are spelled out in
 # full and only recognized in the one title position real postings
 # actually use for this.
+# 2026-09: reuses _US_STATE_FULL_NAMES_FRAGMENT (defined above, alongside
+# _COUNTRY_BASED_RESTRICTION_RE) instead of duplicating the 50-state list a
+# second time.
 _TITLE_REGION_SUFFIX_NAMES = (
     r"europe|emea|apac|latam|asia[\s\-]?pacific|australia|"
-    r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|"
-    r"delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|"
-    r"kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|"
-    r"mississippi|missouri|montana|nebraska|nevada|new\s+hampshire|"
-    r"new\s+jersey|new\s+mexico|new\s+york|north\s+carolina|north\s+dakota|"
-    r"ohio|oklahoma|oregon|pennsylvania|rhode\s+island|south\s+carolina|"
-    r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
-    r"west\s+virginia|wisconsin|wyoming"
+    + _US_STATE_FULL_NAMES_FRAGMENT
 )
 _TITLE_REGION_SUFFIX_RE = re.compile(
     r"[\-–—,]\s*(?:" + _TITLE_REGION_SUFFIX_NAMES + r")\s*$", re.I,
 )
 
+# 2026-09 NEW (2nd cross-LLM review, real posting: Think Academy MY's
+# "Remote Customer Service Representative (Malaysia Based)"): a SECOND
+# title shape — a "(<Country> Based)" parenthetical — that isn't a
+# trailing " - <place>"/", <place>" suffix at all, so _TITLE_REGION_SUFFIX_RE
+# above never matched it. Checked anywhere in the title, not just at the
+# end, since a parenthetical qualifier can appear mid-title too.
+_TITLE_COUNTRY_PAREN_RE = re.compile(
+    r"\(\s*(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+based\s*\)", re.I,
+)
+
 
 def has_title_region_restriction_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter: does the job TITLE end with a
-    " - <region/state>" or ", <region/state>" qualifier naming a specific,
-    non-global place? See the module comment above
-    _TITLE_REGION_SUFFIX_NAMES for the real Arcwood/OpenProject/HeroDevs
-    postings this closes."""
+    " - <region/state>" or ", <region/state>" qualifier, or contain a
+    "(<Country> Based)" parenthetical, naming a specific, non-global
+    place? See the module comments above _TITLE_REGION_SUFFIX_NAMES and
+    _TITLE_COUNTRY_PAREN_RE for the real Arcwood/OpenProject/HeroDevs/
+    Think Academy MY postings this closes."""
     title = job.get("title") or ""
     if not title.strip():
         return False
-    return bool(_TITLE_REGION_SUFFIX_RE.search(title))
+    return bool(_TITLE_REGION_SUFFIX_RE.search(title) or _TITLE_COUNTRY_PAREN_RE.search(title))
 
 
 # Marker ats_scrapers.py's enrich_application_questions() appends before
