@@ -881,7 +881,8 @@ def _url_to_slug_workday(url: str) -> str | None:
         # asset request caught on this same host (favicon.ico) — e.g.
         # "2fasmglobal|favicon.ico" — because site_id was trusted
         # unconditionally. Same guard as rippling/pageup's fix below.
-        if company and wd and site_id and _looks_like_real_slug(site_id):
+        if (company and wd and site_id and _looks_like_real_slug(site_id)
+                and not _workday_site_id_is_ui_action(site_id)):
             return f"{company}|{wd}|{site_id}"
     return None
 
@@ -5531,6 +5532,49 @@ _WORKDAY_WD_NUM_RE = re.compile(r"\.wd(\d+)\.myworkdayjobs\.com$", re.I)
 # as _looks_like_real_slug's junk-path-segment fix above.
 _WD_INSTANCE_PLACEHOLDER_RE = re.compile(r"^wd\d{1,3}$", re.I)
 
+# 2026-09 NEW (real archive_i row, user-found: "alpinephysicians|wd1|
+# refreshFacet" — the tenant's actual working career site is
+# alpinephysicians.wd1.myworkdayjobs.com/External, not .../refreshFacet).
+# Same contamination family as the "assets"/"robots.txt" junk-path-segment
+# fix and the "wd5" instance-placeholder fix above, but a THIRD distinct
+# shape: "refreshFacet" is a client-side JS action/handler name from
+# Workday's own faceted-search widget (the CxsSearch bundle's AJAX
+# "refresh this facet" call), not a page or a tenant's named career site
+# at all — it never appears in _NON_SLUG_PATH_SEGMENTS (not a static-asset
+# path) and isn't a filename/hex-hash/locale-code either, so
+# _looks_like_real_slug lets it straight through: it's genuinely shaped
+# like a normal camelCase slug, just semantically wrong. Traced to
+# _assemble_workday_slug below: openroles' own workday.json dataset
+# carries this value directly as metadata.site for this entry — i.e. this
+# is upstream's scraper mis-capturing a JS attribute as if it were the
+# tenant's site name, echoed straight through by our own reconstruction
+# (same "trust upstream's field, don't guess a replacement" shape as the
+# "wd5" bug). "Search" (see verification.py's _verify_workday docstring —
+# 3 real companies 404ing on site_id="Search") is the same family: a
+# generic UI-widget word, not a tenant site. Rather than an exact
+# blocklist (impossible to enumerate every JS handler name Workday's
+# widgets might use), this catches the general SHAPE: a common UI-action
+# verb, either alone ("Search", case-insensitive) or as a camelCase prefix
+# immediately followed by a capitalized word ("refreshFacet",
+# case-sensitive — genuine tenant site names are never lowercase-verb-led
+# camelCase; they're PascalCase like "External"/"CorporateCareers" or
+# plain lowercase like "totalrewards").
+_WORKDAY_UI_ACTION_VERBS = (
+    r"refresh|clear|load|reload|search|filter|toggle|apply|remove|add|"
+    r"fetch|get|set|update|reset|submit|open|close|show|hide|select|"
+    r"dismiss|expand|collapse"
+)
+_WORKDAY_UI_ACTION_CAMEL_RE = re.compile(r"^(?:" + _WORKDAY_UI_ACTION_VERBS + r")[A-Z]\w*$")
+_WORKDAY_UI_ACTION_BARE_RE = re.compile(r"^(?:" + _WORKDAY_UI_ACTION_VERBS + r")$", re.I)
+
+
+def _workday_site_id_is_ui_action(site_id: str) -> bool:
+    """True if site_id looks like a Workday client-side widget action name
+    (e.g. "refreshFacet", "Search") rather than a real tenant career-site
+    name. See the module comment above _WORKDAY_UI_ACTION_VERBS for the
+    real archive_i row and confirmed-dead "Search" evidence this closes."""
+    return bool(_WORKDAY_UI_ACTION_CAMEL_RE.match(site_id) or _WORKDAY_UI_ACTION_BARE_RE.match(site_id))
+
 
 def _assemble_workday_slug(entry: dict) -> str | None:
     """Reconstruct our 'company|wd#|site_id' format from an openroles
@@ -5552,6 +5596,8 @@ def _assemble_workday_slug(entry: dict) -> str | None:
     if not company or not site:
         return None
     if _WD_INSTANCE_PLACEHOLDER_RE.match(company):
+        return None
+    if _workday_site_id_is_ui_action(site):
         return None
     m = _WORKDAY_WD_NUM_RE.search(host)
     if not m:
