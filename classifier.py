@@ -1553,24 +1553,46 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
 
 
 def _dynamic_job_cap(jobs: list[dict]) -> int:
-    """5-7 jobs per batch (2026-09, explicit user request: 'reduce batch
-    size for location classification to between 5 to 7 max, dynamically
-    sized based on the number of characters so the LLMs does not lose
-    context'). Scaled down toward 5 as the jobs being batched have longer
-    descriptions — more text per job in one call means less of the model's
-    attention per job, which is the exact confirmed-live failure mode
-    (see MAX_JOBS_PER_BATCH's history below). Based on the AVERAGE
-    description length across the jobs being batched, since the cap
-    applies to the batch as a whole, not any single job.
+    """5-10 jobs per batch (2026-09, raised from the earlier 5-7 range per
+    explicit user request: a real run classifying 201 jobs produced 82
+    separate batches/API calls — "that eats into requests and calls per
+    day" — because the OLD ceiling of 7 for short-description jobs was
+    needlessly tight; there was never a confirmed failure mode at 8-10
+    jobs/batch for short descriptions, only at much larger flat batches
+    (100+, see MAX_JOBS_PER_BATCH's history below) or long-description
+    batches specifically. The floor stays at 5 for long-JD batches —
+    that's the tier the original hallucination fix actually targeted (a
+    cheap model losing attention across many FULL job descriptions in one
+    call), and the user's own instruction here explicitly kept "5 minimum
+    for long JDs."
+
+    Scaled down toward 5 as the jobs being batched have longer
+    descriptions — more text per job in one call means less of the
+    model's attention per job. Based on the AVERAGE description length
+    across the jobs being batched, since the cap applies to the batch as
+    a whole, not any single job.
+
+    NOTE: this caps job COUNT per batch, but each provider's own
+    max_batch_chars (config.py) is a separate, independent ceiling that's
+    checked first in _build_dynamic_batches — Groq's max_batch_chars=6,000
+    (~1,500 tokens, sized to fit its real 8K-tokens-per-minute quota,
+    shared across every concurrent shard this run) will still force
+    smaller batches than this job-count cap allows whenever descriptions
+    aren't trivially short, REGARDLESS of raising this cap further. That's
+    Groq's genuine rate-limit ceiling, not an oversight — raising it risks
+    live 429s once several shards' calls land in the same minute. NVIDIA/
+    OpenAI's much larger char budgets (3.2M/3.3M) mean job count is the
+    ONLY real constraint for them, so this change mainly cuts THEIR batch
+    counts, not Groq's.
     """
     if not jobs:
-        return 7
+        return 10
     total = sum(len(j.get("description_snippet") or "") for j in jobs)
     avg = total / len(jobs)
     if avg <= 2_000:
-        return 7
+        return 10
     if avg <= 8_000:
-        return 6
+        return 7
     return 5
 
 
