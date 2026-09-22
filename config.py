@@ -1,8 +1,21 @@
 """
 Configuration — multi-provider architecture.
 
-Role classification:     Gemini + Groq, running concurrently
-Location classification: NVIDIA NIM + OpenAI + Groq, running concurrently
+Role classification:     Gemini + Groq + Mistral, running concurrently
+Location classification: NVIDIA NIM + OpenAI + Groq + Mistral, running concurrently
+
+2026-09: added Mistral (mistral-small-latest) to both stages — explicit
+user request for "another generous free AI provider" after the 82-batch
+cost/quota complaint. Mistral's free tier (1 RPS / 500K TPM / 1B
+tokens/month, no card) is the most generous of any provider here on both
+axes at once. Two alternatives were researched and rejected: GitHub Models
+is fully retired as of 2026-07-30; SambaNova's true no-card free tier caps
+at 20 requests/DAY, too low to be useful (its better-known "Developer
+Tier" numbers require a linked card). See the _MISTRAL_BASE_INTERVAL
+comment block below for full sourcing and the one real caveat (Mistral
+uses free-tier data for training by default, with a separate opt-out
+toggle in account Privacy settings — not a blocker for public job-posting
+data, but worth knowing).
 
 2026-09: swapped Gemini and NVIDIA between the two stages, and added Groq
 to both (explicit user request). Gemini was repeatedly hitting its
@@ -115,6 +128,25 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     chat models as of 2026-09. Treated as a single pool shared by BOTH
 #     the role and location NVIDIA entries below (same provider name
 #     "nvidia", same key), since that's what's actually true of the quota.
+#   Mistral (help.mistral.ai/en/articles/225174-what-are-the-limits-of-the-free-tier,
+#     verified live 2026-09) — La Plateforme free tier: 1 request/second
+#     (=60 RPM), 500,000 tokens/minute, 1,000,000,000 tokens/month, org-wide,
+#     no credit card required. By far the most generous free tier of any
+#     provider here on BOTH RPM and TPM — added 2026-09 per explicit user
+#     request for "another free AI provider, generous AF". Two providers
+#     researched and REJECTED before this one: GitHub Models is fully
+#     retired as of 2026-07-30 (no longer usable at all); SambaNova's true
+#     no-card free tier is capped at 20 REQUESTS PER DAY (not per minute —
+#     confirmed via docs.sambanova.ai/docs/en/models/rate-limits), too low
+#     to be useful here — its more generous "Developer Tier" numbers
+#     reported by third-party comparison sites require linking a card,
+#     which this project's other providers deliberately avoid. Caveat:
+#     Mistral uses free-tier input/output for model training BY DEFAULT
+#     (separate opt-out toggle per help.mistral.ai/en/articles/455207 —
+#     "Anonymous improvement data" in the account Privacy settings); this
+#     is a data-handling tradeoff to be aware of, not a functional
+#     limitation, and doesn't block use here since no PII/proprietary data
+#     is sent (only public job postings).
 _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single process
 _GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 calls/min
                                   # (6K TPM, 75% of cap — was 30s/2-calls-min, doubled
@@ -129,6 +161,12 @@ _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verif
 # classification below, so both stages' calls draw from one 40 RPM pool,
 # not two separate ones. 60/40 = 1.5s/call single-process baseline.
 _NVIDIA_BASE_INTERVAL = 1.5
+# Mistral La Plateforme free tier — 1 request/second confirmed live via
+# help.mistral.ai (see comment block above). 1/1 = 1.0s/call single-process
+# baseline. Same provider name "mistral" is used in BOTH role and location
+# provider lists below, so its one real 500K-TPM/1-RPS pool is tracked as
+# shared, not double-counted (same pattern as the shared Groq/NVIDIA keys).
+_MISTRAL_BASE_INTERVAL = 1.0
 
 # ── Role classification providers (free tiers, concurrent) ──
 # 2026-09: Gemini + Groq (explicit user request — swapped with location's
@@ -172,6 +210,20 @@ _ROLE_PROVIDER_DEFS = [
         "https://api.groq.com/openai/v1",
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
+    # Mistral: mistral-small-latest — see the base-interval comment block
+    # above for the live-verified free-tier numbers (1 RPS / 500K TPM / 1B
+    # tokens/month, no card). max_batch_chars kept modest here since titles
+    # are short and there's no reason to approach anywhere near Mistral's
+    # real per-call ceiling for role classification — this budget is a
+    # safety net, not the real limiter (MAX_JOBS_PER_BATCH does that job).
+    _make_provider(
+        "mistral",
+        "MISTRAL_API_KEY",
+        "mistral-small-latest",
+        "https://api.mistral.ai/v1",
+        max_batch_chars=300_000,
+        min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
 
@@ -243,6 +295,26 @@ _LOCATION_PROVIDER_DEFS = [
         "https://api.groq.com/openai/v1",
         max_batch_chars=6_000,
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
+    # Mistral: mistral-small-latest — same key/model/quota pool as the
+    # role-classification entry above (same provider name "mistral", so
+    # classifier.py's per-provider throttle correctly treats all Mistral
+    # calls as sharing ONE real 500K-TPM/1-RPS pool, not two independent
+    # ones). By far the most generous real budget of any of the four
+    # location providers — added specifically to absorb more of the
+    # per-run batch count that used to fall almost entirely on
+    # OpenAI/NVIDIA/Groq. max_batch_chars: mistral-small-latest's published
+    # context is 128K tokens; 0.8 headroom x ~4 chars/tok ≈ 400K, but
+    # capped well below that in practice by MAX_JOBS_PER_BATCH's 5-10 job
+    # ceiling (see classifier.py's _dynamic_job_cap) — this is a safety
+    # net, not the real limiter, same caveat as OpenAI/NVIDIA above.
+    _make_provider(
+        "mistral",
+        "MISTRAL_API_KEY",
+        "mistral-small-latest",
+        "https://api.mistral.ai/v1",
+        max_batch_chars=400_000,
+        min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
 
