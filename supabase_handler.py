@@ -1197,6 +1197,43 @@ def _touch_last_seen(seen_jobs: list[tuple[dict, str]], today: str):
 
 # ── Stale job cleanup ───────────────────────────────────
 
+def get_stale_job_ids(cutoff_days: int, source_pipeline: str) -> list[int]:
+    """Returns the `id`s of every `source_pipeline` row whose last_seen is
+    older than `cutoff_days` — i.e. exactly the rows cleanup_stale_jobs()
+    is about to hard-delete THIS run if called right after with the same
+    cutoff as its `delete_days`.
+
+    2026-09: added for Crawl III's Notion-cleanup requirement — once
+    cleanup_stale_jobs() hard-deletes a row, the Supabase id that ties it
+    to its Notion page (see notion_sync.PROP_SUPABASE_ID) is gone for
+    good, so the id list must be read BEFORE the delete, not after. Callers
+    (crawl_iii.run_finalize()) pass this to
+    notion_sync.archive_notion_pages_for_supabase_ids() first, then call
+    cleanup_stale_jobs() to actually remove the rows from Supabase.
+
+    Tolerates a fetch failure the same way get_existing_urls() does —
+    returns [] rather than raising, so a transient Supabase hiccup here
+    just means this run's Notion archiving is skipped, not that the whole
+    finalize step fails (the Supabase-side hard-delete still runs either
+    way)."""
+    cutoff = (date.today() - timedelta(days=cutoff_days)).isoformat()
+    try:
+        r = http_requests.get(
+            f"{REST}/jobs",
+            headers=HEADERS, timeout=30,
+            params={
+                "select": "id",
+                "source_pipeline": f"eq.{source_pipeline}",
+                "last_seen": f"lt.{cutoff}",
+            },
+        )
+        r.raise_for_status()
+        return [row["id"] for row in r.json() if "id" in row]
+    except Exception as e:
+        log.error(f"Failed to fetch stale job ids for source_pipeline={source_pipeline}: {e}")
+        return []
+
+
 def cleanup_stale_jobs(inactive_days: int = 30, delete_days: int = 60,
                         source_pipeline: str | None = None) -> dict:
     """
