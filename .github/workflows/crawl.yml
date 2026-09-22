@@ -47,10 +47,29 @@ name: Crawl
 # NVIDIA_API_KEY repo secret before relying on it — until then config.py
 # just skips that provider and runs Gemini+OpenAI as before, same as any
 # other missing provider key.
+#
+# 2026-09: added Crawl III (crawl_iii.py) — a third, independent pipeline
+# consuming stapply.ai's bulk pre-scraped CSVs (Phenom/UKG/SuccessFactors/
+# Dayforce/Eightfold/Recruitee) instead of live-scraping ATS boards. Opt-in
+# only, its OWN standalone `scope` value ("crawl_iii") rather than being
+# folded into "both" — "both" keeps its existing meaning (Crawl I + Crawl
+# II) unchanged, same as adding "archive_ii" as a value never redefined
+# what "both" meant. Skipped entirely unless `scope` is explicitly
+# "crawl_iii" on a manual run — never runs on the unattended cron trigger,
+# and does not run alongside Crawl I/II in the same dispatch (run it as its
+# own separate dispatch if you want all three the same day). Writes to the
+# SAME `jobs` table, tagged jobs.source_pipeline='crawl_iii', with its own
+# `needs`-gated finalize step (archives stale Notion pages, then
+# hard-deletes same-day-stale rows — see crawl_iii.py's run_finalize()
+# docstring for why its cutoffs are far more aggressive than Crawl I/II's).
+# No per-source sharding on the Supabase side is possible here (stapply
+# publishes one bulk CSV per platform, not a queryable per-row endpoint),
+# so crawl_iii_shard_count just splits the ALREADY-DOWNLOADED rows by a URL
+# hash — see crawl_iii.py's module docstring's "SHARDING" section.
 
 on:
   schedule:
-    - cron: "0 6 * * 1-5"   # 6:00 UTC = 7:00 AM WAT, Mon-Fri only — Crawl I only, Crawl II always skipped here (blank `scope` on this trigger)
+    - cron: "0 6 * * 1-5"   # 6:00 UTC = 7:00 AM WAT, Mon-Fri only — Crawl I only, Crawl II/III always skipped here (blank `scope` on this trigger)
   workflow_dispatch:
     inputs:
       scope:
@@ -61,6 +80,7 @@ on:
           - both
           - archive_i
           - archive_ii
+          - crawl_iii
         default: both
       archive_i_shard_count:
         description: "Crawl I: parallel shards over archive_i (known ATS boards) — only used if scope includes archive_i"
@@ -68,6 +88,10 @@ on:
         default: "10"
       archive_ii_shard_count:
         description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if scope includes archive_ii"
+        required: false
+        default: "10"
+      crawl_iii_shard_count:
+        description: "Crawl III: parallel shards over stapply.ai's direct job-board CSVs (Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee) — only used if scope is 'both' or 'crawl_iii'"
         required: false
         default: "10"
 
@@ -90,19 +114,21 @@ jobs:
     outputs:
       archive_i_matrix: ${{ steps.build.outputs.archive_i_matrix }}
       archive_ii_matrix: ${{ steps.build.outputs.archive_ii_matrix }}
+      crawl_iii_matrix: ${{ steps.build.outputs.crawl_iii_matrix }}
     steps:
       - name: Build shard-index matrices from shard_count inputs
         id: build
         run: |
           ARCHIVE_I_SHARDS="${{ github.event.inputs.archive_i_shard_count || '10' }}"
           ARCHIVE_II_SHARDS="${{ github.event.inputs.archive_ii_shard_count || '10' }}"
+          CRAWL_III_SHARDS="${{ github.event.inputs.crawl_iii_shard_count || '10' }}"
           python3 -c "
           import json
-          for name, count in [('archive_i', int('$ARCHIVE_I_SHARDS')), ('archive_ii', int('$ARCHIVE_II_SHARDS'))]:
+          for name, count in [('archive_i', int('$ARCHIVE_I_SHARDS')), ('archive_ii', int('$ARCHIVE_II_SHARDS')), ('crawl_iii', int('$CRAWL_III_SHARDS'))]:
               matrix = json.dumps({'include': [{'shard': s} for s in range(count)]})
               print(f'{name}_matrix={matrix}')
           " >> "$GITHUB_OUTPUT"
-          echo "archive_i shards: $ARCHIVE_I_SHARDS, archive_ii shards: $ARCHIVE_II_SHARDS"
+          echo "archive_i shards: $ARCHIVE_I_SHARDS, archive_ii shards: $ARCHIVE_II_SHARDS, crawl_iii shards: $CRAWL_III_SHARDS"
 
   # ── Prefix - Supabase — Notion statuses -> Supabase ─────────────────────
   # 2026-09 (explicit user instruction): runs ONCE, before any crawl shard
@@ -230,6 +256,49 @@ jobs:
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
 
+  # ── Crawl III — stapply.ai direct job-board CSVs ────────────────────────
+  # Opt-in only, its own standalone scope value ("crawl_iii") — see the
+  # module-level 2026-09 comment above for why it's not folded into "both".
+  # Never runs on the unattended cron trigger. Same-table writer as Crawl
+  # I/II (tagged source_pipeline='crawl_iii'), no Notion calls here either
+  # — see postfix-notion below for its finalize step.
+
+  crawl-iii:
+    needs: [prepare-matrix, prefix-supabase]
+    if: ${{ github.event.inputs.scope == 'crawl_iii' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.crawl_iii_matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: "Crawl III — shard ${{ matrix.shard }}/${{ github.event.inputs.crawl_iii_shard_count || '10' }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          LLM_PROVIDER: cerebras
+          AI_RATE_SHARDS: "12"
+      # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
+        run: exec python crawl_iii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.crawl_iii_shard_count || '10' }}
+
   # ── Postfix - Notion — new Supabase jobs -> Notion, then cleanup ────────
   # 2026-09 (explicit user instruction): merges the old crawl-i-finalize +
   # crawl-ii-finalize into ONE job that runs once both crawl-i and crawl-ii
@@ -243,10 +312,19 @@ jobs:
   # failure/skip-tolerant behavior but actually stops on a real cancel).
   # Named for what it writes TO: it takes whatever's new in Supabase and
   # pushes it to Notion, THEN does the regular stale-job cleanup — see
-  # postfix_notion.py for the two clearly-separated steps and why Crawl
-  # II's cleanup is conditional on Crawl II having actually run this cycle.
+  # postfix_notion.py for the clearly-separated steps and why Crawl II's/
+  # Crawl III's cleanup are each conditional on that pipeline having
+  # actually run this cycle.
+  #
+  # 2026-09: added `crawl-iii` to `needs` (still runs fine when crawl-iii
+  # is skipped by `scope` — GitHub treats a skipped dependency as
+  # satisfied for `needs`, same as it always has for crawl-ii) and a
+  # `--run-crawl-iii-cleanup` flag, parallel to the existing
+  # `--run-crawl-ii-cleanup` — Crawl III's finalize (archive stale Notion
+  # pages, then hard-delete same-day-stale rows) must only run on cycles
+  # where Crawl III's shards actually scanned something this time.
   postfix-notion:
-    needs: [crawl-i, crawl-ii]
+    needs: [crawl-i, crawl-ii, crawl-iii]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -276,8 +354,11 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_PROVIDER: cerebras
         run: |
+          ARGS=""
           if [ "${{ github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii' }}" = "true" ]; then
-            exec python postfix_notion.py --run-crawl-ii-cleanup
-          else
-            exec python postfix_notion.py
+            ARGS="$ARGS --run-crawl-ii-cleanup"
           fi
+          if [ "${{ github.event.inputs.scope == 'crawl_iii' }}" = "true" ]; then
+            ARGS="$ARGS --run-crawl-iii-cleanup"
+          fi
+          exec python postfix_notion.py $ARGS
