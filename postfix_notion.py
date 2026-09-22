@@ -27,7 +27,14 @@ log:
      start cleaning up Crawl II's rows on days Crawl II never scanned
      them.
 
-Usage: python postfix_notion.py [--run-crawl-ii-cleanup]
+  3. Crawl III's cleanup (2026-09) — same conditional-on-having-run
+     pattern as Crawl II, via --run-crawl-iii-cleanup. crawl_iii.
+     run_finalize() does its own two-step job internally (archive stale
+     Notion pages FIRST, then hard-delete the same-day-stale Supabase
+     rows — see that function's docstring), so this file just calls it;
+     no separate Notion-archiving step is needed here.
+
+Usage: python postfix_notion.py [--run-crawl-ii-cleanup] [--run-crawl-iii-cleanup]
 """
 
 import argparse
@@ -36,6 +43,7 @@ import logging
 import notion_sync
 import crawl_i
 import crawl_ii
+import crawl_iii
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +58,10 @@ def main() -> None:
     parser.add_argument("--run-crawl-ii-cleanup", action="store_true",
                          help="Also run Crawl II's stale-job cleanup — pass this only on "
                               "runs where Crawl II's shards actually ran this cycle")
+    parser.add_argument("--run-crawl-iii-cleanup", action="store_true",
+                         help="Also run Crawl III's stale-job cleanup (archives stale Notion "
+                              "pages, then hard-deletes same-day-stale rows) — pass this only "
+                              "on runs where Crawl III's shards actually ran this cycle")
     args = parser.parse_args()
 
     log.info("=" * 60)
@@ -69,6 +81,12 @@ def main() -> None:
         crawl_ii.run_finalize()
     else:
         log.info("── Step 3: Crawl II cleanup — skipped (Crawl II did not run this cycle) ──")
+
+    if args.run_crawl_iii_cleanup:
+        log.info("── Step 4: Crawl III cleanup ──")
+        crawl_iii.run_finalize()
+    else:
+        log.info("── Step 4: Crawl III cleanup — skipped (Crawl III did not run this cycle) ──")
 
     log.info("=" * 60)
     log.info("POSTFIX — NOTION complete")
