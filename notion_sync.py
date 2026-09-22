@@ -339,6 +339,67 @@ def _build_page_properties(row: dict, schema: dict) -> dict:
     return props
 
 
+# ── Step 3 (2026-09, Crawl III only): archive stale pages ───────────────
+
+def archive_notion_pages_for_supabase_ids(ids: list[int]) -> int:
+    """Archives (Notion's soft-delete — `archived: true`, recoverable from
+    Notion's own trash) the page for each given jobs.id, found via the
+    Supabase ID property (PROP_SUPABASE_ID) that push_pending_jobs_to_notion()
+    stamps on every page it creates.
+
+    Added for Crawl III's aggressive same-day staleness policy: unlike
+    Crawl I/Crawl II (3-day cutoffs), Crawl III hard-deletes a Supabase row
+    the very next run it isn't re-seen (see crawl_iii.py's INACTIVE_DAYS/
+    DELETE_DAYS = 1) — without this, a Notion page for a job stapply.ai
+    quietly dropped (closed/expired, no signal in its CSV — see stapply
+    research notes) would sit in Notion forever pointing at a Supabase row
+    that no longer exists. Caller MUST fetch `ids` via
+    supabase_handler.get_stale_job_ids() BEFORE calling
+    cleanup_stale_jobs() — once that hard-deletes the row, the id can no
+    longer be used to find its page.
+
+    Deliberately scoped to a list of ids the caller already decided are
+    stale, not a source_pipeline filter of its own — this module has no
+    opinion on cleanup policy, it just does what it's told for each id
+    given. A job whose page was never created (e.g. push failed, or it
+    never cleared filter_roles/filter_locations) is a silent no-op per id,
+    not an error — same best-effort philosophy as the rest of this module.
+    One query + (usually) one PATCH per id: at Crawl III's expected volume
+    (a handful to low dozens of same-day drops, not thousands) this stays
+    well under Notion's ~3 req/sec limit via the shared _request()
+    throttle, same as every other call in this file.
+
+    Returns how many pages were actually archived."""
+    if not ids or not _configured():
+        return 0
+
+    schema = _get_schema()
+    if schema and PROP_SUPABASE_ID not in schema:
+        log.warning(f"Notion property {PROP_SUPABASE_ID!r} not found in database schema — "
+                     f"cannot look up pages by Supabase id, skipping archive for {len(ids)} stale jobs")
+        return 0
+
+    archived = 0
+    for job_id in ids:
+        data = _request("POST", f"/databases/{NOTION_DATABASE_ID}/query", {
+            "filter": {"property": PROP_SUPABASE_ID, "number": {"equals": job_id}},
+            "page_size": 5,
+        })
+        if not data:
+            continue
+        for page in data.get("results", []):
+            page_id = page.get("id")
+            if not page_id or page.get("archived"):
+                continue
+            result = _request("PATCH", f"/pages/{page_id}", {"archived": True})
+            if result is not None:
+                archived += 1
+
+    if archived or ids:
+        log.info(f"  archived {archived}/{len(ids)} Notion pages for stale jobs")
+    return archived
+
+
 def push_pending_jobs_to_notion() -> dict:
     """Called once by postfix_notion.py, after every crawl-i/crawl-ii
     shard has finished. Fetches every Supabase row with no Notion page
