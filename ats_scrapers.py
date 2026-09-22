@@ -47,6 +47,90 @@ def _get_session() -> requests.Session:
         _thread_local.session.mount("http://", adapter)
     return _thread_local.session
 
+
+# ── Per-run scrape failure aggregation (2026-09, explicit user request) ──
+# Individual company/tenant scrape failures (a bad Workday slug returning
+# 403/422, a dead tenant, etc.) used to each get their own WARNING-level
+# log line with the full URL and response body — real-world runs against
+# tens of thousands of slugs can produce hundreds of these back-to-back,
+# drowning out everything else in the log (confirmed live: a user
+# complaint about exactly this wall of individual Workday warnings).
+# Instead of removing the diagnostic detail entirely, each failure is
+# recorded here (thread-safe — scrapers run under a ThreadPoolExecutor,
+# see crawl_i.py's scrape_all) and the full body/URL still goes out at
+# DEBUG level for anyone actually debugging a specific tenant. The
+# grown-up-facing message is a single grouped one-liner per (platform,
+# reason) — e.g. "breakthrought1d and 22 others: HTTP 422 (unrecognized
+# site)" — printed once via log_scrape_failure_summary(), called from
+# crawl_i.py right before the location-classification stage starts (the
+# "errors section" the run's own log structure already has a natural
+# place for).
+_scrape_failures: dict[tuple[str, str], list[str]] = {}
+_scrape_failures_lock = threading.Lock()
+
+
+def _record_scrape_failure(ats: str, identifier: str, reason: str) -> None:
+    """Record one company/tenant's scrape failure for later grouped
+    summary instead of an immediate per-item WARNING log line. `reason`
+    should already be a short, human-readable, GROUPABLE string (e.g.
+    "HTTP 422 (unrecognized site)", "HTTP 403 (bot-blocked)", "connection
+    error") — every failure with the same (ats, reason) pair gets grouped
+    into one summary line together, so callers should normalize away
+    anything unique-per-company (like error case IDs) before calling this."""
+    with _scrape_failures_lock:
+        _scrape_failures.setdefault((ats, reason), []).append(identifier)
+
+
+def get_scrape_failure_summary(clear: bool = True) -> str | None:
+    """Build one grouped, human-readable summary line per (ats, reason)
+    from every failure recorded via _record_scrape_failure since the last
+    call (or since process start). Returns None if nothing failed.
+
+    Format per group: "{first identifier} and {N} others: {reason}" (just
+    "{identifier}: {reason}" when there's only one) — matching the exact
+    shape asked for ("company abc and 23 others 404'd, company efg and 4
+    others 503'd"). Groups are sorted largest-first so the biggest,
+    most-worth-investigating failure pattern reads first."""
+    with _scrape_failures_lock:
+        if not _scrape_failures:
+            return None
+        groups = list(_scrape_failures.items())
+        if clear:
+            _scrape_failures.clear()
+
+    # Group further by ats so multi-platform runs read as one line per
+    # platform rather than an unlabeled flat list.
+    by_ats: dict[str, list[tuple[str, list[str]]]] = {}
+    for (ats, reason), identifiers in groups:
+        by_ats.setdefault(ats, []).append((reason, identifiers))
+
+    lines = []
+    for ats in sorted(by_ats):
+        reason_groups = sorted(by_ats[ats], key=lambda rg: -len(rg[1]))
+        parts = []
+        total = 0
+        for reason, identifiers in reason_groups:
+            total += len(identifiers)
+            first = identifiers[0]
+            if len(identifiers) == 1:
+                parts.append(f"{first}: {reason}")
+            else:
+                parts.append(f"{first} and {len(identifiers) - 1} other"
+                             f"{'s' if len(identifiers) > 2 else ''}: {reason}")
+        lines.append(f"[{ats}] {total} failed — " + "; ".join(parts))
+
+    return "\n".join(lines)
+
+
+def log_scrape_failure_summary() -> None:
+    """Convenience wrapper: log the grouped summary (if any) at WARNING
+    level and clear the collector for the next run. No-op, no log line at
+    all, when nothing failed this run."""
+    summary = get_scrape_failure_summary(clear=True)
+    if summary:
+        log.warning("── Scrape failures (grouped) ──\n" + summary)
+
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
@@ -729,28 +813,42 @@ def scrape_workday(slug: str) -> list[dict]:
                 api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
             )
         except Exception as e:
-            log.warning(
+            log.debug(
                 f"[workday] Request failed for slug={slug!r} offset={offset} "
                 f"url={api_url}: {type(e).__name__}: {e}"
             )
+            _record_scrape_failure("workday", company, f"connection error ({type(e).__name__})")
             break
 
         if r.status_code != 200:
-            log.warning(
+            log.debug(
                 f"[workday] Non-200 status for slug={slug!r} offset={offset} "
                 f"url={api_url}: status={r.status_code} "
                 f"body={r.text[:200]!r}"
             )
+            # 2026-09: group by (status, errorCode) when Workday's own JSON
+            # body has one (e.g. S21 "site not found", S22 "permission
+            # denied"/bot-blocked) — that's the actually-groupable, stable
+            # signal; the errorCaseId in the same body is unique PER
+            # REQUEST and would defeat grouping entirely if included.
+            error_code = None
+            try:
+                error_code = r.json().get("errorCode")
+            except Exception:
+                pass
+            reason = f"HTTP {r.status_code}" + (f" ({error_code})" if error_code else "")
+            _record_scrape_failure("workday", company, reason)
             break
 
         try:
             data = r.json()
         except Exception as e:
-            log.warning(
+            log.debug(
                 f"[workday] Failed to parse JSON for slug={slug!r} offset={offset} "
                 f"url={api_url}: {type(e).__name__}: {e} "
                 f"body={r.text[:200]!r}"
             )
+            _record_scrape_failure("workday", company, "invalid JSON response")
             break
 
         postings = data.get("jobPostings", [])
