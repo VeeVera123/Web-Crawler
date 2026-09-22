@@ -55,7 +55,7 @@ from classifier import (
     PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
 from supabase_handler import (
-    add_jobs_batch, start_scan_report, finish_scan_report,
+    add_jobs_batch, bump_scan_report, finish_scan_report_for_pipeline,
     get_all_slugs, cleanup_stale_jobs,
     get_existing_urls, touch_seen_jobs_raw,
     touch_archive_i_last_seen,
@@ -73,6 +73,13 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+# Matches add_jobs_batch()'s default and _build_row()'s default —
+# spelled out explicitly here (rather than relying on those defaults)
+# purely so bump_scan_report()/finish_scan_report_for_pipeline() calls
+# below have one obvious source of truth for the pipeline name, same
+# style as crawl_ii.py's/crawl_iii.py's own SOURCE_PIPELINE constants.
+SOURCE_PIPELINE = "crawl_i"
 
 # ── Per-platform concurrency limits ──────────────────────
 # Two categories, tuned differently:
@@ -503,15 +510,20 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def _run_pipeline(boards: list[tuple[str, str]]) -> None:
-    """Shared core: scrape → filter → enrich → push, with its own
-    scan_report row. Does NOT run cleanup_stale_jobs() — see
-    run_finalize() for why that's split out.
+    """Shared core: scrape → filter → enrich → push. Does NOT run
+    cleanup_stale_jobs() — see run_finalize() for why that's split out.
 
     2026-08: job board aggregators (RemoteOK, Remotive, etc. — see
     job_board_scrapers.py) were disabled and the file removed entirely —
-    ATS boards are now the only source Crawl I scrapes."""
-    report_id = start_scan_report()
+    ATS boards are now the only source Crawl I scrapes.
 
+    2026-09: scan-report accounting switched from start_scan_report()/
+    finish_scan_report(report_id, ...) (one brand-new Supabase row per
+    shard — confirmed live as 10-70+ rows/day, useless as a daily
+    summary) to bump_scan_report(SOURCE_PIPELINE, ...) — this shard
+    reports only its OWN contribution, and Postgres atomically adds it
+    into the single (run_date, source_pipeline) row every shard shares.
+    See supabase_handler.bump_scan_report()'s docstring."""
     try:
         all_jobs: list[dict] = []
         boards_ok = boards_failed = 0
@@ -535,8 +547,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
 
         if not all_jobs:
             log.info("No jobs found across any source.")
-            if report_id:
-                finish_scan_report(report_id, boards_scanned=boards_ok, boards_failed=boards_failed)
+            bump_scan_report(SOURCE_PIPELINE, boards_scanned=boards_ok, boards_failed=boards_failed)
             return
 
         raw_scraped_count = len(all_jobs)
@@ -563,11 +574,10 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
             touch_seen_jobs_raw(already_seen)
         if not new_jobs:
             log.info("No new (previously unseen) jobs to classify.")
-            if report_id:
-                finish_scan_report(
-                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
-                    total_jobs_raw=raw_scraped_count, duplicates=len(already_seen),
-                )
+            bump_scan_report(
+                SOURCE_PIPELINE, boards_scanned=boards_ok, boards_failed=boards_failed,
+                total_jobs_raw=raw_scraped_count, duplicates=len(already_seen),
+            )
             return
         all_jobs = new_jobs
 
@@ -576,11 +586,10 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         csm_jobs = filter_roles(all_jobs)
         if not csm_jobs:
             log.info("No CSM/AM roles found.")
-            if report_id:
-                finish_scan_report(
-                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
-                    total_jobs_raw=raw_scraped_count,
-                )
+            bump_scan_report(
+                SOURCE_PIPELINE, boards_scanned=boards_ok, boards_failed=boards_failed,
+                total_jobs_raw=raw_scraped_count,
+            )
             return
 
         # 2026-09 (explicit user request): print grouped scrape-failure
@@ -607,11 +616,10 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         global_jobs, confidences = filter_locations(csm_jobs)
         if not global_jobs:
             log.info("No global/Africa-eligible CSM/AM roles found.")
-            if report_id:
-                finish_scan_report(
-                    report_id, boards_scanned=boards_ok, boards_failed=boards_failed,
-                    total_jobs_raw=raw_scraped_count, csm_roles=len(csm_jobs),
-                )
+            bump_scan_report(
+                SOURCE_PIPELINE, boards_scanned=boards_ok, boards_failed=boards_failed,
+                total_jobs_raw=raw_scraped_count, csm_roles=len(csm_jobs),
+            )
             return
 
         # Detect visa sponsorship from descriptions (before discarding them)
@@ -632,17 +640,16 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         # re-matches (global_jobs that still weren't a true first-insert —
         # should be rare now, but not impossible with in-run URL reuse).
         duplicates = len(already_seen) + (len(global_jobs) - added)
-        if report_id:
-            finish_scan_report(
-                report_id,
-                boards_scanned=boards_ok,
-                boards_failed=boards_failed,
-                total_jobs_raw=raw_scraped_count,
-                csm_roles=len(csm_jobs),
-                global_jobs=len(global_jobs),
-                new_jobs_added=added,
-                duplicates=duplicates,
-            )
+        bump_scan_report(
+            SOURCE_PIPELINE,
+            boards_scanned=boards_ok,
+            boards_failed=boards_failed,
+            total_jobs_raw=raw_scraped_count,
+            csm_roles=len(csm_jobs),
+            global_jobs=len(global_jobs),
+            new_jobs_added=added,
+            duplicates=duplicates,
+        )
 
         log.info("── Summary ──")
         log.info(f"  {added} new jobs added to Supabase.")
@@ -652,8 +659,7 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
 
     except Exception as e:
         log.error(f"Scanner failed: {e}")
-        if report_id:
-            finish_scan_report(report_id, status="failed")
+        bump_scan_report(SOURCE_PIPELINE, status="failed")
         raise
 
 
@@ -691,10 +697,14 @@ def run_finalize() -> None:
     log.info("=" * 60)
     log.info("CRAWL I — finalize (cleanup stale jobs)")
     log.info("=" * 60)
-    summary = cleanup_stale_jobs(inactive_days=3, delete_days=3, source_pipeline="crawl_i")
+    summary = cleanup_stale_jobs(inactive_days=3, delete_days=3, source_pipeline=SOURCE_PIPELINE)
     log.info(f"Crawl I finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
+    # 2026-09: closes out today's single scan_reports row for crawl_i —
+    # finished_at + status='completed' (unless a shard already marked it
+    # 'failed' via bump_scan_report — see that function's docstring).
+    finish_scan_report_for_pipeline(SOURCE_PIPELINE)
 
 
 def main():
