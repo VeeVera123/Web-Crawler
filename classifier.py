@@ -195,14 +195,48 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
                 time.sleep(delay)
                 continue
+            # 2026-09 FIX (real production evidence, not hypothetical):
+            # investigated after the pipeline owner reported Groq "failing
+            # massively" despite the model being confirmed live and not
+            # deprecated (checked against Groq's own docs). Root cause:
+            # an ordinary per-minute rate limit (429) that survives
+            # MAX_RETRIES attempts used to fall into the SAME
+            # _mark_exhausted call as a genuine daily-quota exhaustion or
+            # a hard non-retryable error — permanently blacklisting the
+            # provider for the REST of this process's run, even though a
+            # per-minute quota (Groq's real pool: 8K TPM) fully refills
+            # within a minute. Groq's quota is shared across role AND
+            # location classification AND all AI_RATE_SHARDS concurrent
+            # crawl-shard processes (see config.py's provider comments) —
+            # a single congested burst early in a run is enough to trip
+            # this and silently kill Groq for that shard's ENTIRE
+            # remaining run, which looks exactly like "the provider is
+            # broken" from the outside. A daily-quota error (is_daily_limit
+            # above) genuinely can't recover mid-run, so permanently
+            # blacklisting is correct there — but a rate limit that merely
+            # outlasted this call's retries is NOT the same thing, and
+            # should just fail THIS call (existing cross-provider failover
+            # already handles that) so the provider gets tried again on
+            # the next batch, once the per-minute window has reset.
+            if is_rate_limit:
+                log.warning(f"{name} rate limit exhausted retries for this call — "
+                            f"NOT blacklisting (per-minute quota, will retry on next batch)")
+                return None
             # Every remaining path is a genuine give-up on this provider
-            # for this call — exhausted retries on an ordinary rate limit,
-            # or any other non-retryable API error. Per the circuit-breaker
-            # policy above, this now marks the provider exhausted for the
-            # rest of the run too, not just this one batch.
+            # for this call that ISN'T a recoverable rate limit — some
+            # other non-retryable API error (bad auth, invalid request,
+            # model error, etc.). This still marks the provider exhausted
+            # for the rest of the run, since there's no reason to expect
+            # those to self-resolve within the same process.
             _mark_exhausted(name, f"API error: {e}")
             return None
-    _mark_exhausted(name, "exhausted all retries")
+    # Every retry attempt returned null content or was itself a rate limit
+    # that got retried — if we fall out of the loop entirely without an
+    # exception, that means MAX_RETRIES null-content attempts (already
+    # handled above, returns before reaching here) or (2026-09 fix, see
+    # above) exhausted rate-limit retries with no exception on the final
+    # attempt. Either way this is the same "don't permanently blacklist a
+    # per-minute rate limit" fix — not a hard failure worth a circuit break.
     return None
 
 
