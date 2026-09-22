@@ -192,7 +192,9 @@ sys.path.insert(0, _ROOT)  # for node.py
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # for ats_scrapers.py (job-count reporting)
 import node  # noqa: E402
 from ats_scrapers import scrape_board  # noqa: E402
-from discovery import _looks_like_real_slug, _WD_INSTANCE_PLACEHOLDER_RE  # noqa: E402
+from discovery import (  # noqa: E402
+    _looks_like_real_slug, _WD_INSTANCE_PLACEHOLDER_RE, _workday_site_id_is_ui_action,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
                      datefmt="%H:%M:%S")
@@ -1296,6 +1298,14 @@ def _workday_slug_is_malformed(slug: str) -> bool:
     if not re.match(r"^wd\d+$", wd, re.I):
         return True
     if not _looks_like_real_slug(site):
+        return True
+    # 2026-09 NEW (real archive_i row: "alpinephysicians|wd1|refreshFacet" —
+    # the tenant's real working career site is .../External, not
+    # .../refreshFacet) — see discovery.py's _workday_site_id_is_ui_action
+    # docstring for the full evidence. A JS widget action name passes every
+    # OTHER shape check above (not a filename, hash, locale code, or
+    # instance placeholder), so it needs its own dedicated check.
+    if _workday_site_id_is_ui_action(site):
         return True
     return False
 
