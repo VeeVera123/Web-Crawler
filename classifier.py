@@ -1,8 +1,12 @@
 """
 Two-stage classifier — multi-provider architecture.
 
-Role classification:     Cerebras + Groq + NVIDIA NIM (free tiers, concurrent)
-Location classification: Gemini + OpenAI GPT-4.1 nano + NVIDIA NIM (concurrent)
+Role classification:     Gemini + Groq + Mistral (free tiers, concurrent)
+Location classification: NVIDIA NIM + OpenAI GPT-4.1 nano + Groq + Mistral (concurrent)
+
+(See config.py's module docstring for the full, current provider roster
+and the reasoning behind each swap — this list drifts as providers get
+added/moved, so config.py is the source of truth if this ever looks stale.)
 
 Falls back to single-provider mode if only LLM_PROVIDER is set.
 
@@ -586,14 +590,14 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     # no other signal, so if a provider's API key is missing this run,
     # that's the single most useful line for explaining an unexpectedly
     # low role-match count.
-    _known_role_providers = {"gemini", "groq"}
+    _known_role_providers = {"gemini", "groq", "mistral"}
     _active = {p["name"] for p in providers}
     _missing = _known_role_providers - _active
     if _missing:
-        log.warning(f"Role AI running with {len(_active)}/2 providers "
-                    f"({', '.join(sorted(_active)) or 'none'}) — missing "
-                    f"{', '.join(sorted(_missing))} (no API key set). No "
-                    f"failover if this one struggles.")
+        log.warning(f"Role AI running with {len(_active)}/{len(_known_role_providers)} "
+                    f"providers ({', '.join(sorted(_active)) or 'none'}) — missing "
+                    f"{', '.join(sorted(_missing))} (no API key set). Less "
+                    f"failover if one of the active providers struggles.")
 
     provider_summary = ", ".join(
         f"{p['name']}:{len(provider_titles[p['name']])}" for p in providers
@@ -1747,14 +1751,15 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     # were actually left — nothing said the others were missing. This is
     # the single most likely explanation for "why did so few jobs get a
     # real AI verdict this run."
-    _known_location_providers = {"nvidia", "openai", "groq"}
+    _known_location_providers = {"nvidia", "openai", "groq", "mistral"}
     _active = {p["name"] for p in providers}
     _missing = _known_location_providers - _active
     if _missing:
-        log.warning(f"Location AI running with {len(_active)}/3 providers "
-                    f"({', '.join(sorted(_active)) or 'none'}) — missing "
+        log.warning(f"Location AI running with {len(_active)}/{len(_known_location_providers)} "
+                    f"providers ({', '.join(sorted(_active)) or 'none'}) — missing "
                     f"{', '.join(sorted(_missing))} (no API key set). Lower "
-                    f"throughput and no failover if this one struggles.")
+                    f"throughput and less failover if one of the active "
+                    f"providers struggles.")
 
     # ── Round-robin assign jobs to providers (tracking original indices) ──
     provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
