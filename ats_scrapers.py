@@ -5848,7 +5848,22 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
 # re-fetching the listing page.
 
 _WORK_AUTH_RE = re.compile(
-    r"(authorized?\s*to\s*work|work\s*authoriz|visa\s*sponsor|"
+    # 2026-09 FIX (real production evidence: Federato's "Senior Customer
+    # Success Manager" on Greenhouse, job id 5391941008) — the screening
+    # question label was "Are you eligible to work in the United States or
+    # Canada?", which this regex previously never matched at all: the only
+    # "...to work" alternative required the word "authorized"/"authorised"
+    # specifically, so an "eligible to work in <country>" phrasing (just as
+    # common in the wild as "authorized to work") was silently invisible to
+    # enrich_application_questions() — the question never even became an
+    # "Application Question:" line for classifier.py's
+    # has_hard_country_specific_auth_signal to see, regardless of how good
+    # that function's own country-matching got. Fixed by folding
+    # "authorized/eligible/entitled/permitted to work" into one alternative
+    # (mirrors the phrasing set classifier.py's _COUNTRY_AUTH_RE already
+    # expects on the other end of this pipeline).
+    r"((?:authorized?|authorised?|eligible|entitled|permitted)\s*to\s*work|"
+    r"eligib\w*\s*to\s*work|work\s*authoriz|visa\s*sponsor|"
     r"immigration\s*sponsor|right\s*to\s*work|work\s*permit|"
     r"employment\s*eligib|legally\s*authorized|"
     r"require.*\bsponsorship\b|"
