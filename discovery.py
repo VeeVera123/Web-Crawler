@@ -8,14 +8,15 @@ see node.py's ARCHIVE_I_TABLE comment).
 Sources:
   1. Feashliaa GitHub (50k+ slugs for 6 platforms — greenhouse,
      lever, ashby, bamboohr, icims, workday)
-  2. kalil0321/ats-scrapers (CSV inventories for 23 platforms —
+  2. kalil0321/ats-scrapers (CSV inventories for 26 platforms —
      incl. smartrecruiters, workable, adp, oracle_cloud_hcm, csod,
      taleo, paylocity, personio, avature, pinpoint, jazzhr, joincom,
-     gem. 2026-09: expanded from 12 to 23 — the repo already had CSVs
-     for 11 more platforms we have a working URL_TO_SLUG converter for
-     but weren't pulling from (see KALIL_SOURCES); successfactors'
-     CSV is still deliberately excluded — no URL-based converter
-     exists for it, see URL_TO_SLUG's successfactors comment)
+     gem, paycom, pageup, softgarden. 2026-09: expanded from 12 to 23
+     in round 1, then 23 to 26 in round 2 after the user cross-checked
+     kalil's own live company-count listing and caught paycom missing
+     entirely (never added) — successfactors' CSV is still deliberately
+     excluded, no URL-based converter exists for it, see URL_TO_SLUG's
+     successfactors comment)
   3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
   4. Common Crawl index (ongoing discovery for 27 platforms — including
      6 also covered by Feashliaa's bulk dump, added as a supplemental
@@ -216,19 +217,56 @@ KALIL_SOURCES = {
     "paylocity":        f"{KALIL_BASE}/paylocity.csv",
     "taleo":            f"{KALIL_BASE}/taleo.csv",
     "oracle_cloud_hcm": f"{KALIL_BASE}/oracle.csv",
+    # 2026-09 round 2 (real user question: "did you not query kalil for
+    # paycom? recruitee has more rows than we do now" — prompted by the
+    # user pasting kalil's own live company-count listing). Confirmed via
+    # that listing plus a live fetch of each raw CSV: these 3 also exist,
+    # also have working scrapers (ats_scrapers.SCRAPERS) AND URL_TO_SLUG
+    # converters, and were simply never added in the first pass. Note
+    # "softgarden" specifically: an OLD comment used to list it (alongside
+    # taleo — also since fixed) as "Disabled (JS-rendered / auth-required /
+    # blocked)" — re-checked live this round and that CSV fetches and
+    # parses cleanly now, so whatever the original blocker was, it no
+    # longer applies (or never applied to the CSV fetch itself, only to
+    # some other access path). "recruitee" itself needs no CSV-URL fix —
+    # it was already wired and returns kalil's full current count when
+    # queried live; a lower count in Supabase right now most likely means
+    # this file's changes haven't reached the git remote GitHub Actions
+    # actually runs from yet (see the standing deployment-gap note from
+    # earlier this session), not a code bug here.
+    "paycom":    f"{KALIL_BASE}/paycom.csv",
+    "pageup":    f"{KALIL_BASE}/pageup.csv",
+    "softgarden": f"{KALIL_BASE}/softgarden.csv",
     # Still disabled — no URL-based converter exists (detected via content
     # fingerprint elsewhere, not a URL string), so the CSV's "url" column
     # can't be converted, and the platform isn't in DIRECT_SLUG_PLATFORMS
     # below because its raw CSV slug format hasn't been verified against
     # what our own scraper/verifier expects:
     # "successfactors"
-    # Confirmed unscrapeable platforms (see Main/BLACKLISTED_ATS.md) —
-    # deliberately never added even though kalil0321 has CSVs for some of
-    # these too: "phenom" (ukg/phenom), "eightfold", "recruiterbox".
+    # Confirmed unscrapeable (UKG/Phenom family, see the URL_TO_SLUG dict's
+    # own "ukg/phenom: no entry — confirmed unscrapeable" comment) —
+    # deliberately never added even though kalil0321 has a CSV for it too:
+    # "phenom".
+    # "eightfold": no URL_TO_SLUG entry / no scraper yet — not a confirmed-
+    # blocked platform, just not built. Worth reconsidering separately if
+    # ever prioritized.
+    # "recruiterbox": verified 2026-09 (not just assumed) — the original
+    # recruiterbox.com product no longer exists independently; it rebranded
+    # to Trakstar Hire years ago, and Trakstar Hire's job/openings API is
+    # per-customer-authenticated (developers.recruiterbox.com), not an open
+    # per-company slug pattern like every other source here — there is no
+    # anonymous endpoint to scrape, so this isn't addable in this project's
+    # slug-scraping model at all, regardless of how many rows kalil0321 has
+    # for it.
     # Not ATS platforms at all (country-specific public job boards, out of
-    # scope for this project): "infojobs_es", "jobs_cz".
+    # scope for this project): "infojobs_es", "jobs_cz", "jobbankca".
     # "mercor" not added: not in URL_TO_SLUG/SUPPORTED_ATS — no working
     # scraper for it yet, so slugs from it can't be verified or scraped.
+    # Not in URL_TO_SLUG/SUPPORTED_ATS at all, no scraper exists for any of
+    # these (separate discussion needed before considering): "beisen",
+    # "beisen_legacy", "bytedance", "darwinbox", "gupy" (no public API —
+    # every known scraper for it uses browser automation, not a URL-based
+    # slug), "herp", "hrmos", "keka", "moka", "seek", "ukg".
 }
 
 # Common Crawl
@@ -6313,9 +6351,9 @@ def main():
         else:
             grand_total += fa_total
 
-    # Source 2: kalil0321/ats-scrapers (23 platforms, CSV inventories)
+    # Source 2: kalil0321/ats-scrapers (26 platforms, CSV inventories)
     if args.source in ("kalil", "all"):
-        log.info("\n--- KALIL0321 (23 platforms, CSV inventories) ---")
+        log.info("\n--- KALIL0321 (26 platforms, CSV inventories) ---")
         ka_slugs = fetch_kalil_slugs()
         ka_total = sum(len(s) for s in ka_slugs.values())
 
