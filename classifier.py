@@ -2311,8 +2311,8 @@ _CANDIDATE_WORD_RE = re.compile(r"\b(?:candidates?|applicants?|residents?)\b", r
 _ANY_RESIDENCE_PLACE_RE = re.compile(r"\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b", re.I)
 
 _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
-    r"\b(?:team|office|headquarters|hq|company|organization|organisation|"
-    r"org|department|division|studio|founders?)\b",
+    r"\b(?:teams?|offices?|headquarters|hq|compan(?:y|ies)|organizations?|"
+    r"organisations?|orgs?|departments?|divisions?|studios?|founders?)\b",
     re.I,
 )
 
@@ -2372,7 +2372,8 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
         if _COUNTRY_BASED_RESTRICTION_RE.search(sentence):
             return True
         if (_REMOTE_FOR_TRIGGER_RE.search(sentence) and _CANDIDATE_WORD_RE.search(sentence)
-                and _ANY_RESIDENCE_PLACE_RE.search(sentence)):
+                and _ANY_RESIDENCE_PLACE_RE.search(sentence)
+                and not _text_has_global_evidence(sentence)):
             return True
     return False
 
