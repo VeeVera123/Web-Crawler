@@ -1,27 +1,35 @@
 name: Crawl
 
 # Unified daily crawl workflow (formerly daily_scan.yml, ATS Global Scanner).
-# 2026-08 restructure: runs Crawl I (crawl_i.py, formerly main.py — the
-# known-ATS scanner reading archive_i, formerly slug_registry) and/or
-# Crawl II (crawl_ii.py — the heuristic in-house/unsupported career-page
-# scraper reading archive_ii, formerly archive_iii), selected via the
-# `scope` dropdown (both / archive_i / archive_ii).
+# Runs up to three independent pipelines against the same `jobs` table:
+#   Crawl I   (crawl_i.py)   — known-ATS scanner reading archive_i
+#   Crawl II  (crawl_ii.py)  — heuristic in-house/unsupported career-page scraper reading archive_ii
+#   Crawl III (crawl_iii.py) — stapply.ai direct job-board CSV consumer (Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee)
+# Every row is tagged jobs.source_pipeline ('crawl_i'/'crawl_ii'/'crawl_iii'),
+# and each pipeline's own finalize step only ever cleans up its own tagged
+# rows — see each crawl_*.py's run_finalize() docstring.
 #
-# 2026-09: replaced the old `include_archive_ii` checkbox with this
-# dropdown — the checkbox could only ever ADD Crawl II on top of Crawl I
-# (which always ran unconditionally), so there was no way to run Crawl II
-# by itself. `scope` picks exactly which crawl(s) run: default "both"
-# (matches the old default-unchecked... plus the checkbox's own default
-# of Crawl-I-only was actually the OPPOSITE of "both" — see the two `if:`
-# conditions below for the exact logic), or either archive alone. The
-# scheduled/cron trigger never sets `scope` at all (github.event.inputs.scope
-# is blank on that trigger), and both `if:` conditions treat a blank scope
-# the same as the old cron default: Crawl I only, Crawl II always skipped
-# — the daily automatic run's behavior is unchanged by this rename. Crawl I
-# and Crawl II write to the SAME `jobs` table but
-# every row is tagged jobs.source_pipeline ('crawl_i' / 'crawl_ii'), and
-# each pipeline's finalize job only cleans up its own tagged rows — see
-# crawl_i.py's and crawl_ii.py's run_finalize() docstrings.
+# 2026-09 (this revision, explicit user instruction — replaces the earlier
+# `scope` single-choice dropdown entirely): the dropdown had a real bug —
+# picking "both" (Crawl I + Crawl II) silently left Crawl III unselectable
+# in the SAME run, because "both" only ever meant "Crawl I + Crawl II",
+# never "everything." There was no dropdown value that meant "all three."
+# Replaced with three independent checkboxes — run_crawl_i/run_crawl_ii/
+# run_crawl_iii — each `type: boolean`, each `default: true`. On a manual
+# dispatch, all three run unless you UNTICK the ones you don't want (the
+# opt-OUT model the user asked for, not opt-in). On the unattended cron
+# trigger, ALL THREE now run every scheduled morning — previously only
+# Crawl I ran on schedule (Crawl II/III were opt-in-only, dispatch-only);
+# that restriction is gone. See each crawl-*/postfix-notion job's `if:`
+# condition below for the exact expression
+# (`github.event_name == 'schedule' || inputs.run_crawl_*`) that
+# implements both halves of this at once.
+#
+# Historical note: `github.event.inputs.*` (all-string) was used
+# throughout the old `scope`-dropdown version of this file; this revision
+# uses the typed `inputs.*` context instead, since `type: boolean` inputs
+# need to evaluate as real booleans in the `if:` expressions above, not as
+# the literal strings "true"/"false".
 #
 # 2026-09: removed the crawl-i-job-boards job (ran `crawl_i.py
 # --job-boards-only`) — that flag doesn't exist in crawl_i.py anymore
@@ -33,65 +41,63 @@ name: Crawl
 # bug class as the slug_registry/Certificate-Transparency ones already
 # fixed elsewhere this session.
 #
-# Note: crawl-i and crawl-ii do NOT depend on each other — both just list
-# `needs: prepare-matrix`, the one job they share. GitHub's dependency
-# graph draws that as two arrows fanning out from prepare-matrix, which
-# can look like a line connecting Crawl I and Crawl II, but there's no
-# `needs: crawl-i` anywhere on crawl-ii (or vice versa) — they run fully
-# in parallel, as designed.
+# Note: crawl-i, crawl-ii, and crawl-iii do NOT depend on each other — all
+# three just list `needs: [prepare-matrix, prefix-supabase]`, the two jobs
+# they share. GitHub's dependency graph draws that as arrows fanning out
+# from those two, which can look like the three crawls are chained
+# together, but there's no `needs: crawl-i` anywhere on crawl-ii or
+# crawl-iii (or vice versa) — all three run fully in parallel, as designed.
 #
 # 2026-09: added NVIDIA_API_KEY (free NIM tier — see config.py's
 # _LOCATION_PROVIDER_DEFS) as a third location-classification provider
-# alongside Gemini/OpenAI, on the crawl-i and crawl-ii shard steps only
-# (finalize steps don't classify anything, so they don't need it). Add an
-# NVIDIA_API_KEY repo secret before relying on it — until then config.py
-# just skips that provider and runs Gemini+OpenAI as before, same as any
-# other missing provider key.
+# alongside Gemini/OpenAI, on every crawl's shard steps (finalize steps
+# don't classify anything, so they don't need it). Add an NVIDIA_API_KEY
+# repo secret before relying on it — until then config.py just skips that
+# provider and runs Gemini+OpenAI as before, same as any other missing
+# provider key.
 #
 # 2026-09: added Crawl III (crawl_iii.py) — a third, independent pipeline
-# consuming stapply.ai's bulk pre-scraped CSVs (Phenom/UKG/SuccessFactors/
-# Dayforce/Eightfold/Recruitee) instead of live-scraping ATS boards. Opt-in
-# only, its OWN standalone `scope` value ("crawl_iii") rather than being
-# folded into "both" — "both" keeps its existing meaning (Crawl I + Crawl
-# II) unchanged, same as adding "archive_ii" as a value never redefined
-# what "both" meant. Skipped entirely unless `scope` is explicitly
-# "crawl_iii" on a manual run — never runs on the unattended cron trigger,
-# and does not run alongside Crawl I/II in the same dispatch (run it as its
-# own separate dispatch if you want all three the same day). Writes to the
-# SAME `jobs` table, tagged jobs.source_pipeline='crawl_iii', with its own
-# `needs`-gated finalize step (archives stale Notion pages, then
-# hard-deletes same-day-stale rows — see crawl_iii.py's run_finalize()
-# docstring for why its cutoffs are far more aggressive than Crawl I/II's).
-# No per-source sharding on the Supabase side is possible here (stapply
-# publishes one bulk CSV per platform, not a queryable per-row endpoint),
-# so crawl_iii_shard_count just splits the ALREADY-DOWNLOADED rows by a URL
-# hash — see crawl_iii.py's module docstring's "SHARDING" section.
+# consuming stapply.ai's bulk pre-scraped CSVs instead of live-scraping
+# ATS boards. Writes to the SAME `jobs` table, tagged
+# jobs.source_pipeline='crawl_iii', with its own `needs`-gated finalize
+# step (archives stale Notion pages, then hard-deletes same-day-stale rows
+# — see crawl_iii.py's run_finalize() docstring for why its cutoffs are
+# far more aggressive than Crawl I/II's). No per-source sharding on the
+# Supabase side is possible here (stapply publishes one bulk CSV per
+# platform, not a queryable per-row endpoint), so crawl_iii_shard_count
+# just splits the ALREADY-DOWNLOADED rows by a URL hash — see crawl_iii.py's
+# module docstring's "SHARDING" section.
 
 on:
   schedule:
-    - cron: "0 6 * * 1-5"   # 6:00 UTC = 7:00 AM WAT, Mon-Fri only — Crawl I only, Crawl II/III always skipped here (blank `scope` on this trigger)
+    - cron: "0 6 * * 1-5"   # 6:00 UTC = 7:00 AM WAT, Mon-Fri only — runs ALL THREE crawls (see the `if:` conditions below)
   workflow_dispatch:
     inputs:
-      scope:
-        description: "Which crawl(s) to run this time"
+      run_crawl_i:
+        description: "Run Crawl I (known ATS boards, archive_i)"
         required: false
-        type: choice
-        options:
-          - both
-          - archive_i
-          - archive_ii
-          - crawl_iii
-        default: both
+        type: boolean
+        default: true
+      run_crawl_ii:
+        description: "Run Crawl II (in-house/unsupported career pages, archive_ii)"
+        required: false
+        type: boolean
+        default: true
+      run_crawl_iii:
+        description: "Run Crawl III (stapply.ai direct job-board CSVs — Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee)"
+        required: false
+        type: boolean
+        default: true
       archive_i_shard_count:
-        description: "Crawl I: parallel shards over archive_i (known ATS boards) — only used if scope includes archive_i"
+        description: "Crawl I: parallel shards over archive_i (known ATS boards) — only used if run_crawl_i is checked"
         required: false
         default: "10"
       archive_ii_shard_count:
-        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if scope includes archive_ii"
+        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if run_crawl_ii is checked"
         required: false
         default: "10"
       crawl_iii_shard_count:
-        description: "Crawl III: parallel shards over stapply.ai's direct job-board CSVs (Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee) — only used if scope is 'both' or 'crawl_iii'"
+        description: "Crawl III: parallel shards over stapply.ai's direct job-board CSVs — only used if run_crawl_iii is checked"
         required: false
         default: "10"
 
@@ -108,7 +114,7 @@ jobs:
     # workflow_dispatch inputs can't be referenced directly inside a
     # matrix expression, so each shard_count input -> [0, 1, ..., N-1] is
     # computed here first (same pattern as verification.yml/people_data_labs.yml).
-    # Runs unconditionally (cheap) even when Crawl II ends up skipped —
+    # Runs unconditionally (cheap) even when a crawl ends up skipped —
     # simpler than duplicating the shard-count parsing logic per pipeline.
     runs-on: ubuntu-latest
     outputs:
@@ -132,9 +138,10 @@ jobs:
 
   # ── Prefix - Supabase — Notion statuses -> Supabase ─────────────────────
   # 2026-09 (explicit user instruction): runs ONCE, before any crawl shard
-  # starts, regardless of `scope` — it's read Notion, write Supabase, which
-  # has nothing to do with which crawl pipeline runs this cycle. Named for
-  # what it writes TO. See prefix_supabase.py / notion_sync.py.
+  # starts, regardless of which crawls are enabled — it's read Notion,
+  # write Supabase, which has nothing to do with which crawl pipeline runs
+  # this cycle. Named for what it writes TO. See prefix_supabase.py /
+  # notion_sync.py.
   prefix-supabase:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -159,14 +166,14 @@ jobs:
         run: exec python prefix_supabase.py
 
   # ── Crawl I — known ATS boards (archive_i) ───────────────────────────────
-  # Runs unless `scope` was explicitly set to archive_ii-only. Covers the
-  # scheduled cron trigger (blank scope), workflow_dispatch with scope=both,
-  # and workflow_dispatch with scope=archive_i. Pure Supabase writer — no
-  # Notion calls happen here at all (see Prefix/Postfix above and below).
+  # Runs on the scheduled cron trigger (all three run there — see the
+  # top-of-file 2026-09 note) OR on a manual dispatch with run_crawl_i
+  # checked (the default). Pure Supabase writer — no Notion calls happen
+  # here at all (see Prefix/Postfix above and below).
 
   crawl-i:
     needs: [prepare-matrix, prefix-supabase]
-    if: ${{ github.event.inputs.scope != 'archive_ii' }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_i }}
     runs-on: ubuntu-latest
     # 2026-09: was 90 — not enough for a shard to get through its slice
     # in one run. Raised to 350, same headroom-under-the-hard-ceiling
@@ -203,24 +210,23 @@ jobs:
           LLM_PROVIDER: cerebras
           # Every AI-classifying job in this workflow shares Gemini/Groq's
           # free-tier per-key quota — see config.py. Sized generously (12)
-          # to cover the worst case (10 crawl-i shards + up to 10 crawl-ii
-          # shards all running at once); a run with fewer shards or Crawl
-          # II skipped just under-uses its share, which is harmless.
+          # to cover the worst case (all three crawls' shards running at
+          # once, now the default on both schedule and manual dispatch);
+          # a run with fewer shards or a crawl unticked just under-uses
+          # its share, which is harmless.
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
 
   # ── Crawl II — in-house/unsupported career pages (archive_ii) ──────────
-  # Opt-in only: skipped entirely unless `scope` is explicitly "both" or
-  # "archive_ii" on a manual run. The scheduled cron trigger has no
-  # `github.event.inputs` at all (blank scope), so this condition is
-  # always false for the automatic daily run — Crawl II never runs
-  # unattended, same as before this was a dropdown. Pure Supabase writer,
-  # same as Crawl I — no Notion calls here either.
+  # Runs on the scheduled cron trigger OR on a manual dispatch with
+  # run_crawl_ii checked (the default — see the top-of-file 2026-09 note:
+  # this used to be opt-in/dispatch-only, no longer). Pure Supabase
+  # writer, same as Crawl I — no Notion calls here either.
 
   crawl-ii:
     needs: [prepare-matrix, prefix-supabase]
-    if: ${{ github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii' }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_ii }}
     runs-on: ubuntu-latest
     # 2026-09: same reasoning as crawl-i's timeout-minutes above — raised
     # 90 -> 350 (GitHub's 360min hard ceiling for a hosted-runner job).
@@ -257,15 +263,14 @@ jobs:
         run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
 
   # ── Crawl III — stapply.ai direct job-board CSVs ────────────────────────
-  # Opt-in only, its own standalone scope value ("crawl_iii") — see the
-  # module-level 2026-09 comment above for why it's not folded into "both".
-  # Never runs on the unattended cron trigger. Same-table writer as Crawl
-  # I/II (tagged source_pipeline='crawl_iii'), no Notion calls here either
-  # — see postfix-notion below for its finalize step.
+  # Runs on the scheduled cron trigger OR on a manual dispatch with
+  # run_crawl_iii checked (the default). Same-table writer as Crawl I/II
+  # (tagged source_pipeline='crawl_iii'), no Notion calls here either — see
+  # postfix-notion below for its finalize step.
 
   crawl-iii:
     needs: [prepare-matrix, prefix-supabase]
-    if: ${{ github.event.inputs.scope == 'crawl_iii' }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_iii }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -300,29 +305,18 @@ jobs:
         run: exec python crawl_iii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.crawl_iii_shard_count || '10' }}
 
   # ── Postfix - Notion — new Supabase jobs -> Notion, then cleanup ────────
-  # 2026-09 (explicit user instruction): merges the old crawl-i-finalize +
-  # crawl-ii-finalize into ONE job that runs once both crawl-i and crawl-ii
-  # are done (`needs: [crawl-i, crawl-ii]` + `if: ${{ !cancelled() }}` —
-  # still runs even if a shard failed/timed out, or if crawl-ii was
-  # skipped entirely by `scope`, same as the two old finalize jobs did
-  # separately — but, unlike `always()`, does NOT run if the whole
-  # workflow run was manually cancelled. 2026-09 fix at explicit user
-  # request: `always()` was firing this job even after a manual cancel,
-  # which reads as "cancelling did nothing" — `!cancelled()` keeps the
-  # failure/skip-tolerant behavior but actually stops on a real cancel).
-  # Named for what it writes TO: it takes whatever's new in Supabase and
-  # pushes it to Notion, THEN does the regular stale-job cleanup — see
-  # postfix_notion.py for the clearly-separated steps and why Crawl II's/
-  # Crawl III's cleanup are each conditional on that pipeline having
-  # actually run this cycle.
-  #
-  # 2026-09: added `crawl-iii` to `needs` (still runs fine when crawl-iii
-  # is skipped by `scope` — GitHub treats a skipped dependency as
-  # satisfied for `needs`, same as it always has for crawl-ii) and a
-  # `--run-crawl-iii-cleanup` flag, parallel to the existing
-  # `--run-crawl-ii-cleanup` — Crawl III's finalize (archive stale Notion
-  # pages, then hard-delete same-day-stale rows) must only run on cycles
-  # where Crawl III's shards actually scanned something this time.
+  # 2026-09 (explicit user instruction): one job that runs once crawl-i,
+  # crawl-ii, and crawl-iii are all done (`needs: [crawl-i, crawl-ii,
+  # crawl-iii]` + `if: ${{ !cancelled() }}` — still runs even if a shard
+  # failed/timed out, or if a crawl was skipped entirely by its checkbox
+  # (GitHub treats a skipped `needs` dependency as satisfied) — but, unlike
+  # `always()`, does NOT run if the whole workflow run was manually
+  # cancelled). Named for what it writes TO: it takes whatever's new in
+  # Supabase and pushes it to Notion, THEN does the regular stale-job
+  # cleanup — see postfix_notion.py for the clearly-separated steps and
+  # why Crawl II's/Crawl III's cleanup are each conditional on that
+  # pipeline having actually run this cycle (Crawl I's cleanup always
+  # runs unconditionally inside postfix_notion.py — see that file).
   postfix-notion:
     needs: [crawl-i, crawl-ii, crawl-iii]
     if: ${{ !cancelled() }}
@@ -355,10 +349,10 @@ jobs:
           LLM_PROVIDER: cerebras
         run: |
           ARGS=""
-          if [ "${{ github.event.inputs.scope == 'both' || github.event.inputs.scope == 'archive_ii' }}" = "true" ]; then
+          if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_ii }}" = "true" ]; then
             ARGS="$ARGS --run-crawl-ii-cleanup"
           fi
-          if [ "${{ github.event.inputs.scope == 'crawl_iii' }}" = "true" ]; then
+          if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_iii }}" = "true" ]; then
             ARGS="$ARGS --run-crawl-iii-cleanup"
           fi
           exec python postfix_notion.py $ARGS
