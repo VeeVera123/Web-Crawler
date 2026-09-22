@@ -264,6 +264,33 @@ def _rpc(fn: str, params: dict, limit: int = 1000) -> list[dict]:
     raise SupabaseFetchError(f"RPC {fn} failed after {MAX_HTTP_RETRIES} attempts: {last_error}")
 
 
+def _rpc_void(fn: str, params: dict) -> bool:
+    """POST to a `void`-returning Postgres function via PostgREST's /rpc/
+    endpoint. Deliberately separate from _rpc() above: PostgREST responds
+    to a void-returning function with 204 No Content and an empty body,
+    and _rpc()'s `return r.json()` would throw trying to parse that empty
+    body (caught by _rpc's own `except Exception`, which would then just
+    retry a call that actually already succeeded). Used for
+    bump_scan_report()/finish_scan_report_for_pipeline() — best-effort,
+    logs and returns False on failure rather than raising, since a lost
+    scan-report update should never fail the crawl shard that generated
+    it."""
+    try:
+        r = http_requests.post(f"{REST}/rpc/{fn}", headers=HEADERS, json=params, timeout=30)
+        _track_egress(r)
+        r.raise_for_status()
+        return True
+    except SupabaseEgressLimitExceeded:
+        raise
+    except Exception as e:
+        detail = ""
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            detail = f" | body: {resp.text[:500]}"
+        log.error(f"Supabase RPC {fn} failed: {e}{detail}")
+        return False
+
+
 # ── archive_i (formerly slug_registry) ───────────────────
 
 def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -> int:
@@ -1301,6 +1328,90 @@ def cleanup_stale_jobs(inactive_days: int = 30, delete_days: int = 60,
 
 def start_scan_report() -> int | None:
     """Create a new scan report row. Returns the report ID."""
+    result = _post("scan_reports", {
+        "status": "running",
+        "run_date": date.today().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
+    if result and len(result) > 0:
+        report_id = result[0]["id"]
+        log.info(f"Scan report #{report_id} started")
+        return report_id
+    return None
+
+
+def bump_scan_report(
+    source_pipeline: str,
+    boards_scanned: int = 0,
+    boards_failed: int = 0,
+    total_jobs_raw: int = 0,
+    csm_roles: int = 0,
+    global_jobs: int = 0,
+    new_jobs_added: int = 0,
+    duplicates: int = 0,
+    status: str | None = None,
+    run_date: str | None = None,
+) -> None:
+    """2026-09: replaces start_scan_report()/finish_scan_report() as the
+    way crawl_i.py/crawl_ii.py/crawl_iii.py report their numbers. The old
+    pair created ONE new scan_reports row per shard (10-70+ rows/day, one
+    per parallel GitHub Actions matrix job — confirmed live, e.g. 71 rows
+    on 2026-09-18 for a single crawl_i run alone), which made the table
+    useless as an actual daily summary. This calls the bump_scan_report()
+    Postgres RPC (see the migration that created it) instead: every shard
+    reports ONLY its own contribution, and Postgres atomically adds it
+    into the ONE row for (run_date, source_pipeline) under a unique index
+    — safe against concurrent shards racing on the same row, which a
+    plain client-side read-modify-write PATCH could not guarantee. Net
+    result: exactly one scan_reports row per pipeline per day (three per
+    day once crawl_i/ii/iii all use this), with the true cumulative totals
+    across every shard.
+
+    Call this once per shard, with that shard's own (not cumulative)
+    counts, at whichever point the shard's run actually stops (mirrors
+    the old finish_scan_report() call sites exactly — just no report_id
+    to track anymore, since there's no longer a per-shard row to update).
+
+    `status`: pass "failed" to mark the whole day's row failed (sticky —
+    see the RPC's docstring); leave as None (the default) for every
+    normal call. run_finalize() is what marks a row "completed" once, via
+    finish_scan_report_for_pipeline(), after all shards are done — no
+    individual shard call here should ever pass status="completed"."""
+    _rpc_void("bump_scan_report", {
+        "p_source_pipeline": source_pipeline,
+        "p_run_date": run_date or date.today().isoformat(),
+        "p_boards_scanned": boards_scanned,
+        "p_boards_failed": boards_failed,
+        "p_total_jobs_raw": total_jobs_raw,
+        "p_csm_roles": csm_roles,
+        "p_global_jobs": global_jobs,
+        "p_new_jobs_added": new_jobs_added,
+        "p_duplicates": duplicates,
+        "p_status": status,
+    })
+
+
+def finish_scan_report_for_pipeline(source_pipeline: str, run_date: str | None = None) -> None:
+    """Call ONCE per pipeline, after every one of its shards has finished
+    (same `needs`-gated finalize step that already calls
+    cleanup_stale_jobs() — see crawl_i.py/crawl_ii.py/crawl_iii.py's
+    run_finalize()). Sets finished_at + status='completed' on that
+    pipeline's single row for today (or leaves it 'failed' if any shard's
+    bump_scan_report() call already marked it so — a failed shard must
+    never read as a quietly "completed" run)."""
+    _rpc_void("finish_scan_report_for_pipeline", {
+        "p_source_pipeline": source_pipeline,
+        "p_run_date": run_date or date.today().isoformat(),
+    })
+
+
+def start_scan_report() -> int | None:
+    """DEPRECATED 2026-08/09 pattern — creates one new scan_reports row
+    per call. No longer used by crawl_i.py/crawl_ii.py/crawl_iii.py (see
+    bump_scan_report()'s docstring for why: one row per SHARD made the
+    table useless as a daily summary). Left in place only in case some
+    other/future one-off script wants a single standalone report row
+    rather than participating in the shared per-pipeline-per-day row."""
     result = _post("scan_reports", {
         "status": "running",
         "run_date": date.today().isoformat(),
