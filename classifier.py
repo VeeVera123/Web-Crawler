@@ -1161,6 +1161,17 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_state_list_restriction_signal(job):
         return "no_match", None, None
 
+    # ── 0.85. HARD OVERRIDE (2026-09, real posting: OpenSesame's "Sales
+    # Operations Manager, Direct Sales", Greenhouse): the description's own
+    # words state the role must be based/located in, or worked from, one
+    # specific named country ("This position can be based anywhere in the
+    # US") — a hard country-wide restriction independent of both the
+    # work-authorization phrasing 0.75 catches and the enumerated-state-list
+    # phrasing 0.8 catches. See has_hard_country_based_restriction_signal's
+    # docstring. ──
+    if has_hard_country_based_restriction_signal(job):
+        return "no_match", None, None
+
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
     # key PRESENT with value None, not missing, so the "" default here
@@ -2126,6 +2137,69 @@ _COUNTRY_AUTH_RE = re.compile(
     r"citizen(?:ship)?\b",
     re.I,
 )
+
+# 2026-09 NEW (real posting: OpenSesame's "Sales Operations Manager, Direct
+# Sales", Greenhouse — job-boards.greenhouse.io/opensesame/jobs/8161867):
+# location field was bare "Remote" (a real, honest signal), but the
+# description's own "Location Requirements" section read: "This position
+# can be based anywhere in the US." That's an explicit, unambiguous
+# country-wide restriction stated by the company itself — nothing about
+# work AUTHORIZATION (so _COUNTRY_AUTH_RE above, which only matches
+# "authorized/eligible/entitled/permitted TO WORK in <country>" phrasing,
+# never fires on it), and no enumerated state list either (so
+# has_state_list_restriction_signal doesn't catch it). This is a distinct
+# phrasing family — "based (anywhere) in <country>" / "must work from
+# <country>" / "must be located in <country>" — describing where the
+# CANDIDATE has to physically be, not what work authorization they must
+# hold. Deliberately scanned sentence-by-sentence with a guard against
+# "team/office/HQ/company is based in X" (describing the COMPANY's own
+# location, not a candidate eligibility rule) — real postings often
+# mention where a hiring manager's team sits without that being a
+# restriction on where applicants may live.
+_COUNTRY_BASED_RESTRICTION_RE = re.compile(
+    r"\b(?:must\s+(?:currently\s+)?(?:be\s+)?based|"
+    r"(?:can|will|to|may)\s+be\s+based|is\s+based|are\s+based|"
+    r"must\s+(?:currently\s+)?be\s+located)\s+"
+    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in|within)\s+"
+    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bmust\s+(?:currently\s+)?work\s+from\s+"
+    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    re.I,
+)
+
+_TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
+    r"\b(?:team|office|headquarters|hq|company|organization|organisation|"
+    r"org|department|division|studio|founders?)\b",
+    re.I,
+)
+
+
+def has_hard_country_based_restriction_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter, sibling to
+    has_hard_country_specific_auth_signal above but for a different
+    phrasing family: does this job's description state (in its own words,
+    not an application question) that the ROLE/CANDIDATE must be based,
+    located, or working from one specific named country? See the module
+    comment above _COUNTRY_BASED_RESTRICTION_RE for the real OpenSesame
+    posting this closes.
+
+    Checked sentence-by-sentence (split on '.', '!', '?', or a newline) so
+    a sentence describing where the COMPANY's team/office/HQ sits (a
+    common, unrelated statement in remote job postings) doesn't
+    false-positive this into rejecting an otherwise genuinely open-to-
+    anyone role.
+    """
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if not sentence.strip():
+            continue
+        if _COUNTRY_BASED_RESTRICTION_RE.search(sentence) and not _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+            return True
+    return False
+
 
 # Marker ats_scrapers.py's enrich_application_questions() appends before
 # a work-authorization-flavored screening question (see its own
