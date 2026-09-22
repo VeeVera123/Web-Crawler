@@ -107,7 +107,7 @@ from classifier import (  # noqa: E402
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
     get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
-    log_egress_summary,
+    log_egress_summary, bump_scan_report, finish_scan_report_for_pipeline,
 )
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
@@ -1395,9 +1395,13 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                           stats: dict, crawl_start: float, time_budget_seconds: float,
                           time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
-                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool]:
+                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool, dict]:
     """Crawls archive_ii pages, then classifies and writes everything ONCE
-    at the end. Returns (pages_done, jobs_added, time_budget_hit).
+    at the end. Returns (pages_done, jobs_added, time_budget_hit,
+    report_stats) — report_stats is {total_jobs_raw, csm_roles,
+    global_jobs, duplicates}, for _run_shard's bump_scan_report() call
+    (2026-09 — see that function's docstring; Crawl II previously wrote no
+    scan_reports rows at all).
 
     2026-09 restructure, at explicit user instruction: previously this
     fetched+extracted a sub-batch of pages, immediately ran that
@@ -1426,6 +1430,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     all_pages_with_roles: set[str] = set()
     time_budget_hit = False
     i = 0
+    report_stats = {"total_jobs_raw": 0, "csm_roles": 0, "global_jobs": 0, "duplicates": 0}
 
     log.info(f"── Crawling entries ({len(pages)} pages) ──")
     for i in range(0, len(pages), batch_size):
@@ -1458,9 +1463,11 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     if all_pages_with_roles:
         touch_archive_ii_last_seen(all_pages_with_roles)
 
+    report_stats["total_jobs_raw"] = len(all_candidate_jobs)
+
     if not all_candidate_jobs:
         log.info("No job postings found — nothing to do.")
-        return pages_done, 0, time_budget_hit
+        return pages_done, 0, time_budget_hit, report_stats
 
     log.info("── Deduplication ──")
     existing_urls = get_existing_urls()
@@ -1473,24 +1480,27 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
             new_jobs.append(job)
     if already_seen:
         touch_seen_jobs_raw(already_seen)
+    report_stats["duplicates"] = len(already_seen)
     log.info(f"  Found {len(all_candidate_jobs)} postings: {len(already_seen)} already in the "
              f"database (skipped), {len(new_jobs)} new — only the new ones get reviewed")
 
     if not new_jobs:
         log.info("No new postings to review.")
-        return pages_done, 0, time_budget_hit
+        return pages_done, 0, time_budget_hit, report_stats
 
     log.info("── Role check (is this a CSM/AM role?) ──")
     role_matched = _filter_roles(new_jobs)
+    report_stats["csm_roles"] = len(role_matched)
     log.info(f"  {len(new_jobs)} postings checked → {len(role_matched)} are CSM/AM roles")
     if not role_matched:
-        return pages_done, 0, time_budget_hit
+        return pages_done, 0, time_budget_hit, report_stats
 
     log.info("── Location check (open to global/Africa hires?) ──")
     global_jobs, confidences = _filter_locations(role_matched)
+    report_stats["global_jobs"] = len(global_jobs)
     log.info(f"  {len(role_matched)} roles checked → {len(global_jobs)} are eligible")
     if not global_jobs:
-        return pages_done, 0, time_budget_hit
+        return pages_done, 0, time_budget_hit, report_stats
 
     for job in global_jobs:
         job["visa_sponsorship"] = detect_visa_sponsorship(job)
@@ -1500,7 +1510,13 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
                                             existing_urls=existing_urls)
     log.info(f"  {added} new jobs written")
 
-    return pages_done, added, time_budget_hit
+    # `duplicates` now counts BOTH kinds, same convention as crawl_i.py/
+    # crawl_iii.py: pre-classification skips (already_seen) and any
+    # post-classification re-matches (global_jobs that still weren't a
+    # true first-insert).
+    report_stats["duplicates"] += (len(global_jobs) - added)
+
+    return pages_done, added, time_budget_hit, report_stats
 
 
 def new_connector() -> aiohttp.TCPConnector:
@@ -1536,6 +1552,10 @@ def run_finalize() -> None:
     log.info(f"Crawl II finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
+    # 2026-09: closes out today's single scan_reports row for crawl_ii —
+    # finished_at + status='completed' (unless a shard already marked it
+    # 'failed' via bump_scan_report).
+    finish_scan_report_for_pipeline(SOURCE_PIPELINE)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -1555,6 +1575,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
 
     if not pages:
         log.warning(f"Shard {shard}/{total_shards}: no pages assigned, nothing to do.")
+        bump_scan_report(SOURCE_PIPELINE)
         return
 
     stats = {
@@ -1576,12 +1597,36 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     parse_pool = node.new_parse_pool()
 
     try:
-        async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
-            done, added, time_budget_hit = await crawl_batch_ii(
-                pages, session, sem, stats, crawl_start, time_budget_seconds,
-                TIME_BUDGET_MINUTES, parse_pool)
-    finally:
-        parse_pool.shutdown(wait=False)
+        try:
+            async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
+                done, added, time_budget_hit, report_stats = await crawl_batch_ii(
+                    pages, session, sem, stats, crawl_start, time_budget_seconds,
+                    TIME_BUDGET_MINUTES, parse_pool)
+        finally:
+            parse_pool.shutdown(wait=False)
+    except Exception as e:
+        # 2026-09: crawl_i.py's/crawl_iii.py's _run_pipeline() have always
+        # had this outer try/except to mark a shard's contribution
+        # 'failed' in scan_reports rather than silently vanishing from the
+        # daily summary — crawl_ii.py never had one at all (no scan_reports
+        # writes here before this same 2026-09 change), added now for
+        # parity now that this shard's numbers feed the shared row.
+        log.error(f"Crawl II shard failed: {e}")
+        bump_scan_report(SOURCE_PIPELINE, status="failed")
+        raise
+
+    # 2026-09: reports this shard's OWN contribution — bump_scan_report()
+    # atomically adds it into the single (run_date, 'crawl_ii') row every
+    # shard shares, rather than creating a new Supabase row per shard (see
+    # that function's docstring).
+    bump_scan_report(
+        SOURCE_PIPELINE,
+        total_jobs_raw=report_stats["total_jobs_raw"],
+        csm_roles=report_stats["csm_roles"],
+        global_jobs=report_stats["global_jobs"],
+        new_jobs_added=added,
+        duplicates=report_stats["duplicates"],
+    )
 
     status = "STOPPED EARLY (time budget)" if time_budget_hit else "complete"
     log.info("── Summary ──")
