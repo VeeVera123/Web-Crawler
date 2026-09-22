@@ -119,7 +119,7 @@ from ats_scrapers import _snippet
 from classifier import detect_visa_sponsorship
 from crawl_i import filter_roles, filter_locations
 from supabase_handler import (
-    add_jobs_batch, start_scan_report, finish_scan_report,
+    add_jobs_batch, bump_scan_report, finish_scan_report_for_pipeline,
     get_existing_urls, touch_seen_jobs_raw,
     cleanup_stale_jobs, get_stale_job_ids,
     log_egress_summary,
@@ -270,9 +270,13 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
     section — the implicit English-only gate) -> filter_locations
     (location classification) -> visa detection -> push. Does NOT run
     cleanup_stale_jobs() — see run_finalize() for why that's split out,
-    same reasoning as crawl_i.py's own run_finalize()."""
-    report_id = start_scan_report()
+    same reasoning as crawl_i.py's own run_finalize().
 
+    2026-09: scan-report accounting uses bump_scan_report(SOURCE_PIPELINE,
+    ...) rather than a per-shard start_scan_report()/finish_scan_report()
+    row — see supabase_handler.bump_scan_report()'s docstring for why (one
+    new Supabase row per shard made the table useless as a daily
+    summary)."""
     try:
         mode_note = f" (shard {shard}/{total_shards})" if total_shards > 1 else ""
         log.info(f"── Fetching stapply.ai CSVs ({len(STAPPLY_SOURCES)} sources){mode_note} ──")
@@ -282,8 +286,7 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
             log.warning(f"  failed to fetch: {', '.join(missing)} — continuing with the rest")
         if not raw_texts:
             log.error("No stapply sources fetched — aborting this shard.")
-            if report_id:
-                finish_scan_report(report_id, status="failed")
+            bump_scan_report(SOURCE_PIPELINE, status="failed")
             return
 
         all_jobs: list[dict] = []
@@ -294,8 +297,7 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
 
         if not all_jobs:
             log.info("No jobs parsed from any stapply source this shard.")
-            if report_id:
-                finish_scan_report(report_id)
+            bump_scan_report(SOURCE_PIPELINE)
             return
 
         raw_count = len(all_jobs)
@@ -317,16 +319,14 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
             touch_seen_jobs_raw(already_seen)
         if not new_jobs:
             log.info("No new (previously unseen) jobs to classify.")
-            if report_id:
-                finish_scan_report(report_id, total_jobs_raw=raw_count, duplicates=len(already_seen))
+            bump_scan_report(SOURCE_PIPELINE, total_jobs_raw=raw_count, duplicates=len(already_seen))
             return
 
         log.info("── Role check (is this a CSM/AM/PM/OM role?) ──")
         csm_jobs = filter_roles(new_jobs)
         if not csm_jobs:
             log.info("No CSM/AM/PM/OM roles found.")
-            if report_id:
-                finish_scan_report(report_id, total_jobs_raw=raw_count)
+            bump_scan_report(SOURCE_PIPELINE, total_jobs_raw=raw_count)
             return
 
         # No enrich_descriptions()/enrich_application_questions() step —
@@ -337,8 +337,7 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
         global_jobs, confidences = filter_locations(csm_jobs)
         if not global_jobs:
             log.info("No global/Africa-eligible CSM/AM/PM/OM roles found.")
-            if report_id:
-                finish_scan_report(report_id, total_jobs_raw=raw_count, csm_roles=len(csm_jobs))
+            bump_scan_report(SOURCE_PIPELINE, total_jobs_raw=raw_count, csm_roles=len(csm_jobs))
             return
 
         for job in global_jobs:
@@ -351,15 +350,14 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
         log.info(f"  {added} new jobs written (source_pipeline={SOURCE_PIPELINE!r})")
 
         duplicates = len(already_seen) + (len(global_jobs) - added)
-        if report_id:
-            finish_scan_report(
-                report_id,
-                total_jobs_raw=raw_count,
-                csm_roles=len(csm_jobs),
-                global_jobs=len(global_jobs),
-                new_jobs_added=added,
-                duplicates=duplicates,
-            )
+        bump_scan_report(
+            SOURCE_PIPELINE,
+            total_jobs_raw=raw_count,
+            csm_roles=len(csm_jobs),
+            global_jobs=len(global_jobs),
+            new_jobs_added=added,
+            duplicates=duplicates,
+        )
 
         log.info("── Summary ──")
         log.info(f"  {added} new jobs added to Supabase.")
@@ -369,8 +367,7 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
 
     except Exception as e:
         log.error(f"Crawl III failed: {e}")
-        if report_id:
-            finish_scan_report(report_id, status="failed")
+        bump_scan_report(SOURCE_PIPELINE, status="failed")
         raise
 
 
@@ -407,6 +404,10 @@ def run_finalize() -> None:
     log.info(f"Crawl III finalize summary: inactive cutoff {summary['inactive_cutoff']} "
              f"(ok={summary['mark_inactive_ok']}), delete cutoff {summary['delete_cutoff']} "
              f"(ok={summary['delete_ok']})")
+    # 2026-09: closes out today's single scan_reports row for crawl_iii —
+    # finished_at + status='completed' (unless a shard already marked it
+    # 'failed' via bump_scan_report).
+    finish_scan_report_for_pipeline(SOURCE_PIPELINE)
 
 
 def main():
