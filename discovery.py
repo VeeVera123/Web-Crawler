@@ -8,8 +8,14 @@ see node.py's ARCHIVE_I_TABLE comment).
 Sources:
   1. Feashliaa GitHub (50k+ slugs for 6 platforms — greenhouse,
      lever, ashby, bamboohr, icims, workday)
-  2. kalil0321/ats-scrapers (CSV inventories for 15 platforms —
-     incl. successfactors, smartrecruiters, workable)
+  2. kalil0321/ats-scrapers (CSV inventories for 23 platforms —
+     incl. smartrecruiters, workable, adp, oracle_cloud_hcm, csod,
+     taleo, paylocity, personio, avature, pinpoint, jazzhr, joincom,
+     gem. 2026-09: expanded from 12 to 23 — the repo already had CSVs
+     for 11 more platforms we have a working URL_TO_SLUG converter for
+     but weren't pulling from (see KALIL_SOURCES); successfactors'
+     CSV is still deliberately excluded — no URL-based converter
+     exists for it, see URL_TO_SLUG's successfactors comment)
   3. OpenPostings jobs.db (110k+ companies across 80+ ATSs)
   4. Common Crawl index (ongoing discovery for 27 platforms — including
      6 also covered by Feashliaa's bulk dump, added as a supplemental
@@ -188,8 +194,41 @@ KALIL_SOURCES = {
     "smartrecruiters": f"{KALIL_BASE}/smartrecruiters.csv",
     "teamtailor":      f"{KALIL_BASE}/teamtailor.csv",
     "breezyhr":        f"{KALIL_BASE}/breezy.csv",
-    # Disabled (JS-rendered / auth-required / blocked):
-    # "taleo", "successfactors", "softgarden"
+    # 2026-09 (real user question: "why does BambooHR/ADP/Paylocity produce
+    # almost nothing while JazzHR dominates?"): these 11 CSVs already exist
+    # in kalil0321/ats-scrapers' ats-companies/ folder — confirmed live by
+    # fetching each raw file directly — and every one maps to an ATS key
+    # we already have a working URL_TO_SLUG converter for (see that dict),
+    # they just weren't wired into KALIL_SOURCES before now. Dict KEYS here
+    # must match our own internal ats name exactly (fetch_kalil_slugs looks
+    # up URL_TO_SLUG[ats]), which is why "cornerstone.csv" is keyed "csod",
+    # "join_com.csv" is keyed "joincom", and "oracle.csv" is keyed
+    # "oracle_cloud_hcm" — those are OUR names for those platforms, not the
+    # CSV's filename.
+    "adp":              f"{KALIL_BASE}/adp.csv",
+    "avature":          f"{KALIL_BASE}/avature.csv",
+    "csod":             f"{KALIL_BASE}/cornerstone.csv",
+    "gem":              f"{KALIL_BASE}/gem.csv",
+    "jazzhr":           f"{KALIL_BASE}/jazzhr.csv",
+    "joincom":          f"{KALIL_BASE}/join_com.csv",
+    "personio":         f"{KALIL_BASE}/personio.csv",
+    "pinpoint":         f"{KALIL_BASE}/pinpoint.csv",
+    "paylocity":        f"{KALIL_BASE}/paylocity.csv",
+    "taleo":            f"{KALIL_BASE}/taleo.csv",
+    "oracle_cloud_hcm": f"{KALIL_BASE}/oracle.csv",
+    # Still disabled — no URL-based converter exists (detected via content
+    # fingerprint elsewhere, not a URL string), so the CSV's "url" column
+    # can't be converted, and the platform isn't in DIRECT_SLUG_PLATFORMS
+    # below because its raw CSV slug format hasn't been verified against
+    # what our own scraper/verifier expects:
+    # "successfactors"
+    # Confirmed unscrapeable platforms (see Main/BLACKLISTED_ATS.md) —
+    # deliberately never added even though kalil0321 has CSVs for some of
+    # these too: "phenom" (ukg/phenom), "eightfold", "recruiterbox".
+    # Not ATS platforms at all (country-specific public job boards, out of
+    # scope for this project): "infojobs_es", "jobs_cz".
+    # "mercor" not added: not in URL_TO_SLUG/SUPPORTED_ATS — no working
+    # scraper for it yet, so slugs from it can't be verified or scraped.
 }
 
 # Common Crawl
@@ -2217,6 +2256,20 @@ def _parse_csv_line(line: str) -> tuple[str, str, str] | None:
     return None
 
 
+_PAYLOCITY_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I
+)
+
+
+def _paylocity_name_slug(name: str) -> str:
+    """Build the URL-path company-name segment Paylocity's own scraper
+    (ats_scrapers.scrape_paylocity) appends after the UUID, from just a
+    company name — used when the source CSV doesn't already provide a URL
+    with that segment (see fetch_kalil_slugs' paylocity fallback below)."""
+    tokens = re.findall(r"[A-Za-z0-9]+", name or "")
+    return "-".join(tokens) if tokens else "Careers"
+
+
 def fetch_kalil_slugs() -> dict[str, dict[str, str]]:
     """Download CSV company lists from kalil0321/ats-scrapers repo.
     CSVs have format: name,slug,url
@@ -2251,6 +2304,27 @@ def fetch_kalil_slugs() -> dict[str, dict[str, str]]:
                 if not slug and ats in DIRECT_SLUG_PLATFORMS:
                     if raw_slug and raw_slug.lower() not in SKIP_SLUGS:
                         slug = raw_slug
+
+                # 2026-09: kalil0321's paylocity.csv gives URLs shaped
+                # ".../Recruiting/Jobs/All/{uuid}" with NO trailing
+                # company-name path segment — confirmed live by fetching
+                # the raw CSV — so _url_to_slug_paylocity (which requires
+                # that 5th path segment, matching real customer URLs seen
+                # in the wild) always returns None here, silently dropping
+                # every one of this platform's rows. The CSV's own "slug"
+                # column already IS the bare UUID though, so this builds
+                # our internal 'uuid|CompanyName' format directly from the
+                # CSV row instead of depending on the URL having a segment
+                # it doesn't have. scrape_paylocity's own docstring notes
+                # the routing is by UUID; the trailing name segment matches
+                # what real-world URLs look like but isn't re-validated
+                # against a fetched page here, so a slug built this way is
+                # marked/treated exactly like any other freshly-discovered
+                # slug — normal scrape-time failures (dead tenant, wrong
+                # name segment rejected by Paylocity's own server) are
+                # already tolerated the same way as for every other source.
+                if not slug and ats == "paylocity" and raw_slug and _PAYLOCITY_UUID_RE.match(raw_slug):
+                    slug = f"{raw_slug}|{_paylocity_name_slug(name)}"
 
                 if slug:
                     found[slug] = name.strip() if name else ""
@@ -6239,9 +6313,9 @@ def main():
         else:
             grand_total += fa_total
 
-    # Source 2: kalil0321/ats-scrapers (15 platforms, CSV inventories)
+    # Source 2: kalil0321/ats-scrapers (23 platforms, CSV inventories)
     if args.source in ("kalil", "all"):
-        log.info("\n--- KALIL0321 (15 platforms, CSV inventories) ---")
+        log.info("\n--- KALIL0321 (23 platforms, CSV inventories) ---")
         ka_slugs = fetch_kalil_slugs()
         ka_total = sum(len(s) for s in ka_slugs.values())
 
