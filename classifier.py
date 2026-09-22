@@ -1172,6 +1172,23 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_hard_country_based_restriction_signal(job):
         return "no_match", None, None
 
+    # ── 0.86. HARD OVERRIDE (2026-09, cross-LLM review, real posting:
+    # Stripe's "Program Manager, Security GRC"): Greenhouse's own metadata
+    # names a specific, non-global place even though the location FIELD
+    # this project reads said nothing more specific than "Remote". See
+    # has_hard_metadata_location_signal's docstring. ──
+    if has_hard_metadata_location_signal(job):
+        return "no_match", None, None
+
+    # ── 0.87. HARD OVERRIDE (2026-09, cross-LLM review, real postings:
+    # Arcwood's "Account Manager - Louisiana", OpenProject's "(Senior)
+    # Account Manager - Europe", HeroDevs' "Channel Account Manager,
+    # EMEA"): the TITLE itself carries the only region/state restriction,
+    # independent of the location field or description body. See
+    # has_title_region_restriction_signal's docstring. ──
+    if has_title_region_restriction_signal(job):
+        return "no_match", None, None
+
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
     # key PRESENT with value None, not missing, so the "" default here
@@ -2108,7 +2125,18 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
     r"india|philippines|nigeria|kenya|south\s+africa|singapore|mexico|brazil|"
     r"netherlands|france|spain|italy|sweden|norway|denmark|finland|poland|"
     r"portugal|switzerland|austria|belgium|japan|china|u\.?a\.?e\.?|"
-    r"united\s+arab\s+emirates|egypt|ghana"
+    r"united\s+arab\s+emirates|egypt|ghana|"
+    # 2026-09 NEW (real postings surfaced by a cross-LLM review of live JD
+    # links — see the module comment above _COUNTRY_BASED_RESTRICTION_RE
+    # for the full evidence): CONTINENT/REGION names used the exact same
+    # way a country name is in this project's postings — "remote within
+    # Europe", "Account Manager - Europe", "Channel Account Manager,
+    # EMEA" (HeroDevs), "(Senior) Account Manager - Europe" (OpenProject) —
+    # none of these are "global/worldwide", but none is a single ISO
+    # country either. Added here (not a separate fragment) since every
+    # regex that consumes this fragment treats a hit the same way: "this
+    # posting names a specific, non-global place" -> hard reject.
+    r"europe|emea|apac|latam|asia[\s\-]?pacific"
 )
 # 2026-09 FIX (live-sample validation, real postings): the ORIGINAL regex
 # required "authorized...to work in <country>" with no words allowed in
@@ -2130,6 +2158,12 @@ _COUNTRY_AUTH_RE = re.compile(
     r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\b(?:us|u\.s\.|uk|u\.k\.|canadian|australian|british|indian|german|irish)\s+work\s+authoriz"
     r"|\bwork\s+authoriz\w*\s+(?:in|for)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    # 2026-09 NEW (real posting: Aptive's "Program Manager," iCIMS —
+    # "Legal authorization to work in the U.S." — a NOUN-phrase statement,
+    # not the "authorized to work in" VERB-phrase question every other
+    # alternative above expects). Confirmed via a cross-LLM review of live
+    # JD text; this exact phrasing never matched any prior alternative.
+    r"|\bauthoriz(?:ation|ations)\s+to\s+work\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian|indian)\s+work\s+(?:visa|permit)\b"
@@ -2156,14 +2190,48 @@ _COUNTRY_AUTH_RE = re.compile(
 # location, not a candidate eligibility rule) — real postings often
 # mention where a hiring manager's team sits without that being a
 # restriction on where applicants may live.
+# 2026-09 BROADENED (cross-LLM review of ~30 live JD links, dispatched
+# specifically to find phrasing this project's regexes still missed — see
+# the real postings quoted below): the ORIGINAL version of this regex only
+# matched a MODAL-VERB-prefixed "based"/"located" ("must be based",
+# "can be based", "is based") plus "must work from" — but real postings
+# overwhelmingly phrase the SAME restriction as a bare screening QUESTION
+# with no modal at all:
+#   Lumivero:  "Do you currently reside in the US full-time?"
+#   Infinx:    "Do you currently live in the US?"
+#   WeVote:    "Are you currently located in the United States?"
+#   Spinwheel: "Do you currently live in either the US or Canada?"
+# None of these contain "based" or "must" — "reside"/"live"/"located" were
+# entirely absent from the old verb list, so none of them matched. Fixed
+# by broadening to every verb form real postings actually use (reside/
+# residing/resides, live/living/lives, located, based) with NO modal-verb
+# requirement — the verb immediately followed by "in"/"within" a named
+# place is itself the signal, regardless of what (if anything) precedes
+# it. Also added:
+#  - "either" as an optional word between "in" and "the" (Spinwheel's
+#    "in either the US or Canada" — the literal "the US" substring alone
+#    is what matches, but "either" sits between "in" and "the" and would
+#    otherwise break the match).
+#  - a distinct "remote within/in <place>" alternative — GreenSlate's
+#    "This role is remote within the United States" and Storm Ideas'
+#    "This role is fully remote within Canada" name the place right after
+#    "remote", not after a based/located/reside/live verb at all.
+#  - "working from (anywhere in)? <place>", modal-free — Storm Ideas'
+#    "Fully remote working from anywhere in Egypt!" has no "must".
+# Deliberately NOT added: timezone phrases ("Pacific Time Zone", "US
+# Eastern Time") are NOT treated as a place name — a cross-LLM review
+# specifically flagged that Storm Ideas runs the EXACT SAME "Pacific-time-
+# aligned" hours for both a Canada-restricted role and an Egypt-restricted
+# role, so timezone alone proves nothing about required physical location
+# and must stay a separate, unimplemented signal rather than being folded
+# in here.
 _COUNTRY_BASED_RESTRICTION_RE = re.compile(
-    r"\b(?:must\s+(?:currently\s+)?(?:be\s+)?based|"
-    r"(?:can|will|to|may)\s+be\s+based|is\s+based|are\s+based|"
-    r"must\s+(?:currently\s+)?be\s+located)\s+"
+    r"\b(?:reside|residing|resides|live|living|lives|located|based)\s+"
     r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in|within)\s+"
-    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\bmust\s+(?:currently\s+)?work\s+from\s+"
-    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"(?:either\s+)?(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bremote\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwork(?:ing)?\s+from\s+"
+    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
 )
 
@@ -2173,32 +2241,135 @@ _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
     re.I,
 )
 
+# 2026-09 NEW (cross-LLM review, real posting: Prolific's Montreal listing —
+# job-boards.eu.greenhouse.io/prolificacademicltd — "currently based in,
+# and can verify right to work from one of the following countries" / "we
+# can only onboard successful participants who are currently based in ...
+# the specified regions"): a CURATED COUNTRY/REGION WHITELIST is, by
+# construction, not "global/worldwide" — the fact that the whitelist might
+# be long (Prolific's own page even offers a "REST OF WORLD" catch-all
+# option elsewhere) doesn't change that THIS specific screening flow only
+# onboards from a defined list, not literally anywhere. Matched on the
+# distinctive whitelist PHRASING itself rather than trying to enumerate
+# whatever list of countries a company might name, since the list itself
+# is never fully knowable from the description text alone.
+_COUNTRY_WHITELIST_PHRASE_RE = re.compile(
+    r"\bone\s+of\s+the\s+following\s+countries\b"
+    r"|\bthe\s+specified\s+regions?\b"
+    r"|\bfollowing\s+list\s+of\s+(?:countries|regions|locations)\b"
+    r"|\bcurrently\s+based\s+in,?\s+and\s+can\s+verify\s+right\s+to\s+work\b",
+    re.I,
+)
+
 
 def has_hard_country_based_restriction_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter, sibling to
     has_hard_country_specific_auth_signal above but for a different
-    phrasing family: does this job's description state (in its own words,
-    not an application question) that the ROLE/CANDIDATE must be based,
-    located, or working from one specific named country? See the module
-    comment above _COUNTRY_BASED_RESTRICTION_RE for the real OpenSesame
-    posting this closes.
+    phrasing family: does this job's description (or an appended
+    application question) state — in its own words, not necessarily an
+    "authorized to work" question — that the ROLE/CANDIDATE must reside,
+    live, be located, be based, or be working from one specific named
+    country/region, or must fall within a curated country/region
+    whitelist? See the module comments above _COUNTRY_BASED_RESTRICTION_RE
+    and _COUNTRY_WHITELIST_PHRASE_RE for the real postings (OpenSesame,
+    Lumivero, Infinx, WeVote, Spinwheel, GreenSlate, Storm Ideas,
+    Prolific) this closes.
 
     Checked sentence-by-sentence (split on '.', '!', '?', or a newline) so
     a sentence describing where the COMPANY's team/office/HQ sits (a
     common, unrelated statement in remote job postings) doesn't
     false-positive this into rejecting an otherwise genuinely open-to-
-    anyone role.
+    anyone role. The whitelist-phrase check is intentionally NOT run
+    through this same team/office guard — none of its phrasings have any
+    plausible "describing the company, not the candidate" reading.
     """
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
     if not text.strip():
         return False
+    if _COUNTRY_WHITELIST_PHRASE_RE.search(text):
+        return True
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
         if not sentence.strip():
             continue
         if _COUNTRY_BASED_RESTRICTION_RE.search(sentence) and not _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
             return True
     return False
+
+
+# 2026-09 NEW (cross-LLM review, real posting: Stripe's "Program Manager,
+# Security GRC" — stripe.com/jobs/search?gh_jid=8078131): Greenhouse's own
+# metadata can carry a specific, non-global location even when the bare
+# location FIELD this project reads says "Remote" — ats_scrapers.py's
+# _fetch_greenhouse_questions() already appends a "Metadata Location: ..."
+# line to description_snippet whenever Greenhouse's own job metadata has a
+# location/location_country field (see its own comment: "Also check
+# metadata for location hints"), but nothing downstream ever READ that
+# line — it just sat in the text unused. This is a highly reliable,
+# STRUCTURED signal (it's the ATS's own metadata field, not free-form
+# prose to parse), so it gets its own direct check rather than folding it
+# into the prose-oriented regexes above: if the metadata value doesn't
+# carry any of the same global/worldwide evidence the location-FIELD
+# classifier itself accepts, it's exactly as disqualifying as the field
+# saying that value directly.
+_METADATA_LOCATION_LINE_RE = re.compile(r"^Metadata Location:\s*(.+)$", re.M)
+
+
+def has_hard_metadata_location_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does an appended "Metadata
+    Location: ..." line (see ats_scrapers.py's _fetch_greenhouse_questions)
+    name a specific, non-global place? See the module comment above
+    _METADATA_LOCATION_LINE_RE for the real Stripe posting this closes."""
+    desc = job.get("description_snippet") or ""
+    if not desc:
+        return False
+    for m in _METADATA_LOCATION_LINE_RE.finditer(desc):
+        value = m.group(1).strip()
+        if value and not _text_has_global_evidence(value):
+            return True
+    return False
+
+
+# 2026-09 NEW (cross-LLM review, real postings: Arcwood's "Account Manager
+# - Louisiana" (iCIMS), OpenProject's "(Senior) Account Manager - Europe"
+# (Personio), HeroDevs' "Channel Account Manager, EMEA"): several ATSs
+# encode the ONLY location restriction in the TITLE itself, as a trailing
+# " - <place>" / ", <place>" qualifier, with the location FIELD saying
+# nothing more specific than bare "Remote" or "US-" — so nothing in the
+# description/application-question checks above ever sees a restriction
+# at all. Deliberately scoped to a SMALL, unambiguous set of full region
+# names and full (not abbreviated) US state names, matched only as the
+# LAST segment of the title after a dash/comma — this avoids the false-
+# positive risk a bare state abbreviation would carry (a title containing
+# "IN" or "OR" as ordinary English words) since these are spelled out in
+# full and only recognized in the one title position real postings
+# actually use for this.
+_TITLE_REGION_SUFFIX_NAMES = (
+    r"europe|emea|apac|latam|asia[\s\-]?pacific|australia|"
+    r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|"
+    r"delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|"
+    r"kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|"
+    r"mississippi|missouri|montana|nebraska|nevada|new\s+hampshire|"
+    r"new\s+jersey|new\s+mexico|new\s+york|north\s+carolina|north\s+dakota|"
+    r"ohio|oklahoma|oregon|pennsylvania|rhode\s+island|south\s+carolina|"
+    r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
+    r"west\s+virginia|wisconsin|wyoming"
+)
+_TITLE_REGION_SUFFIX_RE = re.compile(
+    r"[\-–—,]\s*(?:" + _TITLE_REGION_SUFFIX_NAMES + r")\s*$", re.I,
+)
+
+
+def has_title_region_restriction_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does the job TITLE end with a
+    " - <region/state>" or ", <region/state>" qualifier naming a specific,
+    non-global place? See the module comment above
+    _TITLE_REGION_SUFFIX_NAMES for the real Arcwood/OpenProject/HeroDevs
+    postings this closes."""
+    title = job.get("title") or ""
+    if not title.strip():
+        return False
+    return bool(_TITLE_REGION_SUFFIX_RE.search(title))
 
 
 # Marker ats_scrapers.py's enrich_application_questions() appends before
