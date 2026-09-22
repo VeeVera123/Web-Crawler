@@ -44,16 +44,14 @@ passes empirically tested real vs fake slugs against every SCRAPERS-
 registered platform's actual endpoint (WebFetch against live real and
 obviously-fake slugs, cross-checked against each platform's own docs).
 21 platforms have a confirmed-safe, structurally distinct "does not
-exist" signal. 5 do not (see _UNVERIFIABLE_ATS below) — either the
+exist" signal. A handful do not (see _UNVERIFIABLE_ATS below) — either the
 platform returns an identical-looking response for "doesn't exist" and
 "real board, 0 jobs" (oracle_cloud_hcm, confirmed empirically: a real
 empty tenant returns the exact same 200+empty-array shape a nonexistent
 one would), the check requires JS/POST semantics no lightweight HTTP
-probe can safely replicate (workday — confirmed 2026-09 that, unlike
-Taleo below, a fake Workday tenant subdomain resolves anyway to the same
-shared per-instance load balancer, so DNS doesn't help here either;
-smartrecruiters — the one documented safe check needs api.smartrecruiters.com,
-which robots.txt disallows, confirmed live 2026-09, not just "suspected"),
+probe can safely replicate (smartrecruiters — the one documented safe
+check needs api.smartrecruiters.com, which robots.txt disallows,
+confirmed live 2026-09, not just "suspected"),
 or no live example could be found/reached to confirm a rule at all
 (jobadder — "Nothing here I'm afraid..." was found to be plausibly the
 SAME message a real empty board shows, an explicitly UNSAFE signal —
@@ -72,13 +70,18 @@ row that DNS-check already flagged as a real, currently-dead tenant.
 BreezyHR ALSO moved out of this bucket 2026-09 — a follow-up research
 pass found real live customer examples via web search that the original
 note said couldn't be found; see _verify_breezyhr's docstring for the
-confirmed status-code signal. Rows
-on unverifiable platforms, plus successfactors (JS-rendered, no scraper
-at all — see ats_scrapers.py's SCRAPERS dict; NOT brassring, which DOES
-have a working scraper — see BLACKLISTED_ATS.md and SCRAPERS, brassring
-was re-enabled 2026-09 and is only in _UNVERIFIABLE_ATS for lack of a
-confirmed dead-signal, same as workday/smartrecruiters/etc, not for lack
-of a scraper) are left completely untouched by this engine and only
+confirmed status-code signal. Workday ALSO moved out of this bucket
+2026-09 — real production evidence (user-pasted scrape_workday logs
+across dozens of real companies) surfaced Workday's own explicit
+HTTP 404 + errorCode "S21" "site_id not found" signal, cleanly distinct
+from 403/S22 bot-blocks, 502 gateway errors, and 422s; see
+_verify_workday's docstring for the full decision table and evidence.
+Rows on unverifiable platforms, plus successfactors (JS-rendered, no
+scraper at all — see ats_scrapers.py's SCRAPERS dict; NOT brassring,
+which DOES have a working scraper — see BLACKLISTED_ATS.md and SCRAPERS,
+brassring was re-enabled 2026-09 and is only in _UNVERIFIABLE_ATS for
+lack of a confirmed dead-signal, same as smartrecruiters/etc, not for
+lack of a scraper) are left completely untouched by this engine and only
 counted (as "unverified") and logged. ("ycombinator" was also in this
 bucket until 2026-09, when discovery.py's URL_TO_SLUG entry that used to
 mis-resolve YC/workatastartup.com URLs into a fake "ycombinator" ATS was
@@ -381,10 +384,16 @@ def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
 # Left completely untouched — never checked, never deleted, only counted.
 # See the module docstring above for why each one is here.
 _UNVERIFIABLE_ATS = {
-    "workday",           # SPA + POST-based API; no reliable GET-based signal found.
-                          # CONFIRMED 2026-09: unlike Taleo below, a fake Workday
-                          # tenant subdomain resolves anyway (shared per-instance
-                          # load balancer, not tenant-specific DNS) — no DNS shortcut here.
+    # "workday" MOVED OUT 2026-09 — the DNS-per-tenant shortcut still
+    # doesn't exist (unlike Taleo below, a fake Workday tenant subdomain
+    # resolves anyway, to the same shared per-instance load balancer every
+    # real tenant on that wdN instance uses), but real production evidence
+    # (user-pasted scrape_workday logs across dozens of real companies)
+    # surfaced a different, genuinely safe signal: Workday's own API
+    # returns HTTP 404 + errorCode "S21" for a site_id that truly doesn't
+    # exist for a tenant, distinct from 403/S22 (bot-block), 502 (gateway),
+    # and 422 (still ambiguous) — see _verify_workday's docstring for the
+    # full evidence and decision table.
     "smartrecruiters",   # CONFIRMED live 2026-09: the one documented safe check needs
                           # api.smartrecruiters.com, which robots.txt disallows outright
                           # (fetch tooling itself refuses the URL for this reason).
@@ -777,6 +786,72 @@ async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool
         return True
 
 
+async def _verify_workday(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Workday (2026-09, moved out of _UNVERIFIABLE_ATS after real
+    production evidence — user-pasted crawl_i.py scrape_workday logs
+    across dozens of real tenants — revealed a confirmed, platform-native
+    "this exact site_id doesn't exist for this tenant" signal.
+
+    Hits the EXACT same CXS jobs POST endpoint/payload/headers as the real
+    scraper (ats_scrapers.scrape_workday), with limit=1 so a live tenant
+    costs almost nothing to confirm. The observed real error-code
+    semantics (all confirmed against real companies in the pasted logs,
+    never against a fabricated example):
+      - HTTP 200                              -> tenant/site_id is real, KEEP.
+      - HTTP 404, errorCode "S21", message
+        "not found: Job_Posting_Site_ID=..."  -> Workday's OWN explicit
+        "this site_id does not exist for this tenant" signal — confirmed
+        via 3 different real companies all failing on site_id="Search"
+        (almost certainly a mis-captured UI element name, not a real
+        tenant site). This is the one and only DEAD signal used here.
+      - HTTP 403, errorCode "S22", message
+        "permission denied"                   -> bot-mitigation blocking
+        THIS request, NOT proof of non-existence (confirmed on real,
+        active companies wmeimg/wsc) — ambiguous, left in place.
+      - HTTP 502                              -> transient gateway error
+        (confirmed on Whole Foods, an obviously real, huge company) —
+        ambiguous, left in place.
+      - HTTP 422 (empty message), any other
+        status, timeout, JSON-parse failure    -> not yet a confirmed
+        signal either way (seen on real companies wth/yearup/zutari, and
+        earlier apttus/conga-external, a company that was
+        acquired/renamed) — ambiguous, left in place.
+
+    The caller (verify_archive_i_row) already runs the cheap static
+    _workday_slug_is_malformed shape check on every Workday row BEFORE
+    ever calling this function, so a garbage compound slug never reaches
+    this live call at all — this function only has to answer "does this
+    well-formed-looking tenant/site_id combination actually exist."""
+    company, wd, site_id = slug.split("|")
+    wd_num = wd[2:] if wd[:2].lower() == "wd" else wd
+    base_url = f"https://{company}.wd{wd_num}.myworkdayjobs.com"
+    api_url = f"{base_url}/wday/cxs/{company}/{site_id}/jobs"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        "Origin": base_url,
+        "Referer": f"{base_url}/{site_id}",
+    }
+    body = {"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""}
+    async with session.post(api_url, json=body, headers=headers, timeout=REQUEST_TIMEOUT) as r:
+        if r.status == 200:
+            return True
+        if r.status == 404:
+            try:
+                data = await r.json(content_type=None)
+            except Exception:
+                data = {}
+            if isinstance(data, dict) and data.get("errorCode") == "S21":
+                return False
+        # Every other case — 403/S22 bot-block, 502 gateway, 422 ambiguous,
+        # a 404 that ISN'T the confirmed S21 shape, timeouts, JSON failures —
+        # is left ambiguous: raise so the caller's except-block counts it as
+        # "unverified" and leaves the row untouched, never deleted on a guess.
+        r.raise_for_status()
+        raise RuntimeError(f"workday: ambiguous status {r.status} for slug {slug!r} (not S21/404)")
+
+
 async def _verify_gem(session: aiohttp.ClientSession, slug: str) -> bool:
     """Gem (2026-09, new platform — see discovery.py's SUPPORTED_ATS
     comment). POST a "JobBoardMeta" GraphQL query for this boardId to
@@ -848,6 +923,13 @@ ARCHIVE_II_VERIFIERS = {
     # why this moved out of there): _verify_breezyhr's own docstring has
     # the live evidence.
     "breezyhr": _verify_breezyhr,
+    # 2026-09: Workday — moved out of _UNVERIFIABLE_ATS after real
+    # production evidence (user-pasted scrape_workday logs) confirmed a
+    # genuine platform-native dead signal (HTTP 404 + errorCode "S21").
+    # See _verify_workday's own docstring above for the full decision
+    # table and the real-company evidence for every other status this
+    # deliberately leaves ambiguous (403/S22, 502, 422, etc.).
+    "workday": _verify_workday,
 }
 
 
@@ -1177,29 +1259,22 @@ async def delete_row(session: aiohttp.ClientSession, table: str, row_id: int) ->
 # ── orchestration ───────────────────────────────────────────────────
 
 # 2026-09 FIX (real production evidence — user-reported live crawl_i.py
-# logs, cross-checked against this file): Workday sits in
-# _UNVERIFIABLE_ATS because there's no safe LIVE "does this tenant exist"
-# signal for it — but that's a completely separate question from "is this
-# slug even shaped like a real one to begin with", which needs no network
-# call at all and is exactly what _looks_like_real_slug already does for
-# every OTHER platform via run_archive_i's dispatch below. The problem:
-# `_looks_like_real_slug` is applied to a slug as ONE whole string, but
-# Workday's slug format is a compound "company|wd#|site_id" — the actual
-# garbage discovery.py's two 2026-09 fixes were built to catch (a junk
-# site_id like "assets"/"robots.txt", or a company that's itself a bare
-# wd-instance-number placeholder like "wd5") only shows up once you split
-# the compound slug into its three real parts. Checking the whole
-# "anokacounty|wd1|assets" string against _looks_like_real_slug never
-# matches anything (no known asset extension, not a hex hash, not a
-# locale code) — so even for the platforms that DO reach that check, a
-# malformed compound Workday slug slips through it undetected. On top of
-# that, Workday rows never even reach that check in the first place:
-# run_archive_i's dispatch (see "skipped_rows" below) routes every
-# _UNVERIFIABLE_ATS row straight to counts["unverified"] and never calls
-# verify_archive_i_row on it at all, live check AND static shape check
-# both skipped together — when only the LIVE check is actually unsafe for
-# Workday; the static shape check needs no live signal and is exactly as
-# safe here as it is for every other platform.
+# logs, cross-checked against this file): the generic `_looks_like_real_slug`
+# shape check every OTHER platform's slug gets in verify_archive_i_row is
+# applied to a slug as ONE whole string — but Workday's slug format is a
+# compound "company|wd#|site_id", so the actual garbage discovery.py's two
+# 2026-09 fixes were built to catch (a junk site_id like "assets"/
+# "robots.txt", or a company that's itself a bare wd-instance-number
+# placeholder like "wd5") only shows up once you split the compound slug
+# into its three real parts. Checking the whole "anokacounty|wd1|assets"
+# string against `_looks_like_real_slug` never matches anything (no known
+# asset extension, not a hex hash, not a locale code) — so a malformed
+# compound Workday slug would slip straight through the generic check
+# undetected. This dedicated per-component check is what verify_archive_i_row
+# uses instead, specifically for ats == "workday", BEFORE the live
+# _verify_workday call below runs (see its docstring for the confirmed
+# S21/404 dead signal) — so a garbage compound slug is caught for free,
+# with zero network calls, and never even reaches the live check.
 def _workday_slug_is_malformed(slug: str) -> bool:
     """Cheap, no-network static shape check for Workday's compound
     "company|wd#|site_id" slug — mirrors the two confirmed-real bugs
@@ -1238,7 +1313,13 @@ async def verify_archive_i_row(session: aiohttp.ClientSession, row: dict, dry_ru
         # shared shape guard discovery.py's every _url_to_slug_* extractor
         # already uses; checked here BEFORE the live fetch so a bad-shaped
         # slug is removed regardless of whether it happens to be live.
-        if not _looks_like_real_slug(slug):
+        # Workday's slug is a compound "company|wd#|site_id" string, not a
+        # single shape _looks_like_real_slug can meaningfully check as one
+        # blob — use the dedicated per-component check for it instead (see
+        # _workday_slug_is_malformed's docstring for the two real bugs
+        # this closes that the generic check would miss entirely).
+        is_malformed = _workday_slug_is_malformed(slug) if ats == "workday" else not _looks_like_real_slug(slug)
+        if is_malformed:
             if dry_run:
                 async with lock:
                     counts["dead"] += 1
@@ -1395,34 +1476,15 @@ async def run_archive_i(ats_filter: str | None, limit: int | None, dry_run: bool
         all_rows = await fetch_rows(session, node.ARCHIVE_I_TABLE, "id,ats,slug", ats_filter, None,
                                      shard_index, shard_count)
 
+        # Workday now flows through ARCHIVE_II_VERIFIERS/verify_archive_i_row
+        # like every other platform (both the static _workday_slug_is_malformed
+        # shape check AND the live _verify_workday check happen inside that
+        # function now — see its docstring and _verify_workday's above) — no
+        # more special-casing needed here, just the plain skipped/verifiable
+        # split for the platforms genuinely left in _UNVERIFIABLE_ATS.
         verifiable_rows = [r for r in all_rows if r["ats"] in ARCHIVE_II_VERIFIERS]
         skipped_rows = [r for r in all_rows if r["ats"] not in ARCHIVE_II_VERIFIERS]
-
-        # 2026-09 FIX: Workday has no safe LIVE not-found signal (that's
-        # why it's in _UNVERIFIABLE_ATS), but a malformed compound slug
-        # needs no live signal at all — see _workday_slug_is_malformed's
-        # docstring above for the two real bugs this closes. Split
-        # skipped_rows so Workday still gets this free, no-network check
-        # instead of being blanket-counted as unverified like the
-        # genuinely-unverifiable platforms (smartrecruiters etc.).
-        workday_skipped = [r for r in skipped_rows if r["ats"] == "workday"]
-        other_skipped = [r for r in skipped_rows if r["ats"] != "workday"]
-        counts["unverified"] += len(other_skipped)
-
-        if workday_skipped:
-            malformed = [r for r in workday_skipped if _workday_slug_is_malformed(r["slug"])]
-            log.info(f"  {len(workday_skipped)} workday rows: static shape check found "
-                     f"{len(malformed)} malformed (no live call needed either way)")
-            if dry_run:
-                counts["dead"] += len(malformed)
-                counts["unverified"] += len(workday_skipped) - len(malformed)
-            else:
-                deleted = 0
-                for r in malformed:
-                    if await delete_row(session, node.ARCHIVE_I_TABLE, r["id"]):
-                        deleted += 1
-                counts["dead"] += deleted
-                counts["unverified"] += len(workday_skipped) - deleted
+        counts["unverified"] += len(skipped_rows)
 
         if limit is not None:
             verifiable_rows = verifiable_rows[:limit]
