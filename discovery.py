@@ -536,6 +536,23 @@ SUPPORTED_ATS = {
     # g.json live — absent) so, like isolvedhire, it is NOT added to
     # HTTPARCHIVE_ATS_TECH_NAMES.
     "gem",
+    # 2026-09: RecruiterBox / Trakstar Hire — added at explicit user
+    # request. Confirmed live, both discoverable and scrapable per this
+    # file's hard rule: a real tenant's job URL was found via public web
+    # search (mobilenations.recruiterbox.com/jobs/...), and a direct
+    # live GET against https://jsapi.recruiterbox.com/v1/openings/
+    # ?client_name=mobilenations returned real job data (3 open postings,
+    # full HTML description inline, structured location, remote flag) —
+    # a fully public, keyless JSON API, corroborated independently by
+    # the platform's own API docs (apiv1.recruiterbox.com/frontend_api.html)
+    # and a real third-party open-source scraper (github.com/
+    # sarthakjain004/headstart issue #540). The rebranded "Trakstar Hire"
+    # name canonicalizes to the SAME jsapi.recruiterbox.com API host
+    # regardless of which of the two hosted-site domains a given tenant's
+    # URL uses — see _url_to_slug_recruiterbox's docstring. No Wappalyzer
+    # fingerprint checked for this one; relying on the URL-suffix pattern
+    # alone, same as most other platforms in this set.
+    "recruiterbox",
 }
 
 # The 4 genuinely dead-end ATS platforms (confirmed unscrapeable — robots.txt
@@ -656,6 +673,11 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     # clean, single "Gem" list entry (github.com/Masterjx9/OpenPostings —
     # "Supported ATS" section).
     "gem": "gem",
+    # 2026-09: RecruiterBox / Trakstar Hire — confirmed live: OpenPostings'
+    # README lists it as "Trakstar" (NOT "RecruiterBox" — checked live,
+    # that string does not appear anywhere in the README at all), so
+    # that's the label their real ATS_name data will actually contain.
+    "trakstar": "recruiterbox",
 }
 
 def _map_ats_name(name: str) -> str | None:
@@ -1159,6 +1181,27 @@ def _url_to_slug_recruitee(url: str) -> str | None:
         slug = host.replace(".recruitee.com", "").lower()
         if slug and slug not in SKIP_SLUGS and slug != "www":
             return slug
+    return None
+
+
+def _url_to_slug_recruiterbox(url: str) -> str | None:
+    """RecruiterBox / Trakstar Hire — 2026-09, added at explicit user
+    request. A tenant's canonical job URL can be on EITHER of two domains
+    (confirmed live — see ats_scrapers.scrape_recruiterbox's module
+    comment): the legacy hosted-site domain
+    ({slug}.recruiterbox.com/jobs/...) or the current rebranded domain
+    ({slug}.hire.trakstar.com/jobs/...). Both share the same subdomain-as-
+    client_name shape, so both are handled here identically."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host.endswith(".hire.trakstar.com"):
+        slug = host.replace(".hire.trakstar.com", "").lower()
+    elif host.endswith(".recruiterbox.com"):
+        slug = host.replace(".recruiterbox.com", "").lower()
+    else:
+        return None
+    if slug and slug not in SKIP_SLUGS and slug != "www":
+        return slug
     return None
 
 
@@ -2221,6 +2264,11 @@ URL_TO_SLUG = {
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
+    # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
+    # comment above and _url_to_slug_recruiterbox's own docstring (handles
+    # both the legacy recruiterbox.com domain and the current
+    # hire.trakstar.com rebrand in one function).
+    "recruiterbox": _url_to_slug_recruiterbox,
 }
 
 
@@ -2749,6 +2797,12 @@ CC_PLATFORM_PATTERNS = {
     "isolvedhire": ["*.isolvedhire.com/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
+    # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
+    # comment above. Both domains a tenant's canonical URL can use (see
+    # _url_to_slug_recruiterbox's docstring) need their own glob pattern —
+    # kept in sync with CC_EXTRACTORS below, same "must match keys" rule
+    # as every other entry in this dict.
+    "recruiterbox": ["*.recruiterbox.com/jobs/*", "*.hire.trakstar.com/jobs/*"],
 }
 
 # Reuse URL_TO_SLUG converters for Common Crawl extraction
@@ -2820,6 +2874,9 @@ CC_EXTRACTORS = {
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
+    # New (2026-09): RecruiterBox / Trakstar Hire — kept in sync with
+    # CC_PLATFORM_PATTERNS above.
+    "recruiterbox": _url_to_slug_recruiterbox,
 }
 
 
@@ -5611,6 +5668,15 @@ _GITHUB_REGISTRY_ATS_MAP = {
     "personio": "personio",
     "pinpointhq": "pinpoint",
     "recruitee": "recruitee",
+    # RecruiterBox / Trakstar Hire — NOT checked against openroles' own
+    # data/tenants/ listing this session (the jsdelivr flat-listing lookup
+    # used to verify Gem's absence above failed to return live during this
+    # check). No key added here on principle rather than guessed — same
+    # "don't add without live confirmation" rule as everywhere else in
+    # this file. Still fully wired via SUPPORTED_ATS/URL_TO_SLUG/
+    # CC_PLATFORM_PATTERNS/CC_EXTRACTORS/_OPENPOSTINGS_ATS_MAP_RAW above,
+    # same as Gem's "not present in this one source" precedent. Revisit
+    # if this source is re-checked later.
     "rippling": "rippling",
     "smartrecruiters": "smartrecruiters",
     "taleo": "taleo",
