@@ -4598,6 +4598,108 @@ def scrape_hireology(slug: str) -> list[dict]:
     return jobs
 
 
+# ── RecruiterBox / Trakstar Hire ──────────────────────────
+# 2026-09: added at explicit user request. RecruiterBox rebranded to
+# "Trakstar Hire" some years ago but the public API host and the legacy
+# {slug}.recruiterbox.com hosted-site domain are both still live — a
+# tenant's canonical job URL can come back on EITHER domain (confirmed
+# live: a real tenant found via a public web search on the legacy
+# `mobilenations.recruiterbox.com/jobs/...` URL returns
+# `hosted_url: https://mobilenations.hire.trakstar.com/jobs/...` from the
+# API itself) — discovery.py registers both domain suffixes, extracting
+# the same `client_name` slug from either one.
+#
+# Confirmed live (2026-09), two independent sources plus a direct fetch:
+# the official API docs (apiv1.recruiterbox.com/frontend_api.html) and a
+# real open-source scraper (github.com/sarthakjain004/headstart issue
+# #540) both describe, and a live GET against a real tenant
+# (client_name=mobilenations) confirmed, a fully public, keyless JSON API:
+#   GET https://jsapi.recruiterbox.com/v1/openings/?client_name={slug}
+#     &offset={n}&limit=100
+# Response: {"meta": {"offset", "limit", "total"}, "objects": [...]}, each
+# object carrying title, hosted_url (canonical apply-page URL — on
+# whichever of the two domains that tenant currently uses), position_type,
+# allows_remote (bool), a structured location (city/state/country/
+# zipcode), team, and the FULL HTML description INLINE — no per-job
+# detail-page fetch needed, same "no second pass required" shape as
+# Hireology above. api.recruiterbox.com/jsapi.recruiterbox.com carries no
+# separate robots.txt disallow for this path (the DataDome protection
+# real open-source scrapers work around only guards the HOSTED HTML career
+# page, not this JSON API host — confirmed by the headstart project
+# switching its own scraper to this API specifically to avoid that wall).
+def scrape_recruiterbox(slug: str) -> list[dict]:
+    """RecruiterBox / Trakstar Hire — public unauthenticated JSON API.
+    Slug is the tenant's client_name (e.g. 'mobilenations')."""
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    limit = 100
+    max_pages = 40  # defensive ceiling, same convention as scrape_hireology
+    jobs = []
+
+    for page in range(max_pages):
+        offset = page * limit
+        r = _get("https://jsapi.recruiterbox.com/v1/openings/",
+                  headers=headers, params={"client_name": slug, "offset": offset, "limit": limit})
+        if not r:
+            break
+        try:
+            payload = r.json()
+        except Exception as e:
+            log.debug(f"RecruiterBox: JSON parse failed for {slug} offset {offset}: {e}")
+            break
+
+        items = payload.get("objects") or []
+        if not isinstance(items, list) or not items:
+            break
+
+        for j in items:
+            if not isinstance(j, dict):
+                continue
+            title = (j.get("title") or "").strip()
+            job_url = (j.get("hosted_url") or "").strip()
+            if not title or not job_url:
+                continue
+
+            loc = j.get("location") or {}
+            if isinstance(loc, dict):
+                location = ", ".join(p for p in (loc.get("city", ""), loc.get("state", "")) if p)
+                country = (loc.get("country") or "").strip()
+            else:
+                location = ""
+                country = ""
+            if not location and j.get("allows_remote"):
+                location = "Remote"
+
+            team = j.get("team")
+            if isinstance(team, dict):
+                team = team.get("name", "")
+
+            desc = _snippet(j.get("description") or "")
+
+            jobs.append({
+                "title": title,
+                "url": job_url,
+                "company": slug.replace("-", " ").replace("_", " ").title(),
+                "location": location,
+                "country": country,
+                "department": team or "",
+                "workplace_type": "Remote" if j.get("allows_remote") else "",
+                "employment_type": (j.get("position_type") or "").strip(),
+                "salary": _extract_salary(desc),
+                "description_snippet": desc,
+                "source_ats": "RecruiterBox",
+                "slug": slug,
+            })
+
+        meta = payload.get("meta") or {}
+        total = meta.get("total")
+        if total is not None and offset + limit >= total:
+            break
+        if len(items) < limit:
+            break
+
+    return jobs
+
+
 # ── Gem ─────────────────────────────────────────
 
 # Gem's public job board (jobs.gem.com/{slug}) is a client-rendered
@@ -4981,6 +5083,7 @@ SCRAPERS = {
     # confirmed-live GraphQL evidence trail (list + batched detail calls,
     # no auth, no robots.txt on jobs.gem.com at all).
     "gem": scrape_gem,
+    "recruiterbox": scrape_recruiterbox,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -5749,6 +5852,15 @@ DESCRIPTION_FETCHERS = {
     # case (same as Zoho/BambooHR above), but registered with the generic
     # fetcher as a defensive fallback for the rare short/empty case.
     "Hireology": _fetch_generic_description,
+    # RecruiterBox / Trakstar Hire deliberately NOT registered here (same
+    # reasoning as Gem below): scrape_recruiterbox's jsapi.recruiterbox.com
+    # listing call already returns the full HTML description inline, and
+    # job["url"] (hosted_url) points at the tenant's HOSTED career-page
+    # HTML, which real third-party scrapers confirm is DataDome-protected
+    # (see scrape_recruiterbox's module comment) — a generic plain-request
+    # fallback fetch against that URL would hit a bot-detection wall, not
+    # recover a real description, so registering it would only waste a
+    # request on the already-rare empty case rather than actually helping.
     # Gem deliberately NOT registered here: scrape_gem already fetches
     # each job's real descriptionHtml via GraphQL in one batched call, and
     # job["url"] points at the board's JS-rendered listing page (see
