@@ -2,7 +2,11 @@
 Two-stage classifier — multi-provider architecture.
 
 Role classification:     Gemini + Groq + Mistral (free tiers, concurrent)
-Location classification: NVIDIA NIM + OpenAI GPT-4.1 nano + Groq + Mistral (concurrent)
+Location classification: NVIDIA NIM + OpenAI GPT-4.1 nano + Groq (concurrent)
+  (Mistral is role-only as of 2026-09 — dropped from location after a live
+  403 tier_not_allowed on mistral-large-2512; see config.py for the story
+  and why the downgrade-to-Small budget is too small for location's longer
+  batches. See config.py, the source of truth, for exact models/keys.)
 
 (See config.py's module docstring for the full, current provider roster
 and the reasoning behind each swap — this list drifts as providers get
@@ -1771,7 +1775,12 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     # were actually left — nothing said the others were missing. This is
     # the single most likely explanation for "why did so few jobs get a
     # real AI verdict this run."
-    _known_location_providers = {"nvidia", "openai", "groq", "mistral"}
+    # 2026-09: "mistral" deliberately excluded — see config.py's module
+    # docstring ("ROUND 2"): Mistral was dropped from LOCATION_PROVIDERS
+    # (real 403 tier_not_allowed on Large, and the downgrade-to-Small
+    # budget is too small for location's longer batches), so its absence
+    # here is expected, not a missing-API-key situation to warn about.
+    _known_location_providers = {"nvidia", "openai", "groq"}
     _active = {p["name"] for p in providers}
     _missing = _known_location_providers - _active
     if _missing:
