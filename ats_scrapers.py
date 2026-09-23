@@ -7022,35 +7022,44 @@ def _fetch_wild_questions(job: dict) -> str:
 
 
 def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
-    """Fetch application questions for location-'unsure' jobs.
+    """Fetch application questions for EVERY job that has a URL.
+
+    2026-09 ROUND 2 (explicit user instruction: "Make sure that all jobs
+    have their application questions fetched. All of them. ... everything
+    under our control should have application questions in it.
+    Everything!"): previously this only fetched for jobs where
+    classifier.keyword_classify_location(job) == "unsure" — i.e. only the
+    subset that would actually be sent to the AI location-classification
+    step. That left the majority of jobs (anything already keyword-
+    classified as a hard 'match' or 'no_match') with NO application-
+    question enrichment at all, even though a job already keyword-matched
+    as globally open could still carry a hard-restriction application
+    question (a work-authorization/visa screening question) that the
+    keyword classifier's own description-text checks never got a chance to
+    see, because it lives in the ATS's separate screening-questions data,
+    not the description body. Fetching for every job closes that gap;
+    crawl_iii.py's scrapply.ai-sourced jobs are the one explicit carve-out
+    the user named (no application-question fetcher for that source), and
+    that carve-out already existed and is unaffected by this change since
+    crawl_iii.py doesn't call this function at all.
 
     Jobs on one of the 20 supported ATS platforms (see QUESTION_FETCHERS
     above) use that platform's dedicated fetcher. Everything else —
     including archive_ii's unsupported-ATS/"wild" company career sites —
     falls back to _fetch_wild_questions, the same universal HTML-form
     parser + /apply,/application URL-guessing used as the Level-3 fallback
-    everywhere else in this file (2026-09: previously these jobs got no
-    application-question enrichment at all, purely because their
-    source_ats had no dedicated entry — the generic parser doesn't need
-    one, so there's no reason to skip them).
+    everywhere else in this file.
 
     Work authorization / visa sponsorship questions are strong signals that
     a job is NOT globally open, even when its location field just says
     "Remote". We extract just those and append them to description_snippet
-    so the AI location classifier can use them.
-
-    "Unsure" is determined the same way classifier.keyword_classify_location()
-    determines it — i.e. this targets exactly the subset of jobs that will
-    actually be sent to the AI location step, not the full job list.
+    so both the keyword classifier's hard overrides and the AI location
+    classifier can use them.
 
     Call this AFTER enrich_descriptions and BEFORE filter_locations."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from classifier import keyword_classify_location
 
-    to_enrich = [
-        j for j in jobs
-        if j.get("url") and keyword_classify_location(j) == "unsure"
-    ]
+    to_enrich = [j for j in jobs if j.get("url")]
 
     if not to_enrich:
         return jobs
@@ -7063,7 +7072,7 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
             wild_count += 1
         by_platform[ats] = by_platform.get(ats, 0) + 1
     platform_summary = ", ".join(f"{k}:{v}" for k, v in sorted(by_platform.items()))
-    log.info(f"Fetching application questions for {len(to_enrich)} unsure-location jobs "
+    log.info(f"Fetching application questions for {len(to_enrich)} jobs "
              f"across {len(by_platform)} ATS platforms ({platform_summary})"
              + (f" — {wild_count} on unsupported/wild sites, generic fallback" if wild_count else "")
              + "...")
