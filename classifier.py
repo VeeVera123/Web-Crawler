@@ -1193,6 +1193,26 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_title_region_restriction_signal(job):
         return "no_match", None, None
 
+    # ── 0.88. HARD OVERRIDE (2026-09, explicit user instruction, real
+    # posting: Together AI's Greenhouse listing, job 5070981007): a
+    # screening question requiring in-office attendance a specific number
+    # of days per week, or naming a specific office/city as a physical
+    # attendance requirement — "Are you willing to work four days per week
+    # in our San Francisco office?" — independent of the location field
+    # (which just said "San Francisco" with no other qualifier) and of the
+    # workplace_type/title-suffix checks above (this project had no
+    # detector at all for a body-text/application-question ATTENDANCE
+    # REQUIREMENT phrased as a question, only for an explicit
+    # Hybrid/On-site/In-office FIELD value or title suffix). This question
+    # only reached description_snippet at all after the 2026-09 fix to
+    # ats_scrapers.py's _format_screening_questions() — see that function's
+    # docstring: previously every non-work-authorization-shaped screening
+    # question, including this one, was silently dropped before
+    # classifier.py ever saw it. See has_office_attendance_signal's
+    # docstring. ──
+    if has_office_attendance_signal(job):
+        return "no_match", None, None
+
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
     # key PRESENT with value None, not missing, so the "" default here
@@ -2590,6 +2610,47 @@ def has_hard_country_specific_auth_signal(job: dict) -> bool:
             return True
     text = desc + " " + (job.get("title") or "")
     return bool(_COUNTRY_AUTH_RE.search(text))
+
+
+# 2026-09 NEW (explicit user instruction, real posting: Together AI's
+# Greenhouse listing, job 5070981007 — "Are you willing to work four days
+# per week in our San Francisco office?"). Distinct from
+# _NON_REMOTE_WORKPLACE_RE below: that one matches a scraper-reported
+# workplace_type FIELD value (Hybrid/On-site/In-office/In-person) or a
+# title suffix, not free-text body/application-question phrasing asking
+# whether the candidate is willing to attend an office N days a week.
+# A number-of-days-per-week-in-office question is unambiguous evidence the
+# role is NOT fully remote, regardless of what the bare location field
+# says — Together AI's own location field here was just "San Francisco"
+# with no other qualifier, so nothing else in this pipeline would have
+# caught it. Only reaches this function's input at all since the 2026-09
+# fix to ats_scrapers.py's _format_screening_questions() stopped dropping
+# non-work-authorization-shaped screening questions before they ever
+# reached description_snippet.
+_OFFICE_ATTENDANCE_RE = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six|seven)\s*(?:-|\s)?days?\s*"
+    r"(?:a|per)\s*week\s*(?:in|at|from)\s*(?:our|the|this|your)?\s*"
+    r"[\w\s]{0,30}?\boffice\b"
+    r"|\bwilling\s+to\s+(?:work|come|be)\s+(?:in|to|at)\s+(?:our|the|this|your)?\s*"
+    r"[\w\s]{0,30}?\boffice\b"
+    r"|\brequired?\s+to\s+(?:be\s+)?(?:in|at)\s+(?:the|our|a)\s+office\b"
+    r"|\bin[\s\-]office\s+\d+\s*days?\b",
+    re.I,
+)
+
+
+def has_office_attendance_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's description or
+    application-question text (see _OFFICE_ATTENDANCE_RE's module comment
+    above) require in-person office attendance a specific number of days
+    per week, or explicitly ask the candidate's willingness to be in a
+    physical office? This is a hard "not fully remote" signal independent
+    of the workplace_type field and title-suffix checks elsewhere in this
+    file, both of which only catch a STRUCTURED field/title value, not a
+    free-text attendance requirement buried in a screening question."""
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    return bool(_OFFICE_ATTENDANCE_RE.search(text))
 
 
 # Disqualifying workplace_type tokens: a scraper-reported physical-presence
