@@ -1,6 +1,7 @@
 """
 CRAWL III — direct job-board consumer for stapply.ai's bulk, pre-scraped
-CSVs (Phenom, UKG, SAP/SuccessFactors, Dayforce, Eightfold, Recruitee).
+CSVs (Phenom, UKG, SAP/SuccessFactors, Dayforce, Eightfold, Recruitee,
+MokaHR).
 
 2026-09 (explicit user instruction): a third, independent crawl pipeline,
 alongside Crawl I (crawl_i.py — known-ATS live scanner) and Crawl II
@@ -23,12 +24,12 @@ done that scraping for us, once, for its entire dataset, and republishes
 the result as one CSV per ATS platform at
 https://storage.stapply.ai/jobhive/v1/{source}/jobs.csv — full title,
 company, location, and DESCRIPTION already inline. So Crawl III's pipeline
-is: fetch 6 CSVs (async, aiohttp) -> parse -> classify -> write. No
+is: fetch 7 CSVs (async, aiohttp) -> parse -> classify -> write. No
 per-job HTTP round-trip at all, for either the initial scrape OR the
 enrichment step Crawl I/II both need — literally "just regex [and AI], not
 fetching," per the explicit design instruction this file was built from.
 
-SIX SOURCES, WHY EACH IS GENUINE INCREMENTAL COVERAGE:
+SEVEN SOURCES, WHY EACH IS GENUINE INCREMENTAL COVERAGE:
   - phenom          — no scraper/discovery support of our own at all.
   - ukg             — no scraper/discovery support of our own at all.
   - successfactors (the "SAP" ask — stapply has no separate "sap" key) —
@@ -51,6 +52,15 @@ SIX SOURCES, WHY EACH IS GENUINE INCREMENTAL COVERAGE:
                       per explicit instruction, as a faster supplemental
                       source alongside our own scraper, not a replacement
                       for it.
+  - moka            — MokaHR (app.mokahr.com/social-recruitment/...), a
+                      Chinese ATS platform. No live scraper/discovery of
+                      our own — MokaHR's own API (mokahr.com/docs/api) is
+                      per-employer OAuth-authenticated, no anonymous
+                      cross-tenant endpoint found. stapply's CSV (31,943
+                      rows, confirmed live via manifest.json) is the only
+                      practical way to get this coverage. NOTE this source
+                      is the exception to the "English/US-market" language
+                      assumption below — see LANGUAGE FILTERING.
 
 LANGUAGE FILTERING (explicit, deliberate, and SCOPED TO THIS FILE ONLY):
 no language-detection library is used here. classifier.py's role-keyword
@@ -58,14 +68,20 @@ regexes (CS_KEYWORDS/AM_KEYWORDS/etc. — see keyword_classify_role) are
 English-only phrases ("customer success", "account manager", ...) — a
 non-English title essentially never matches, so it's filtered out at
 filter_roles() before it ever reaches location classification, same as
-any other title that isn't CSM/AM/PM/OM. These 6 sources are enterprise
-HR-suite platforms whose postings skew heavily English/US-market, so the
-volume this misses is expected to be small — per explicit instruction,
-this is an accepted tradeoff for THIS batch specifically, not a general
-policy. A future EURES/Bundesagentur/jobs.ch/jobbank.gc.ca-style batch
-(non-English-market job boards) remains a SEPARATE, not-yet-authorized
-effort that would need a real language-ID step (langdetect/fastText) —
-do not extend this file's English-only assumption to that batch.
+any other title that isn't CSM/AM/PM/OM. Six of these seven sources are
+enterprise HR-suite platforms whose postings skew heavily English/US-
+market, so the volume this misses is expected to be small. The seventh,
+moka, is the opposite case: MokaHR's customer base (Trip.com, SHEIN,
+Zhihu, BIGO, ...) skews heavily Chinese-market/Chinese-language, so this
+source's postings will mostly self-filter out at filter_roles() as non-
+English titles rather than genuinely lacking CSM/AM/PM/OM roles — this is
+expected and fine (same self-filtering behavior, just a much higher miss
+rate for this one source than the other six), not a bug to chase. Per
+explicit instruction, none of this is a general policy. A future
+EURES/Bundesagentur/jobs.ch/jobbank.gc.ca-style batch (non-English-market
+job boards) remains a SEPARATE, not-yet-authorized effort that would need
+a real language-ID step (langdetect/fastText) — do not extend this file's
+English-only assumption to that batch.
 
 AGGRESSIVE STALENESS POLICY (explicit instruction — "today or latest the
 day before"): stapply's CSV schema has NO closed/status/is_active field —
@@ -84,7 +100,7 @@ find out a job disappeared by it not showing up in the next CSV pull).
 SHARDING: unlike Crawl I (server-side, per-slug, via a Supabase RPC) there
 is no per-row API to shard against here — stapply publishes one bulk CSV
 file per platform, not a paginated/queryable endpoint. Each shard fetches
-the SAME 6 CSVs in full (small relative to Crawl I's ~87K live per-company
+the SAME 7 CSVs in full (small relative to Crawl I's ~87K live per-company
 HTTP round-trips — this is 6 bulk downloads, not thousands) and then keeps
 only its own ~1/total_shards slice, selected by hashing each job's URL
 (_shard_of()) — deterministic and stable across shards/runs, same
@@ -151,6 +167,20 @@ STAPPLY_SOURCES = {
     "dayforce": f"{STAPPLY_BASE}/dayforce/jobs.csv",
     "eightfold": f"{STAPPLY_BASE}/eightfold/jobs.csv",
     "recruitee": f"{STAPPLY_BASE}/recruitee/jobs.csv",
+    # 2026-09 (explicit user request: "Add MokaHR ... if you can't add the
+    # scraper directly, just add it to crawl 3 since scraply has it"):
+    # MokaHR (app.mokahr.com/social-recruitment/{company}/{id}) has no
+    # public/anonymous per-company API of our own to build a live scraper
+    # from — a real search this session found only an OAuth-authenticated
+    # employer API (mokahr.com/docs/api) and a third-party project
+    # (gzchenhao/openhire) that has Moka on its roadmap but hasn't built it
+    # yet. But stapply's own manifest.json (confirmed live) lists "moka" as
+    # a real source: 31,943 rows, last updated 2026-09-21, same 25-column
+    # schema as every other source here (url, title, company, location,
+    # description, ...) — so it drops straight into the existing
+    # source-agnostic _row_to_job()/parse_source_csv() with no special-
+    # casing needed, same as the other 6.
+    "moka": f"{STAPPLY_BASE}/moka/jobs.csv",
 }
 
 _FETCH_TIMEOUT = aiohttp.ClientTimeout(total=180, connect=30)
