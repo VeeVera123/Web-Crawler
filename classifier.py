@@ -1,12 +1,12 @@
 """
 Two-stage classifier — multi-provider architecture.
 
-Role classification:     Gemini + Groq + Mistral (free tiers, concurrent)
-Location classification: NVIDIA NIM + OpenAI GPT-4.1 nano + Groq (concurrent)
-  (Mistral is role-only as of 2026-09 — dropped from location after a live
-  403 tier_not_allowed on mistral-large-2512; see config.py for the story
-  and why the downgrade-to-Small budget is too small for location's longer
-  batches. See config.py, the source of truth, for exact models/keys.)
+Role classification:     Groq-O + Groq-C (free tiers, concurrent)
+Location classification: Groq-O + Groq-C + NVIDIA NIM + OpenAI GPT-4.1 nano (concurrent)
+  (2026-09 ROUND 4: Gemini and Mistral both removed entirely, replaced by
+  a second independent Groq account — explicit user instruction, after
+  Gemini's daily-quota problems and Mistral's 403-then-429 saga. See
+  config.py, the source of truth, for exact models/keys/reasoning.)
 
 (See config.py's module docstring for the full, current provider roster
 and the reasoning behind each swap — this list drifts as providers get
@@ -594,7 +594,9 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     # no other signal, so if a provider's API key is missing this run,
     # that's the single most useful line for explaining an unexpectedly
     # low role-match count.
-    _known_role_providers = {"gemini", "groq", "mistral"}
+    # 2026-09 ROUND 4: Gemini and Mistral removed entirely, replaced by a
+    # second independent Groq account — see config.py's module docstring.
+    _known_role_providers = {"groq-o", "groq-c"}
     _active = {p["name"] for p in providers}
     _missing = _known_role_providers - _active
     if _missing:
@@ -1767,20 +1769,20 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     providers = LOCATION_PROVIDERS
 
     # 2026-09: surface missing providers up front. LOCATION_PROVIDERS
-    # silently drops any of gemini/openai/nvidia whose API key env var
-    # isn't set (see config.py's _make_provider) — running location
-    # classification on 1 provider instead of 3 isn't wrong, but it cuts
-    # both capacity and failover coverage a lot, and previously the only
-    # sign of it was the raw HTTP request log for whichever provider(s)
-    # were actually left — nothing said the others were missing. This is
-    # the single most likely explanation for "why did so few jobs get a
-    # real AI verdict this run."
-    # 2026-09: "mistral" deliberately excluded — see config.py's module
-    # docstring ("ROUND 2"): Mistral was dropped from LOCATION_PROVIDERS
-    # (real 403 tier_not_allowed on Large, and the downgrade-to-Small
-    # budget is too small for location's longer batches), so its absence
-    # here is expected, not a missing-API-key situation to warn about.
-    _known_location_providers = {"nvidia", "openai", "groq"}
+    # silently drops any provider whose API key env var isn't set (see
+    # config.py's _make_provider) — running location classification on
+    # fewer providers than expected isn't wrong, but it cuts both capacity
+    # and failover coverage a lot, and previously the only sign of it was
+    # the raw HTTP request log for whichever provider(s) were actually left
+    # — nothing said the others were missing. This is the single most
+    # likely explanation for "why did so few jobs get a real AI verdict
+    # this run."
+    # 2026-09 ROUND 4: "gemini" and "mistral" deliberately excluded — both
+    # removed entirely (see config.py's module docstring), replaced by a
+    # second independent Groq account ("groq-c"). If GROQ_API_KEY_C isn't
+    # set yet, "groq-c" will show up in _missing below — that's expected
+    # until the account owner adds that secret, not a bug.
+    _known_location_providers = {"nvidia", "openai", "groq-o", "groq-c"}
     _active = {p["name"] for p in providers}
     _missing = _known_location_providers - _active
     if _missing:
