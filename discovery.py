@@ -250,14 +250,20 @@ KALIL_SOURCES = {
     # "eightfold": no URL_TO_SLUG entry / no scraper yet — not a confirmed-
     # blocked platform, just not built. Worth reconsidering separately if
     # ever prioritized.
-    # "recruiterbox": verified 2026-09 (not just assumed) — the original
-    # recruiterbox.com product no longer exists independently; it rebranded
-    # to Trakstar Hire years ago, and Trakstar Hire's job/openings API is
-    # per-customer-authenticated (developers.recruiterbox.com), not an open
-    # per-company slug pattern like every other source here — there is no
-    # anonymous endpoint to scrape, so this isn't addable in this project's
-    # slug-scraping model at all, regardless of how many rows kalil0321 has
-    # for it.
+    "recruiterbox":     f"{KALIL_BASE}/recruiterbox.csv",
+    # 2026-09 round 3 (real user question: "are we wired to obtain
+    # recruiterbox slugs from kalil yet?"): the comment that used to sit here
+    # ("no anonymous endpoint, not addable") was written BEFORE this session
+    # found RecruiterBox/Trakstar Hire's real public API
+    # (jsapi.recruiterbox.com/v1/openings — see ats_scrapers.scrape_recruiterbox
+    # and GREYLIST_ATS.md) and added a working URL_TO_SLUG converter
+    # (_url_to_slug_recruiterbox) — that old rationale is stale now, not
+    # still true. Confirmed live this round that kalil0321's own
+    # recruiterbox.csv exists (format: name,slug,url) and its "url" column
+    # has both the legacy company.recruiterbox.com domain and the rebranded
+    # company.hire.trakstar.com domain, both of which our converter already
+    # handles — so no DIRECT_SLUG_PLATFORMS entry is needed, the existing
+    # URL_TO_SLUG-based path in fetch_kalil_slugs() picks it up for free.
     # Not ATS platforms at all (country-specific public job boards, out of
     # scope for this project): "infojobs_es", "jobs_cz", "jobbankca".
     # "mercor" not added: not in URL_TO_SLUG/SUPPORTED_ATS — no working
