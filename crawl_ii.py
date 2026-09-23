@@ -104,6 +104,18 @@ from classifier import (  # noqa: E402
     classify_role_category,
     PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
 )
+# 2026-09 ROUND 2 (explicit user instruction: "Make sure that all jobs have
+# their application questions fetched. All of them. ... everything under
+# our control should have application questions in it. Everything!"): this
+# file previously had NO application-question enrichment step at all —
+# unlike crawl_i.py, it never imported or called enrich_application_
+# questions, so none of its jobs ever got their ATS screening/work-auth
+# questions folded into description_snippet before location classification.
+# ats_scrapers.py's generic _fetch_wild_questions fallback (used for any
+# platform without a dedicated fetcher — which covers most of this file's
+# unsupported/"wild" company career sites) needed no new code to support
+# this; the only gap was that nothing here ever called it.
+from ats_scrapers import enrich_application_questions  # noqa: E402
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
     get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
@@ -1496,6 +1508,14 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         return pages_done, 0, time_budget_hit, report_stats
 
     log.info("── Location check (open to global/Africa hires?) ──")
+    # Fetch application questions for EVERY role-matched job (2026-09 ROUND
+    # 2, explicit user instruction — see the import comment above). Work
+    # authorization / visa screening questions help both the keyword
+    # classifier's hard overrides and the AI stage catch country-restricted
+    # roles that the bare description text alone wouldn't reveal.
+    log.info("  enriching application questions across all ATS platforms...")
+    role_matched = enrich_application_questions(role_matched)
+
     global_jobs, confidences = _filter_locations(role_matched)
     report_stats["global_jobs"] = len(global_jobs)
     log.info(f"  {len(role_matched)} roles checked → {len(global_jobs)} are eligible")
