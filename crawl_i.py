@@ -607,9 +607,12 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         log.info("  fetching descriptions for jobs missing them...")
         csm_jobs = enrich_descriptions(csm_jobs)
 
-        # Fetch application questions for location-"unsure" jobs, across
-        # all 20 ATS platforms (multi-tier fallback — see ats_scrapers.py).
-        # Work authorization questions help the AI detect country-restricted roles
+        # Fetch application questions for EVERY job (2026-09 ROUND 2,
+        # explicit user instruction — previously only "unsure"-location jobs
+        # got this), across all 20 ATS platforms (multi-tier fallback — see
+        # ats_scrapers.py). Work authorization questions help both the
+        # keyword classifier's hard overrides and the AI stage detect
+        # country-restricted roles.
         log.info("  enriching application questions across all ATS platforms...")
         csm_jobs = enrich_application_questions(csm_jobs)
 
