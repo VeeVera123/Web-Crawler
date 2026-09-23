@@ -6007,15 +6007,83 @@ def _clean_label(text: str) -> str:
     return text
 
 
-def _format_auth_questions(questions: list[dict]) -> str:
-    """Given [{label, required}, ...], keep only work-authorization-relevant
-    ones and format them as 'Application Question: ...' lines."""
+# 2026-09 CRITICAL FIX (explicit user instruction, real production
+# evidence): this function used to keep ONLY questions matching
+# _WORK_AUTH_RE before ever appending them to description_snippet — every
+# other question was silently dropped and NEVER reached classifier.py, no
+# matter how relevant. Two real live postings proved this was actively
+# hiding hard eligibility restrictions:
+#   Sleep Doctor (Greenhouse, People Operations Manager): "Do you
+#   currently reside in one of the following: AR, AZ, CA, CO, GA, FL, IL,
+#   IA, KY, MD, MN, NC, NV, NY, OH, PA, TX, WI, WA?" — a hard US-state-list
+#   residency restriction with NO "authorized"/"eligible"/"sponsor"/"work
+#   permit" wording at all, so _WORK_AUTH_RE never matched it and the
+#   question was dropped before classifier.py's already-existing
+#   has_state_list_restriction_signal() ever got a chance to see it.
+#   Together AI (Greenhouse, role redacted): "Are you willing to work four
+#   days per week in our San Francisco office?" — a hard onsite-attendance
+#   requirement, not a work-authorization question in any sense, so it was
+#   dropped the same way.
+# Fix: stop pre-filtering by TOPIC (work-auth-shaped wording) and instead
+# filter by NOISE (universal PII/identity/EEO boilerplate that's on nearly
+# every application form and never carries eligibility signal) — see
+# _BOILERPLATE_QUESTION_RE below. Every other screening question, whatever
+# it's about, is now appended as an "Application Question: ..." line and
+# reaches BOTH classifier.py's deterministic regexes (has_state_list_
+# restriction_signal, has_hard_country_specific_auth_signal, the new
+# has_office_attendance_signal) and the AI classification stage for
+# anything those regexes don't recognize. This does NOT reintroduce the
+# earlier "any Application Question line = auto-reject" bug (see
+# has_hard_country_specific_auth_signal's own docstring for that history)
+# — the downstream functions still only fire on a SPECIFIC, named
+# restriction (a country, an enumerated state list, a named office/city),
+# never on the mere presence of a screening question. A country-agnostic
+# "Are you legally authorized to work in the country where this job is
+# located?" (Together AI's own second question, right below the office one
+# in the same posting) still correctly passes through untouched.
+_BOILERPLATE_QUESTION_RE = re.compile(
+    r"^(?:"
+    r"first\s*name|last\s*name|full\s*name|preferred\s*name|"
+    r"e-?mail(?:\s*address)?|phone(?:\s*number)?|"
+    r"r[ée]sum[ée]\s*/?\s*cv|r[ée]sum[ée]|cv|"
+    r"cover\s*letter|"
+    r"linked\s*in(?:\s*(?:profile|url))?|"
+    r"website|portfolio|github|personal\s*website|"
+    r"how\s+did\s+you\s+hear\s+about\s+(?:this|us)|referral|referred\s+by|"
+    r"pronouns?|"
+    r"race(?:\s*/\s*ethnicit\w*)?|ethnicit\w*|gender(?:\s*identity)?|"
+    r"veteran\s*status|disabilit\w*(?:\s*status)?|"
+    r"sexual\s*orientation"
+    r")\s*[:\?]?\s*$",
+    re.I,
+)
+
+
+def _format_screening_questions(questions: list[dict]) -> str:
+    """Given [{label, required}, ...], keep every substantive screening
+    question — excluding only universal PII/identity fields (name, email,
+    phone, resume, cover letter, LinkedIn, website/portfolio) and EEO
+    self-identification questions (race, gender, veteran status,
+    disability, sexual orientation), which never carry job-eligibility
+    signal and would otherwise be pure noise (or, for EEO fields,
+    inappropriate to feed into any downstream classification at all).
+    Formats survivors as 'Application Question: ...' lines. See the
+    comment block above _BOILERPLATE_QUESTION_RE for why this replaced
+    the old work-authorization-only pre-filter."""
     lines = []
     for q in questions or []:
         label = (q.get("label") or "").strip()
-        if label and _WORK_AUTH_RE.search(label):
+        if label and not _BOILERPLATE_QUESTION_RE.match(label):
             lines.append(f"Application Question: {label}")
     return "\n".join(lines)
+
+
+# Backward-compat alias — every existing call site (and any future one)
+# gets the broadened behavior automatically. Kept under the old name too
+# since "auth questions" is still a reasonable mental model for most of
+# what survives the boilerplate filter, even though it's no longer
+# filtered BY that topic.
+_format_auth_questions = _format_screening_questions
 
 
 # ── Level 3: universal fallback (embedded JSON + generic DOM form parse) ──
@@ -6215,11 +6283,17 @@ def _fetch_greenhouse_questions(job: dict) -> str:
     if str(data.get("id", "")) != str(job_id):
         return ""
 
+    # 2026-09: was `if _WORK_AUTH_RE.search(label)` — dropped every
+    # non-auth-shaped screening question before it ever reached
+    # classifier.py. See _format_screening_questions's docstring (the
+    # Sleep Doctor/Together AI real-posting evidence) for why this now
+    # keeps every substantive question, filtering only universal PII/EEO
+    # boilerplate.
     questions = data.get("questions") or []
     auth_questions = []
     for q in questions:
-        label = q.get("label", "")
-        if _WORK_AUTH_RE.search(label):
+        label = (q.get("label") or "").strip()
+        if label and not _BOILERPLATE_QUESTION_RE.match(label):
             auth_questions.append(f"Application Question: {label}")
 
     # Also check metadata for location hints (e.g. "United States (Remote)")
@@ -6256,6 +6330,9 @@ def _fetch_ashby_questions(job: dict) -> str:
     except Exception:
         return ""
 
+    # 2026-09: was `if _WORK_AUTH_RE.search(title)` — see
+    # _format_screening_questions's docstring for why every substantive
+    # question is now kept, filtering only universal PII/EEO boilerplate.
     auth_questions = []
     # Check applicationFormDefinition for work auth questions
     form_def = data.get("applicationFormDefinition") or data.get("formDefinition") or {}
@@ -6267,15 +6344,15 @@ def _fetch_ashby_questions(job: dict) -> str:
             f = field.get("field", field) if isinstance(field, dict) else field
             if not isinstance(f, dict):
                 continue
-            title = f.get("title", "") or f.get("label", "") or f.get("name", "")
-            if _WORK_AUTH_RE.search(title):
+            title = (f.get("title", "") or f.get("label", "") or f.get("name", "")).strip()
+            if title and not _BOILERPLATE_QUESTION_RE.match(title):
                 auth_questions.append(f"Application Question: {title}")
 
     # Also check surveyQuestions
     survey = data.get("surveyQuestions") or []
     for sq in survey:
-        label = sq.get("label", "") or sq.get("title", "") or sq.get("question", "")
-        if _WORK_AUTH_RE.search(label):
+        label = (sq.get("label", "") or sq.get("title", "") or sq.get("question", "")).strip()
+        if label and not _BOILERPLATE_QUESTION_RE.match(label):
             auth_questions.append(f"Application Question: {label}")
 
     return "\n".join(auth_questions)
