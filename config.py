@@ -1,89 +1,64 @@
 """
 Configuration — multi-provider architecture.
 
-Role classification:     Gemini + Groq + Mistral, running concurrently
-Location classification: NVIDIA NIM + OpenAI + Groq, running concurrently
+Role classification:     Groq-O + Groq-C, running concurrently
+Location classification: Groq-O + Groq-C + NVIDIA NIM + OpenAI, running concurrently
 
-2026-09: added Mistral to role classification — explicit user request for
-"another generous free AI provider" after the 82-batch cost/quota
-complaint. Two alternatives were researched and rejected first: GitHub
-Models is fully retired as of 2026-07-30; SambaNova's true no-card free
-tier caps at 20 requests/DAY, too low to be useful (its better-known
-"Developer Tier" numbers require a linked card).
+2026-09 ROUND 4 — Gemini and Mistral REMOVED entirely, replaced by a
+second independent Groq account (explicit user instruction, after
+discovering they already held two separate Groq accounts — and two
+separate Gemini accounts, though Gemini is dropped here regardless, not
+doubled): "Groq-O" (the original GROQ_API_KEY, already in use) and
+"Groq-C" (a second, genuinely separate Groq account/API key — new env var
+GROQ_API_KEY_C) are two INDEPENDENT accounts, each with its own real free-
+tier quota pool (30 RPM / 8K TPM / 1K RPD / 200K TPD per
+console.groq.com/docs/rate-limits — see the base-interval comment block
+below), not two views of the same key. Each name is used in BOTH role and
+location classification (mirroring the existing single-"groq" pattern),
+so classifier.py's per-provider throttle correctly tracks TWO separate
+pools instead of doubling load on one. This roughly doubles this
+project's total Groq-family throughput without touching a single other
+provider, and sidesteps Gemini's daily-quota problems and Mistral's
+403-then-429 saga entirely (see below for that history) rather than
+continuing to fight either. Gemini is removed outright (not kept as a
+third leg) and Mistral is removed outright (not kept as a fourth,
+worst-performing leg) — explicit instruction, and there's no remaining
+reason to keep either once two independent, reliable Groq quotas cover
+the volume that prompted adding them in the first place.
+GROQ_API_KEY_C is a NEW secret the account owner needs to add (GitHub
+Actions secret + local .env, same as any other provider key here) — it
+does not exist yet purely from this code change.
 
-2026-09 ROUND 2 — REAL PRODUCTION FAILURE, model downgraded from Large to
-Small, and Mistral dropped from location classification entirely:
-mistral-large-2512 was tried first (see below for why it looked like the
-obviously better choice), but the FIRST real crawl run hit it with a live
-403: `{'type': 'tier_not_allowed', 'code': '1910', 'message': 'This model
-is not available in your subscription tier'}`. This account's Mistral
-plan does not include Mistral Large 3 — the account's own
-admin.mistral.ai/plateforme/limits page DOES list a 250,000 TPM figure for
-it, but that page apparently shows what the rate limit WOULD be, not
-whether the model is actually callable on this tier; the 403 is the real,
-authoritative signal, not the limits page. Reverted to mistral-small-2603
-("Mistral Small 4"), which is presumed (not yet proven — watch for the
-same 403 on this model too, which would mean the account's tier blocks
-ALL chat-completion models, not just Large) to be within the free/
-experiment tier's actual model allowlist. Its real per-model budget is
-only 20,000 TPM (vs. Large's 250,000 — see below), which is fine for role
-classification (short title batches) but nowhere near enough for location
-classification's much longer job-description batches — at that budget
-each call only fits a few hundred tokens, not even one full description
-with headroom. So Mistral is now ROLE-ONLY; it has been removed from
-LOCATION_PROVIDERS rather than kept in with a batch size too small to be
-useful. If this account's Mistral plan is ever upgraded to include Large
-3, both the model id and the location-classification entry could be
-restored — see the max_batch_chars comment in _ROLE_PROVIDER_DEFS for the
-recalculated 20,000-TPM budget.
-
-2026-09 ROUND 3 — REAL PRODUCTION EVIDENCE that even Small's console-page
-rate limit doesn't match reality: a live run paced at the "confirmed" 1
-RPS got HTTP 429 on every batch, three in a row, exhausting all retries
-each time. Widened _MISTRAL_BASE_INTERVAL from 1.0s to 30.0s/call (see
-that constant's own comment for the sourcing — a community tool's
-real-world ~1-req/30s finding, cross-checked against this project's own
-observed 429 pattern, not an official Mistral number). Also researched
-and rejected as alternatives at the same time: Cerebras now requires a
-verified payment method to activate ANY account (its "free" $5 credit
-expires in 30 days) — confirmed live via inference-docs.cerebras.ai/
-support/rate-limits — so it fails this project's no-card-required bar and
-was NOT added, despite third-party sites claiming a generous no-card free
-tier (they're wrong or stale). OpenRouter's free (":free"-suffixed) models
-are real but capped at 20 RPM / 50 RPD with $0 credits — confirmed live
-via OpenRouter's own rate-limits article — which is too low to matter at
-this project's volume; a one-time $10 credit purchase permanently raises
-that to 1000 RPD, but that's a real cost decision left to the account
-owner, not something to add unilaterally. Net effect of this round:
-Mistral remains in the roster but is now the deliberately slowest/least-
-relied-upon leg — the existing cross-provider failover (see classifier.py)
-already picks up its slack when it's this rate-limited, which is the
-whole reason this project runs multiple providers instead of one.
-
-Model choice within Mistral (superseded by the entries above, kept for
-context on how the original small-vs-large comparison was made):
-mistral-large-2512 ("Mistral Large 3") was picked over
-mistral-small-2603 ("Mistral Small 4") purely on the rate-limits page's
-numbers — mistral-small-2603 shows just 20,000 TPM there vs.
-mistral-large-2512's 250,000 TPM, both at the same 1 RPS — without
-realizing that page doesn't reflect per-tier model access. Lesson: a
-live 403 from an actual API call is stronger evidence than a numbers-only
-limits page for whether a model is usable at all. See the
-_MISTRAL_BASE_INTERVAL comment block below for full sourcing and the one
-real caveat (Mistral uses free-tier data for training by default, with a
-separate opt-out toggle in account Privacy settings — not a blocker for
-public job-posting data, but worth knowing).
-
-2026-09: swapped Gemini and NVIDIA between the two stages, and added Groq
-to both (explicit user request). Gemini was repeatedly hitting its
-free-tier DAILY quota in location classification (long job descriptions,
-heavier real workload) — moved to role classification instead, where
-calls are short (just titles) and its daily budget goes much further.
-NVIDIA moved the other way, consolidating into location-only rather than
-splitting its one 40 RPM quota across both stages. Groq (openai/
-gpt-oss-120b — confirmed live as Groq's largest/most-capable free-tier
-model) now runs in BOTH stages under the same provider name, so its one
-real 8K TPM quota is tracked as shared, not double-counted.
+SUPERSEDED HISTORY (Gemini and Mistral, both fully removed as of ROUND 4
+above — kept as a condensed record so nobody re-adds either without
+knowing why they were dropped):
+  - Gemini was added early on for role classification, moved between
+    stages once (it kept hitting its free-tier DAILY quota in location
+    classification's heavier workload — moved to role's shorter title-only
+    calls instead), and is now removed outright per ROUND 4.
+  - Mistral was added later ("another generous free AI provider" request)
+    and went through 3 rounds of real production trouble before removal:
+    (1) mistral-large-2512 looked like a straight upgrade over
+    mistral-small-2603 based on admin.mistral.ai/plateforme/limits'
+    published TPM figures (250,000 vs 20,000, same 1 RPS) — but a real
+    crawl run hit Large with a live 403 tier_not_allowed (this account's
+    plan didn't include it; the limits page's number didn't mean the model
+    was actually callable — a live 403 is stronger evidence than a
+    numbers-only page). (2) Downgraded to mistral-small-2603, dropped from
+    location classification (Small's real 20,000 TPM budget was too small
+    for description-length batches, role-only from here on). (3) Even
+    Small's "confirmed" 1 RPS console figure didn't match reality — a live
+    run got HTTP 429 on every batch, three in a row, exhausting all
+    retries each time; widened to 30s/call based on a community tool's
+    real-world ~1-req/30s finding. Around the same time, Cerebras (requires
+    a card now — inference-docs.cerebras.ai/support/rate-limits) and
+    OpenRouter (free tier capped at 20 RPM/50 RPD; 1000 RPD needs a
+    one-time $10 purchase, a real cost decision left to the account owner)
+    were both researched and NOT added. Net lesson from the whole Mistral
+    saga: a provider's own rate-limit console page can be flatly wrong
+    about both model access AND real throughput — trust production
+    evidence over documentation. ROUND 4's two-Groq-account fix made all
+    of this moot rather than pursuing a 4th round of Mistral tuning.
 
 Together with the failover in classifier.py's ai_classify_roles()/
 ai_classify_locations() — if one of a stage's providers fails a batch
@@ -154,25 +129,25 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 # These get multiplied by AI_RATE_SHARDS below so N concurrent processes
 # collectively stay under the same quota one process was tuned against.
 # Verified against each provider's own docs/pricing pages (2026-08/2026-09)
-# — all five are ORG/PROJECT-scoped (or, for NVIDIA, per-API-key) quotas,
-# not per-process, so N processes sharing one key genuinely do divide one
-# pool between them (confirming the AI_RATE_SHARDS fair-share approach is
-# the right model here, not an over-cautious one):
+# — all are ORG/PROJECT-scoped (or, for NVIDIA, per-API-key) quotas, not
+# per-process, so N processes sharing one key genuinely do divide one pool
+# between them (confirming the AI_RATE_SHARDS fair-share approach is the
+# right model here, not an over-cautious one):
 #   Cerebras (inference-docs.cerebras.ai/support/rate-limits) — Free Trial:
 #     5 RPM / 30K TPM / 1M TPD, org-wide. RPM is the binding constraint by
 #     far, so batches should be as LARGE as the TPM/context budget allows —
 #     fewer, bigger calls make better use of a 5-RPM ceiling than many
-#     small ones would.
+#     small ones would. (Legacy single-provider fallback only — not in the
+#     current multi-provider roster; also now requires a card to activate
+#     at all, see ROUND 4's superseded-history note above.)
 #   Groq (console.groq.com/docs/rate-limits), openai/gpt-oss-120b: 30 RPM /
-#     8K TPM / 1K RPD / 200K TPD, org-wide. TPM is the binding constraint
-#     here (30 RPM is loose by comparison), so batch size stays the limiter.
-#   Gemini (ai.google.dev/gemini-api/docs/rate-limits) — Google no longer
-#     publishes a static free-tier RPM/TPM table; it now varies by account
-#     usage tier and must be read from https://aistudio.google.com/rate-limit
-#     directly. The 15 RPM figure below is the long-standing historical
-#     Flash-tier free-tier number and a reasonable conservative default,
-#     but if you're still seeing 429s after this change, check your actual
-#     dashboard number and adjust _GEMINI_BASE_INTERVAL to match.
+#     8K TPM / 1K RPD / 200K TPD PER ACCOUNT, org-wide. TPM is the binding
+#     constraint here (30 RPM is loose by comparison), so batch size stays
+#     the limiter. 2026-09 ROUND 4: this project now uses TWO independent
+#     Groq accounts ("Groq-O"/GROQ_API_KEY and "Groq-C"/GROQ_API_KEY_C),
+#     each with this exact same quota, so total available Groq-family
+#     throughput is roughly double a single account's — see the module
+#     docstring for the full story.
 #   OpenAI (platform.openai.com/docs/guides/rate-limits), gpt-4.1-nano,
 #     Tier 1: 500 RPM / 200K TPM, org+project-scoped. Current interval
 #     already runs at ~12% of the confirmed limit even at 9 concurrent
@@ -185,153 +160,76 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     chat models as of 2026-09. Treated as a single pool shared by BOTH
 #     the role and location NVIDIA entries below (same provider name
 #     "nvidia", same key), since that's what's actually true of the quota.
-#   Mistral (admin.mistral.ai/plateforme/limits — the account's own live
-#     per-model limits page, checked live 2026-09; NOT
-#     help.mistral.ai/en/articles/225174, whose generic "1 RPS / 500K TPM"
-#     free-tier figure turned out not to match reality per-model) — every
-#     model on the account gets its own separate TPM budget at a shared
-#     1 request/second ceiling. mistral-small-2603 ("Mistral Small 4") is
-#     actually stingy at just 20,000 TPM; the limits page ALSO showed
-#     mistral-large-2512 ("Mistral Large 3") at 250,000 TPM, which looked
-#     like a straight upgrade — but a real crawl run hit Large with a live
-#     403 tier_not_allowed (this account's plan doesn't include it; the
-#     limits page's number doesn't mean the model is actually callable —
-#     see the module docstring's "ROUND 2" section for the full story), so
-#     Small is what's actually used here, not Large. (Also on that limits
-#     page but not used: ministral-3b-2512 at 1.3M TPM / 12.5 RPS — much
-#     higher throughput, much weaker/smaller model, and unconfirmed whether
-#     it's tier-allowed either; worth checking later if raw volume ever
-#     matters more than per-job accuracy.) Added 2026-09 per explicit user request
-#     for "another free AI provider, generous AF". Two providers researched
-#     and REJECTED before Mistral: GitHub Models is fully retired as of
-#     2026-07-30 (no longer usable at all); SambaNova's true no-card free
-#     tier is capped at 20 REQUESTS PER DAY (not per minute — confirmed via
-#     docs.sambanova.ai/docs/en/models/rate-limits), too low to be useful
-#     here — its more generous "Developer Tier" numbers reported by
-#     third-party comparison sites require linking a card, which this
-#     project's other providers deliberately avoid. Caveat: Mistral uses
-#     free-tier input/output for model training BY DEFAULT (separate
-#     opt-out toggle per help.mistral.ai/en/articles/455207 — "Anonymous
-#     improvement data" in the account Privacy settings); this is a
-#     data-handling tradeoff to be aware of, not a functional limitation,
-#     and doesn't block use here since no PII/proprietary data is sent
-#     (only public job postings). mistral-large-2512 is a dated model id,
-#     not a "-latest" alias — checked live 2026-09 and Mistral's current
-#     model listing (docs.mistral.ai/getting-started/models) no longer
-#     carries "-latest" aliases at all; if Mistral ships a newer Large
-#     later, update this dated id by hand and re-check
-#     admin.mistral.ai/plateforme/limits for its real per-model TPM/RPS
-#     rather than assuming continuity.
 _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single process
+                                  # (legacy fallback only — see comment above)
 _GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 calls/min
                                   # (6K TPM, 75% of cap — was 30s/2-calls-min, doubled
-                                  # throughput while keeping a real safety margin)
-_GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verify your
-                                  # own account at aistudio.google.com/rate-limit)
+                                  # throughput while keeping a real safety margin).
+                                  # Shared by BOTH Groq-O and Groq-C below — each is
+                                  # its own independent account with this same real
+                                  # quota, not two views of one pool.
 # NVIDIA NIM (integrate.api.nvidia.com) — no single published per-model RPM;
 # NVIDIA's own docs say free-tier limits are model/account-specific, but the
 # commonly reported free-tier figure across NIM-hosted chat models is ~40
-# RPM, SHARED ACROSS THE WHOLE KEY (not per-model) — this matters here
-# because the SAME NVIDIA_API_KEY is used for both role and location
-# classification below, so both stages' calls draw from one 40 RPM pool,
-# not two separate ones. 60/40 = 1.5s/call single-process baseline.
+# RPM, SHARED ACROSS THE WHOLE KEY (not per-model). Location-classification
+# only (see LOCATION_PROVIDER_DEFS below) — 60/40 = 1.5s/call single-process
+# baseline.
 _NVIDIA_BASE_INTERVAL = 1.5
-# Mistral: mistral-small-2603. 2026-09 ROUND 3 — REAL PRODUCTION EVIDENCE
-# that the "1 RPS" figure from admin.mistral.ai/plateforme/limits (used for
-# ROUND 1/2 above) does NOT reflect actual enforced throughput, same kind
-# of gap as the Large-tier 403 in ROUND 2: a live run paced at exactly
-# 1.0s/call got HTTP 429 on every single batch, three batches in a row,
-# exhausting all retries each time (5s/10s backoff) before failing over.
-# The free/"Experiment" tier's real ceiling is well below its own console's
-# published number. Widened to 30.0s/call based on a third-party report
-# (a community tool, mistral-managed-queue, built specifically to survive
-# Mistral's free tier, which treats it as ~1 request/30s) cross-checked
-# against this project's own observed 429 pattern — not an official
-# Mistral number (their docs don't publish one that matches reality), but
-# consistent with what was actually seen. If 429s persist even at this
-# pace, that's evidence the real ceiling is lower still and this should be
-# widened further; if they stop, this can be tightened back down later
-# with real evidence, not by trusting the console page again.
-_MISTRAL_BASE_INTERVAL = 30.0
 
 # ── Role classification providers (free tiers, concurrent) ──
-# 2026-09: Gemini + Groq (explicit user request — swapped with location's
-# roster below: Gemini moves here from location, NVIDIA moves OUT of role
-# entirely and consolidates into location-only, Groq is now used by BOTH
-# stages). Reasoning given: Gemini was hitting its free-tier DAILY quota
-# repeatedly in location classification and needed a break/reroute of its
-# own traffic; moving it to role (shorter, cheaper calls — titles, not
-# full job descriptions) gives it a much lighter real workload while
-# keeping it in the rotation instead of dropping it outright.
+# 2026-09 ROUND 4: Groq-O + Groq-C ONLY (explicit user instruction — Gemini
+# and Mistral both removed entirely, see module docstring for the full
+# history/reasoning). Two independent Groq accounts stand in for what used
+# to be a 3-provider roster (Gemini/Groq/Mistral), because two genuinely
+# separate free-tier Groq quotas cover more real throughput than three
+# providers where one (Gemini) hit daily quotas and the other (Mistral)
+# never reliably worked at all (403s, then persistent 429s).
 _ROLE_PROVIDER_DEFS = [
-    # Gemini: same model/base_url as before, but a role-appropriate (much
-    # smaller) max_batch_chars — titles are short, so there's no reason to
-    # approach anywhere near Gemini's real ~1M-token context here. Kept
-    # generous relative to Groq/NVIDIA below since Gemini's free-tier RPM
-    # (not TPM) is the binding constraint for short-text batches like this.
-    _make_provider(
-        "gemini",
-        "GEMINI_API_KEY",
-        "gemini-3.5-flash",
-        "https://generativelanguage.googleapis.com/v1beta/openai/",
-        max_batch_chars=400_000,
-        min_call_interval=_GEMINI_BASE_INTERVAL * AI_RATE_SHARDS,
-    ),
-    # Groq: GPT OSS 120B — confirmed live 2026-09 via
+    # Groq-O ("Original"): the account already in use before this round —
+    # same GROQ_API_KEY env var as always, no secret change needed for this
+    # one. GPT OSS 120B — confirmed live 2026-09 via
     # console.groq.com/docs/rate-limits and console.groq.com/docs/model/
     # openai/gpt-oss-120b as Groq's largest/most-capable model with
     # published free-tier access (120B-parameter open-weight reasoning
     # model, 131,072 token context, 65,536 max output; free tier: 30 RPM /
-    # 1K RPD / 8K TPM / 200K TPD) — the smartest free-tier option
-    # available, per explicit user request to use it since free tier
-    # costs no usage credits either way. Same provider name "groq" is
+    # 1K RPD / 8K TPM / 200K TPD). Same provider name "groq-o" is
     # deliberately reused in LOCATION_PROVIDERS below, so classifier.py's
-    # per-provider throttle treats both stages' Groq calls as sharing ONE
+    # per-provider throttle treats both stages' Groq-O calls as sharing ONE
     # real 8K TPM pool, not two independent ones (same pattern already
     # used for the shared NVIDIA key elsewhere in this file).
     _make_provider(
-        "groq",
+        "groq-o",
         "GROQ_API_KEY",
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-small-2603 (Mistral Small 4) — NOT mistral-large-2512
-    # (see module docstring's "ROUND 2" section: Large returned a live 403
-    # tier_not_allowed on this account's plan, downgraded to Small, which
-    # is presumed-but-not-yet-fully-confirmed to actually be callable here;
-    # if Small ALSO 403s, that means this account's tier blocks every
-    # Mistral chat model, not just Large — check the run's logs for that).
-    # max_batch_chars derived from Small's real 20,000 TPM budget (per
-    # admin.mistral.ai/plateforme/limits, live 2026-09): at the 1 RPS
-    # single-process baseline (60 calls/min max), 20,000/60 ≈ 333
-    # tokens/call ≈ 1,330 chars at ~4 chars/token, then the same ~72%
-    # safety margin used elsewhere in this file -> ~950, rounded down to
-    # 900. Small for role classification only — titles are short (a batch
-    # of several is well under 900 chars), so this budget is plenty here
-    # even though it's far too small for location classification's
-    # description-length batches (see why Mistral was removed from
-    # LOCATION_PROVIDERS below).
+    # Groq-C ("Clone"/second account): a genuinely SEPARATE Groq account —
+    # its own signup, own API key, own independent 30 RPM / 8K TPM / 1K RPD
+    # quota, identical tier/model to Groq-O above but tracked as its own
+    # pool. NEW env var GROQ_API_KEY_C — the account owner needs to add
+    # this as a GitHub Actions secret (and local .env) for this entry to
+    # activate; until then _make_provider silently skips it, same as any
+    # other provider with an unset key. Same model/limits/reasoning as
+    # Groq-O; the only difference is which account's quota it draws from.
     _make_provider(
-        "mistral",
-        "MISTRAL_API_KEY",
-        "mistral-small-2603",
-        "https://api.mistral.ai/v1",
-        max_batch_chars=900,
-        min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
+        "groq-c",
+        "GROQ_API_KEY_C",
+        "openai/gpt-oss-120b",
+        "https://api.groq.com/openai/v1",
+        max_batch_chars=4_000,
+        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
 
 ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
 
 # ── Location classification providers (concurrent) ──
-# 2026-09: NVIDIA NIM + OpenAI + Groq (explicit user request — Gemini
-# moved OUT to role classification above, since it kept hitting its free
-# daily quota here; Groq added as a replacement third leg, using the SAME
-# provider name "groq" as its role-classification entry above so both
-# stages' calls draw from Groq's one real 8K TPM pool instead of being
-# tracked as if they were separate quotas).
+# 2026-09 ROUND 4: OpenAI + NVIDIA + Groq-O + Groq-C (explicit user
+# instruction — Mistral removed entirely, see module docstring; Groq-O and
+# Groq-C use the SAME provider names as their role-classification entries
+# above so each stays tracked as one real pool per account, not doubled).
 _LOCATION_PROVIDER_DEFS = [
     # OpenAI: GPT-4.1 nano, paid tier. Confirmed Tier 1: 500 RPM / 200K TPM,
     # org+project-scoped. Not scaled by AI_RATE_SHARDS — even at 9 concurrent
@@ -373,33 +271,33 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=3_200_000,   # 1,000,000 tok * 0.8 * 4 chars/tok
         min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Groq: GPT OSS 120B — see the role-classification entry above for the
-    # live-verified model/rate-limit details (same model, same account,
-    # same "smartest free-tier option" reasoning). max_batch_chars is
-    # higher than the role entry's 4_000 (real job descriptions need more
-    # room than a bare title) but still small relative to
-    # OpenAI/NVIDIA above — Groq's real 8K TPM ceiling is by far the
-    # tightest of the three location providers, and it's a SHARED pool
-    # with the role-classification Groq traffic above, so this stays
-    # conservative on purpose. MAX_JOBS_PER_BATCH's 5-7 job cap (see
-    # classifier.py) still does most of the real batch-size limiting here,
-    # same as for OpenAI/NVIDIA.
+    # Groq-O + Groq-C: GPT OSS 120B, two independent accounts — see the
+    # role-classification entries above for the live-verified model/rate-
+    # limit details and the "genuinely separate quota, not double-counted"
+    # explanation. max_batch_chars is higher than the role entries' 4_000
+    # (real job descriptions need more room than a bare title) but still
+    # small relative to OpenAI/NVIDIA above — each account's real 8K TPM
+    # ceiling is by far the tightest of the four location providers, and
+    # each is a SHARED pool with that same account's role-classification
+    # traffic above, so this stays conservative on purpose.
+    # MAX_JOBS_PER_BATCH's 5-7 job cap (see classifier.py) still does most
+    # of the real batch-size limiting here, same as for OpenAI/NVIDIA.
     _make_provider(
-        "groq",
+        "groq-o",
         "GROQ_API_KEY",
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=6_000,
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral deliberately NOT included here (2026-09 ROUND 2 — see module
-    # docstring): downgraded from mistral-large-2512 to mistral-small-2603
-    # after a live 403 tier_not_allowed on Large, and Small's real 20,000
-    # TPM budget (~900 usable chars/call after safety margin — see the
-    # role-classification entry above) is nowhere near enough for location
-    # classification's much longer job-description batches. Mistral is
-    # role-only for now; revisit adding it back here if this account's
-    # Mistral plan is ever upgraded to include Large 3.
+    _make_provider(
+        "groq-c",
+        "GROQ_API_KEY_C",
+        "openai/gpt-oss-120b",
+        "https://api.groq.com/openai/v1",
+        max_batch_chars=6_000,
+        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
 ]
 
 LOCATION_PROVIDERS = [p for p in _LOCATION_PROVIDER_DEFS if p is not None]
