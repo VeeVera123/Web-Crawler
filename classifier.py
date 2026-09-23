@@ -767,13 +767,21 @@ GLOBAL_KEYWORDS = [
     r"\blocation\s*[\-–—:]?\s*anywhere\b",
     r"\blocation\s*[\-–—:]?\s*flexible\b",
     r"\blocation\s*[\-\s]*free\b",
-    r"\blocation\s*agnostic\b",
-    r"\blocation\s*independent\b",
+    # 2026-09 ROUND 5 BUG FIX (explicit user-provided global hiring lingo
+    # list): these two used bare \s* with NO hyphen alternative, so the
+    # extremely common HYPHENATED spellings "location-agnostic" and
+    # "location-independent" (a literal hyphen character, which \s* never
+    # matches since it isn't whitespace) never matched at all — only the
+    # spaced-out "location agnostic"/"location independent" did. Fixed the
+    # same way "location[\s\-]*free" a few lines above already did it
+    # correctly.
+    r"\blocation[\s\-]*agnostic\b",
+    r"\blocation[\s\-]*independent\b",
     r"\bgeo[\-\s]*flexible\b",
     r"\bgeo[\-\s]*agnostic\b",
     r"\bborderless\b",
     r"\bunrestricted\s*location\b",
-    r"\bno\s*location\s*restriction\b",
+    r"\bno\s*location\s*restrictions?\b",
     r"\b(fully\s*)?distributed\b",
     r"\bdistributed\s*team\b",
     r"\bdistributed\s*workforce\b",
@@ -783,17 +791,34 @@ GLOBAL_KEYWORDS = [
     r"\ball\s*countries\b",
     r"\bany\s*location\b",
     r"\ball\s*locations?\b",
-    r"\bno\s*location\s*(requirement|restriction|preference)\b",
-    r"\bno\s*geographic\s*restriction\b",
-    r"\bno\s*country\s*restriction\b",
+    r"\bno\s*location\s*(requirement|restriction|preference)s?\b",
+    # 2026-09 ROUND 5 BUG FIX: these two required a trailing word boundary
+    # right after the singular "restriction", which FAILS on the plural
+    # "restrictions" (no word-boundary between the "n" and the "s") — the
+    # user's own list uses the plural ("no geographic restrictions", "no
+    # location restrictions"). Made the trailing "s" optional.
+    r"\bno\s*geographic\s*restrictions?\b",
+    r"\bno\s*country\s*restrictions?\b",
+    # 2026-09 ROUND 5 (explicit user-provided global hiring lingo list —
+    # "no geographic limitation"/"no location limitation" is the same idea
+    # as "restriction" with a different noun, not previously covered at
+    # all).
+    r"\bno\s*(geographic|location)\s*limitations?\b",
+    r"\bno\s*restrictions?\s*on\s*where\s*you\s*live\b",
+    r"\bwe\s*(?:don'?t|do\s*not)\s*restrict\s*where\s*you\s*(?:work|live)\b",
     # Time-zone framed global signals — "any time zone" / "regardless of
     # time zone" is a strong proxy for "we don't restrict by geography"
     r"\btime[\-\s]*zone\s*agnostic\b",
     r"\bany\s*time\s*zone\b",
     r"\bany\s*timezone\b",
     # Explicit "we don't care where you are" phrasings
-    r"\bregardless\s*of\s*(location|country|time\s*zone|timezone)\b",
+    r"\bregardless\s*of\s*(location|country|time\s*zone|timezone|geography)\b",
     r"\birrespective\s*of\s*(location|country)\b",
+    # 2026-09 ROUND 5 (explicit user-provided global hiring lingo list):
+    # "wherever"/"where you live" framed variants distinct from the
+    # "regardless of"/"irrespective of" preposition-led phrasings above.
+    r"\bregardless\s*of\s*where\s*you\s*live\b",
+    r"\bwherever\s*(?:you|they)\s*(?:are|live)(?:\s*located)?\b",
     r"\bcountry[\-\s]*agnostic\b",
     r"\bwork\s*from\s*any\s*(country|location)\b",
     # "hire/candidates/applicants ... worldwide/globally/anywhere" phrasings
@@ -824,6 +849,38 @@ GLOBAL_KEYWORDS = [
     r"\bwork\s*from\s*any\s*part\s*of\s*the\s*world\b",
     r"\bglobal\s*remote\s*team\b",
     r"\bremote[\-\s]*native\b",
+    # 2026-09 ROUND 5 (explicit user-provided global hiring lingo list,
+    # sourced from OpenAI research per the user's established workflow of
+    # posing a research question externally and handing back the answer —
+    # see this file's own history of the Mistral/OpenRouter and restrictive-
+    # language research questions for the same pattern). Cross-checked
+    # against the existing ~100 entries above; only the genuinely MISSING
+    # phrasings are added here rather than duplicating coverage that
+    # already exists (e.g. "hire anywhere in the world" already matches
+    # the existing bare "hire...anywhere" entry as a substring, so it's
+    # not re-added).
+    r"\bwork\s*anywhere\b",
+    r"\bfrom\s*anywhere\b",
+    r"\banywhere\s*(globally|worldwide)\b",
+    r"\blocation\s*(?:doesn'?t|does\s*not)\s*matter\b",
+    r"\bglobally\s*remote\b",
+    r"\bglobal\s*remote\s*workforce\b",
+    r"\bglobal\s*remote\s*(?:position|role|opportunity)\b",
+    r"\bdistributed\s*(?:worldwide|globally)\b",
+    r"\bremote\s*by\s*design\b",
+    r"\bborn\s*remote\b",
+    # Hyphenated "work-from-anywhere" (a literal hyphen, not whitespace) —
+    # the existing "\bwork\s*from\s*anywhere\b" entry above only matches
+    # the spaced-out form; this compound-adjective form ("work-from-
+    # anywhere company/culture") needs its own hyphen-aware pattern.
+    r"\bwork[\s\-]*from[\s\-]*anywhere\b",
+    r"\bopen\s*(?:globally|worldwide)\b",
+    r"\bapplications?\s*accepted\s*worldwide\b",
+    r"\b(?:applicants|candidates)\s*worldwide\s*welcome\b",
+    r"\b(?:located|based)\s*anywhere\b",
+    r"\bacross\s*the\s*globe\b",
+    r"\btalent,?\s*not\s*(?:location|geography)\b",
+    r"\bgeography\s*is\s*not\s*a\s*barrier\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -880,6 +937,20 @@ _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS = {
     r"\bdigital\s*nomad\b",
     r"\bglobal\s*remote\s*team\b",
     r"\bremote[\-\s]*native\b",
+    # 2026-09 ROUND 5 additions (explicit user-provided global hiring
+    # lingo list): same reasoning as the block above — these describe what
+    # the COMPANY/workforce is or does in general ("we have a global remote
+    # workforce", "we're remote by design", "we were born remote", "our
+    # people are across the globe") rather than an explicit statement that
+    # THIS role's hiring is open globally. They stay in the base keyword
+    # list (field-level residue check is strict enough to keep them safe
+    # there) and count for the guard functions, just not for the looser
+    # free-text safety net.
+    r"\bglobal\s*remote\s*workforce\b",
+    r"\bdistributed\s*(?:worldwide|globally)\b",
+    r"\bremote\s*by\s*design\b",
+    r"\bborn\s*remote\b",
+    r"\bacross\s*the\s*globe\b",
 }
 _SAFETY_NET_GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS
                          if kw not in _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS]
@@ -928,11 +999,24 @@ NON_GEO_WORDS_RE = re.compile(
 GLOBAL_FILLER_RE = re.compile(
     r"\b("
     r"location|locations|agnostic|independent|geo|flexible|team|"
-    r"multiple|countries|country|regions|region|restriction|requirement|preference|"
-    r"geographic|any|all|no|talent|pool|candidates|applicants|open|hire|hiring|"
+    r"multiple|countries|country|regions|region|restrictions?|requirement|preference|"
+    r"geographic|geography|any|all|no|talent|pool|candidates|applicants|open|hire|hiring|"
     r"globally|time|zone|timezone|regardless|irrespective|of|welcome|eligible|"
-    r"in|work|from"
+    r"in|work|from|limitations?|barrier|employment|not|matter|does|doesn'?t"
     r")\b",
+    re.I,
+)
+
+# 2026-09 ROUND 5 (explicit user-provided EMEA-wide hiring lingo list):
+# connector/filler vocabulary specific to this project's "EMEA-wide"
+# phrasing family ("EMEA-wide", "across EMEA", "throughout EMEA", "all
+# EMEA countries", "any EMEA country", "across the EMEA region") — used
+# ONLY by the location-FIELD EMEA residue check (step 3 above) so a field
+# value like "EMEA - All Countries" or "EMEA Wide" doesn't leave "all
+# countries"/"wide" sitting as false residue and get wrongly rejected as a
+# qualified (non-bare) EMEA value.
+_EMEA_FILLER_RE = re.compile(
+    r"\b(wide|region|regions|across|throughout|all|any|countries|country|markets?)\b",
     re.I,
 )
 
@@ -966,7 +1050,7 @@ PLACEHOLDER_LOC_RE = re.compile(
 # acceptable and everything else isn't — no separate "is this global"
 # judgment is made here.
 _TITLE_CODES = (
-    r"US|USA|UK|EU|EMEA|APAC|LATAM|ANZ|NAM|MENA|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|"
+    r"US|USA|UK|EU|EMEA|APAC|LATAM|ANZ|NAM|AMER|MENA|CA|AU|IN|DE|FR|NL|SG|HK|JP|BR|MX|PH|NG|KE|ZA|AE|SA|IL|"
     r"PL|CZ|RO|BG|HU|IE|ES|IT|PT|SE|NO|DK|FI|CH|AT|BE|NZ"
 )
 # Global/Africa-hiring words allowed in the same delimiter-anchored
@@ -974,6 +1058,18 @@ _TITLE_CODES = (
 # Worldwide", "Distributed - Support Engineer").
 _TITLE_GLOBAL_WORDS = r"Global|Worldwide|International|Africa|Distributed|Anywhere|Borderless"
 _TITLE_CODES_OR_GLOBAL = _TITLE_CODES + r"|" + _TITLE_GLOBAL_WORDS
+
+# 2026-09 ROUND 3 (explicit user correction: "if it has multiple locations
+# and africa thats good. Like say: MENA, AMER, Africa, EMEA, Latam. thats
+# acceptable too."): a title naming 2+ DISTINCT region acronyms/global-words
+# together is evidence of broad multi-region reach, not a single-region
+# restriction — same principle as _has_multi_region_breadth below, just
+# scoped to this title-extraction subsystem's own acronym set (which
+# includes country codes _has_multi_region_breadth deliberately excludes,
+# so this is kept as its own regex rather than reusing that one).
+_TITLE_MULTI_REGION_WORDS_RE = re.compile(
+    r"\b(?:EMEA|APAC|LATAM|ANZ|NAM|AMER|MENA|" + _TITLE_GLOBAL_WORDS + r")\b", re.I,
+)
 
 _TITLE_LOCATION_RE = re.compile(
     r"(?:"
@@ -1030,6 +1126,19 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
         or PLACEHOLDER_LOC_RE.match(loc)
     )
     if not is_bare:
+        return loc
+
+    # 2026-09 ROUND 3 (explicit user correction): a title naming 2+
+    # distinct region acronyms/global-words together (e.g. "Regional
+    # Account Manager - MENA, AMER, Africa, EMEA, Latam") signals broad
+    # multi-region reach. Extracting just ONE of them below (whichever
+    # _TITLE_LOCATION_RE happens to match, typically the last one before
+    # the title ends) would incorrectly narrow an intentionally-broad
+    # posting down to a single restrictive region. Leave `loc` unchanged
+    # (still bare/blank) in that case — it then falls through to the
+    # normal bare-Remote 'unsure' bucket (or stays blank/'unsure') instead
+    # of being hard-rejected over one arbitrarily-picked region name.
+    if len({m.group(0).lower() for m in _TITLE_MULTI_REGION_WORDS_RE.finditer(title)}) >= 2:
         return loc
 
     match = _TITLE_LOCATION_RE.search(title)
@@ -1219,6 +1328,27 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_office_attendance_signal(job):
         return "no_match", None, None
 
+    # ── 0.89. HARD OVERRIDE (2026-09, explicit user-provided taxonomy of
+    # restrictive job-posting language): a company-capability statement
+    # ("we don't have a legal entity in your country"), an explicit
+    # exclusion ("not open to candidates outside the US"), or a curated
+    # country-list phrasing ("the following countries only") — none of
+    # which match the classic "must reside/be based in <country>" shape the
+    # overrides above already catch. See
+    # has_entity_or_exclusion_restriction_signal's docstring. ──
+    if has_entity_or_exclusion_restriction_signal(job):
+        return "no_match", None, None
+
+    # ── 0.895. HARD OVERRIDE (2026-09, explicit user-provided taxonomy of
+    # restrictive job-posting language): a residence-verb-governed timezone
+    # requirement ("must be located in a US timezone" — distinct from safe
+    # "overlap with our hours" scheduling wording), an explicit relocation
+    # requirement naming a place, or a hyphenated "<place>-based candidates
+    # only" construction. See
+    # has_timezone_relocation_or_hyphenated_restriction_signal's docstring. ──
+    if has_timezone_relocation_or_hyphenated_restriction_signal(job):
+        return "no_match", None, None
+
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
     # key PRESENT with value None, not missing, so the "" default here
@@ -1275,6 +1405,15 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if re.search(r"\bemea\b", loc_lower):
         check = re.sub(r"\bemea\b", "", loc_lower)
         check = NON_GEO_WORDS_RE.sub("", check)
+        # 2026-09 ROUND 5 (explicit user-provided EMEA-wide hiring lingo
+        # list): also strip the connector/filler words this project's own
+        # "EMEA-wide" phrasing family uses ("EMEA-wide", "across EMEA",
+        # "throughout EMEA", "all EMEA countries", "any EMEA country") —
+        # without this, a location FIELD value like "EMEA - All Countries"
+        # or "EMEA Wide" left "all countries"/"wide" as residue and was
+        # wrongly rejected as a qualified (non-bare) EMEA value, even
+        # though none of those words name an actual place.
+        check = _EMEA_FILLER_RE.sub("", check)
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
         if not check:
             # EMEA (Europe/Middle East/Africa) includes Africa but is
@@ -2209,8 +2348,82 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
     # country either. Added here (not a separate fragment) since every
     # regex that consumes this fragment treats a hit the same way: "this
     # posting names a specific, non-global place" -> hard reject.
-    r"europe|emea|apac|latam|asia[\s\-]?pacific"
+    #
+    # 2026-09 ROUND 4 (explicit, urgent user correction): "emea" was
+    # REMOVED from this line entirely. This project's own base location-
+    # FIELD logic (see the "── 3. EMEA → match ONLY if no country/city
+    # qualifier ──" block in _keyword_classify_location_detail) has ALWAYS
+    # treated a bare "EMEA" with no further qualifier as ACCEPTED — the
+    # exact same PRIORITY_AFRICA tier as the Africa continent, since "EMEA
+    # (Europe/Middle East/Africa) includes Africa but is broader than
+    # global." Putting "emea" in THIS fragment as well directly
+    # contradicted that project-wide policy: a title like "Channel Account
+    # Manager, EMEA" or description text like "authorized to work in EMEA"
+    # was being hard-rejected by these overrides before ever reaching the
+    # location-field logic that would have correctly accepted it. Per the
+    # user, directly: "EMEA is fucking allowed... We accept... jobs hiring
+    # in Africa as a continent and ones hiring in the EMEA region." Plain
+    # "europe" (the continent, NOT the EMEA acronym) is deliberately KEPT
+    # here — this project's base location-field logic does NOT give bare
+    # "Europe" the same accepted treatment it gives Africa/EMEA/Global, so
+    # "Account Manager - Europe" (OpenProject, still a real posting this
+    # closes) is correctly still a hard reject.
+    r"europe|apac|latam|asia[\s\-]?pacific|"
+    # 2026-09 ROUND 2 (explicit user-provided taxonomy of restrictive
+    # region names, not tied to one specific posting this time — a
+    # structured brainstorm of phrasing families rather than individual
+    # live JD evidence, unlike every entry above): the remaining common
+    # region/bloc names this project's postings use the same way —
+    # "North America only", "hire exclusively within APAC" (already
+    # covered), "MENA only", "DACH", "Benelux", "Nordics", "ANZ"
+    # (Australia/New Zealand shorthand).
+    # 2026-09 ROUND 3 (explicit user correction): bare "africa" and
+    # "sub-saharan africa" were REMOVED from this list — Africa already has
+    # its own dedicated POSITIVE handling as continent-wide evidence
+    # (PRIORITY_AFRICA, see the "── 2. Africa as a continent ──" block in
+    # _keyword_classify_location_detail), and treating it as a restrictive
+    # region name here directly contradicted that: a title/description
+    # naming Africa (alone, or alongside other regions like "MENA, AMER,
+    # Africa, EMEA, Latam" — the user's own example of an ACCEPTABLE
+    # multi-region posting) was getting hard-rejected by this fragment
+    # before ever reaching the location-field logic that would have
+    # recognized it as continent-wide/global-ish evidence. See also
+    # _has_multi_region_breadth below, which handles the general case of
+    # 2+ DIFFERENT regions named together (not just Africa) the same way
+    # 2+ different African countries already counts as continent evidence
+    # rather than a single-country restriction.
+    r"north\s+america|americas|mena|middle\s+east|"
+    r"anz|dach|benelux|nordics?"
 )
+
+# 2026-09 ROUND 3 (explicit user correction, quoted directly: "if it has
+# multiple locations and africa thats good. Like say: MENA, AMER, Africa,
+# EMEA, Latam. thats acceptable too."): naming 2+ DISTINCT business regions
+# together is evidence of BROAD multi-region hiring, not a restriction to
+# one place — the exact same principle this file already applies to 2+
+# different African countries counting as continent-wide evidence rather
+# than "based in one African country." Used below to suppress a region-name
+# match that would otherwise fire on a list that actually proves the
+# opposite of what a single region name implies. Deliberately does NOT
+# include "africa" (never restrictive to begin with, see the comment above)
+# or full country names (a list of several individual COUNTRIES, e.g. "USA,
+# Canada, Mexico only," is still exactly the curated-whitelist restriction
+# _COUNTRY_WHITELIST_PHRASE_RE/_COUNTRY_LIST_ONLY_RE exist to catch — this
+# guard is specifically about BUSINESS-REGION names, not country lists).
+_REGION_ONLY_WORDS_RE = re.compile(
+    r"\b(?:europe|emea|apac|latam|asia[\s\-]?pacific|north\s+america|"
+    r"americas|mena|middle\s+east|anz|dach|benelux|nordics?)\b",
+    re.I,
+)
+
+
+def _has_multi_region_breadth(text: str) -> bool:
+    """True if `text` names 2+ DISTINCT business regions (see
+    _REGION_ONLY_WORDS_RE's module comment) — evidence of broad multi-
+    region reach that should NOT be treated as a single-region
+    restriction."""
+    hits = {m.group(0).lower() for m in _REGION_ONLY_WORDS_RE.finditer(text or "")}
+    return len(hits) >= 2
 # 2026-09 FIX (live-sample validation, real postings): the ORIGINAL regex
 # required "authorized...to work in <country>" with no words allowed in
 # between, so it missed extremely common real phrasing variants —
@@ -2415,6 +2628,11 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
     anyone role. The whitelist-phrase check is intentionally NOT run
     through this same team/office guard — none of its phrasings have any
     plausible "describing the company, not the candidate" reading.
+
+    2026-09 ROUND 3 (explicit user correction): a sentence naming 2+
+    DISTINCT business regions together ("open to residents of MENA, AMER,
+    EMEA, or Latam") is evidence of broad multi-region reach, not a
+    restriction — see _has_multi_region_breadth's docstring.
     """
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
@@ -2427,11 +2645,20 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
             continue
         if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
             continue
+        if _has_multi_region_breadth(sentence):
+            continue
         if _COUNTRY_BASED_RESTRICTION_RE.search(sentence):
             return True
         if (_REMOTE_FOR_TRIGGER_RE.search(sentence) and _CANDIDATE_WORD_RE.search(sentence)
                 and _ANY_RESIDENCE_PLACE_RE.search(sentence)
-                and not _text_has_global_evidence(sentence)):
+                and not _text_has_global_evidence(sentence)
+                # 2026-09 ROUND 5 (explicit user-provided EMEA-wide hiring
+                # lingo list): EMEA/Africa evidence in the same sentence is
+                # just as strong a "don't reject" guard as global evidence
+                # — "remote for EMEA candidates, including UK/Germany/UAE"
+                # names real countries but is still an EMEA-wide (accepted)
+                # posting, not a single-country restriction.
+                and not _text_has_africa_or_emea_evidence(sentence)):
             return True
     return False
 
@@ -2487,7 +2714,20 @@ def has_hard_metadata_location_signal(job: dict) -> bool:
 # _COUNTRY_BASED_RESTRICTION_RE) instead of duplicating the 50-state list a
 # second time.
 _TITLE_REGION_SUFFIX_NAMES = (
-    r"europe|emea|apac|latam|asia[\s\-]?pacific|australia|"
+    r"europe|apac|latam|asia[\s\-]?pacific|australia|"
+    # 2026-09 ROUND 2 (same user-provided region taxonomy as
+    # _COUNTRY_AUTH_NAMES_RE_FRAGMENT above — kept in sync so a title
+    # suffix like "Account Manager - MENA" or "- DACH" is caught the same
+    # way "- Europe" already is). 2026-09 ROUND 3: bare "africa"/
+    # "sub-saharan africa" REMOVED. 2026-09 ROUND 4 (explicit, urgent user
+    # correction): bare "emea" ALSO REMOVED — see the ROUND 4 comment above
+    # _COUNTRY_AUTH_NAMES_RE_FRAGMENT's "europe|apac|latam|..." line for the
+    # full reasoning: this project's base location-field logic has ALWAYS
+    # accepted bare EMEA (no city/country qualifier) at the same tier as
+    # the Africa continent, so a title suffix like "Channel Account
+    # Manager, EMEA" (HeroDevs) must NOT be hard-rejected here either.
+    r"north\s+america|americas|mena|middle\s+east|"
+    r"anz|dach|benelux|nordics?|"
     + _US_STATE_FULL_NAMES_FRAGMENT
 )
 _TITLE_REGION_SUFFIX_RE = re.compile(
@@ -2511,9 +2751,18 @@ def has_title_region_restriction_signal(job: dict) -> bool:
     "(<Country> Based)" parenthetical, naming a specific, non-global
     place? See the module comments above _TITLE_REGION_SUFFIX_NAMES and
     _TITLE_COUNTRY_PAREN_RE for the real Arcwood/OpenProject/HeroDevs/
-    Think Academy MY postings this closes."""
+    Think Academy MY postings this closes.
+
+    2026-09 ROUND 3 (explicit user correction): a title naming 2+ DISTINCT
+    business regions together ("Account Manager - MENA, AMER, EMEA, Latam")
+    is evidence of broad multi-region reach, not a single-region
+    restriction — see _has_multi_region_breadth's docstring. Checked before
+    the suffix/paren regexes so a multi-region title never gets rejected
+    just because one of its several regions happens to sit last."""
     title = job.get("title") or ""
     if not title.strip():
+        return False
+    if _has_multi_region_breadth(title):
         return False
     return bool(_TITLE_REGION_SUFFIX_RE.search(title) or _TITLE_COUNTRY_PAREN_RE.search(title))
 
@@ -2614,12 +2863,21 @@ def has_hard_country_specific_auth_signal(job: dict) -> bool:
     "Are you legally authorized to work in the country in which you are
     applying?" no longer does, since it says nothing about which country
     this particular job actually requires.
+
+    2026-09 ROUND 3 (explicit user correction): a question or description
+    naming 2+ DISTINCT business regions together ("authorized to work in
+    MENA, AMER, EMEA, or Latam") is evidence of broad multi-region reach,
+    not a restriction — see _has_multi_region_breadth's docstring. Checked
+    per-line/per-text before the country/region regex fires.
     """
     desc = job.get("description_snippet") or ""
     for line in desc.splitlines():
-        if line.startswith(_APPLICATION_AUTH_QUESTION_MARKER) and _COUNTRY_AUTH_RE.search(line):
+        if (line.startswith(_APPLICATION_AUTH_QUESTION_MARKER) and _COUNTRY_AUTH_RE.search(line)
+                and not _has_multi_region_breadth(line)):
             return True
     text = desc + " " + (job.get("title") or "")
+    if _has_multi_region_breadth(text):
+        return False
     return bool(_COUNTRY_AUTH_RE.search(text))
 
 
@@ -2662,6 +2920,216 @@ def has_office_attendance_signal(job: dict) -> bool:
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
     return bool(_OFFICE_ATTENDANCE_RE.search(text))
+
+
+# 2026-09 NEW (explicit user-provided taxonomy of restrictive job-posting
+# language, not tied to one specific posting this time — same brainstorm as
+# the region-name broadening near _COUNTRY_AUTH_NAMES_RE_FRAGMENT above).
+# The user's own design constraint, quoted directly: "The biggest thing I'd
+# avoid is making `country`, `region`, `EMEA`, `Europe`, `Africa`, `US`,
+# `Canada`, `remote`, `EOR`, `PEO`, `payroll`, or `timezone` independently
+# restrictive. They need to participate in an eligibility/location
+# construction." Every regex below is built to that rule: none of them fire
+# on a bare keyword alone, only on a full multi-word construction that
+# unambiguously states an eligibility restriction.
+#
+# Part 1: "we can't/won't employ you there" wording — a company saying it
+# has no legal entity/payroll capability in the candidate's country, or can
+# only employ through a curated EOR/PEO country list, is JUST AS restrictive
+# as a hard country requirement even though it's phrased as a company
+# capability statement rather than a candidate requirement. This is
+# UNCONDITIONAL (no team/office-context guard, no place-name requirement,
+# just like _COUNTRY_WHITELIST_PHRASE_RE above) because none of these
+# phrasings have a plausible "describing the company in general, unrelated
+# to hiring" reading — they only ever appear in an eligibility context.
+_ENTITY_PAYROLL_RESTRICTION_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|does\s+not|doesn'?t)\s+(?:currently\s+)?have\s+(?:a\s+|an\s+)?"
+    r"(?:legal\s+)?entity\s+in\b"
+    r"|\bno\s+legal\s+entity\s+in\b"
+    r"|\bunable\s+to\s+(?:employ|hire|onboard)\s+(?:you\s+|candidates\s+|applicants\s+)?"
+    r"(?:in|outside|from)\b"
+    r"|\bcan\s+only\s+(?:employ|hire)\b[\w\s]{0,30}?\bwhere\s+"
+    r"(?:we|the\s+company|\w+)\s+(?:have|has)\s+(?:an?\s+)?(?:legal\s+)?entity\b"
+    r"|\b(?:must|will)\s+be\s+employed\s+through\s+(?:our|a|an)\s+(?:eor|peo)\b"
+    r"|\bonly\s+(?:able\s+to\s+)?onboard(?:ed)?\s+(?:candidates\s+)?through\s+(?:our|a|an)\s+(?:eor|peo)\b"
+    r"|\bcountries\s+(?:where\s+)?(?:we|the\s+company)\s+(?:currently\s+)?(?:have|has)\s+"
+    r"(?:an?\s+)?(?:eor|peo|payroll)\s+(?:partner|provider|entity|presence)\b",
+    re.I,
+)
+
+# Part 2: explicit exclusion phrasing — "not open/available to candidates
+# OUTSIDE of <place/list>" is the mirror image of "only open to candidates
+# IN <place>": both restrict eligibility to one place, just phrased from the
+# opposite direction. Requires the "outside" construction paired with an
+# eligibility verb (open/available/accept/consider), not a bare "outside"
+# anywhere in the text.
+_EXCLUSION_OUTSIDE_RE = re.compile(
+    r"\b(?:not|isn'?t|is\s+not)\s+(?:currently\s+)?"
+    r"(?:open|available|accepting\s+applications)\s+(?:to|for)\s+"
+    r"(?:candidates|applicants)?[\w\s]{0,20}?\boutside\s+(?:of\s+)?(?:the\s+)?[\w\s,&]{0,40}"
+    r"|\b(?:cannot|can'?t|do\s+not|don'?t)\s+(?:accept|consider)\s+"
+    r"(?:applications|candidates|applicants)\s+(?:located\s+|based\s+)?(?:from\s+)?outside\s+(?:of\s+)?"
+    r"|\bunable\s+to\s+consider\s+(?:candidates|applicants)\s+(?:located\s+|based\s+)?outside\b",
+    re.I,
+)
+
+# Part 3: a bare "the following countries only" / "restricted to the
+# following countries" construction — the curated-list phrasing itself,
+# independent of whether the enumerated list happens to be long. Sibling to
+# _COUNTRY_WHITELIST_PHRASE_RE above, kept separate since these are a
+# distinct phrasing family (explicit "only"/"restricted" wording rather than
+# a "can verify right to work" screening-flow phrasing).
+_COUNTRY_LIST_ONLY_RE = re.compile(
+    r"\bthe\s+following\s+countries\s+only\b"
+    r"|\brestricted\s+to\s+(?:the\s+)?following\s+countries\b"
+    r"|\bonly\s+open\s+to\s+(?:candidates|applicants)\s+in\s+(?:the\s+)?following\s+countries\b"
+    r"|\bwe\s+only\s+hire\s+in\s+the\s+following\s+countries\b",
+    re.I,
+)
+
+
+def has_entity_or_exclusion_restriction_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's description state
+    — via a company-capability statement ("we don't have a legal entity in
+    your country", "can only employ where we have an EOR/PEO"), an explicit
+    exclusion ("not open to candidates outside the US"), or a curated-list
+    phrasing ("the following countries only") — that eligibility is
+    restricted to a specific place or list, even though none of these
+    phrasings look like the classic "must reside/be based in <country>"
+    shape the other hard overrides already catch? See the module comments
+    above _ENTITY_PAYROLL_RESTRICTION_RE, _EXCLUSION_OUTSIDE_RE, and
+    _COUNTRY_LIST_ONLY_RE. Per the user's explicit design constraint, none
+    of these fire on bare "EOR"/"PEO"/"payroll"/"country"/"region" alone —
+    only on the full construction.
+    """
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    if _ENTITY_PAYROLL_RESTRICTION_RE.search(text) or _COUNTRY_LIST_ONLY_RE.search(text):
+        return True
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if not sentence.strip():
+            continue
+        if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+            continue
+        if _EXCLUSION_OUTSIDE_RE.search(sentence):
+            return True
+    return False
+
+
+# Part 4: timezone wording TIED TO a residence/location requirement — per
+# the user's explicit distinction, "must have significant overlap with our
+# team's working hours" is SAFE (describes scheduling, not eligibility),
+# but "must be located/based/reside in a US timezone" or "in the same
+# timezone as our HQ" is RESTRICTIVE (uses a residence verb, just naming a
+# timezone instead of a country). The regex only fires on a residence verb
+# immediately governing "timezone" — a sentence that also contains "overlap"
+# is guarded off entirely, since every "overlap"-based phrasing this
+# project has seen is the safe scheduling-only shape, never a residence
+# requirement.
+#
+# 2026-09 ROUND 5 (explicit, urgent user correction re: EMEA): "emea" was
+# REMOVED from the optional region-qualifier list below — this project
+# treats EMEA the same as the Africa continent, an ACCEPTED broad-hiring
+# tier, not a restriction (see the ROUND 4 comment above
+# _COUNTRY_AUTH_NAMES_RE_FRAGMENT). "must be located in an EMEA timezone"
+# is functionally the same statement as "must be based in EMEA" — which is
+# explicitly allowed — so it must not be treated as restrictive here
+# either, for the same consistency reason "africa"/"emea" were pulled out
+# of every other restrictive-region fragment in this file.
+_TIMEZONE_LOCATION_RE = re.compile(
+    r"\b(?:located|based|reside|residing|resides|live|living|lives|work(?:ing)?)\s+"
+    r"(?:in|within)\s+(?:a\s+|an\s+|the\s+)?"
+    # NOTE: the generic "[a-z]{2,4}" catch-all below (for arbitrary 2-4
+    # letter timezone abbreviations this list doesn't explicitly name)
+    # would otherwise still swallow "emea"/"africa" as if they were just
+    # another short code — the negative lookaheads keep those excluded
+    # consistent with removing them from the explicit list above.
+    r"(?:us|u\.s\.|uk|u\.k\.|north american?|european?|apac|latam|"
+    r"gmt|est|cst|mst|pst|cet|(?!emea\b)(?!africa\b)[a-z]{2,4})?\s*time\s*zone\b"
+    r"|\b(?:located|based|reside|residing|resides|live|living|lives)\s+"
+    r"in\s+the\s+same\s+time\s*zone\s+as\b",
+    re.I,
+)
+
+# Part 5: a narrow, explicit relocation REQUIREMENT naming a specific place
+# — "willing to relocate to the United States" / "must relocate to our
+# Austin office" — distinct from a company merely mentioning relocation
+# assistance/packages exist (which says nothing about restricting who may
+# apply from where and is intentionally NOT matched here).
+_RELOCATION_REQUIRED_RE = re.compile(
+    r"\b(?:willing|must\s+be\s+willing|required|willingness)\s+to\s+relocate\s+to\s+"
+    r"(?:the\s+)?[\w\s,]{0,40}"
+    r"|\bmust\s+relocate\s+to\s+(?:the\s+)?[\w\s,]{0,40}"
+    r"|\brequires?\s+relocation\s+to\s+(?:the\s+)?[\w\s,]{0,40}",
+    re.I,
+)
+
+# Part 6: hyphenated "<place>-based candidates/applicants only" — the same
+# eligibility restriction as _COUNTRY_BASED_RESTRICTION_RE's "based in
+# <place>" shape, just written as a compound adjective ("US-based
+# candidates only") instead of a verb phrase. Requires the trailing
+# "only" (or leading "only") so a merely descriptive "we have a US-based
+# team" doesn't fire — that's already handled by the team-context guard
+# below regardless, but the "only" requirement keeps this regex itself
+# narrow.
+_HYPHENATED_BASED_ONLY_RE = re.compile(
+    r"\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\s+"
+    r"(?:candidates?|applicants?|employees?|team\s+members?)?\s*only\b"
+    r"|\bonly\s+(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\s+"
+    r"(?:candidates?|applicants?|employees?)\b",
+    re.I,
+)
+
+
+def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's description state
+    a residence-verb-governed timezone requirement ("must be located in a
+    US timezone" — see _TIMEZONE_LOCATION_RE's module comment for why this
+    is distinct from safe "overlap" scheduling wording), an explicit
+    relocation requirement naming a place (_RELOCATION_REQUIRED_RE), or a
+    hyphenated "<place>-based candidates only" construction
+    (_HYPHENATED_BASED_ONLY_RE)? Checked sentence-by-sentence with the same
+    team/office-context guard and global-evidence guard as
+    has_hard_country_based_restriction_signal above, since all three of
+    these phrasings could in principle appear in a sentence describing the
+    COMPANY's own timezone/location rather than a candidate requirement.
+    """
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if not sentence.strip():
+            continue
+        if "overlap" in sentence.lower():
+            continue
+        if _text_has_global_evidence(sentence):
+            continue
+        # 2026-09 ROUND 5 (explicit user-provided EMEA-wide hiring lingo
+        # list): same reasoning as has_hard_country_based_restriction_signal
+        # above — EMEA/Africa evidence in the sentence is as strong a
+        # "don't reject" guard as explicit global evidence.
+        if _text_has_africa_or_emea_evidence(sentence):
+            continue
+        # NOTE: the team/office-context guard used elsewhere in this file
+        # (_TEAM_OR_COMPANY_CONTEXT_RE) is deliberately NOT applied to
+        # _TIMEZONE_LOCATION_RE / _RELOCATION_REQUIRED_RE here — both
+        # legitimately reference "our office"/"our HQ team" as the
+        # relocation target or comparison basis ("relocate to our Austin
+        # office", "same timezone as our headquarters team"), and both
+        # regexes already require a residence/relocation verb governing the
+        # place, which a genuine company-describes-itself sentence
+        # ("our HQ is in Austin") doesn't have.
+        if _TIMEZONE_LOCATION_RE.search(sentence) or _RELOCATION_REQUIRED_RE.search(sentence):
+            return True
+        # _HYPHENATED_BASED_ONLY_RE ("US-based candidates only") has no
+        # office/team-referencing shape, so the team-context guard is kept
+        # here to stay consistent with the rest of the file's pattern.
+        if not _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence) and _HYPHENATED_BASED_ONLY_RE.search(sentence):
+            return True
+    return False
 
 
 # Disqualifying workplace_type tokens: a scraper-reported physical-presence
