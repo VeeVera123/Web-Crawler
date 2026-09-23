@@ -37,7 +37,30 @@ useful. If this account's Mistral plan is ever upgraded to include Large
 restored — see the max_batch_chars comment in _ROLE_PROVIDER_DEFS for the
 recalculated 20,000-TPM budget.
 
-Model choice within Mistral (superseded by the entry above, kept for
+2026-09 ROUND 3 — REAL PRODUCTION EVIDENCE that even Small's console-page
+rate limit doesn't match reality: a live run paced at the "confirmed" 1
+RPS got HTTP 429 on every batch, three in a row, exhausting all retries
+each time. Widened _MISTRAL_BASE_INTERVAL from 1.0s to 30.0s/call (see
+that constant's own comment for the sourcing — a community tool's
+real-world ~1-req/30s finding, cross-checked against this project's own
+observed 429 pattern, not an official Mistral number). Also researched
+and rejected as alternatives at the same time: Cerebras now requires a
+verified payment method to activate ANY account (its "free" $5 credit
+expires in 30 days) — confirmed live via inference-docs.cerebras.ai/
+support/rate-limits — so it fails this project's no-card-required bar and
+was NOT added, despite third-party sites claiming a generous no-card free
+tier (they're wrong or stale). OpenRouter's free (":free"-suffixed) models
+are real but capped at 20 RPM / 50 RPD with $0 credits — confirmed live
+via OpenRouter's own rate-limits article — which is too low to matter at
+this project's volume; a one-time $10 credit purchase permanently raises
+that to 1000 RPD, but that's a real cost decision left to the account
+owner, not something to add unilaterally. Net effect of this round:
+Mistral remains in the roster but is now the deliberately slowest/least-
+relied-upon leg — the existing cross-provider failover (see classifier.py)
+already picks up its slack when it's this rate-limited, which is the
+whole reason this project runs multiple providers instead of one.
+
+Model choice within Mistral (superseded by the entries above, kept for
 context on how the original small-vs-large comparison was made):
 mistral-large-2512 ("Mistral Large 3") was picked over
 mistral-small-2603 ("Mistral Small 4") purely on the rate-limits page's
@@ -213,13 +236,23 @@ _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verif
 # classification below, so both stages' calls draw from one 40 RPM pool,
 # not two separate ones. 60/40 = 1.5s/call single-process baseline.
 _NVIDIA_BASE_INTERVAL = 1.5
-# Mistral: mistral-small-2603, 1 request/second confirmed live via
-# admin.mistral.ai/plateforme/limits (see comment block above). 1/1 =
-# 1.0s/call single-process baseline. Role-classification only (see module
-# docstring's "ROUND 2" section for why it was dropped from location
-# classification — its real 20,000 TPM budget is too small for
-# description-length batches).
-_MISTRAL_BASE_INTERVAL = 1.0
+# Mistral: mistral-small-2603. 2026-09 ROUND 3 — REAL PRODUCTION EVIDENCE
+# that the "1 RPS" figure from admin.mistral.ai/plateforme/limits (used for
+# ROUND 1/2 above) does NOT reflect actual enforced throughput, same kind
+# of gap as the Large-tier 403 in ROUND 2: a live run paced at exactly
+# 1.0s/call got HTTP 429 on every single batch, three batches in a row,
+# exhausting all retries each time (5s/10s backoff) before failing over.
+# The free/"Experiment" tier's real ceiling is well below its own console's
+# published number. Widened to 30.0s/call based on a third-party report
+# (a community tool, mistral-managed-queue, built specifically to survive
+# Mistral's free tier, which treats it as ~1 request/30s) cross-checked
+# against this project's own observed 429 pattern — not an official
+# Mistral number (their docs don't publish one that matches reality), but
+# consistent with what was actually seen. If 429s persist even at this
+# pace, that's evidence the real ceiling is lower still and this should be
+# widened further; if they stop, this can be tightened back down later
+# with real evidence, not by trusting the console page again.
+_MISTRAL_BASE_INTERVAL = 30.0
 
 # ── Role classification providers (free tiers, concurrent) ──
 # 2026-09: Gemini + Groq (explicit user request — swapped with location's
