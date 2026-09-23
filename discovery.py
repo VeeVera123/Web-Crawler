@@ -6119,7 +6119,7 @@ def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
 
 
 def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
-                        dry_run: bool = False) -> int:
+                        dry_run: bool = False, skip_live_check: bool = False) -> int:
     """Upsert slugs to Supabase archive_i. Returns total upserted.
 
     slugs_by_ats values can be:
@@ -6140,7 +6140,36 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
     field entirely: archive_i has no such column (id/ats/slug/source/
     first_seen/last_seen only — confirmed against the live schema), so
     sending it once the table name was fixed would have just traded one
-    failure mode for another (a PostgREST "column not found" 400)."""
+    failure mode for another (a PostgREST "column not found" 400).
+
+    2026-09 ROUND 2 (explicit user instruction: "run all discovery entries
+    through verification. they must be verified before entry. A life
+    [live] check just like commoncrawl and wayback do now. just extend it
+    to them all."): every discovery source now gets the SAME live
+    pre-check Common Crawl/Wayback/CT-logs already ran on their own
+    (fetch_commoncrawl_slugs/fetch_wayback_slugs/fetch_ct_log_slugs each
+    called _drop_dead_cc_slugs internally, before ever returning — see
+    that function's docstring for the full mechanism and _CC_LIVE_CHECK
+    for the 19 platforms it can actually check). The other 8 sources
+    (Feashliaa, kalil0321, OpenPostings, Latmay H.F, iCIMS HR Jobs, GitHub
+    registries, Edward H.F, Open Jobs Daily H.F, TheirStack, HTTP Archive)
+    previously wrote whatever slug they extracted straight to archive_i
+    with zero live verification, relying entirely on verification.py's
+    separate, LATER cleanup pass to eventually notice and delete anything
+    dead — meaning a dead slug could sit in archive_i, get scraped by the
+    daily ATS scanner, and burn scrape attempts for however long until the
+    next verification.py run caught up. Centralizing the check HERE
+    instead of duplicating a call in every one of those 8 fetch_*_slugs()
+    functions means no source can ever bypass it going forward, including
+    any new source added later. `skip_live_check=True` is for the 3
+    sources that already verified their own slugs before calling this
+    (Common Crawl/Wayback at their own call sites in main(), and CT logs'
+    own incremental per-platform upload path) — re-running the exact same
+    live HTTP checks a second time here would just be wasted network
+    calls against the same hosts, not a correctness issue."""
+    if not skip_live_check:
+        slugs_by_ats = _drop_dead_cc_slugs(slugs_by_ats, source)
+
     if not SUPABASE_URL or not SUPABASE_KEY:
         log.error("SUPABASE_URL or SUPABASE_KEY not set")
         return 0
@@ -6462,8 +6491,13 @@ def main():
                  f"{sum(1 for s in cc_slugs.values() if s)} platforms")
 
         if not args.dry_run:
+            # skip_live_check: fetch_commoncrawl_slugs() already ran every
+            # slug through _drop_dead_cc_slugs() itself before returning —
+            # re-checking here would just re-hit the same hosts a second
+            # time for nothing.
             upserted = upsert_to_supabase(cc_slugs, source="commoncrawl",
-                                           dry_run=args.dry_run)
+                                           dry_run=args.dry_run,
+                                           skip_live_check=True)
             grand_total += upserted
         else:
             grand_total += cc_total
@@ -6483,8 +6517,11 @@ def main():
             # (2,910+ real historical rows already written under this label
             # from the original ADP-only version — unchanged by this
             # generalization, still the right value).
+            # skip_live_check: fetch_wayback_slugs() already ran every slug
+            # through _drop_dead_cc_slugs() itself before returning.
             upserted = upsert_to_supabase(wb_slugs, source="wayback",
-                                           dry_run=args.dry_run)
+                                           dry_run=args.dry_run,
+                                           skip_live_check=True)
             grand_total += upserted
         else:
             grand_total += wb_total
@@ -6506,8 +6543,11 @@ def main():
 
         def _ct_upsert_now(ats: str, verified_slugs: set) -> None:
             nonlocal ct_running_total
+            # skip_live_check: fetch_ct_log_slugs() already ran these slugs
+            # through _drop_dead_cc_slugs() per-platform before invoking
+            # this callback.
             upserted = upsert_to_supabase({ats: verified_slugs}, source="ct_logs",
-                                           dry_run=False)
+                                           dry_run=False, skip_live_check=True)
             ct_running_total += upserted
 
         # NOTE: archive_i.source has a CHECK constraint allowlist —
