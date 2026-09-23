@@ -2,33 +2,54 @@
 Configuration — multi-provider architecture.
 
 Role classification:     Gemini + Groq + Mistral, running concurrently
-Location classification: NVIDIA NIM + OpenAI + Groq + Mistral, running concurrently
+Location classification: NVIDIA NIM + OpenAI + Groq, running concurrently
 
-2026-09: added Mistral to both stages — explicit user request for
+2026-09: added Mistral to role classification — explicit user request for
 "another generous free AI provider" after the 82-batch cost/quota
 complaint. Two alternatives were researched and rejected first: GitHub
 Models is fully retired as of 2026-07-30; SambaNova's true no-card free
 tier caps at 20 requests/DAY, too low to be useful (its better-known
 "Developer Tier" numbers require a linked card).
 
-Model choice within Mistral: mistral-large-2512 ("Mistral Large 3"), NOT
-mistral-small-2603 ("Mistral Small 4") as originally configured. Mistral's
-own generic help-center article quotes a single free-tier figure (1 RPS /
-500K TPM) that does NOT match reality — the account's own live per-model
-limits page (admin.mistral.ai/plateforme/limits, checked live 2026-09)
-shows each model has its OWN separate TPM budget at the same 1 RPS:
-mistral-small-2603 is actually stingy at just 20,000 TPM, while
-mistral-large-2512 gets 250,000 TPM — 12.5x more token budget for the
-IDENTICAL 1 RPS cost. Large is also the smarter model, so this is a
-straight upgrade with no tradeoff. (Also visible on that same limits page
-but not used here: ministral-3b-2512 at 1.3M TPM / 12.5 RPS — by far the
-highest throughput of anything on the account, but a much smaller/weaker
-3B model; worth revisiting if raw volume ever matters more than per-job
-classification accuracy.) See the _MISTRAL_BASE_INTERVAL comment block
-below for full sourcing and the one real caveat (Mistral uses free-tier
-data for training by default, with a separate opt-out toggle in account
-Privacy settings — not a blocker for public job-posting data, but worth
-knowing).
+2026-09 ROUND 2 — REAL PRODUCTION FAILURE, model downgraded from Large to
+Small, and Mistral dropped from location classification entirely:
+mistral-large-2512 was tried first (see below for why it looked like the
+obviously better choice), but the FIRST real crawl run hit it with a live
+403: `{'type': 'tier_not_allowed', 'code': '1910', 'message': 'This model
+is not available in your subscription tier'}`. This account's Mistral
+plan does not include Mistral Large 3 — the account's own
+admin.mistral.ai/plateforme/limits page DOES list a 250,000 TPM figure for
+it, but that page apparently shows what the rate limit WOULD be, not
+whether the model is actually callable on this tier; the 403 is the real,
+authoritative signal, not the limits page. Reverted to mistral-small-2603
+("Mistral Small 4"), which is presumed (not yet proven — watch for the
+same 403 on this model too, which would mean the account's tier blocks
+ALL chat-completion models, not just Large) to be within the free/
+experiment tier's actual model allowlist. Its real per-model budget is
+only 20,000 TPM (vs. Large's 250,000 — see below), which is fine for role
+classification (short title batches) but nowhere near enough for location
+classification's much longer job-description batches — at that budget
+each call only fits a few hundred tokens, not even one full description
+with headroom. So Mistral is now ROLE-ONLY; it has been removed from
+LOCATION_PROVIDERS rather than kept in with a batch size too small to be
+useful. If this account's Mistral plan is ever upgraded to include Large
+3, both the model id and the location-classification entry could be
+restored — see the max_batch_chars comment in _ROLE_PROVIDER_DEFS for the
+recalculated 20,000-TPM budget.
+
+Model choice within Mistral (superseded by the entry above, kept for
+context on how the original small-vs-large comparison was made):
+mistral-large-2512 ("Mistral Large 3") was picked over
+mistral-small-2603 ("Mistral Small 4") purely on the rate-limits page's
+numbers — mistral-small-2603 shows just 20,000 TPM there vs.
+mistral-large-2512's 250,000 TPM, both at the same 1 RPS — without
+realizing that page doesn't reflect per-tier model access. Lesson: a
+live 403 from an actual API call is stronger evidence than a numbers-only
+limits page for whether a model is usable at all. See the
+_MISTRAL_BASE_INTERVAL comment block below for full sourcing and the one
+real caveat (Mistral uses free-tier data for training by default, with a
+separate opt-out toggle in account Privacy settings — not a blocker for
+public job-posting data, but worth knowing).
 
 2026-09: swapped Gemini and NVIDIA between the two stages, and added Groq
 to both (explicit user request). Gemini was repeatedly hitting its
@@ -147,13 +168,17 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     free-tier figure turned out not to match reality per-model) — every
 #     model on the account gets its own separate TPM budget at a shared
 #     1 request/second ceiling. mistral-small-2603 ("Mistral Small 4") is
-#     actually stingy at just 20,000 TPM; mistral-large-2512 ("Mistral
-#     Large 3") gets 250,000 TPM — 12.5x more token budget for the
-#     IDENTICAL 1 RPS cost, and it's the smarter model besides, so Large is
-#     used here, not Small. (Also on that limits page but not used:
-#     ministral-3b-2512 at 1.3M TPM / 12.5 RPS — much higher throughput,
-#     much weaker/smaller model; worth it later if raw volume ever matters
-#     more than per-job accuracy.) Added 2026-09 per explicit user request
+#     actually stingy at just 20,000 TPM; the limits page ALSO showed
+#     mistral-large-2512 ("Mistral Large 3") at 250,000 TPM, which looked
+#     like a straight upgrade — but a real crawl run hit Large with a live
+#     403 tier_not_allowed (this account's plan doesn't include it; the
+#     limits page's number doesn't mean the model is actually callable —
+#     see the module docstring's "ROUND 2" section for the full story), so
+#     Small is what's actually used here, not Large. (Also on that limits
+#     page but not used: ministral-3b-2512 at 1.3M TPM / 12.5 RPS — much
+#     higher throughput, much weaker/smaller model, and unconfirmed whether
+#     it's tier-allowed either; worth checking later if raw volume ever
+#     matters more than per-job accuracy.) Added 2026-09 per explicit user request
 #     for "another free AI provider, generous AF". Two providers researched
 #     and REJECTED before Mistral: GitHub Models is fully retired as of
 #     2026-07-30 (no longer usable at all); SambaNova's true no-card free
@@ -188,12 +213,12 @@ _GEMINI_BASE_INTERVAL = 4.0      # 15 RPM free tier (historical figure — verif
 # classification below, so both stages' calls draw from one 40 RPM pool,
 # not two separate ones. 60/40 = 1.5s/call single-process baseline.
 _NVIDIA_BASE_INTERVAL = 1.5
-# Mistral: mistral-large-2512, 1 request/second confirmed live via
+# Mistral: mistral-small-2603, 1 request/second confirmed live via
 # admin.mistral.ai/plateforme/limits (see comment block above). 1/1 =
-# 1.0s/call single-process baseline. Same provider name "mistral" is used
-# in BOTH role and location provider lists below, so its one real
-# 250K-TPM/1-RPS pool is tracked as
-# shared, not double-counted (same pattern as the shared Groq/NVIDIA keys).
+# 1.0s/call single-process baseline. Role-classification only (see module
+# docstring's "ROUND 2" section for why it was dropped from location
+# classification — its real 20,000 TPM budget is too small for
+# description-length batches).
 _MISTRAL_BASE_INTERVAL = 1.0
 
 # ── Role classification providers (free tiers, concurrent) ──
@@ -239,22 +264,28 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-large-2512 (Mistral Large 3 — see the base-interval
-    # comment block above for why Large is used instead of Small: 12.5x
-    # the real per-model TPM budget at the identical 1 RPS cost, per the
-    # account's own admin.mistral.ai/plateforme/limits page, live 2026-09).
-    # max_batch_chars derived from that real 250,000 TPM budget: at the
-    # 1 RPS single-process baseline (60 calls/min max), 250,000/60 ≈ 4,166
-    # tokens/call ≈ 16,700 chars at ~4 chars/token, then a ~72% safety
-    # margin -> 12,000. Kept modest here regardless since titles are short
-    # and role batches won't come close to this ceiling in practice — it's
-    # a safety net, not the real limiter (MAX_JOBS_PER_BATCH does that job).
+    # Mistral: mistral-small-2603 (Mistral Small 4) — NOT mistral-large-2512
+    # (see module docstring's "ROUND 2" section: Large returned a live 403
+    # tier_not_allowed on this account's plan, downgraded to Small, which
+    # is presumed-but-not-yet-fully-confirmed to actually be callable here;
+    # if Small ALSO 403s, that means this account's tier blocks every
+    # Mistral chat model, not just Large — check the run's logs for that).
+    # max_batch_chars derived from Small's real 20,000 TPM budget (per
+    # admin.mistral.ai/plateforme/limits, live 2026-09): at the 1 RPS
+    # single-process baseline (60 calls/min max), 20,000/60 ≈ 333
+    # tokens/call ≈ 1,330 chars at ~4 chars/token, then the same ~72%
+    # safety margin used elsewhere in this file -> ~950, rounded down to
+    # 900. Small for role classification only — titles are short (a batch
+    # of several is well under 900 chars), so this budget is plenty here
+    # even though it's far too small for location classification's
+    # description-length batches (see why Mistral was removed from
+    # LOCATION_PROVIDERS below).
     _make_provider(
         "mistral",
         "MISTRAL_API_KEY",
-        "mistral-large-2512",
+        "mistral-small-2603",
         "https://api.mistral.ai/v1",
-        max_batch_chars=12_000,
+        max_batch_chars=900,
         min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
 ]
@@ -328,29 +359,14 @@ _LOCATION_PROVIDER_DEFS = [
         max_batch_chars=6_000,
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
-    # Mistral: mistral-large-2512 (Mistral Large 3) — same key/model/quota
-    # pool as the role-classification entry above (same provider name
-    # "mistral", so classifier.py's per-provider throttle correctly treats
-    # all Mistral calls as sharing ONE real 250K-TPM/1-RPS pool, not two
-    # independent ones — see the base-interval comment block above for why
-    # Large, not Small, is used, and for the max_batch_chars derivation:
-    # 250,000 TPM / 60 calls-per-min (1 RPS baseline) ≈ 4,166 tokens/call,
-    # ~72% margin -> 12,000 chars). Not the biggest char budget of the four
-    # location providers (OpenAI/NVIDIA's char budgets are effectively
-    # uncapped by comparison), but a real, meaningfully-sized fourth leg —
-    # added specifically to absorb more of the per-run batch count that
-    # used to fall almost entirely on OpenAI/NVIDIA/Groq. In practice
-    # MAX_JOBS_PER_BATCH's 5-10 job ceiling (see classifier.py's
-    # _dynamic_job_cap) still does most of the real batch-size limiting
-    # here, same as for the other three providers.
-    _make_provider(
-        "mistral",
-        "MISTRAL_API_KEY",
-        "mistral-large-2512",
-        "https://api.mistral.ai/v1",
-        max_batch_chars=12_000,
-        min_call_interval=_MISTRAL_BASE_INTERVAL * AI_RATE_SHARDS,
-    ),
+    # Mistral deliberately NOT included here (2026-09 ROUND 2 — see module
+    # docstring): downgraded from mistral-large-2512 to mistral-small-2603
+    # after a live 403 tier_not_allowed on Large, and Small's real 20,000
+    # TPM budget (~900 usable chars/call after safety margin — see the
+    # role-classification entry above) is nowhere near enough for location
+    # classification's much longer job-description batches. Mistral is
+    # role-only for now; revisit adding it back here if this account's
+    # Mistral plan is ever upgraded to include Large 3.
 ]
 
 LOCATION_PROVIDERS = [p for p in _LOCATION_PROVIDER_DEFS if p is not None]
