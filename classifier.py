@@ -105,10 +105,41 @@ for _p in LOCATION_PROVIDERS:
     except Exception as e:
         log.warning(f"Failed to create location client ({_p['name']}): {e}")
 
-# Per-provider rate limiting (thread-safe via dict — each provider has its own timestamp)
+# Per-provider rate limiting.
 _last_call_times = {p["name"]: 0.0 for p in ROLE_PROVIDERS}
 for _p in LOCATION_PROVIDERS:
     _last_call_times[_p["name"]] = 0.0
+
+# 2026-09 ROUND 8 FIX (real production evidence: two "groq-o rate limit
+# hit" WARNINGs logged at the EXACT same timestamp, for two DIFFERENT
+# batches, even after the cross-shard lock started working correctly).
+# _last_call_times was only "thread-safe via dict" in the sense that dict
+# reads/writes themselves don't corrupt memory — the actual
+# check-elapsed-then-sleep-then-record sequence below in _ai_call was NOT
+# atomic. Two threads processing two batches for the SAME provider
+# concurrently (normal — a shard's own ThreadPoolExecutor can easily have
+# 2+ groq-o batches in flight at once) could both read the same stale
+# _last_call_times[name], both compute "elapsed >= interval, go ahead",
+# and both fire within the same fraction of a second — exactly what a
+# per-account pacing interval exists to prevent, and exactly what the
+# paired-429 evidence shows happening. A per-provider lock around that
+# whole check-sleep-record sequence makes it atomic: the second thread
+# now genuinely waits for the first to finish updating the timestamp
+# before it even computes its own "elapsed," instead of racing it.
+_pacing_locks = {name: threading.Lock() for name in _last_call_times}
+_pacing_locks_lock = threading.Lock()  # guards creating a lock for a name not seen at import time
+
+
+def _pacing_lock_for(name: str) -> threading.Lock:
+    lock = _pacing_locks.get(name)
+    if lock is not None:
+        return lock
+    with _pacing_locks_lock:
+        lock = _pacing_locks.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _pacing_locks[name] = lock
+        return lock
 
 # 2026-09: once a provider hits its DAILY quota (not an ordinary transient
 # rate limit — see is_daily_limit below), retrying it again later in the
@@ -146,13 +177,25 @@ def _mark_exhausted(name: str, reason: str) -> None:
     retryable API error, all of it. Logs once per provider per run (not
     once per failed batch — a struggling provider can fail many batches
     in a row, and this project's own logs got noisy from that before),
-    then every later call short-circuits instantly with no network hit."""
+    then every later call short-circuits instantly with no network hit.
+
+    2026-09 ROUND 8 (explicit user design: "that groq account is tagged
+    unusable and no hit is made to it again" — meaning by every shard, not
+    just this one): for a Groq account, also writes this exhaustion to the
+    shared cross-shard table (see groq_coordination.mark_exhausted_shared)
+    so every OTHER shard stops wasting attempts on the same dead account
+    instead of each independently rediscovering it. Best-effort — if that
+    write fails, this shard is still protected by the local set below, and
+    every other shard just falls back to discovering it on its own,
+    exactly like before this cross-shard propagation existed."""
     with _exhausted_providers_lock:
         already_known = name in _exhausted_providers_today
         _exhausted_providers_today.add(name)
     if not already_known:
         log.error(f"{name} failed ({reason}) — no more traffic to {name} for the rest of this run, "
                   f"rerouting its remaining work to other providers")
+        if name in _GROQ_NAMES:
+            groq_coordination.mark_exhausted_shared(name, reason)
 
 
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
@@ -180,6 +223,13 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
         return None
 
     is_groq = name in _GROQ_NAMES
+    if is_groq and groq_coordination.is_exhausted_shared(name):
+        # 2026-09 ROUND 8: another shard already discovered this account is
+        # dead for today — cache it locally too so THIS process never has
+        # to make the remote check again for the rest of its run (matches
+        # the local-set fast path at the top of this function).
+        _mark_exhausted(name, "cross-shard: another shard marked this account exhausted today")
+        return None
     if is_groq and not groq_coordination.enter_critical_section():
         log.debug(f"{name}: couldn't claim the cross-shard Groq slot in time — "
                   f"skipping this call (existing failover will retry it on another provider)")
@@ -194,11 +244,16 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
 
         interval = provider.get("min_call_interval", 0.0)
 
-        if interval > 0:
-            elapsed = time.time() - _last_call_times.get(name, 0.0)
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-        _last_call_times[name] = time.time()
+        # 2026-09 ROUND 8: the whole check-elapsed / sleep / record sequence
+        # happens under one lock per provider name now — see the ROUND 8
+        # FIX note by _pacing_locks above for why (real paired-429 evidence
+        # of two concurrent batches both racing this same check).
+        with _pacing_lock_for(name):
+            if interval > 0:
+                elapsed = time.time() - _last_call_times.get(name, 0.0)
+                if elapsed < interval:
+                    time.sleep(interval - elapsed)
+            _last_call_times[name] = time.time()
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -613,13 +668,17 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
 
     Single-provider fallback: uses whichever provider is configured.
 
-    Cross-provider failover: if a provider's batch fails outright (after
-    its own MAX_RETRIES=3 attempts inside _ai_call, or its client can't be
-    built), that batch's titles are reassigned across the OTHER providers
-    and retried once before giving up on them — see the module docstring.
+    Cross-provider failover (2026-09 ROUND 8, matches ai_classify_locations'
+    cascade): if a provider's batch fails outright (after its own
+    MAX_RETRIES=3 attempts inside _ai_call, or its client can't be built),
+    that title keeps getting reassigned to whatever provider hasn't been
+    tried for it yet — cycling through every configured provider if that's
+    what it takes — until it either succeeds or every single one has
+    genuinely failed it. A title is only ever defaulted to False once
+    there is truly nowhere left to send it.
 
-    Returns {title: is_relevant}. On failure of every provider for a
-    title: defaults to False (exclude).
+    Returns {title: is_relevant}. On genuine exhaustion of every provider
+    for a title: defaults to False (exclude).
     """
     if not titles:
         return {}
@@ -743,57 +802,100 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
 
     _run_round(all_work)
 
-    # ── Failover: reassign each failed provider's batch to the OTHER
-    # providers for this stage and retry once. Only one failover round —
-    # this is "the other providers pick it up", not an endless cascade. ──
-    if failed_batches and len(providers) > 1:
-        retry_work = []
-        # 2026-09 ROUND 6: one aggregated line for the WHOLE failover round
-        # instead of one log.warning() per failed batch (same spam class as
-        # the _run_round fix above — a provider with many small failed
-        # batches used to print one "reassigning to..." line each).
-        _reassign_total_titles = 0
-        _reassign_from = set()
-        _reassign_to = set()
+    # ── Failover cascade (2026-09 ROUND 8, explicit user request: "No role
+    # should be written to uncertain or discarded without going through an
+    # AI. they all must go through one.") — mirrors ai_classify_locations'
+    # ROUND 5 cascade: a title keeps getting routed to whatever untried,
+    # non-exhausted provider is left until it either succeeds or every
+    # configured provider has genuinely been tried and failed for THAT
+    # title. Replaces the OLD "one failover round then default to False"
+    # behavior, which could silently exclude a title after a single retry
+    # even with 2+ untried providers still sitting available — e.g. 4
+    # configured providers, the first fails, the one failover retry lands
+    # on a second one that's ALSO struggling, and the title died there even
+    # though a 3rd and 4th provider were never even tried.
+    #
+    # `tried` tracks, per title, which provider names have already been
+    # attempted — the loop terminates naturally once no still-failing
+    # title has any untried, viable candidate left (bounded by
+    # len(providers) rounds; a hard round cap is kept anyway as defense in
+    # depth, same as the location cascade).
+    tried: dict[str, set] = {}
+    _cascade_round = 0
+    while failed_batches and len(providers) > 1 and _cascade_round < len(providers):
+        _cascade_round += 1
+        failing = []  # titles still needing a home this round
         for failed_pname, batch in failed_batches:
-            survivors = [p for p in providers if p["name"] != failed_pname]
-            if not survivors:
-                for t in batch:
-                    results.setdefault(t, False)
-                continue
-            _reassign_total_titles += len(batch)
-            _reassign_from.add(failed_pname)
-            _reassign_to.update(p["name"] for p in survivors)
-            sub_assignments = {p["name"]: [] for p in survivors}
-            for i, title in enumerate(batch):
-                p = survivors[i % len(survivors)]
-                sub_assignments[p["name"]].append(title)
-            for p in survivors:
-                p_titles = sub_assignments[p["name"]]
-                if not p_titles:
-                    continue
-                client = _get_role_client(p)
-                if not client:
-                    retry_work.append((p, None, p_titles))
-                    continue
-                for sub_batch in _build_role_batches(p_titles, max_chars=p["max_batch_chars"]):
-                    retry_work.append((p, client, sub_batch))
-
-        if _reassign_total_titles:
-            log.warning(
-                f"Role classification: {', '.join(sorted(_reassign_from))} failed on "
-                f"{_reassign_total_titles} title(s) total this round — reassigning to "
-                f"{', '.join(sorted(_reassign_to))}"
-            )
-
+            for title in batch:
+                tried.setdefault(title, set()).add(failed_pname)
+                failing.append(title)
         failed_batches = []
+
+        # Pick the next candidate provider for each still-failing title:
+        # anything NOT already tried for that title AND not already known
+        # dead for the rest of this run (same _exhausted_providers_today
+        # circuit breaker ai_classify_locations' cascade uses — including,
+        # as of ROUND 8, a Groq account another SHARD marked exhausted).
+        # Round-robins across each title's own remaining candidates via a
+        # shared counter so load spreads across the survivors.
+        assignments: dict[str, dict] = {}
+        k = 0
+        for title in failing:
+            candidates = [
+                p for p in providers
+                if p["name"] not in tried[title]
+                and p["name"] not in _exhausted_providers_today
+            ]
+            if not candidates:
+                # Genuinely exhausted for THIS title — every provider has
+                # now either been tried and failed, or was already known
+                # dead. Falls through to the final default-False loop
+                # below, same as before, but only reached here once every
+                # option has truly been used up.
+                continue
+            assignments[title] = candidates[k % len(candidates)]
+            k += 1
+
+        if not assignments:
+            break  # nothing left that has anywhere new to go
+
+        by_provider: dict[str, list] = {}
+        for title in failing:
+            p = assignments.get(title)
+            if p is None:
+                continue
+            by_provider.setdefault(p["name"], []).append(title)
+
+        retry_work = []
+        for pname, p_titles in by_provider.items():
+            p = next(pp for pp in providers if pp["name"] == pname)
+            client = _get_role_client(p)
+            if not client:
+                retry_work.append((p, None, p_titles))
+                continue
+            for sub_batch in _build_role_batches(p_titles, max_chars=p["max_batch_chars"]):
+                retry_work.append((p, client, sub_batch))
+
+        log.warning(
+            f"Role classification cascade round {_cascade_round}: "
+            f"retrying {sum(len(v) for v in by_provider.values())} still-"
+            f"failing title(s) across {len(by_provider)} provider(s) "
+            f"({', '.join(sorted(by_provider))})"
+        )
         if retry_work:
             _run_round(retry_work)
-        # Anything that failed AGAIN on the failover round is defaulted —
-        # no second failover cascade.
-        for _pname, batch in failed_batches:
-            for t in batch:
-                results.setdefault(t, False)
+        # Loop repeats: anything that failed again lands back in
+        # failed_batches and gets picked up next iteration, still
+        # excluding every provider already tried for that specific title.
+
+    # Genuinely exhausted for a title only after every provider has
+    # actually been tried (or the single-provider case, where there was
+    # never anywhere else to send it) — default to False (exclude), same
+    # fallback semantics as before this round, but only reached once every
+    # configured option has truly been used up.
+    for _pname, batch in failed_batches:
+        for t in batch:
+            results.setdefault(t, False)
 
     # Any title never touched by any provider at all (shouldn't happen,
     # but matches the old function's "always return every title" contract)
