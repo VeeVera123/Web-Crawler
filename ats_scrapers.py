@@ -3027,7 +3027,17 @@ def scrape_paylocity(slug: str) -> list[dict]:
             continue
         seen_titles.add(title_key)
 
-        job_url = f"https://recruiting.paylocity.com/recruiting/jobs/Details/{company_id}/{job_id}/{company_name_slug}"
+        # 2026-09 ROUND 8 FIX (real production evidence — every recorded
+        # Paylocity job_url 404'd): the path was built as
+        # /Details/{company_id GUID}/{job_id}/{company_name_slug}, but
+        # Paylocity's real URL shape is /Details/{job_id}/{company_name_slug}
+        # (optionally plus a third, purely cosmetic title slug — confirmed
+        # live that omitting it still resolves correctly). company_id is
+        # the slug's OWN "which company" identifier (used to build the
+        # listing URL above), not a path segment Paylocity's job-detail
+        # route expects at all — every posting from every Paylocity tenant
+        # was carrying this same wrong shape.
+        job_url = f"https://recruiting.paylocity.com/recruiting/jobs/Details/{job_id}/{company_name_slug}"
 
         jobs.append({
             "title": str(title).strip(),
