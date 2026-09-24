@@ -73,33 +73,57 @@ on:
     - cron: "0 6 * * 1-5"   # 6:00 UTC = 7:00 AM WAT, Mon-Fri only — runs ALL THREE crawls (see the `if:` conditions below)
   workflow_dispatch:
     inputs:
-      run_crawl_i:
-        description: "Run Crawl I (known ATS boards, archive_i)"
-        required: false
-        type: boolean
-        default: true
-      run_crawl_ii:
-        description: "Run Crawl II (in-house/unsupported career pages, archive_ii)"
+      # 2026-09 ROUND 6 (explicit user instruction: "there are currently
+      # tick boxes for archive one and 2 and one for crawl 3. it should
+      # just be 2 checkboxes: Both crawl one and 2 and one for crawl 3.
+      # All checked by default."): the previous 3 independent checkboxes
+      # (run_crawl_i/run_crawl_ii/run_crawl_iii) are collapsed to 2 —
+      # run_crawl_1_2 now gates BOTH Crawl I and Crawl II together (see
+      # their `if:` conditions below, both keyed off this one input), and
+      # run_crawl_iii is unchanged. Also shortened every input's
+      # description to 5 words or fewer per explicit instruction.
+      run_crawl_1_2:
+        description: "Run Crawl I & II"
         required: false
         type: boolean
         default: true
       run_crawl_iii:
-        description: "Run Crawl III (stapply.ai direct job-board CSVs — Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee)"
+        description: "Run Crawl III"
         required: false
         type: boolean
         default: true
       archive_i_shard_count:
-        description: "Crawl I: parallel shards over archive_i (known ATS boards) — only used if run_crawl_i is checked"
+        description: "Crawl I shard count"
         required: false
         default: "10"
       archive_ii_shard_count:
-        description: "Crawl II: parallel shards over archive_ii (in-house career pages) — only used if run_crawl_ii is checked"
+        description: "Crawl II shard count"
         required: false
         default: "10"
       crawl_iii_shard_count:
-        description: "Crawl III: parallel shards over stapply.ai's direct job-board CSVs — only used if run_crawl_iii is checked"
+        description: "Crawl III shard count"
         required: false
         default: "10"
+      # 2026-09 ROUND 6 (explicit user instruction: "add a dropdown to
+      # choose what providers to use... two checkboxes for OpenAI and
+      # NVIDIA. if both boxes are left blank, it uses all available
+      # models, if you tick both, then just OpenAI and NVIDIA is used or
+      # just either one that was chosen is used. Whatever is chosen is
+      # used for both location and role classification. so normally/by
+      # default, the current arrangement is used."): see config.py's
+      # USE_OPENAI/USE_NVIDIA handling (_PROVIDER_FILTER) for the actual
+      # filtering logic — these two inputs just pass straight through as
+      # env vars on every classifying step below.
+      use_openai:
+        description: "Use OpenAI only"
+        required: false
+        type: boolean
+        default: false
+      use_nvidia:
+        description: "Use NVIDIA only"
+        required: false
+        type: boolean
+        default: false
 
 # Belt-and-suspenders: GitHub already serializes runs of the same workflow+ref
 # by default for `schedule`/`workflow_dispatch` unless you opt into concurrent
@@ -173,7 +197,7 @@ jobs:
 
   crawl-i:
     needs: [prepare-matrix, prefix-supabase]
-    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_i }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_1_2 }}
     runs-on: ubuntu-latest
     # 2026-09: was 90 — not enough for a shard to get through its slice
     # in one run. Raised to 350, same headroom-under-the-hard-ceiling
@@ -207,6 +231,8 @@ jobs:
           GROQ_API_KEY_C: ${{ secrets.GROQ_API_KEY_C }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          USE_OPENAI: ${{ inputs.use_openai }}
+          USE_NVIDIA: ${{ inputs.use_nvidia }}
           LLM_PROVIDER: cerebras
           # Every AI-classifying job in this workflow shares Groq-O's/
           # Groq-C's free-tier per-key quotas — see config.py. Sized
@@ -227,7 +253,7 @@ jobs:
 
   crawl-ii:
     needs: [prepare-matrix, prefix-supabase]
-    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_ii }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_crawl_1_2 }}
     runs-on: ubuntu-latest
     # 2026-09: same reasoning as crawl-i's timeout-minutes above — raised
     # 90 -> 350 (GitHub's 360min hard ceiling for a hosted-runner job).
@@ -258,6 +284,8 @@ jobs:
           GROQ_API_KEY_C: ${{ secrets.GROQ_API_KEY_C }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          USE_OPENAI: ${{ inputs.use_openai }}
+          USE_NVIDIA: ${{ inputs.use_nvidia }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
@@ -300,6 +328,8 @@ jobs:
           GROQ_API_KEY_C: ${{ secrets.GROQ_API_KEY_C }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          USE_OPENAI: ${{ inputs.use_openai }}
+          USE_NVIDIA: ${{ inputs.use_nvidia }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
@@ -350,7 +380,7 @@ jobs:
           LLM_PROVIDER: cerebras
         run: |
           ARGS=""
-          if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_ii }}" = "true" ]; then
+          if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_1_2 }}" = "true" ]; then
             ARGS="$ARGS --run-crawl-ii-cleanup"
           fi
           if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_iii }}" = "true" ]; then
