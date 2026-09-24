@@ -136,21 +136,33 @@ def _fast_rpc_void(fn: str, params: dict) -> None:
     except Exception:
         pass
 
-# A holder that hasn't renewed within this many seconds is presumed dead
-# (crashed shard, killed runner) and the lock is reclaimable by anyone —
-# this is what stops one dead shard from freezing Groq for everyone else
-# for the rest of the run.
-_STALE_SECONDS = 180
+# 2026-09 ROUND 8 (explicit user design): shortened from 180s. The holder
+# renews on EVERY Groq call it makes (see enter_critical_section below),
+# and at Groq's own worst-case pacing (12s/call, 5/min at a full 6,000-char
+# batch) a genuinely active holder logs a fresh renewal at least once a
+# minute even in the slowest realistic case — so "no renewal in over a
+# minute" is a real, meaningful signal that the holder is gone (crashed,
+# killed runner), not just between calls. A dead holder now only blocks
+# everyone else for about a minute instead of three.
+_STALE_SECONDS = 60
 
-# How long a shard will queue for the lock before giving up THIS ROUND and
-# falling back to classifier.py's existing cross-provider failover instead
-# — never blocks forever.
-_MAX_WAIT_SECONDS = 45
+# 2026-09 ROUND 8: how long a shard will queue for the lock before giving
+# up THIS ROUND and falling back to classifier.py's existing
+# cross-provider failover instead — never blocks forever. Long enough to
+# reliably span one full staleness cycle (a shard that starts waiting just
+# after a stale takeover check still gets another shot once the NEXT
+# staleness window closes) without waiting indefinitely.
+_MAX_WAIT_SECONDS = 70
 
-# Jittered poll interval while waiting — deliberately randomized (not a
-# fixed per-shard offset) so many shards waiting on the same lock don't
-# fall into a synchronized "keep landing on the same instant" pattern.
-_POLL_MIN, _POLL_MAX = 2.0, 5.0
+# 2026-09 ROUND 8 (explicit user design: "maybe every 20 seconds, it comes
+# and asks: is this still in use"): a waiting shard doesn't need to poll
+# tightly — the lock only ever frees up either when the holder finishes
+# (unpredictable) or the staleness window elapses (a known ~60s cadence),
+# so checking every ~20s catches both without hammering Supabase with
+# pointless polls from every waiting shard. Jittered (not a fixed offset)
+# so many shards waiting on the same lock don't all check in the same
+# instant.
+_POLL_MIN, _POLL_MAX = 15.0, 25.0
 
 _warned_unreachable = False
 
@@ -300,3 +312,33 @@ def bump_daily(account: str, n: int = 1) -> int | None:
     except Exception as e:
         log.debug(f"Groq daily-usage counter unreachable for {account}: {e}")
         return None
+
+
+def mark_exhausted_shared(account: str, reason: str) -> None:
+    """2026-09 ROUND 8 (explicit user design: 'that groq account is tagged
+    unusable and no hit is made to it again' — by anyone, not just the
+    shard that discovered it): tell every other shard this account is done
+    for today (hit the 1,000/day cap, or a hard non-retryable API error —
+    a revoked key, an account suspension) via the shared daily-usage row.
+    Mirrors classifier.py's LOCAL _exhausted_providers_today, just made
+    visible cross-shard. Best-effort: a failed write here isn't dangerous
+    — the existing per-process circuit breaker still protects the shard
+    that made this call, and every other shard just falls back to
+    rediscovering the same failure on its own, exactly like before this
+    existed."""
+    _fast_rpc_void("mark_groq_exhausted",
+                    {"p_account": account, "p_today": date.today().isoformat(), "p_reason": reason})
+
+
+def is_exhausted_shared(account: str) -> bool:
+    """Best-effort cross-shard check — returns False (not exhausted, go
+    ahead and try) on ANY failure to reach Supabase. That's the safe
+    direction for THIS check specifically: a false negative here costs at
+    most one wasted attempt that the normal per-call error handling
+    already absorbs, unlike the lock's fail-closed check where a false
+    positive risks a rate-limit storm."""
+    try:
+        return bool(_fast_rpc("is_groq_exhausted",
+                               {"p_account": account, "p_today": date.today().isoformat()}))
+    except Exception:
+        return False
