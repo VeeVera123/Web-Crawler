@@ -3360,6 +3360,31 @@ def get_latest_crawl_ids(n: int = 3) -> list[str]:
         return []
 
 
+# 2026-09: index.commoncrawl.org is free, unauthenticated, community-funded
+# infra with no SLA, serving several million requests/day off a shared
+# backend — it queues/overflows under load and throws intermittent 504s
+# (and 429/500/502/503/509) even against queries that succeed seconds
+# later. This is confirmed, long-standing, and expected behavior per
+# Common Crawl's own team (mailing list: "the index server is currently
+# heavily loaded... more than a few requests failing due to queue
+# overflows" — recommendation: cap to ~1 req/sec and retry failures), not
+# something wrong with this script or targeted at it. There is no more
+# reliable HTTP mirror of the same CDX index (the Internet Archive's own
+# CDX server indexes IA's crawls, not Common Crawl's, so it isn't a
+# substitute) — the only genuinely more reliable path is the columnar
+# Parquet index queried directly from S3 via Athena/DuckDB, which is a
+# much bigger infra lift (Athena table setup + per-TB-scanned billing) and
+# out of scope here. Common Crawl's own reference client (cdx_toolkit)
+# retries on exactly these status codes with exponential backoff capped
+# around 60s and stays serial/"polite" against the shared server — this
+# retry loop mirrors that documented, CC-recommended pattern instead of
+# giving up (and silently returning 0 results) on the first transient 504.
+_CC_RETRY_STATUS_CODES = {429, 500, 502, 503, 504, 509}
+_CC_RETRY_MAX_ATTEMPTS = 5
+_CC_RETRY_BASE_BACKOFF_SECONDS = 2
+_CC_RETRY_MAX_BACKOFF_SECONDS = 60
+
+
 def query_cc_index(crawl_id: str, url_pattern: str) -> list[str]:
     endpoint = f"{CC_INDEX_URL}/{crawl_id}-index"
     all_urls = []
@@ -3373,29 +3398,70 @@ def query_cc_index(crawl_id: str, url_pattern: str) -> list[str]:
             "limit": 15000,
             "page": page,
         }
-        try:
-            r = requests.get(endpoint, params=params, timeout=120)
-            if r.status_code == 404:
-                break
-            r.raise_for_status()
-            lines = r.text.strip().split("\n")
-            if not lines or lines == [""]:
-                break
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                    url = record.get("url", "")
-                    if url:
-                        all_urls.append(url)
-                except json.JSONDecodeError:
+        backoff = _CC_RETRY_BASE_BACKOFF_SECONDS
+        r = None
+        for attempt in range(1, _CC_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                r = requests.get(endpoint, params=params, timeout=120)
+                if r.status_code == 404:
+                    break  # genuinely no more pages — not a transient error
+                if r.status_code in _CC_RETRY_STATUS_CODES:
+                    if attempt == _CC_RETRY_MAX_ATTEMPTS:
+                        log.warning(
+                            f"CC query error ({crawl_id}, {url_pattern}): "
+                            f"HTTP {r.status_code} after {attempt} attempts — giving up on this page.")
+                        r = None
+                        break
+                    log.info(
+                        f"  CC query got HTTP {r.status_code} (shared index server overloaded — "
+                        f"known/expected, see query_cc_index's comment) for ({crawl_id}, {url_pattern}), "
+                        f"page {page}, attempt {attempt}/{_CC_RETRY_MAX_ATTEMPTS} — "
+                        f"retrying in {backoff}s.")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, _CC_RETRY_MAX_BACKOFF_SECONDS)
                     continue
-            if len(lines) < 15000:
+                r.raise_for_status()
+                break  # success
+            except (requests.exceptions.ConnectionError,
+                     requests.exceptions.Timeout,
+                     requests.exceptions.ChunkedEncodingError) as e:
+                if attempt == _CC_RETRY_MAX_ATTEMPTS:
+                    log.warning(
+                        f"CC query error ({crawl_id}, {url_pattern}): {e} "
+                        f"after {attempt} attempts — giving up on this page.")
+                    r = None
+                    break
+                log.info(
+                    f"  CC query network error ({crawl_id}, {url_pattern}), page {page}, "
+                    f"attempt {attempt}/{_CC_RETRY_MAX_ATTEMPTS}: {e} — retrying in {backoff}s.")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _CC_RETRY_MAX_BACKOFF_SECONDS)
+                continue
+            except Exception as e:
+                log.warning(f"CC query error ({crawl_id}, {url_pattern}): {e}")
+                r = None
                 break
-            page += 1
-            time.sleep(0.5)
-        except Exception as e:
-            log.warning(f"CC query error ({crawl_id}, {url_pattern}): {e}")
+
+        if r is None:
+            break  # 404, exhausted retries, or a non-retryable exception
+        if r.status_code == 404:
             break
+
+        lines = r.text.strip().split("\n")
+        if not lines or lines == [""]:
+            break
+        for line in lines:
+            try:
+                record = json.loads(line)
+                url = record.get("url", "")
+                if url:
+                    all_urls.append(url)
+            except json.JSONDecodeError:
+                continue
+        if len(lines) < 15000:
+            break
+        page += 1
+        time.sleep(1.0)  # ~1 req/sec pacing per CC's own recommendation
 
     return all_urls
 
