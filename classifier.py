@@ -41,6 +41,21 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER, _PROVIDER_FILTER
 import geo
+import groq_coordination
+
+# 2026-09 ROUND 7: which provider names are "Groq" for cross-shard lock
+# purposes — both independent accounts share the coordination this module
+# provides (see groq_coordination.py's module docstring for the full
+# design: only one shard is ever allowed to fire at Groq at a time).
+_GROQ_NAMES = {"groq-o", "groq-c"}
+
+# 2026-09 ROUND 7: once a Groq account's cross-shard daily count (tracked
+# in Supabase, see groq_coordination.bump_daily) reaches this, every shard
+# reroutes to OpenAI/NVIDIA for the rest of the day — the account owner's
+# explicit rule ("once its gotten to 1k, they all stop"), enforced GLOBALLY
+# instead of each shard discovering the real 1,000 RPD cap independently
+# through trial-and-error 429s.
+_GROQ_DAILY_CAP = 1_000
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +157,20 @@ def _mark_exhausted(name: str, reason: str) -> None:
 
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
-    Returns response text or None on failure."""
+    Returns response text or None on failure.
+
+    2026-09 ROUND 7: for Groq (both accounts), this call only actually
+    proceeds while this process holds the cross-shard Groq lock (see
+    groq_coordination.py) — if it can't be claimed within that module's
+    wait budget, this returns None immediately, exactly like any other
+    provider failure, so the EXISTING cross-provider failover picks up the
+    work on OpenAI/NVIDIA (or a later cascade round) without any special
+    casing needed at the call sites. This replaces AI_RATE_SHARDS' static
+    guess with real coordination: at most one shard fires at Groq at a
+    time, so config.py's Groq min_call_interval is now a single-shard-safe
+    value on its own, not something that needs dividing by an assumed
+    shard count anymore.
+    """
     name = provider["name"]
     if name in _exhausted_providers_today:
         # Already confirmed out for this run (see _mark_exhausted) — skip
@@ -150,124 +178,146 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
         # Callers see this exactly like any other failed call (None), so
         # the existing cross-provider failover path still applies.
         return None
-    interval = provider.get("min_call_interval", 0.0)
 
-    if interval > 0:
-        elapsed = time.time() - _last_call_times.get(name, 0.0)
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
-    _last_call_times[name] = time.time()
+    is_groq = name in _GROQ_NAMES
+    if is_groq and not groq_coordination.enter_critical_section():
+        log.debug(f"{name}: couldn't claim the cross-shard Groq slot in time — "
+                  f"skipping this call (existing failover will retry it on another provider)")
+        return None
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = client.chat.completions.create(
-                model=provider["model"],
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=0,
-                max_tokens=max_tokens,
-            )
-            content = resp.choices[0].message.content
-            if content is None:
-                log.warning(f"{name} returned null content (attempt {attempt + 1})")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BASE_DELAY)
+    try:
+        if is_groq:
+            new_count = groq_coordination.bump_daily(name, 1)
+            if new_count is not None and new_count >= _GROQ_DAILY_CAP:
+                _mark_exhausted(name, f"cross-shard daily count reached {new_count}/{_GROQ_DAILY_CAP}")
+                return None
+
+        interval = provider.get("min_call_interval", 0.0)
+
+        if interval > 0:
+            elapsed = time.time() - _last_call_times.get(name, 0.0)
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+        _last_call_times[name] = time.time()
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = client.chat.completions.create(
+                    model=provider["model"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0,
+                    max_tokens=max_tokens,
+                )
+                content = resp.choices[0].message.content
+                if content is None:
+                    log.warning(f"{name} returned null content (attempt {attempt + 1})")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_BASE_DELAY)
+                        continue
+                    _mark_exhausted(name, "returned null content after all retries")
+                    return None
+                return content.strip()
+            except Exception as e:
+                error_str = str(e)
+                error_lower = error_str.lower()
+                is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_lower
+                # 2026-09 fix: confirmed live this missed Gemini's actual
+                # free-tier daily-quota error entirely — its real wording is
+                # "Quota exceeded for metric: ...generate_content_free_tier_
+                # requests" with quotaId "GenerateRequestsPerDayPerProjectPer
+                # Model-FreeTier", none of which contains "tokens per day" or
+                # the bare word "daily" (case-insensitively) that this check
+                # used to require. Because it fell through as an ordinary
+                # rate limit instead, _ai_call() kept retrying with backoff
+                # for a quota that a few seconds' wait can never fix within
+                # the same UTC day — wasting all MAX_RETRIES attempts (and,
+                # combined with the max_retries=0 fix above, needlessly
+                # delaying cross-provider failover) on a call guaranteed to
+                # fail again immediately. Broadened to also catch "per day"
+                # and "quota exceeded" — still narrow enough not to misfire
+                # on an ordinary transient rate-limit message (those say
+                # "rate limit"/"too many requests", never "quota exceeded"
+                # or a per-day quota window).
+                is_daily_limit = (
+                    "tokens per day" in error_lower
+                    or "requests per day" in error_lower
+                    or "per day" in error_lower
+                    or "perday" in error_lower.replace(" ", "").replace("_", "")
+                    or ("quota exceeded" in error_lower and "day" in error_lower)
+                    or "daily" in error_lower
+                )
+
+                if is_daily_limit:
+                    _mark_exhausted(name, "daily quota reached")
+                    return None
+                if is_rate_limit and attempt < MAX_RETRIES - 1:
+                    delay = RETRY_BASE_DELAY * (attempt + 1)
+                    log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
+                    time.sleep(delay)
                     continue
-                _mark_exhausted(name, "returned null content after all retries")
+                # 2026-09 FIX (real production evidence, not hypothetical):
+                # investigated after the pipeline owner reported Groq "failing
+                # massively" despite the model being confirmed live and not
+                # deprecated (checked against Groq's own docs). Root cause:
+                # an ordinary per-minute rate limit (429) that survives
+                # MAX_RETRIES attempts used to fall into the SAME
+                # _mark_exhausted call as a genuine daily-quota exhaustion or
+                # a hard non-retryable error — permanently blacklisting the
+                # provider for the REST of this process's run, even though a
+                # per-minute quota (Groq's real pool: 8K TPM) fully refills
+                # within a minute. Groq's quota is shared across role AND
+                # location classification AND — pre-ROUND-7 — all
+                # AI_RATE_SHARDS concurrent crawl-shard processes (see
+                # config.py's provider comments); ROUND 7 replaces that
+                # static division with the real cross-shard lock above, but
+                # this per-call recoverable-vs-permanent distinction still
+                # matters regardless of how many shards are involved. A
+                # daily-quota error (is_daily_limit above) genuinely can't
+                # recover mid-run, so permanently blacklisting is correct
+                # there — but a rate limit that merely outlasted this call's
+                # retries is NOT the same thing, and should just fail THIS
+                # call (existing cross-provider failover already handles
+                # that) so the provider gets tried again on the next batch,
+                # once the per-minute window has reset.
+                if is_rate_limit:
+                    with _rate_limit_warned_lock:
+                        first_time = name not in _rate_limit_warned_today
+                        _rate_limit_warned_today.add(name)
+                    if first_time:
+                        log.warning(f"{name} rate limit exhausted retries for this call — "
+                                    f"NOT blacklisting (per-minute quota, will retry on next "
+                                    f"batch; further per-minute rate-limit hits for {name} "
+                                    f"this run are logged at debug level only)")
+                    else:
+                        log.debug(f"{name} rate limit exhausted retries for this call "
+                                  f"(repeat this run, suppressed at warning level)")
+                    return None
+                # Every remaining path is a genuine give-up on this provider
+                # for this call that ISN'T a recoverable rate limit — some
+                # other non-retryable API error (bad auth, invalid request,
+                # model error, etc.). This still marks the provider exhausted
+                # for the rest of the run, since there's no reason to expect
+                # those to self-resolve within the same process.
+                _mark_exhausted(name, f"API error: {e}")
                 return None
-            return content.strip()
-        except Exception as e:
-            error_str = str(e)
-            error_lower = error_str.lower()
-            is_rate_limit = "429" in error_str or "413" in error_str or "rate" in error_lower
-            # 2026-09 fix: confirmed live this missed Gemini's actual
-            # free-tier daily-quota error entirely — its real wording is
-            # "Quota exceeded for metric: ...generate_content_free_tier_
-            # requests" with quotaId "GenerateRequestsPerDayPerProjectPer
-            # Model-FreeTier", none of which contains "tokens per day" or
-            # the bare word "daily" (case-insensitively) that this check
-            # used to require. Because it fell through as an ordinary
-            # rate limit instead, _ai_call() kept retrying with backoff
-            # for a quota that a few seconds' wait can never fix within
-            # the same UTC day — wasting all MAX_RETRIES attempts (and,
-            # combined with the max_retries=0 fix above, needlessly
-            # delaying cross-provider failover) on a call guaranteed to
-            # fail again immediately. Broadened to also catch "per day"
-            # and "quota exceeded" — still narrow enough not to misfire
-            # on an ordinary transient rate-limit message (those say
-            # "rate limit"/"too many requests", never "quota exceeded"
-            # or a per-day quota window).
-            is_daily_limit = (
-                "tokens per day" in error_lower
-                or "requests per day" in error_lower
-                or "per day" in error_lower
-                or "perday" in error_lower.replace(" ", "").replace("_", "")
-                or ("quota exceeded" in error_lower and "day" in error_lower)
-                or "daily" in error_lower
-            )
-
-            if is_daily_limit:
-                _mark_exhausted(name, "daily quota reached")
-                return None
-            if is_rate_limit and attempt < MAX_RETRIES - 1:
-                delay = RETRY_BASE_DELAY * (attempt + 1)
-                log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
-                time.sleep(delay)
-                continue
-            # 2026-09 FIX (real production evidence, not hypothetical):
-            # investigated after the pipeline owner reported Groq "failing
-            # massively" despite the model being confirmed live and not
-            # deprecated (checked against Groq's own docs). Root cause:
-            # an ordinary per-minute rate limit (429) that survives
-            # MAX_RETRIES attempts used to fall into the SAME
-            # _mark_exhausted call as a genuine daily-quota exhaustion or
-            # a hard non-retryable error — permanently blacklisting the
-            # provider for the REST of this process's run, even though a
-            # per-minute quota (Groq's real pool: 8K TPM) fully refills
-            # within a minute. Groq's quota is shared across role AND
-            # location classification AND all AI_RATE_SHARDS concurrent
-            # crawl-shard processes (see config.py's provider comments) —
-            # a single congested burst early in a run is enough to trip
-            # this and silently kill Groq for that shard's ENTIRE
-            # remaining run, which looks exactly like "the provider is
-            # broken" from the outside. A daily-quota error (is_daily_limit
-            # above) genuinely can't recover mid-run, so permanently
-            # blacklisting is correct there — but a rate limit that merely
-            # outlasted this call's retries is NOT the same thing, and
-            # should just fail THIS call (existing cross-provider failover
-            # already handles that) so the provider gets tried again on
-            # the next batch, once the per-minute window has reset.
-            if is_rate_limit:
-                with _rate_limit_warned_lock:
-                    first_time = name not in _rate_limit_warned_today
-                    _rate_limit_warned_today.add(name)
-                if first_time:
-                    log.warning(f"{name} rate limit exhausted retries for this call — "
-                                f"NOT blacklisting (per-minute quota, will retry on next "
-                                f"batch; further per-minute rate-limit hits for {name} "
-                                f"this run are logged at debug level only)")
-                else:
-                    log.debug(f"{name} rate limit exhausted retries for this call "
-                              f"(repeat this run, suppressed at warning level)")
-                return None
-            # Every remaining path is a genuine give-up on this provider
-            # for this call that ISN'T a recoverable rate limit — some
-            # other non-retryable API error (bad auth, invalid request,
-            # model error, etc.). This still marks the provider exhausted
-            # for the rest of the run, since there's no reason to expect
-            # those to self-resolve within the same process.
-            _mark_exhausted(name, f"API error: {e}")
-            return None
-    # Every retry attempt returned null content or was itself a rate limit
-    # that got retried — if we fall out of the loop entirely without an
-    # exception, that means MAX_RETRIES null-content attempts (already
-    # handled above, returns before reaching here) or (2026-09 fix, see
-    # above) exhausted rate-limit retries with no exception on the final
-    # attempt. Either way this is the same "don't permanently blacklist a
-    # per-minute rate limit" fix — not a hard failure worth a circuit break.
-    return None
+        # Every retry attempt returned null content or was itself a rate limit
+        # that got retried — if we fall out of the loop entirely without an
+        # exception, that means MAX_RETRIES null-content attempts (already
+        # handled above, returns before reaching here) or (2026-09 fix, see
+        # above) exhausted rate-limit retries with no exception on the final
+        # attempt. Either way this is the same "don't permanently blacklist a
+        # per-minute rate limit" fix — not a hard failure worth a circuit break.
+        return None
+    finally:
+        # 2026-09 ROUND 7: always release this process's hold on the
+        # cross-shard Groq slot (refcounted — only actually releases the
+        # remote lock once every concurrent Groq call in this process has
+        # finished), no matter which return path above was taken.
+        if is_groq:
+            groq_coordination.exit_critical_section()
 
 
 # ═══════════════════════════════════════════════════════
@@ -1803,39 +1853,58 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     return batch_results, True
 
 
-def _dynamic_job_cap(jobs: list[dict]) -> int:
-    """5-10 jobs per batch (2026-09, raised from the earlier 5-7 range per
-    explicit user request: a real run classifying 201 jobs produced 82
-    separate batches/API calls — "that eats into requests and calls per
-    day" — because the OLD ceiling of 7 for short-description jobs was
-    needlessly tight; there was never a confirmed failure mode at 8-10
-    jobs/batch for short descriptions, only at much larger flat batches
-    (100+, see MAX_JOBS_PER_BATCH's history below) or long-description
-    batches specifically. The floor stays at 5 for long-JD batches —
-    that's the tier the original hallucination fix actually targeted (a
-    cheap model losing attention across many FULL job descriptions in one
-    call), and the user's own instruction here explicitly kept "5 minimum
-    for long JDs."
+def _dynamic_job_cap(jobs: list[dict], provider_name: str | None = None) -> int:
+    """5-10 jobs per batch by default (2026-09, raised from the earlier 5-7
+    range per explicit user request: a real run classifying 201 jobs
+    produced 82 separate batches/API calls — "that eats into requests and
+    calls per day" — because the OLD ceiling of 7 for short-description
+    jobs was needlessly tight; there was never a confirmed failure mode at
+    8-10 jobs/batch for short descriptions, only at much larger flat
+    batches (100+, see MAX_JOBS_PER_BATCH's history below) or
+    long-description batches specifically. The floor stays at 5 for
+    long-JD batches — that's the tier the original hallucination fix
+    actually targeted (a cheap model losing attention across many FULL job
+    descriptions in one call), and the user's own instruction here
+    explicitly kept "5 minimum for long JDs."
 
-    Scaled down toward 5 as the jobs being batched have longer
+    Scaled down toward the floor as the jobs being batched have longer
     descriptions — more text per job in one call means less of the
     model's attention per job. Based on the AVERAGE description length
     across the jobs being batched, since the cap applies to the batch as
     a whole, not any single job.
 
+    2026-09 ROUND 7: provider-aware. NVIDIA raised to a higher 15-40 tier
+    per explicit user instruction ("increase max with caution... never
+    truncate a job") — its real context window (1,000,000 tokens) is
+    orders of magnitude past whatever this cap was ever actually
+    protecting against, so a meaningfully higher ceiling still leaves a
+    same-shaped "fewer jobs per batch as descriptions get longer" curve
+    (still guarding against attention dilution, just at a higher altitude)
+    rather than removing the cap outright. Groq and OpenAI keep the
+    original 5-10 tiers: Groq's real ceiling is its char budget anyway
+    (this job-count cap rarely binds there before max_batch_chars does),
+    and OpenAI's gpt-4.1-nano benchmarks as the weakest reasoner of the
+    three models in active use here, so its cap is left unchanged rather
+    than raised alongside NVIDIA's.
+
     NOTE: this caps job COUNT per batch, but each provider's own
     max_batch_chars (config.py) is a separate, independent ceiling that's
     checked first in _build_dynamic_batches — Groq's max_batch_chars=6,000
-    (~1,500 tokens, sized to fit its real 8K-tokens-per-minute quota,
-    shared across every concurrent shard this run) will still force
-    smaller batches than this job-count cap allows whenever descriptions
-    aren't trivially short, REGARDLESS of raising this cap further. That's
-    Groq's genuine rate-limit ceiling, not an oversight — raising it risks
-    live 429s once several shards' calls land in the same minute. NVIDIA/
-    OpenAI's much larger char budgets (3.2M/3.3M) mean job count is the
-    ONLY real constraint for them, so this change mainly cuts THEIR batch
-    counts, not Groq's.
+    (~1,500 tokens, sized to fit its real 8K-tokens-per-minute quota) will
+    still force smaller batches than this job-count cap allows whenever
+    descriptions aren't trivially short, REGARDLESS of raising this cap
+    further. That's Groq's genuine rate-limit ceiling, not an oversight.
     """
+    if provider_name == "nvidia":
+        if not jobs:
+            return 40
+        total = sum(len(j.get("description_snippet") or "") for j in jobs)
+        avg = total / len(jobs)
+        if avg <= 2_000:
+            return 40
+        if avg <= 8_000:
+            return 25
+        return 15
     if not jobs:
         return 10
     total = sum(len(j.get("description_snippet") or "") for j in jobs)
@@ -1847,7 +1916,8 @@ def _dynamic_job_cap(jobs: list[dict]) -> int:
     return 5
 
 
-def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple[int, list[dict]]]:
+def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int,
+                            provider_name: str | None = None) -> list[tuple[int, list[dict]]]:
     """Build batches dynamically based on description length.
 
     Char-budget driven, BUT also capped by job count. Many jobs have no
@@ -1856,13 +1926,22 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     jobs. The model's response is one line per job, and output tokens are
     scaled to job count (see _classify_location_batch) — so job count,
     not character count, is what actually bounds a safely-sized response.
+
+    2026-09 ROUND 7 (explicit user instruction: "never ever truncate a
+    job"): this no longer re-truncates any job's description. A job's full
+    text is always used — _assign_jobs_by_desc_length (the caller) already
+    guarantees nothing longer than a provider's own max_batch_chars is
+    routed to that provider in the first place, falling back to whichever
+    configured provider has the LARGEST budget for the rare case where a
+    single job's own description exceeds every provider's per-request
+    budget on its own. That means this function only ever sees jobs that
+    already fit — a job here that alone exceeds max_batch_chars becomes a
+    solo, over-budget batch rather than being cut short; that's the
+    intended trade-off (send the whole job, even if the one request runs a
+    little over the nominal budget) over silently hiding part of a JD's
+    eligibility/restriction language from the classifier.
     """
     OVERHEAD_PER_JOB = 120
-    # Matches ats_scrapers._snippet's default cap — descriptions are already
-    # bounded there, so this is just a defensive re-assertion, not the
-    # primary truncation point. 30,000 chars is large enough that no real
-    # job description is ever actually cut off by it.
-    MAX_DESC_CHARS = 30_000
     # 120 -> 10 -> 5-7 dynamic (2026-09, explicit user request): a batch of
     # up to 120 jobs in one bulk "one-line-verdict-per-job" call is exactly
     # the shape that let cheap/small models cut corners — this is the same
@@ -1870,16 +1949,14 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     # hallucinated a match_global verdict with zero supporting text
     # anywhere in the job (see classifier.py's "Post-AI safety net" section
     # in ai_classify_locations for the real posting this closes). First
-    # reduced to a flat 10, now made dynamic (5-7, via _dynamic_job_cap)
-    # so long-description batches get even more of the model's attention
-    # per job than a flat cap would give them. Even at the floor (5/batch),
-    # a real run's ~74 unsure jobs on Gemini/OpenAI is ~15 calls and ~141
-    # on NVIDIA is ~29 calls per run — still comfortably inside every
-    # provider's RPM budget. Deliberately NOT applied to role classification
-    # (_build_role_batches, a separate function) — role verdicts are just a
-    # short title, not a full JD, so the same bulk-call risk doesn't apply
-    # there; left unchanged per explicit instruction.
-    MAX_JOBS_PER_BATCH = _dynamic_job_cap(jobs)
+    # reduced to a flat 10, now made dynamic (5-7, or 15-40 for NVIDIA —
+    # see _dynamic_job_cap) so long-description batches get even more of
+    # the model's attention per job than a flat cap would give them.
+    # Deliberately NOT applied to role classification (_build_role_batches,
+    # a separate function) — role verdicts are just a short title, not a
+    # full JD, so the same bulk-call risk doesn't apply there; left
+    # unchanged per explicit instruction.
+    MAX_JOBS_PER_BATCH = _dynamic_job_cap(jobs, provider_name=provider_name)
 
     batches = []
     current_batch = []
@@ -1888,9 +1965,6 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
 
     for i, job in enumerate(jobs):
         desc = job.get("description_snippet") or ""
-        if len(desc) > MAX_DESC_CHARS:
-            job["description_snippet"] = desc[:MAX_DESC_CHARS]
-            desc = job["description_snippet"]
         desc_len = len(desc)
         job_chars = desc_len + OVERHEAD_PER_JOB
 
@@ -1949,6 +2023,23 @@ def _assign_jobs_by_desc_length(indexed_jobs: list[tuple[int, dict]],
     assigned so far) — the second tiebreaker interleaves equal-budget
     providers evenly instead of giving one of them a whole contiguous
     block before the other gets a look in.
+
+    2026-09 ROUND 7 (explicit user design: "any JD <= 6k characters is
+    Groq-eligible; anything over that only goes to NVIDIA/OpenAI; if
+    they're all under, split equally; never truncate a job"): a job is
+    now only assignable to a provider whose OWN max_batch_chars is big
+    enough to hold that job's full description alone. Since the heap
+    always tries the SMALLEST-budget provider for a job first, this
+    naturally means short jobs land on Groq first (as before) while a job
+    too long for Groq's ~6,000-char budget skips straight past it to
+    NVIDIA/OpenAI instead of being force-fit there — and a job that's
+    short enough to fit everywhere still gets the same equal-share
+    treatment as before. This is what actually GUARANTEES "never above
+    6k to groq" and "never truncate" together: a job is either routed to
+    a provider that can hold it whole, or (the one pathological
+    fallback, e.g. a single description bigger than every configured
+    provider's budget) handed to whichever provider has the LARGEST
+    budget regardless of its current share, rather than dropped or cut.
     """
     assignments = {p["name"]: [] for p in providers}
     n = len(indexed_jobs)
@@ -1978,17 +2069,39 @@ def _assign_jobs_by_desc_length(indexed_jobs: list[tuple[int, dict]],
 
     for k in order:
         orig_idx, job = indexed_jobs[k]
-        # Skip (permanently discard) any provider whose share is already
-        # full — it never goes back on the heap once full.
+        job_len = len(job.get("description_snippet") or "")
+        # Providers skipped for THIS job only (too small to hold it whole)
+        # go back on the heap unchanged afterward — still eligible for a
+        # shorter job later, unlike a share-full provider which is
+        # permanently dropped below.
+        skipped = []
+        assigned_ok = False
         while heap:
             budget, assigned_so_far, tie, p = heapq.heappop(heap)
             if counts[p["name"]] >= shares[p["name"]]:
+                continue  # share full — permanently dropped, same as before
+            if job_len > p["max_batch_chars"]:
+                skipped.append((budget, assigned_so_far, tie, p))
                 continue
             assignments[p["name"]].append((orig_idx, job))
             counts[p["name"]] += 1
+            assigned_ok = True
             if counts[p["name"]] < shares[p["name"]]:
                 heapq.heappush(heap, (budget, counts[p["name"]], tie, p))
             break
+        for entry in skipped:
+            heapq.heappush(heap, entry)
+        if not assigned_ok:
+            # Every provider with room left in its share is too small for
+            # this one job's own description — genuinely nowhere it fits
+            # as a solo request under the normal share-based assignment.
+            # Never drop it and never truncate it: hand it to whichever
+            # CONFIGURED provider has the largest budget, share limit or
+            # not (this is the rare case, e.g. one description far bigger
+            # than usual — not the normal path for most jobs).
+            biggest = max(providers, key=lambda pp: pp["max_batch_chars"])
+            assignments[biggest["name"]].append((orig_idx, job))
+            counts[biggest["name"]] = counts.get(biggest["name"], 0) + 1
     return assignments
 
 
@@ -2161,7 +2274,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
             continue
         assigned_jobs = [job for _, job in assigned]
         assigned_indices = [idx for idx, _ in assigned]
-        batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"])
+        batches = _build_dynamic_batches(assigned_jobs, p["max_batch_chars"], provider_name=p["name"])
         for start_idx, batch in batches:
             batch_orig_indices = assigned_indices[start_idx:start_idx + len(batch)]
             all_work.append((p, client, batch_orig_indices, batch))
@@ -2333,7 +2446,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
             if not client:
                 retry_work.append((p, None, assigned_indices, assigned_jobs))
                 continue
-            for start_idx, sub_batch in _build_dynamic_batches(assigned_jobs, p["max_batch_chars"]):
+            for start_idx, sub_batch in _build_dynamic_batches(assigned_jobs, p["max_batch_chars"], provider_name=p["name"]):
                 sub_orig_indices = assigned_indices[start_idx:start_idx + len(sub_batch)]
                 retry_work.append((p, client, sub_orig_indices, sub_batch))
 
