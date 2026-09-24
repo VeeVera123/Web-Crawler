@@ -184,12 +184,21 @@ def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call
 #     "nvidia", same key), since that's what's actually true of the quota.
 _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single process
                                   # (legacy fallback only — see comment above)
-_GROQ_BASE_INTERVAL = 15.0       # 8K TPM free tier, ~1.5K tokens/call -> ~4 calls/min
-                                  # (6K TPM, 75% of cap — was 30s/2-calls-min, doubled
-                                  # throughput while keeping a real safety margin).
-                                  # Shared by BOTH Groq-O and Groq-C below — each is
-                                  # its own independent account with this same real
-                                  # quota, not two views of one pool.
+# 2026-09 ROUND 7: 15.0 -> 12.0, and NO LONGER multiplied by AI_RATE_SHARDS
+# below (see groq_coordination.py). Worst case every batch is a full
+# 6,000 chars (~1,500 tokens at ~4 chars/token): 8,000 TPM / 1,500
+# tokens/call = 5.33 calls/min safely fit under the cap, floored to 5/min
+# = 12s/call (7,500 of 8,000 TPM used, real margin kept rather than
+# cutting exactly to the limit — explicit user math, verified). This used
+# to ALSO get multiplied by AI_RATE_SHARDS as a static guess at how many
+# concurrent shards might be hitting Groq at once, dividing throughput
+# whether or not that guess was accurate. ROUND 7 replaces that guess with
+# real coordination: groq_coordination.py's cross-shard lock guarantees
+# only ONE shard is ever actively calling Groq at a time, so this interval
+# only ever needs to be safe for a SINGLE caller — no division needed.
+_GROQ_BASE_INTERVAL = 12.0        # Shared by BOTH Groq-O and Groq-C below — each is
+                                   # its own independent account with this same real
+                                   # quota, not two views of one pool.
 # NVIDIA NIM (integrate.api.nvidia.com) — no single published per-model RPM;
 # NVIDIA's own docs say free-tier limits are model/account-specific, but the
 # commonly reported free-tier figure across NIM-hosted chat models is ~40
@@ -225,7 +234,7 @@ _ROLE_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=4_000,       # ~1500 tokens, fits in 8K TPM with overhead
-        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+        min_call_interval=_GROQ_BASE_INTERVAL,  # single-shard-safe; the cross-shard lock (groq_coordination.py) is what keeps concurrent shards off Groq now, not this multiplier
     ),
     # Groq-C ("Clone"/second account): a genuinely SEPARATE Groq account —
     # its own signup, own API key, own independent 30 RPM / 8K TPM / 1K RPD
@@ -241,7 +250,7 @@ _ROLE_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=4_000,
-        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+        min_call_interval=_GROQ_BASE_INTERVAL,  # single-shard-safe; the cross-shard lock (groq_coordination.py) is what keeps concurrent shards off Groq now, not this multiplier
     ),
     # OpenAI + NVIDIA (2026-09, added for the USE_OPENAI/USE_NVIDIA
     # provider-filter feature above): role classification previously had
@@ -342,7 +351,7 @@ _LOCATION_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=6_000,
-        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+        min_call_interval=_GROQ_BASE_INTERVAL,  # single-shard-safe; the cross-shard lock (groq_coordination.py) is what keeps concurrent shards off Groq now, not this multiplier
     ),
     _make_provider(
         "groq-c",
@@ -350,7 +359,7 @@ _LOCATION_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=6_000,
-        min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
+        min_call_interval=_GROQ_BASE_INTERVAL,  # single-shard-safe; the cross-shard lock (groq_coordination.py) is what keeps concurrent shards off Groq now, not this multiplier
     ),
 ]
 
