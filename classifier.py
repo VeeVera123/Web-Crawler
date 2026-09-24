@@ -35,6 +35,7 @@ adds more capacity.
 
 import re
 import time
+import heapq
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1401,6 +1402,31 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if len(african_hits) >= 2:
         return "match", PRIORITY_AFRICA, None
 
+    # ── 2.5. Multi-region breadth in the LOCATION FIELD itself → match
+    # (2026-09 ROUND 5 FALSE-NEGATIVE FIX, found during this session's
+    # closing test sweep, explicit user request to hunt for exactly this
+    # class of bug): the user's own long-standing policy (see
+    # _REGION_ONLY_WORDS_RE's module comment: "if it has multiple
+    # locations and africa thats good. Like say: MENA, AMER, Africa, EMEA,
+    # Latam. thats acceptable too.") already treats 2+ distinct business
+    # regions named together as evidence of broad multi-region reach — but
+    # that logic (_has_multi_region_breadth) was previously only wired
+    # into the DESCRIPTION/TITLE hard-override guards (has_hard_country_
+    # based_restriction_signal, has_title_region_restriction_signal), never
+    # into this function's own LOCATION-FIELD classification. A job whose
+    # location field literally read "APAC, EMEA" or "MENA, AMER, EMEA,
+    # Latam" — genuine, textbook multi-region breadth — fell through to
+    # step 3 below, where the strict "EMEA must have NO other residue"
+    # rule saw the other region names as disqualifying residue and
+    # rejected the job as no_match: exactly backwards, since 2+ regions is
+    # stronger evidence of broad hiring than bare EMEA alone, not weaker.
+    # Checked BEFORE the bare-EMEA residue check for that reason — this is
+    # a superset case, not a competing one. Bucketed at PRIORITY_AFRICA,
+    # the same tier bare EMEA already uses (broader than a single region,
+    # narrower than an explicit "global"/"worldwide" claim).
+    if _has_multi_region_breadth(loc):
+        return "match", PRIORITY_AFRICA, None
+
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
         check = re.sub(r"\bemea\b", "", loc_lower)
@@ -1830,6 +1856,86 @@ def _build_dynamic_batches(jobs: list[dict], max_batch_chars: int) -> list[tuple
     return batches
 
 
+def _assign_jobs_by_desc_length(indexed_jobs: list[tuple[int, dict]],
+                                 providers: list[dict]) -> dict[str, list[tuple[int, dict]]]:
+    """2026-09: length-aware provider assignment — see the fix comment at
+    ai_classify_locations' call site for the full "55 jobs -> 27 batches"
+    root-cause story. Gives every provider the same ~equal SHARE of jobs
+    plain round robin would (off-by-one at most), but picks WHICH jobs
+    each provider gets: the smallest-max_batch_chars providers get the
+    shortest descriptions, so a tight per-batch char budget (e.g. Groq's
+    6,000) can actually fit several jobs per batch instead of being
+    starved to ~1 job/batch by an unlucky draw of long descriptions.
+    Providers with effectively unlimited budgets (OpenAI/NVIDIA, several
+    million chars) absorb whichever long-JD jobs land on them without any
+    batching penalty either way.
+
+    Used for both the initial assignment and each failover-cascade round
+    (with `providers` narrowed to that round's still-viable candidates) —
+    same reasoning applies at every stage: don't let a tight-budget
+    provider get stuck with long jobs it can't batch efficiently.
+
+    Returns {provider_name: [(orig_idx, job), ...]}, same shape the old
+    round-robin dict produced, so no downstream code needed to change.
+
+    2026-09 fix during testing: an earlier version of this function gave
+    each provider a single CONTIGUOUS slice of the length-sorted job list
+    (smallest-budget providers first). That mis-balanced providers that
+    happen to share the SAME budget (e.g. groq-o and groq-c both at
+    6,000) — the first one in sort order (a stable sort, so really just
+    whichever came first in LOCATION_PROVIDERS) claimed the very
+    shortest slice, leaving the second same-budget provider a
+    noticeably-less-short slice purely from list position, not anything
+    about its actual capacity. Confirmed live: 14 jobs each, but 3
+    batches for one and 8 for the other. Replaced with a min-heap that
+    always hands the next-shortest remaining job to whichever
+    still-has-room provider currently has (lowest budget, fewest jobs
+    assigned so far) — the second tiebreaker interleaves equal-budget
+    providers evenly instead of giving one of them a whole contiguous
+    block before the other gets a look in.
+    """
+    assignments = {p["name"]: [] for p in providers}
+    n = len(indexed_jobs)
+    if n == 0 or not providers:
+        return assignments
+
+    # Shortest description first.
+    order = sorted(range(n), key=lambda k: len(indexed_jobs[k][1].get("description_snippet") or ""))
+    base, extra = divmod(n, len(providers))
+    # Tighter-budget providers get the (slightly larger, if any) remainder
+    # share too — they're the ones that most need every job in their share
+    # to be short — same reasoning as before, just computed up front here.
+    providers_by_budget_asc = sorted(providers, key=lambda p: p["max_batch_chars"])
+    shares = {p["name"]: base + (1 if i < extra else 0)
+              for i, p in enumerate(providers_by_budget_asc)}
+
+    counts = {p["name"]: 0 for p in providers}
+    # Heap entries: (max_batch_chars, assigned_count_so_far, tie-break, provider).
+    # Smallest budget wins first; among equal budgets, whichever has been
+    # assigned FEWEST jobs so far wins next — that's what interleaves
+    # same-budget providers instead of giving one a whole block before the
+    # other. tie-break (insertion order) only matters for the initial,
+    # all-zero heap state so equal-everything providers still get a
+    # deterministic, stable order.
+    heap = [(p["max_batch_chars"], 0, i, p) for i, p in enumerate(providers)]
+    heapq.heapify(heap)
+
+    for k in order:
+        orig_idx, job = indexed_jobs[k]
+        # Skip (permanently discard) any provider whose share is already
+        # full — it never goes back on the heap once full.
+        while heap:
+            budget, assigned_so_far, tie, p = heapq.heappop(heap)
+            if counts[p["name"]] >= shares[p["name"]]:
+                continue
+            assignments[p["name"]].append((orig_idx, job))
+            counts[p["name"]] += 1
+            if counts[p["name"]] < shares[p["name"]]:
+                heapq.heappush(heap, (budget, counts[p["name"]], tie, p))
+            break
+    return assignments
+
+
 def _get_location_client(provider: dict):
     client = _location_clients.get(provider["name"])
     if not client:
@@ -1850,18 +1956,39 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     Jobs are round-robin split across providers, batched per provider's
     context window, and all batches run concurrently.
 
-    Cross-provider failover: if a provider's batch fails outright (after
-    its own MAX_RETRIES=3 attempts inside _ai_call, or its client can't be
-    built), that batch's jobs are reassigned across the OTHER providers
-    and retried once before falling back to 'uncertain' — see the module
-    docstring.
+    Cross-provider failover (2026-09 ROUND 5, explicit user request: "when
+    a provider fails for the location phase, it should not be dropped at
+    any cost ... routed to another provider ... only the LLM can finally
+    say this is truly uncertain"): if a provider's batch fails outright
+    (after its own MAX_RETRIES=3 attempts inside _ai_call, or its client
+    can't be built), that batch's jobs are reassigned to a provider that
+    hasn't yet been tried FOR THOSE SPECIFIC JOBS and retried — and this
+    now CASCADES: if that next provider also fails, the same jobs are
+    reassigned again to yet another untried provider, and so on, looping
+    until either (a) a job succeeds on some provider, or (b) every entry
+    in LOCATION_PROVIDERS has genuinely been tried and failed for that
+    job. A job is NEVER given up on after just one failover round any
+    more — it keeps cycling through whatever providers it hasn't already
+    been sent to (per-job tracking, so the same job is never resent to a
+    provider that already failed it) until the provider list for that job
+    is exhausted. The only two ways a job ends up labeled 'uncertain' are
+    therefore: (1) every provider was tried and every one of them failed
+    on a technical level (exception, call_ok=False, no client) — this
+    returns ('uncertain', None); or (2) some provider's call actually
+    SUCCEEDED (call_ok=True) and the model itself genuinely verdicted
+    "uncertain" — this returns ('uncertain', provider_name), i.e.
+    provider_name is NOT None. Case (2) is the only "truly uncertain" the
+    user's instruction refers to; case (1) is a plumbing failure, not a
+    verdict, and callers must not treat the two as equivalent (see the
+    provider_name is None note below, which still holds).
 
     Returns a list of (label, provider_name) tuples in the same order as
     `jobs` — label is one of 'match_global', 'match_africa', 'no_match',
     or 'uncertain'; provider_name is whichever LOCATION_PROVIDERS entry
-    actually produced that label (None if every provider failed for that
-    job, including the failover round). On failure: defaults to
-    ('uncertain', None) (include with flag).
+    actually produced that label (None if EVERY provider in
+    LOCATION_PROVIDERS was tried and failed for that job — see the
+    cascade above; this is the only case where the label defaults to
+    ('uncertain', None) rather than reflecting a genuine LLM verdict).
 
     2026-09: fixed to actually return tuples — crawl_i.py's
     filter_locations() and crawl_ii.py's _filter_locations() have both
@@ -1877,7 +2004,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     IMPORTANT for callers, re: `provider_name is None` (AI-classification-
     stage audit, 2026-09): this happens when EVERY entry in
     LOCATION_PROVIDERS failed/was rate-limited/was exhausted for this
-    job's batch (including the failover round) — see _mark_exhausted's
+    job (including every round of the cascade above) — see _mark_exhausted's
     circuit breaker just above, which, once a provider gives up even
     once in a run, marks it dead for calls for the REST of that run with
     zero further network hits. Under real production load (10+ concurrent
@@ -1931,11 +2058,33 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
                     f"throughput and less failover if one of the active "
                     f"providers struggles.")
 
-    # ── Round-robin assign jobs to providers (tracking original indices) ──
-    provider_assignments = {p["name"]: [] for p in providers}  # name → [(orig_idx, job)]
-    for i, job in enumerate(jobs):
-        p = providers[i % len(providers)]
-        provider_assignments[p["name"]].append((i, job))
+    # ── Length-aware assignment (2026-09, real production bug: 55 jobs
+    # were sharding into 27 batches — nearly 1 job/batch — when the
+    # "5-10 jobs/batch" dynamic cap says that should have been ~6 at most).
+    # Root cause: plain index-based round robin (`providers[i % N]`) hands
+    # each provider an arbitrary MIX of short and long descriptions with
+    # zero regard for that provider's own char budget. Groq's real
+    # rate-limit-driven max_batch_chars is only 6,000 (see config.py) while
+    # descriptions here go up to 30,000 chars each (MAX_DESC_CHARS) — so
+    # whenever a job with a real multi-thousand-char JD landed on Groq, its
+    # batch was capped at 1 job long before _dynamic_job_cap's 5-10 job
+    # ceiling ever mattered, while OpenAI/NVIDIA (3.2-3.3M char budgets)
+    # sat far under their own job-count cap. Round robin was blind to this
+    # — it split job COUNT evenly, not job SIZE vs. each provider's actual
+    # capacity.
+    #
+    # Fix: sort jobs by description length and deal the SHORTEST
+    # descriptions to the SMALLEST-budget providers first (still giving
+    # every provider its normal ~equal share of jobs — this doesn't change
+    # who gets how MANY jobs, only WHICH ones), so a tight-budget provider
+    # like Groq gets jobs that can actually pack 5+ per batch instead of a
+    # random draw that starves it into 1-job batches. Long-JD jobs land on
+    # whichever providers can actually absorb a full batch of them.
+    # Descriptions themselves are NOT truncated or altered by this — this
+    # only changes provider assignment, so the "send full descriptions,
+    # don't hide buried eligibility language" fix from earlier rounds is
+    # untouched.
+    provider_assignments = _assign_jobs_by_desc_length(list(enumerate(jobs)), providers)
 
     # ── Build batches per provider ──
     all_work = []  # (provider, client, [(orig_idx, job)...], batch_jobs)
@@ -2019,42 +2168,102 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
 
     _run_round(all_work)
 
-    # ── Failover: reassign each failed provider's jobs to the OTHER
-    # providers for this stage and retry once — one round only. ──
-    if failed_batches and len(providers) > 1:
-        retry_work = []
+    # ── Failover cascade (2026-09 ROUND 5, explicit user request) ──────
+    # A job must NEVER be dropped to 'uncertain' just because ONE provider
+    # had a technical failure — it has to keep getting routed to whatever
+    # providers it hasn't been tried on yet, cycling through the ENTIRE
+    # LOCATION_PROVIDERS list if that's what it takes, and only actually
+    # settle on ('uncertain', None) once literally every provider has been
+    # tried and genuinely failed for that specific job. This replaces the
+    # old "one extra round then give up" behavior, which silently
+    # defaulted a job to 'uncertain' after exactly one failover retry even
+    # though 2+ untried providers might still have been available (e.g. 4
+    # configured providers, first one fails, failover retry lands on the
+    # second one which is ALSO struggling — the job used to die there even
+    # though a 3rd and 4th provider were sitting untried).
+    #
+    # `tried` tracks, per original job index, which provider names have
+    # already been attempted for that job (starting with whichever
+    # provider round 0 assigned it to) — this is what lets the loop keep
+    # cascading a job through EVERY remaining provider without ever
+    # resending it to one that already failed it. The loop terminates
+    # naturally once no still-failing job has any untried, viable
+    # candidate left (bounded by len(providers) rounds — tried only grows,
+    # never shrinks, and providers is a finite list) — a `len(providers)`
+    # round safety cap is kept anyway as defense in depth against a future
+    # change accidentally breaking that invariant.
+    tried: dict[int, set] = {}
+    _cascade_round = 0
+    while failed_batches and len(providers) > 1 and _cascade_round < len(providers):
+        _cascade_round += 1
+        failing = []  # [(orig_idx, job), ...] still needing a home this round
         for failed_pname, orig_indices, batch in failed_batches:
-            survivors = [p for p in providers if p["name"] != failed_pname]
-            if not survivors:
-                continue  # results already default to ('uncertain', None)
-            log.warning(
-                f"Location classification: {failed_pname} failed on a "
-                f"{len(batch)}-job batch — reassigning to "
-                f"{', '.join(p['name'] for p in survivors)}"
-            )
-            sub_assignments = {p["name"]: [] for p in survivors}  # name -> [(orig_idx, job)]
-            for i, (orig_idx, job) in enumerate(zip(orig_indices, batch)):
-                p = survivors[i % len(survivors)]
-                sub_assignments[p["name"]].append((orig_idx, job))
-            for p in survivors:
-                assigned = sub_assignments[p["name"]]
-                if not assigned:
-                    continue
-                client = _get_location_client(p)
-                assigned_jobs = [job for _, job in assigned]
-                assigned_indices = [idx for idx, _ in assigned]
-                if not client:
-                    retry_work.append((p, None, assigned_indices, assigned_jobs))
-                    continue
-                for start_idx, sub_batch in _build_dynamic_batches(assigned_jobs, p["max_batch_chars"]):
-                    sub_orig_indices = assigned_indices[start_idx:start_idx + len(sub_batch)]
-                    retry_work.append((p, client, sub_orig_indices, sub_batch))
-
+            for orig_idx, job in zip(orig_indices, batch):
+                tried.setdefault(orig_idx, set()).add(failed_pname)
+                failing.append((orig_idx, job))
         failed_batches = []
+
+        # Pick the next candidate provider for each still-failing job:
+        # anything NOT already tried for that job AND not already known
+        # dead for the rest of this run (the pre-existing circuit breaker,
+        # _mark_exhausted/_exhausted_providers_today — skipping those here
+        # avoids burning a whole extra cascade round on a provider that's
+        # guaranteed to short-circuit to None anyway). Round-robins across
+        # each job's own remaining candidates via a shared counter so load
+        # spreads across the survivors instead of piling onto one.
+        assignments: dict[int, dict] = {}
+        k = 0
+        for orig_idx, job in failing:
+            candidates = [
+                p for p in providers
+                if p["name"] not in tried[orig_idx]
+                and p["name"] not in _exhausted_providers_today
+            ]
+            if not candidates:
+                # Genuinely exhausted for THIS job — every provider has
+                # now either been tried and failed, or was already known
+                # dead. Leave it at the default ('uncertain', None); it's
+                # already in no_ai_read from its earlier failure(s) above,
+                # so nothing further to record. This is case (1) from the
+                # docstring, never conflated with a real LLM verdict.
+                continue
+            assignments[orig_idx] = candidates[k % len(candidates)]
+            k += 1
+
+        if not assignments:
+            break  # nothing left that has anywhere new to go
+
+        by_provider: dict[str, list] = {}
+        for orig_idx, job in failing:
+            p = assignments.get(orig_idx)
+            if p is None:
+                continue
+            by_provider.setdefault(p["name"], []).append((orig_idx, job))
+
+        retry_work = []
+        for pname, items in by_provider.items():
+            p = next(pp for pp in providers if pp["name"] == pname)
+            assigned_jobs = [job for _, job in items]
+            assigned_indices = [idx for idx, _ in items]
+            client = _get_location_client(p)
+            if not client:
+                retry_work.append((p, None, assigned_indices, assigned_jobs))
+                continue
+            for start_idx, sub_batch in _build_dynamic_batches(assigned_jobs, p["max_batch_chars"]):
+                sub_orig_indices = assigned_indices[start_idx:start_idx + len(sub_batch)]
+                retry_work.append((p, client, sub_orig_indices, sub_batch))
+
+        log.warning(
+            f"Location classification cascade round {_cascade_round}: "
+            f"retrying {sum(len(v) for v in by_provider.values())} still-"
+            f"failing job(s) across {len(by_provider)} provider(s) "
+            f"({', '.join(sorted(by_provider))})"
+        )
         if retry_work:
             _run_round(retry_work)
-        # Anything that failed AGAIN on the failover round stays
-        # ('uncertain', None) — no second failover cascade.
+        # Loop repeats: anything that failed again lands back in
+        # failed_batches and gets picked up next iteration, still
+        # excluding every provider already tried for that specific job.
 
     # ── Post-AI safety net (2026-09) ──────────────────────────────────
     # Real case this closes: a JazzHR posting (starlims.applytojob.com/
