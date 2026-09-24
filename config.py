@@ -110,6 +110,28 @@ MAX_RETRIES = 2
 # scaling, same behavior as before sharding existed.
 AI_RATE_SHARDS = max(1, int(os.environ.get("AI_RATE_SHARDS", "1")))
 
+# ── Provider selection override (2026-09, explicit user request: "add a
+# dropdown to choose what providers to use... two checkboxes for OpenAI and
+# NVIDIA. if both boxes are left blank, it uses all available models, if
+# you tick both, then just OpenAI and NVIDIA is used or just either one
+# that was chosen is used. Whatever is chosen is used for both location and
+# role classification.") — crawl.yml exposes this as two workflow_dispatch
+# checkboxes (USE_OPENAI/USE_NVIDIA env vars below), for when Groq's shared
+# free-tier quota is having a bad day and the account owner wants to route
+# everything to the two paid/more-generous providers instead, without
+# editing code. Neither checked (the default) means no filtering at all —
+# every configured provider (Groq-O, Groq-C, OpenAI, NVIDIA) runs exactly
+# as before. This is applied to BOTH ROLE_PROVIDERS and LOCATION_PROVIDERS
+# below, after they're built — see the `if _PROVIDER_FILTER:` filtering
+# right after each list is assembled.
+_USE_OPENAI = os.environ.get("USE_OPENAI", "").strip().lower() == "true"
+_USE_NVIDIA = os.environ.get("USE_NVIDIA", "").strip().lower() == "true"
+_PROVIDER_FILTER: set[str] = set()
+if _USE_OPENAI:
+    _PROVIDER_FILTER.add("openai")
+if _USE_NVIDIA:
+    _PROVIDER_FILTER.add("nvidia")
+
 
 def _make_provider(name, api_key_env, model, base_url, max_batch_chars, min_call_interval=0.0):
     """Build a provider config dict. Skips if API key env var is not set."""
@@ -221,9 +243,41 @@ _ROLE_PROVIDER_DEFS = [
         max_batch_chars=4_000,
         min_call_interval=_GROQ_BASE_INTERVAL * AI_RATE_SHARDS,
     ),
+    # OpenAI + NVIDIA (2026-09, added for the USE_OPENAI/USE_NVIDIA
+    # provider-filter feature above): role classification previously had
+    # NO entry for either of these at all — only Groq-O/Groq-C — so
+    # ticking "Use OpenAI" or "Use NVIDIA" in the workflow would otherwise
+    # filter role classification down to an EMPTY provider list (title-only
+    # classification would then fall back to the legacy single-provider
+    # path instead of actually running on the chosen provider, silently
+    # not doing what the checkbox says). Same key/model/quota pool as the
+    # location-classification entries below — role calls are just a short
+    # title, not a full JD, so these two providers have plenty of headroom
+    # left over from whatever location classification is using of the same
+    # quota. Only created (via _make_provider) if the same API key env var
+    # is already set — no new secret required beyond what location
+    # classification already needs.
+    _make_provider(
+        "openai",
+        "OPENAI_API_KEY",
+        "gpt-4.1-nano",
+        "https://api.openai.com/v1",
+        max_batch_chars=500_000,     # titles only — nowhere near OpenAI's real context ceiling
+        min_call_interval=5.0,       # same Tier 1 pacing as the location entry below
+    ),
+    _make_provider(
+        "nvidia",
+        "NVIDIA_API_KEY",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "https://integrate.api.nvidia.com/v1",
+        max_batch_chars=500_000,     # titles only — nowhere near NVIDIA's real context ceiling
+        min_call_interval=_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS,
+    ),
 ]
 
 ROLE_PROVIDERS = [p for p in _ROLE_PROVIDER_DEFS if p is not None]
+if _PROVIDER_FILTER:
+    ROLE_PROVIDERS = [p for p in ROLE_PROVIDERS if p["name"] in _PROVIDER_FILTER]
 
 # ── Location classification providers (concurrent) ──
 # 2026-09 ROUND 4: OpenAI + NVIDIA + Groq-O + Groq-C (explicit user
@@ -301,6 +355,8 @@ _LOCATION_PROVIDER_DEFS = [
 ]
 
 LOCATION_PROVIDERS = [p for p in _LOCATION_PROVIDER_DEFS if p is not None]
+if _PROVIDER_FILTER:
+    LOCATION_PROVIDERS = [p for p in LOCATION_PROVIDERS if p["name"] in _PROVIDER_FILTER]
 
 # Backward compat: single LOCATION_PROVIDER for code that expects one
 LOCATION_PROVIDER = LOCATION_PROVIDERS[0] if LOCATION_PROVIDERS else None
