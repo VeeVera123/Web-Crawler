@@ -6346,8 +6346,26 @@ def _fetch_generic_form_questions_multi(url: str) -> list[dict]:
 
 def _fetch_greenhouse_questions(job: dict) -> str:
     """Fetch application questions from Greenhouse job API.
-    Returns a string of work-authorization-related questions, or empty."""
+    Returns a string of work-authorization-related questions, or empty.
+
+    2026-09 ROUND 5 (explicit user request: "make sure application
+    questions are being fetched too ... use multiple methods and
+    fallbacks"): every early-exit path below (no slug/job-id could be
+    resolved, the boards-api call itself failed, or the API returned no
+    matching job) now falls back to the same generic DOM/embedded-JSON
+    parser (_fetch_generic_form_questions_multi) already used as the
+    documented fallback for Lever/Workable/Recruitee/Teamtailor/BreezyHR/
+    JazzHR/Zoho above/below, instead of silently giving up with "". This
+    is a second, independent extraction method (real HTML on the actual
+    apply page) for the same rare case where the otherwise-reliable public
+    API path can't resolve a job (e.g. a not-yet-reindexed board, or a
+    gh_jid embed whose token couldn't be recovered) — it does not change
+    behavior for the normal case where the API succeeds."""
     url = job.get("url", "")
+
+    def _fallback() -> str:
+        return _format_auth_questions(_fetch_generic_form_questions_multi(url)) if url else ""
+
     # Extract board slug and job ID from URL
     # https://job-boards.greenhouse.io/SLUG/jobs/JOBID
     m = re.search(r"greenhouse\.io/([^/]+)/jobs/(\d+)", url)
@@ -6368,22 +6386,22 @@ def _fetch_greenhouse_questions(job: dict) -> str:
         # embed shape was never recognized anywhere in the pipeline).
         jid_match = _GH_JID_RE.search(url)
         if not jid_match:
-            return ""
+            return _fallback()
         job_id = jid_match.group(1)
         page = _get(url)
         if not page:
-            return ""
+            return _fallback()
         slug = extract_greenhouse_embed_token(page.text)
         if not slug:
-            return ""
+            return _fallback()
     api_url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{job_id}?questions=true"
     r = _get(api_url)
     if not r:
-        return ""
+        return _fallback()
     try:
         data = r.json()
     except Exception:
-        return ""
+        return _fallback()
     # A recovered gh_jid-embed token is only a candidate (see
     # extract_greenhouse_embed_token's docstring) — reject unless the API
     # actually returned THIS job. Guards against a site reusing the
@@ -6393,7 +6411,7 @@ def _fetch_greenhouse_questions(job: dict) -> str:
     # the page. Applied even on the standard-URL path above — cheap and
     # correct either way.
     if str(data.get("id", "")) != str(job_id):
-        return ""
+        return _fallback()
 
     # 2026-09: was `if _WORK_AUTH_RE.search(label)` — dropped every
     # non-auth-shaped screening question before it ever reached
@@ -6417,6 +6435,15 @@ def _fetch_greenhouse_questions(job: dict) -> str:
             if name in ("location", "location_country") and val:
                 auth_questions.append(f"Metadata Location: {val}")
 
+    if not auth_questions:
+        # API call succeeded but returned zero questions — could genuinely
+        # mean this board has none configured, but could also mean the
+        # board's actual apply form carries questions the API's own
+        # `questions` array doesn't expose for this tenant. Give the
+        # generic DOM parser one shot at the real apply page before
+        # concluding there's truly nothing (see 2026-09 ROUND 5 note above
+        # the function).
+        return _fallback()
     return "\n".join(auth_questions)
 
 
@@ -6424,23 +6451,34 @@ def _fetch_greenhouse_questions(job: dict) -> str:
 
 def _fetch_ashby_questions(job: dict) -> str:
     """Fetch application form from Ashby posting API.
-    Returns work-authorization-related form fields, or empty."""
+    Returns work-authorization-related form fields, or empty.
+
+    2026-09 ROUND 5 (explicit user request: "use multiple methods and
+    fallbacks"): mirrors the same fallback added to
+    _fetch_greenhouse_questions above — if the URL doesn't match Ashby's
+    known shape, the posting-api call fails, or the API returns no
+    substantive fields, fall back to the generic DOM/embedded-JSON parser
+    against the real job page rather than giving up with ""."""
     url = job.get("url", "")
+
+    def _fallback() -> str:
+        return _format_auth_questions(_fetch_generic_form_questions_multi(url)) if url else ""
+
     # https://jobs.ashbyhq.com/SLUG/JOBID
     m = re.search(r"ashbyhq\.com/([^/]+)/([a-f0-9-]+)", url)
     if not m:
-        return ""
+        return _fallback()
     slug, job_id = m.group(1), m.group(2)
 
     # Ashby's posting-api/posting endpoint returns form fields
     api_url = f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}"
     r = _get(api_url)
     if not r:
-        return ""
+        return _fallback()
     try:
         data = r.json()
     except Exception:
-        return ""
+        return _fallback()
 
     # 2026-09: was `if _WORK_AUTH_RE.search(title)` — see
     # _format_screening_questions's docstring for why every substantive
@@ -6467,6 +6505,13 @@ def _fetch_ashby_questions(job: dict) -> str:
         if label and not _BOILERPLATE_QUESTION_RE.match(label):
             auth_questions.append(f"Application Question: {label}")
 
+    if not auth_questions:
+        # Same reasoning as Greenhouse above: a successful API call with
+        # zero fields could be a genuinely question-free posting, or could
+        # mean this tenant's form isn't shaped the way applicationForm
+        # Definition/surveyQuestions above expect — give the generic DOM
+        # parser a shot at the real page before giving up entirely.
+        return _fallback()
     return "\n".join(auth_questions)
 
 
@@ -7078,14 +7123,40 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
              + "...")
 
     def _fetch_one(job):
-        fetcher = QUESTION_FETCHERS.get(job.get("source_ats"), _fetch_wild_questions)
+        ats = job.get("source_ats")
+        fetcher = QUESTION_FETCHERS.get(ats, _fetch_wild_questions)
+        questions = ""
         try:
             questions = fetcher(job)
-            if questions:
-                existing = job.get("description_snippet", "") or ""
-                job["description_snippet"] = existing + "\n\n" + questions
         except Exception as e:
-            log.debug(f"Failed to fetch questions for {job.get('url', '')}: {e}")
+            log.debug(f"Failed to fetch questions for {job.get('url', '')} via "
+                      f"{ats or 'wild'} fetcher: {e}")
+        # 2026-09 (explicit user request: "use multiple methods and
+        # fallbacks if you have to" so application questions don't
+        # silently come back empty): a DEDICATED per-platform fetcher
+        # returning nothing doesn't necessarily mean the posting has no
+        # real screening form — it can just as easily mean this one
+        # tenant customized their form, or the platform's API/HTML shape
+        # drifted since that fetcher was written, which is a real,
+        # confirmed failure mode elsewhere in this file (see e.g.
+        # scrape_brassring's "missing session priming" history and the
+        # JazzHR "REVIVED" note above). Rather than accept a silent
+        # empty result from a single extraction method, give every job
+        # that went through a DEDICATED fetcher (not already the wild
+        # one) a second try via the universal multi-method fallback
+        # (_fetch_wild_questions: embedded-JSON parse + raw form-element
+        # parse, across the bare/​/apply//application URL conventions) —
+        # cheap (one more request, same politeness sleep already below),
+        # only runs when the first method found nothing, and never
+        # replaces a real result the dedicated fetcher DID find.
+        if not questions and fetcher is not _fetch_wild_questions:
+            try:
+                questions = _fetch_wild_questions(job)
+            except Exception as e:
+                log.debug(f"Generic fallback also failed for {job.get('url', '')}: {e}")
+        if questions:
+            existing = job.get("description_snippet", "") or ""
+            job["description_snippet"] = existing + "\n\n" + questions
         time.sleep(random.uniform(0.2, 0.5))
         return job
 
