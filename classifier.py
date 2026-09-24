@@ -39,7 +39,7 @@ import heapq
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER
+from config import ROLE_PROVIDERS, LOCATION_PROVIDERS, LOCATION_PROVIDER, LLM_PROVIDER, _PROVIDER_FILTER
 import geo
 
 log = logging.getLogger(__name__)
@@ -108,6 +108,18 @@ for _p in LOCATION_PROVIDERS:
 # which matches how this project actually runs (one process per CI job).
 _exhausted_providers_today: set[str] = set()
 _exhausted_providers_lock = threading.Lock()
+
+# 2026-09 ROUND 6: same log-spam fix as _mark_exhausted's own dedup, but
+# for the ordinary (recoverable) per-minute rate-limit case just below,
+# which deliberately does NOT call _mark_exhausted (a per-minute quota
+# refills, so the provider isn't permanently blacklisted) — but was still
+# logging a fresh WARNING line on every single call that hit it, which is
+# exactly what produced the wall of repeated "rate limit hit"/"exhausted
+# retries" lines in a real run's log when a tight-quota provider like Groq
+# got hit with many small batches at once. First occurrence per provider
+# per run still logs at WARNING; every repeat logs at DEBUG only.
+_rate_limit_warned_today: set[str] = set()
+_rate_limit_warned_lock = threading.Lock()
 
 
 def _mark_exhausted(name: str, reason: str) -> None:
@@ -228,8 +240,17 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
             # already handles that) so the provider gets tried again on
             # the next batch, once the per-minute window has reset.
             if is_rate_limit:
-                log.warning(f"{name} rate limit exhausted retries for this call — "
-                            f"NOT blacklisting (per-minute quota, will retry on next batch)")
+                with _rate_limit_warned_lock:
+                    first_time = name not in _rate_limit_warned_today
+                    _rate_limit_warned_today.add(name)
+                if first_time:
+                    log.warning(f"{name} rate limit exhausted retries for this call — "
+                                f"NOT blacklisting (per-minute quota, will retry on next "
+                                f"batch; further per-minute rate-limit hits for {name} "
+                                f"this run are logged at debug level only)")
+                else:
+                    log.debug(f"{name} rate limit exhausted retries for this call "
+                              f"(repeat this run, suppressed at warning level)")
                 return None
             # Every remaining path is a genuine give-up on this provider
             # for this call that ISN'T a recoverable rate limit — some
@@ -597,11 +618,21 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     # low role-match count.
     # 2026-09 ROUND 4: Gemini and Mistral removed entirely, replaced by a
     # second independent Groq account — see config.py's module docstring.
-    _known_role_providers = {"groq-o", "groq-c"}
+    # 2026-09 ROUND 6: openai/nvidia added as ADDITIONAL possible role
+    # providers (config.py's USE_OPENAI/USE_NVIDIA provider-filter
+    # feature — see that module's docstring) — previously role
+    # classification only ever had groq-o/groq-c, so this set is widened
+    # to match. `_PROVIDER_FILTER` (also from config.py) is subtracted out
+    # of what counts as "missing" below — if the user deliberately ticked
+    # "Use OpenAI" only, groq-o/groq-c being absent from `providers` is the
+    # INTENDED outcome, not something to warn about as if a key were
+    # missing.
+    _known_role_providers = {"groq-o", "groq-c", "nvidia", "openai"}
     _active = {p["name"] for p in providers}
-    _missing = _known_role_providers - _active
+    _expected = (_known_role_providers & _PROVIDER_FILTER) if _PROVIDER_FILTER else _known_role_providers
+    _missing = _expected - _active
     if _missing:
-        log.warning(f"Role AI running with {len(_active)}/{len(_known_role_providers)} "
+        log.warning(f"Role AI running with {len(_active)}/{len(_expected)} "
                     f"providers ({', '.join(sorted(_active)) or 'none'}) — missing "
                     f"{', '.join(sorted(_missing))} (no API key set). Less "
                     f"failover if one of the active providers struggles.")
@@ -617,6 +648,12 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     no_ai_read: set[str] = set()  # titles never actually reviewed by a provider
 
     def _run_round(work):
+        # 2026-09 ROUND 6: same log-collapsing fix as ai_classify_locations'
+        # _run_round — one aggregated error line per provider per round
+        # instead of one log.error() per failed batch (identical spam risk
+        # here: a struggling provider with many small title batches used
+        # to print one line each).
+        batch_errors: dict[str, list] = {}
         with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
             future_map = {}
             for provider, client, batch in work:
@@ -643,9 +680,16 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
                         failed_batches.append((pname, batch))
                         no_ai_read.update(batch)
                 except Exception as e:
-                    log.error(f"Role classification error ({pname}): {e}")
+                    entry = batch_errors.setdefault(pname, [0, ""])
+                    entry[0] += 1
+                    entry[1] = str(e)
                     failed_batches.append((pname, batch))
                     no_ai_read.update(batch)
+
+        for pname, (count, last_err) in batch_errors.items():
+            log.error(f"Role classification: {pname} failed on {count} "
+                      f"batch(es) this round (last error: {last_err}) — "
+                      f"rerouting to other providers")
 
     _run_round(all_work)
 
@@ -654,17 +698,22 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     # this is "the other providers pick it up", not an endless cascade. ──
     if failed_batches and len(providers) > 1:
         retry_work = []
+        # 2026-09 ROUND 6: one aggregated line for the WHOLE failover round
+        # instead of one log.warning() per failed batch (same spam class as
+        # the _run_round fix above — a provider with many small failed
+        # batches used to print one "reassigning to..." line each).
+        _reassign_total_titles = 0
+        _reassign_from = set()
+        _reassign_to = set()
         for failed_pname, batch in failed_batches:
             survivors = [p for p in providers if p["name"] != failed_pname]
             if not survivors:
                 for t in batch:
                     results.setdefault(t, False)
                 continue
-            log.warning(
-                f"Role classification: {failed_pname} failed on a "
-                f"{len(batch)}-title batch — reassigning to "
-                f"{', '.join(p['name'] for p in survivors)}"
-            )
+            _reassign_total_titles += len(batch)
+            _reassign_from.add(failed_pname)
+            _reassign_to.update(p["name"] for p in survivors)
             sub_assignments = {p["name"]: [] for p in survivors}
             for i, title in enumerate(batch):
                 p = survivors[i % len(survivors)]
@@ -679,6 +728,13 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
                     continue
                 for sub_batch in _build_role_batches(p_titles, max_chars=p["max_batch_chars"]):
                     retry_work.append((p, client, sub_batch))
+
+        if _reassign_total_titles:
+            log.warning(
+                f"Role classification: {', '.join(sorted(_reassign_from))} failed on "
+                f"{_reassign_total_titles} title(s) total this round — reassigning to "
+                f"{', '.join(sorted(_reassign_to))}"
+            )
 
         failed_batches = []
         if retry_work:
@@ -2048,11 +2104,16 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     # second independent Groq account ("groq-c"). If GROQ_API_KEY_C isn't
     # set yet, "groq-c" will show up in _missing below — that's expected
     # until the account owner adds that secret, not a bug.
+    # 2026-09 ROUND 6: same _PROVIDER_FILTER-aware adjustment as
+    # ai_classify_roles() above — deliberately excluding a provider via
+    # the USE_OPENAI/USE_NVIDIA checkboxes isn't a "missing API key",
+    # so it shouldn't produce a misleading "missing" warning.
     _known_location_providers = {"nvidia", "openai", "groq-o", "groq-c"}
     _active = {p["name"] for p in providers}
-    _missing = _known_location_providers - _active
+    _expected = (_known_location_providers & _PROVIDER_FILTER) if _PROVIDER_FILTER else _known_location_providers
+    _missing = _expected - _active
     if _missing:
-        log.warning(f"Location AI running with {len(_active)}/{len(_known_location_providers)} "
+        log.warning(f"Location AI running with {len(_active)}/{len(_expected)} "
                     f"providers ({', '.join(sorted(_active)) or 'none'}) — missing "
                     f"{', '.join(sorted(_missing))} (no API key set). Lower "
                     f"throughput and less failover if one of the active "
@@ -2121,6 +2182,22 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     no_ai_read: set[int] = set()
 
     def _run_round(work):
+        # 2026-09 ROUND 6 (explicit user request, real production log dump:
+        # ~30 separate WARNING lines in the same second, one per failed
+        # batch, e.g. "groq-c failed on a 1-job batch — reassigning to
+        # openai, nvidia, groq-o" repeated over and over): a struggling
+        # provider used to get one log.error() line PER BATCH exception in
+        # this round — when a tight-budget provider like Groq gets a burst
+        # of small batches (the exact scenario the length-aware assignment
+        # fix above reduces but doesn't fully eliminate, e.g. if a provider
+        # is ALREADY exhausted mid-round), that's one line per batch,
+        # completely swamping the log for what is really just "this one
+        # provider is having a bad round." Collapsed to ONE aggregated
+        # line per provider per round, logged after the round finishes
+        # rather than inline per batch — still names the actual error
+        # (last one seen for that provider) and the batch/job counts, just
+        # once instead of N times.
+        batch_errors: dict[str, list] = {}  # pname -> [count, last_error_str]
         with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
             future_map = {}
             for provider, client, orig_indices, batch in work:
@@ -2162,9 +2239,16 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
                         failed_batches.append((pname, orig_indices, batch))
                         no_ai_read.update(orig_indices)
                 except Exception as e:
-                    log.error(f"Location classification error ({pname}): {e}")
+                    entry = batch_errors.setdefault(pname, [0, ""])
+                    entry[0] += 1
+                    entry[1] = str(e)
                     failed_batches.append((pname, orig_indices, batch))
                     no_ai_read.update(orig_indices)
+
+        for pname, (count, last_err) in batch_errors.items():
+            log.error(f"Location classification: {pname} failed on {count} "
+                      f"batch(es) this round (last error: {last_err}) — "
+                      f"rerouting to other providers")
 
     _run_round(all_work)
 
