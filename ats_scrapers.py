@@ -264,16 +264,21 @@ _SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.I 
 _ZERO_WIDTH_RE = re.compile(r"[​‌‍‎‏﻿­]")
 
 
-def _snippet(html_or_text: str, max_chars: int = 30_000) -> str:
+def _snippet(html_or_text: str, max_chars: int = 500_000) -> str:
     """Strip HTML, decode entities, drop ATS template/encoding junk, and cap length.
 
-    max_chars defaults to 30,000 — large enough that virtually no genuine job
-    description (even a long, multi-section one) is ever actually truncated;
-    it exists purely as a safety ceiling against pathological outliers (e.g.
-    an ATS dumping repeated legal boilerplate), not as a normal operating limit.
-    Full, untruncated text matters here because this snippet is what gets sent
-    to the AI classification stage — a JD cut off mid-sentence can hide the
-    exact restriction/eligibility language the AI is being asked to find.
+    2026-09 ROUND 7 (explicit user instruction: "never ever truncate a
+    job"): raised from 30,000 to 500,000 — a real job description never
+    comes anywhere close to this; it exists purely as a defensive ceiling
+    against a genuinely pathological outlier (an ATS bug dumping megabytes
+    of repeated boilerplate, or a scrape landing on the wrong page element
+    entirely), not as a normal operating limit. Downstream,
+    classifier.py's _assign_jobs_by_desc_length already routes a job to
+    whichever provider has enough per-request budget to hold it whole
+    (Groq's ~6,000-char budget, NVIDIA/OpenAI's 3.2-3.3M), so a genuinely
+    long real-world JD still reaches the classifier untouched rather than
+    being cut off mid-sentence — which can hide the exact
+    restriction/eligibility language the AI is being asked to find.
     """
     if not html_or_text:
         return ""
@@ -2826,7 +2831,7 @@ def scrape_personio(slug: str) -> list[dict]:
             name = (desc_elem.findtext("name") or "").strip()
             value = (desc_elem.findtext("value") or "").strip()
             if value:
-                desc_parts.append(_snippet(value, max_chars=30_000))
+                desc_parts.append(_snippet(value))
         desc = _snippet(" ".join(desc_parts))
         salary = _extract_salary(desc) if desc else ""
 
