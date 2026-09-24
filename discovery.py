@@ -3350,41 +3350,67 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -
     return out
 
 
-def get_latest_crawl_ids(n: int = 3) -> list[str]:
-    try:
-        r = requests.get(CC_COLLINFO, timeout=30)
-        r.raise_for_status()
-        return [c["id"] for c in r.json()[:n]]
-    except Exception as e:
-        log.error(f"Failed to fetch CC crawl list: {e}")
-        return []
-
-
-# 2026-09: index.commoncrawl.org is free, unauthenticated, community-funded
-# infra with no SLA, serving several million requests/day off a shared
-# backend — it queues/overflows under load and throws intermittent 504s
-# (and 429/500/502/503/509) even against queries that succeed seconds
-# later. This is confirmed, long-standing, and expected behavior per
-# Common Crawl's own team (mailing list: "the index server is currently
-# heavily loaded... more than a few requests failing due to queue
-# overflows" — recommendation: cap to ~1 req/sec and retry failures), not
-# something wrong with this script or targeted at it. There is no more
-# reliable HTTP mirror of the same CDX index (the Internet Archive's own
-# CDX server indexes IA's crawls, not Common Crawl's, so it isn't a
-# substitute) — the only genuinely more reliable path is the columnar
-# Parquet index queried directly from S3 via Athena/DuckDB, which is a
-# much bigger infra lift (Athena table setup + per-TB-scanned billing) and
-# out of scope here. Common Crawl's own reference client (cdx_toolkit)
-# retries on exactly these status codes with exponential backoff capped
-# around 60s and stays serial/"polite" against the shared server — this
-# retry loop mirrors that documented, CC-recommended pattern instead of
-# giving up (and silently returning 0 results) on the first transient 504.
+# 2026-09: index.commoncrawl.org (this covers BOTH collinfo.json here AND
+# the -index endpoint queried below) is free, unauthenticated,
+# community-funded infra with no SLA, serving several million requests/day
+# off a shared backend — it queues/overflows under load and throws
+# intermittent 504s (and 429/500/502/503/509, plus outright connection
+# resets like 'RemoteDisconnected') even against requests that succeed
+# seconds later. Confirmed by Common Crawl's own team on their mailing
+# list ("the index server is currently heavily loaded... more than a few
+# requests failing due to queue overflows" — recommendation: cap to ~1
+# req/sec and retry). This is expected behavior of a rate-limited, no-SLA
+# public service, not something wrong with this script.
+#
+# get_latest_crawl_ids() originally had ZERO retry on this single request
+# — a single transient failure here (as actually observed: "Failed to
+# fetch CC crawl list: ('Connection aborted.', RemoteDisconnected(...))")
+# killed the ENTIRE run, returning 0 crawl IDs and therefore "0 slugs
+# across 0 platforms" for every single platform in the shard, even though
+# query_cc_index() below already had (as of the same day) its own
+# page-level retry logic. This single unprotected upstream call was a
+# bigger single point of failure than any one page-level 504, since it
+# runs exactly once per invocation and gates everything downstream of it.
 _CC_RETRY_STATUS_CODES = {429, 500, 502, 503, 504, 509}
 _CC_RETRY_MAX_ATTEMPTS = 5
 _CC_RETRY_BASE_BACKOFF_SECONDS = 2
 _CC_RETRY_MAX_BACKOFF_SECONDS = 60
+_CC_RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
 
 
+def get_latest_crawl_ids(n: int = 3) -> list[str]:
+    backoff = _CC_RETRY_BASE_BACKOFF_SECONDS
+    for attempt in range(1, _CC_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            r = requests.get(CC_COLLINFO, timeout=30)
+            if r.status_code in _CC_RETRY_STATUS_CODES:
+                raise requests.exceptions.HTTPError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            return [c["id"] for c in r.json()[:n]]
+        except (_CC_RETRYABLE_EXCEPTIONS + (requests.exceptions.HTTPError,)) as e:
+            if attempt == _CC_RETRY_MAX_ATTEMPTS:
+                log.error(f"Failed to fetch CC crawl list after {attempt} attempts: {e}")
+                return []
+            log.warning(
+                f"CC collinfo.json fetch failed (shared index server overloaded/unreachable — "
+                f"known/expected, see get_latest_crawl_ids' comment), attempt "
+                f"{attempt}/{_CC_RETRY_MAX_ATTEMPTS}: {e} — retrying in {backoff}s.")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _CC_RETRY_MAX_BACKOFF_SECONDS)
+        except Exception as e:
+            log.error(f"Failed to fetch CC crawl list: {e}")
+            return []
+    return []
+
+
+# query_cc_index() uses the same _CC_RETRY_* constants defined above
+# get_latest_crawl_ids() — see that function's comment for the full
+# reasoning (shared no-SLA index server, Common Crawl's own documented
+# retry guidance, why there's no better HTTP mirror to fall back to).
 def query_cc_index(crawl_id: str, url_pattern: str) -> list[str]:
     endpoint = f"{CC_INDEX_URL}/{crawl_id}-index"
     all_urls = []
