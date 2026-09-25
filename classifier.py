@@ -1054,6 +1054,11 @@ GLOBAL_KEYWORDS = [
     r"\bglobal\s*hire\b",
     r"\bglobal\s*hires\b",
     r"\bworld\s*[\-\s]*wide\b",
+    r"\baround\s+the\s+(?:world|globe)\b",
+    r"\baround\s*the\s*(world|globe)\b",
+    r"\baround\s+the\s+(?:world|globe)\b",
+    r"\baround\s+the\s+(?:world|globe)\b",
+    r"\bworld\s*[\-\s]*wide\b",
     r"\bearth\b",
     r"\bplanet\s*earth\b",
     r"\bglobal\s*citizens?\b",
@@ -1203,6 +1208,39 @@ GLOBAL_KEYWORDS = [
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 
+
+# Additional high-precision global hiring language. These are deliberately
+# phrased around the ROLE/CANDIDATE, rather than generic company-global words.
+# They are used by the final evidence gate as well as the keyword layer.
+_EXTRA_GLOBAL_HIRING_PATTERNS = [
+    r"\b(?:this|the)\s+(?:role|position|job|opportunity)\s+(?:can|may|could)\s+be\s+based\s+anywhere\b",
+    r"\b(?:this|the)\s+(?:role|position|job|opportunity)\s+is\s+(?:fully\s+)?remote\s+(?:worldwide|globally)\b",
+    r"\b(?:this|the)\s+(?:role|position|job|opportunity)\s+is\s+open\s+(?:worldwide|globally|anywhere)\b",
+    r"\b(?:this|the)\s+(?:role|position|job|opportunity)\s+(?:can|may)\s+be\s+performed\s+from\s+anywhere\b",
+    r"\b(?:candidates?|applicants?|employees?|team\s+members?)\s+(?:can|may)\s+be\s+(?:located|based)\s+anywhere\b",
+    r"\b(?:candidates?|applicants?)\s+(?:from|located\s+in|based\s+in)\s+(?:anywhere|any\s+country|all\s+countries|the\s+world)\b",
+    r"\b(?:open|available)\s+to\s+(?:candidates?|applicants?)\s+(?:from\s+)?(?:anywhere|around\s+the\s+world|worldwide|globally)\b",
+    r"\b(?:we|company|organization|organisation)\s+(?:can|may|will)\s+(?:hire|employ|recruit)\s+(?:people|talent|candidates?|employees?)\s+(?:from\s+)?(?:anywhere|any\s+country|worldwide|globally)\b",
+    r"\b(?:we|company|organization|organisation)\s+(?:hire|hiring|recruit|recruiting)\s+(?:from\s+)?(?:anywhere|all\s+over\s+the\s+world|around\s+the\s+world|worldwide|globally)\b",
+    r"\b(?:remote|work)\s+(?:from\s+)?(?:anywhere|any\s+country|all\s+countries|around\s+the\s+world|the\s+world)\b",
+    r"\b(?:work|working)\s+from\s+(?:any\s+country|anywhere\s+in\s+the\s+world|anywhere\s+worldwide)\b",
+    r"\b(?:no|without)\s+(?:geographic|geographical|location|country)\s+(?:restriction|restrictions|limitation|limitations)\b",
+    r"\b(?:no|without)\s+restrictions?\s+(?:on|as\s+to)\s+where\s+(?:you|candidates?|employees?)\s+(?:live|reside|are\s+based|work)\b",
+    r"\b(?:location|geography|country)\s+(?:does\s+not|doesn't)\s+matter\s+(?:for|to)\s+(?:this\s+role|the\s+role|us|hiring)\b",
+    r"\b(?:regardless|irrespective)\s+of\s+where\s+(?:you|the\s+candidate|candidates?|employees?)\s+(?:live|reside|are\s+based|work)\b",
+    r"\b(?:regardless|irrespective)\s+of\s+(?:your|their|the)\s+(?:location|country|geography)\b",
+    r"\b(?:location|geography|country)[\s\-]*(?:agnostic|independent|neutral)\b",
+    r"\b(?:geographically|location)[\s\-]*(?:agnostic|independent)\b",
+    r"\b(?:globally|worldwide)\s+(?:remote|distributed)\s+(?:role|position|job|opportunity)\b",
+    r"\b(?:applications?|applicants?|candidates?)\s+(?:are\s+)?(?:accepted|welcome|welcomed)\s+worldwide\b",
+    r"\b(?:applications?|applicants?|candidates?)\s+(?:are\s+)?(?:accepted|welcome|welcomed)\s+from\s+anywhere\b",
+    r"\b(?:hire|hiring|recruit|recruiting)\s+(?:in|from|across)\s+(?:all\s+countries|every\s+country|any\s+country)\b",
+    r"\b(?:eligible|available|open)\s+(?:to|for)\s+(?:people|candidates?|applicants?)\s+(?:in|from)\s+(?:any\s+country|all\s+countries)\b",
+    r"\b(?:100%|fully|completely)\s+remote\s+(?:anywhere|worldwide|globally)\b",
+    r"\b(?:remote|distributed)\s+(?:role|position|opportunity)\s+(?:open|available)\s+(?:worldwide|globally|anywhere)\b",
+]
+_EXTRA_GLOBAL_HIRING_RE = [re.compile(p, re.I) for p in _EXTRA_GLOBAL_HIRING_PATTERNS]
+
 # 2026-09 fix: a subset of GLOBAL_KEYWORDS, for _text_has_global_evidence's
 # post-AI safety net ONLY (see that function's docstring) — real case that
 # exposed this: an Ashby posting (jobs.ashbyhq.com/vesta/1f031efa-...,
@@ -1225,6 +1263,9 @@ GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
 # "work from anywhere," "no location restriction," "time zone agnostic,"
 # etc. all stay — those remain unambiguous hiring-policy statements).
 _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS = {
+    r"\bworld\s*[\-\s]*wide\b",
+    r"\baround\s+the\s+(?:world|globe)\b",
+    r"\baround\s*the\s*(world|globe)\b",
     r"\bearth\b",
     r"\bplanet\s*earth\b",
     r"\bglobal\s*citizens?\b",
@@ -1476,8 +1517,12 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
 # column already existed in the schema, unused, before this).
 PRIORITY_GLOBAL = 1   # explicit worldwide/anywhere/global-hiring signal
 PRIORITY_AFRICA = 2   # Africa (continent) or bare EMEA match
-PRIORITY_UNSURE = 3   # kept as a plausible match, but geographic scope
-                       # wasn't confirmed by keyword OR AI evidence
+PRIORITY_UNSURE = 3   # allowed fallback tier: the posting is not
+                       # positively global/EMEA/Africa-specific, but it also
+                       # has no disqualifying geographic restriction. This
+                       # includes bare Remote/N/A/blank locations and genuine
+                       # multi-region scope such as AMER + LATAM or APAC +
+                       # AMER. These roles are intentionally kept.
 
 
 # ── Africa-continent detection ────────────────────────────
@@ -1555,6 +1600,11 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_hard_no_sponsorship_signal(job):
         return "no_match", None, None
 
+    # A concrete role/candidate place always outranks a broad word such as
+    # EMEA in the title or company copy.
+    if has_role_specific_place_restriction_signal(job):
+        return "no_match", None, None
+
     # ── 0.5. HARD OVERRIDE: scraper-reported workplace_type says this
     # specific posting is Hybrid/On-site/In-office/In-person, regardless
     # of what the bare location field claims (e.g. location="Remote" but
@@ -1607,6 +1657,8 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # phrasing 0.8 catches. See has_hard_country_based_restriction_signal's
     # docstring. ──
     if has_hard_country_based_restriction_signal(job):
+        return "no_match", None, None
+    if has_extra_restrictive_geography_signal(job):
         return "no_match", None, None
 
     # ── 0.86. HARD OVERRIDE (2026-09, cross-LLM review, real posting:
@@ -1688,7 +1740,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
 
     # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
-        return "unsure", None, "blank"
+        return "unsure", PRIORITY_UNSURE, "blank"
 
     has_remote = bool(re.search(r"\bremote\b", loc_lower))
 
@@ -1742,7 +1794,12 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # the same tier bare EMEA already uses (broader than a single region,
     # narrower than an explicit "global"/"worldwide" claim).
     if _has_multi_region_breadth(loc):
-        return "match", PRIORITY_AFRICA, None
+        # Multiple regions are allowed, but they are not equivalent to an
+        # explicit global/EMEA/Africa-wide claim. Keep them in the uncertain
+        # tier exactly as requested: AMER + LATAM, APAC + AMER, MENA + APAC,
+        # etc. are broad enough to retain, but not strong enough for priority
+        # 1 or 2.
+        return "unsure", PRIORITY_UNSURE, "multi_region"
 
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
@@ -1787,6 +1844,18 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
             return "match", PRIORITY_GLOBAL, None
         return "no_match", None, None
 
+    # ── 5. Positive evidence in the JD can rescue a bare Remote field ──
+    # The location field itself is ambiguous, but the description/title may
+    # contain a concrete hiring-scope statement. Evaluate that evidence
+    # BEFORE treating bare Remote as merely uncertain.
+    full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
+    if _text_has_global_evidence(full_text):
+        return "match", PRIORITY_GLOBAL, None
+    if _text_has_africa_or_emea_evidence(full_text):
+        return "match", PRIORITY_AFRICA, None
+    if _has_multi_region_breadth(full_text):
+        return "unsure", PRIORITY_UNSURE, "multi_region"
+
     # ── 5. Bare "Remote" with nothing else qualifying it → UNSURE
     # (send to AI). Any OTHER text attached to "remote" (a city, a
     # country, "hybrid", "US only", etc.) is a real qualifier and gets
@@ -1795,7 +1864,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
         stripped = NON_GEO_WORDS_RE.sub("", loc_lower)
         stripped = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9]+", " ", stripped).strip()
         if not stripped:
-            return "unsure", None, "bare_remote"
+            return "unsure", PRIORITY_UNSURE, "bare_remote"
         return "no_match", None, None
 
     # ── 6. REJECT everything else outright ────────────────
@@ -1818,7 +1887,7 @@ def _text_has_global_evidence(text: str) -> bool:
     t = text.lower()
     if STANDALONE_GLOBAL_RE.search(text.strip()):
         return True
-    return any(rx.search(t) for rx in _SAFETY_NET_GLOBAL_RE)
+    return any(rx.search(t) for rx in _SAFETY_NET_GLOBAL_RE) or any(rx.search(t) for rx in _EXTRA_GLOBAL_HIRING_RE)
 
 
 def _text_has_africa_or_emea_evidence(text: str) -> bool:
@@ -1854,10 +1923,12 @@ def keyword_classify_location(job: dict) -> str:
 LOCATION_SYSTEM_PROMPT = """\
 You decide whether a job posting should be included in a list of roles \
 open to candidates working remotely from ANYWHERE in the world, from \
-across the EMEA region (Europe/Middle East/Africa), or from anywhere on \
-the African continent. Everything else — including roles genuinely open \
-to remote candidates but restricted to a single country or a narrower \
-region (APAC, LATAM, one specific country, etc.) — must be excluded.
+across the EMEA region (Europe/Middle East/Africa), from anywhere on \
+the African continent, OR across two or more business regions such as \
+AMER + LATAM, APAC + AMER, or EMEA + APAC. A role with no geographic \
+restriction signal at all is also allowed and must be labeled UNCERTAIN \
+(priority 3). A single narrow region such as APAC or LATAM by itself, a \
+single country, or a single city/state is not allowed.
 
 Every job you're shown here already has an ambiguous LOCATION field \
 (bare "Remote", blank, or a placeholder like "N/A") — the location field \
@@ -1969,11 +2040,18 @@ NO_MATCH — evidence of a country- or narrow-region-specific restriction:
   words "must be located in" — the bare state tag itself IS the \
   restriction; don't wait for boilerplate phrasing to confirm it.
 
-UNCERTAIN — cannot determine either way after reading everything given:
-- No description available, or description genuinely says nothing about \
-  location/eligibility
-- Ambiguous or conflicting signals that don't clearly resolve to one of \
-  the above
+UNCERTAIN — ALLOWED, priority 3. Use this when the posting has no \
+confirmed disqualifying geographic restriction and no stronger priority-1/2 \
+signal:
+- Location is blank, N/A, unspecified, or otherwise absent, and the JD does \
+  not reveal a restriction
+- Location is simply "Remote" with no geographic qualifier and the JD does \
+  not reveal a restriction
+- The role is explicitly open across two or more business regions (for \
+  example AMER + LATAM, APAC + AMER, LATAM + Europe) but does not make a \
+  stronger worldwide/EMEA/Africa-continent claim
+- Ambiguous language remains after reading the entire posting, but there is \
+  no concrete country/region restriction
 
 IMPORTANT: When there is no description or no clear signal, say \
 UNCERTAIN. Do NOT default to MATCH_GLOBAL or MATCH_AFRICA — only use \
@@ -2693,39 +2771,8 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         # failed_batches and gets picked up next iteration, still
         # excluding every provider already tried for that specific job.
 
-    # ── Post-AI safety net (2026-09) ──────────────────────────────────
-    # Real case this closes: a JazzHR posting (starlims.applytojob.com/
-    # apply/tY0FHXuKkf/Account-Manager-Expansions) with a blank location
-    # field and a description containing NO global/worldwide/anywhere
-    # language whatsoever (confirmed via direct fetch of the live
-    # posting) was still returned as match_global by the AI stage,
-    # landing it at PRIORITY_GLOBAL — the highest-trust tier — with
-    # literally zero supporting evidence anywhere in the job's own text.
-    # PRIORITY_GLOBAL/PRIORITY_AFRICA are meant to mean "we have real
-    # positive evidence", so a match the AI itself can't back with any
-    # of the same keyword evidence the deterministic stage already
-    # trusts is downgraded to 'uncertain' rather than accepted at face
-    # value — this doesn't drop the job, it just stops an unsupported
-    # AI claim from outranking genuinely-confirmed matches. A job can
-    # still reach match_global/match_africa normally when the AI finds
-    # real evidence the keyword regexes don't happen to cover; this only
-    # catches the case where the AI's own verdict has NO textual backing
-    # at all.
-    for i, (label, provider_name) in enumerate(results):
-        if label not in ("match_global", "match_africa"):
-            continue
-        job = jobs[i]
-        text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
-        if label == "match_global" and not _text_has_global_evidence(text):
-            log.debug(f"Downgrading unsupported match_global → uncertain for "
-                      f"{job.get('url', job.get('title', '?'))!r} (no global "
-                      f"keyword evidence in title/description)")
-            results[i] = ("uncertain", provider_name)
-        elif label == "match_africa" and not _text_has_africa_or_emea_evidence(text):
-            log.debug(f"Downgrading unsupported match_africa → uncertain for "
-                      f"{job.get('url', job.get('title', '?'))!r} (no Africa/"
-                      f"EMEA keyword evidence in title/description)")
-            results[i] = ("uncertain", provider_name)
+    # ── FINAL AI AUTHORITY GATE ───────────────────────────────────────
+    results = _apply_location_ai_authority_gate(jobs, results)
 
     # 2026-09: simplified summary. "Classified X/Y" previously conflated
     # two very different things under one 'uncertain' bucket: a job the
@@ -2742,7 +2789,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     log.info(f"Locations: {labels.count('match_global')} global, "
              f"{labels.count('match_africa')} Africa, "
              f"{labels.count('no_match')} excluded, "
-             f"{genuinely_uncertain} uncertain (kept, lower confidence)"
+             f"{genuinely_uncertain} uncertain (retained at priority 3)"
              + (f", {no_read} skipped — AI never reached them (see warnings above)"
                 if no_read else ""))
     return results
@@ -3049,7 +3096,7 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
 # guard is specifically about BUSINESS-REGION names, not country lists).
 _REGION_ONLY_WORDS_RE = re.compile(
     r"\b(?:europe|emea|apac|latam|asia[\s\-]?pacific|north\s+america|"
-    r"americas|mena|middle\s+east|anz|dach|benelux|nordics?)\b",
+    r"americas|amer|amers|mena|middle\s+east|anz|dach|benelux|nordics?)\b",
     re.I,
 )
 
@@ -3245,6 +3292,235 @@ _COUNTRY_WHITELIST_PHRASE_RE = re.compile(
 )
 
 
+# 2026-09 STRICT GEOGRAPHY GATE: a role-specific physical/base-location
+# statement is disqualifying even when the same posting also contains a broad
+# EMEA/Africa/global word elsewhere. This closes postings such as
+# "full-time position based in Darmstadt" whose title happens to contain
+# "EMEA". It intentionally requires role/candidate context, so statements
+# such as "our HQ is based in Darmstadt" are not treated as candidate
+# restrictions.
+_ROLE_SPECIFIC_PLACE_RE = re.compile(
+    r"\b(?:this\s+)?(?:role|position|job|opening|opportunity|\"?role\"?)\b"
+    r".{0,100}?\b(?:is\s+)?(?:based|located|situated)\s+(?:in|at)\s+"
+    r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*(?:\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*){0,4}"
+    r"(?:\s*,\s*[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*)?",
+    re.I,
+)
+
+_CANDIDATE_PLACE_RE = re.compile(
+    r"\b(?:must\s+be|should\s+be|is|are|work|working|work\s+remotely|remote\s+role)"
+    r".{0,80}?\b(?:based|located|reside|residing|living|live)\s+(?:in|from)\s+"
+    r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*(?:\s+[A-Z][A-Za-zÀ-ÖØ-öøÿ.'-]*){0,4}",
+    re.I,
+)
+
+# Explicitly accepted broad place names. Anything else captured by the
+# role/candidate patterns above is treated as a specific geographic
+# restriction.
+_BROAD_REGION_VALUE_RE = re.compile(
+    r"\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa|Global|Worldwide|"
+    r"International|Anywhere|APAC|LATAM|AMER|Americas|MENA)\b", re.I,
+)
+
+def has_role_specific_place_restriction_signal(job: dict) -> bool:
+    """Return True when the posting ties THIS role/candidate to a specific
+    city, country, state, or other concrete place. Broad accepted regions
+    such as EMEA/Africa/global are not rejected by this detector.
+
+    This is deliberately role-scoped; company/HQ/team-location sentences
+    are ignored. The check is used before and after AI classification so an
+    LLM cannot override an explicit physical hiring restriction."""
+    title = job.get("title") or ""
+    desc = job.get("description_snippet") or ""
+    location = job.get("location") or ""
+    text = title + " " + desc
+
+    # Structured location is already a role-specific ATS field. If it is a
+    # concrete value and not one of the accepted broad scopes, reject it.
+    loc = str(location).strip()
+    if loc and not PLACEHOLDER_LOC_RE.match(loc):
+        normalized = re.sub(r"[\s,|/()\-–—]+", " ", loc).strip()
+        if normalized and normalized.lower() not in {
+            "remote", "fully remote", "remote worker", "remote job",
+            "global", "worldwide", "international", "anywhere",
+            "emea", "africa", "sub saharan africa",
+        }:
+            # Multi-region structured locations are explicitly allowed.
+            regions = {m.group(0).lower() for m in re.finditer(
+                r"\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa|Global|Worldwide|International|Anywhere|"
+                r"APAC|LATAM|AMER|AMERs|Americas|MENA|Europe|Asia|Asia[-\s]?Pacific|"
+                r"North\s+America|South\s+America|Central\s+America|ANZ|DACH|Benelux|Nordics?)\b",
+                normalized, re.I)}
+            # A location consisting of two or more business regions is an
+            # allowed multi-region scope, regardless of whether EMEA is one
+            # of them. A single narrow region such as LATAM or APAC remains
+            # restrictive under the project's allowlist.
+            if len(regions) >= 2:
+                return False
+            # Two or more distinct African countries are treated as
+            # continent-wide African hiring evidence, not a single-country
+            # restriction.
+            africa_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(normalized)}
+            if len(africa_hits) >= 2:
+                return False
+            if len(regions) == 1 and normalized.lower() == next(iter(regions)):
+                return True if next(iter(regions)) in {"emea", "africa", "global", "worldwide", "international", "anywhere", "sub-saharan africa"} else True
+            if len(regions) == 1:
+                return True
+            return True
+
+    for sentence in re.split(r"(?<=[.!?])\s+|\
++", text):
+        if not sentence.strip():
+            continue
+        # Never treat company/HQ/team/office descriptions as candidate
+        # restrictions.
+        if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+            continue
+        for rx in (_ROLE_SPECIFIC_PLACE_RE, _CANDIDATE_PLACE_RE):
+            for m in rx.finditer(sentence):
+                value = m.group(0)
+                # Strip the structural words and inspect the place portion.
+                tail = re.split(r"\b(?:based|located|reside|residing|living|live)\s+(?:in|from|at)\s+", value, flags=re.I)[-1].strip(" .,:;()")
+                if tail and not _BROAD_REGION_VALUE_RE.fullmatch(tail):
+                    # If the captured tail contains a broad region plus a
+                    # concrete place, the concrete place still wins.
+                    words = [w for w in re.split(r"[,\s]+", tail) if w]
+                    if not any(_BROAD_REGION_VALUE_RE.fullmatch(w) for w in words):
+                        return True
+                    if len(words) > 1:
+                        return True
+    return False
+
+
+# Strict positive hiring-scope evidence. Company reach, product reach,
+# "global team", "millions worldwide", etc. are NOT eligibility evidence.
+_STRICT_GLOBAL_ELIGIBILITY_RE = re.compile(
+    r"\b(?:remote\s+)?(?:worldwide|global|international|anywhere|everywhere)\s+(?:hiring|hire|recruit(?:ing)?|open|available|eligible|candidates?|applicants?)\b"
+    r"|\b(?:work|working|work\s+remotely|hire|hiring|recruit|recruiting|employ|employment|open)\s+(?:from|in|to)\s+(?:anywhere|any\s+country|any\s+location|the\s+world|worldwide|globally)\b"
+    r"|\b(?:open|available|eligible)\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:worldwide|globally|anywhere|from\s+any\s+country)\b"
+    r"|\b(?:no|without)\s+(?:geographic|location|country|regional)\s+(?:restriction|restrictions|limitation|limitations)\b",
+    re.I,
+)
+
+_STRICT_BROAD_REGION_RE = re.compile(
+    r"\b(?:remote|work|working|hire|hiring|recruit|recruiting|employment|employ|candidates?|applicants?|based|located|available|open)\b"
+    r".{0,80}\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa)\b"
+    r"|\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa)\b.{0,80}\b(?:remote|work|working|hire|hiring|recruit|recruiting|employment|employ|candidates?|applicants?|based|located|available|open)\b",
+    re.I,
+)
+
+
+
+# High-precision restrictive language. These patterns require a candidate/role
+# eligibility construction; they intentionally do NOT match generic mentions
+# such as "US customers", "our London office", or "global operations".
+_EXTRA_RESTRICTIVE_PATTERNS = [
+    # Explicit candidate/resident-only constructions, including the common
+    # "for US residents only" form which has no residence verb such as
+    # "must reside in".
+    r"\b(?:for|to)\s+(?:the\s+)?(?:(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)|" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+(?:residents?|candidates?|applicants?)\s+only\b",
+    r"\b(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)\s+(?:residents?|candidates?|applicants?)\s+only\b",
+    r"\bremote\s*[,;:/\-–—(]?\s*(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+only\b",
+    r"\b(?:remote|work\s+remotely)\s*[,;:/\-–—(]?\s*(?:the\s+)?(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+only\b",
+    r"\b(?:role|position|job|opportunity)\s+(?:is\s+)?(?:remote\s+)?(?:only|exclusively)\s+(?:for|in|from)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:be\s+)?(?:based|located|resident|residing|living)\s+(?:in|within)\s+[^.;,\n]{1,80}",
+    r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:live|reside|work|be\s+located|be\s+based)\s+(?:in|within)\s+[^.;,\n]{1,80}",
+    r"\b(?:only|exclusively)\s+(?:open|available)\s+to\s+(?:candidates?|applicants?|employees?|people)\s+(?:in|from|based\s+in)\s+[^.;,\n]{1,80}",
+    r"\b(?:open|available)\s+(?:only|exclusively)\s+(?:in|to\s+candidates?\s+in|for\s+candidates?\s+in)\s+[^.;,\n]{1,80}",
+    r"\b(?:remote|fully\s+remote)\s+(?:only\s+)?(?:in|within)\s+[^.;,\n]{1,80}",
+    r"\b(?:remote|work)\s+(?:is\s+)?(?:only|exclusively)\s+(?:available|permitted|allowed)\s+(?:in|from)\s+[^.;,\n]{1,80}",
+    r"\b(?:we|company|organization|organisation)\s+(?:can|may|will)\s+only\s+(?:hire|employ|recruit)\s+(?:in|from)\s+[^.;,\n]{1,80}",
+    r"\b(?:we|company|organization|organisation)\s+(?:only|exclusively)\s+(?:hire|employ|recruit)\s+(?:in|from)\s+[^.;,\n]{1,80}",
+    r"\b(?:role|position|job|opportunity)\s+(?:is|will be)\s+(?:based|located)\s+(?:in|within)\s+[^.;,\n]{1,80}",
+    r"\b(?:role|position|job|opportunity)\s+(?:is|will be)\s+(?:only|exclusively)\s+(?:available|open)\s+(?:in|to)\s+[^.;,\n]{1,80}",
+    r"\b(?:candidates?|applicants?)\s+must\s+(?:be\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+(?:in|from)\s+[^.;,\n]{1,80}",
+    r"\b(?:right|rights)\s+to\s+work\s+(?:in|from)\s+[^.;,\n]{1,80}",
+    r"\b(?:work|employment)\s+authorization\s+(?:in|for)\s+[^.;,\n]{1,80}",
+    r"\b(?:employment|work)\s+eligib(?:ility|le)\s+(?:in|for)\s+[^.;,\n]{1,80}",
+    r"\b(?:only|exclusively)\s+(?:hire|employ|recruit)\s+(?:people|talent|candidates?|applicants?)\s+(?:in|from)\s+[^.;,\n]{1,80}",
+    r"\b(?:candidates?|applicants?)\s+(?:must|need\s+to)\s+be\s+(?:within|inside)\s+[^.;,\n]{1,80}",
+    r"\b(?:timezone|time\s+zone)\s+(?:requirement|restriction|limited|only)\b.{0,100}\b(?:US|U\.S\.|UK|Europe|EMEA|APAC|LATAM|AMER|Pacific|Eastern|Central|Mountain)\b",
+    r"\b(?:candidates?|applicants?|employees?)\s+(?:must|need(?:\s+to)?|are\s+required\s+to)\s+(?:be\s+)?(?:in|within)\s+(?:a\s+)?(?:US|U\.S\.|UK|European|EMEA|APAC|LATAM|AMER|Pacific|Eastern|Central|Mountain)\s+(?:time\s+)?zones?\b",
+    r"\b(?:must|need(?:\s+to)?|required\s+to)\s+(?:work|be\s+available)\s+(?:during|within)\s+(?:US|U\.S\.|UK|European|EMEA|APAC|LATAM|AMER|Pacific|Eastern|Central|Mountain)\s+(?:business\s+hours|hours|time\s+zone)\b",
+    r"\b(?:must|need\s+to)\s+(?:be\s+)?(?:within|in)\s+(?:the\s+)?(?:same|specified)\s+time\s*zone\b",
+]
+_EXTRA_RESTRICTIVE_RE = [re.compile(p, re.I) for p in _EXTRA_RESTRICTIVE_PATTERNS]
+
+def _apply_location_ai_authority_gate(jobs: list[dict], results: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Apply the final geographic decision contract.
+
+    The LLM is authoritative for the ranking: MATCH_GLOBAL, MATCH_AFRICA,
+    UNCERTAIN, and NO_MATCH are preserved exactly as returned unless the
+    posting contains an explicit, deterministic, role-specific geographic
+    restriction. Deterministic evidence is therefore a hard veto only; the
+    absence of regex evidence is never a reason to downgrade an LLM result.
+    """
+    for i, (label, provider_name) in enumerate(results):
+        if label not in ("match_global", "match_africa", "uncertain", "no_match"):
+            continue
+        job = jobs[i]
+        if (has_role_specific_place_restriction_signal(job)
+                or has_extra_restrictive_geography_signal(job)):
+            if label != "no_match":
+                log.debug(f"Hard geographic restriction overrides AI {label} for "
+                          f"{job.get('url', job.get('title', '?'))!r}")
+            results[i] = ("no_match", provider_name)
+    return results
+
+
+def has_extra_restrictive_geography_signal(job: dict) -> bool:
+    text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if not sentence.strip():
+            continue
+        # Broad accepted geography in the same sentence can legitimately
+        # qualify a region list; don't treat "remote for EMEA candidates,
+        # including UK/Germany" as a single-country restriction.
+        if _text_has_global_evidence(sentence) or _text_has_africa_or_emea_evidence(sentence):
+            continue
+        if any(rx.search(sentence) for rx in _EXTRA_RESTRICTIVE_RE):
+            return True
+    return False
+
+def has_strict_accepted_geography_evidence(job: dict) -> bool:
+    """True only when the posting contains evidence of one of the allowed
+    hiring scopes. This deliberately rejects generic company-global language
+    and is the final gate after AI classification."""
+    loc = str(job.get("location") or "").strip()
+    title = job.get("title") or ""
+    desc = job.get("description_snippet") or ""
+    text = title + " " + desc
+
+    # Structured ATS location is high-confidence evidence.
+    if loc and not PLACEHOLDER_LOC_RE.match(loc):
+        if re.fullmatch(r"\s*(?:global|worldwide|international|anywhere|emea|africa|sub[-\s]?saharan\s+africa)\s*", loc, re.I):
+            return True
+        if len({m.group(0).lower() for m in re.finditer(
+            r"\b(?:EMEA|Africa|Global|Worldwide|International|Anywhere|APAC|LATAM|AMER|Americas|MENA)\b", loc, re.I)}) >= 2:
+            return True
+
+    if _STRICT_GLOBAL_ELIGIBILITY_RE.search(text) or any(rx.search(text) for rx in _EXTRA_GLOBAL_HIRING_RE):
+        return True
+    if _STRICT_BROAD_REGION_RE.search(text):
+        # Multi-region breadth is acceptable when the regions are actually
+        # stated as hiring/eligibility scope.
+        return True
+    if _has_multi_region_breadth(text):
+        # Only accept 2+ regions when they occur in a hiring/location context,
+        # not merely because an employer describes its global business.
+        region_context = re.search(
+            r"\b(?:hire|hiring|recruit|recruiting|work|working|remote|candidates?|applicants?|locations?|based|open|available)\b.{0,120}\b(?:EMEA|APAC|LATAM|AMER|MENA|Africa|Europe|Asia[-\s]?Pacific|Americas|North\s+America)\b",
+            text, re.I,
+        ) or re.search(
+            r"\b(?:EMEA|APAC|LATAM|AMER|MENA|Africa|Europe|Asia[-\s]?Pacific|Americas|North\s+America)\b.{0,120}\b(?:hire|hiring|recruit|recruiting|work|working|remote|candidates?|applicants?|locations?|based|open|available)\b",
+            text, re.I,
+        )
+        if region_context:
+            return True
+    return False
+
+
 def has_hard_country_based_restriction_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter, sibling to
     has_hard_country_specific_auth_signal above but for a different
@@ -3328,7 +3604,14 @@ def has_hard_metadata_location_signal(job: dict) -> bool:
         return False
     for m in _METADATA_LOCATION_LINE_RE.finditer(desc):
         value = m.group(1).strip()
-        if value and not _text_has_global_evidence(value):
+        if not value:
+            continue
+        # Two or more named business regions are an allowed multi-region
+        # scope, even when neither is EMEA (e.g. AMER + LATAM, APAC + AMER).
+        # Do not mistake that for a single-region restriction.
+        if _has_multi_region_breadth(value):
+            continue
+        if not _text_has_global_evidence(value):
             return True
     return False
 
@@ -3397,6 +3680,10 @@ def has_title_region_restriction_signal(job: dict) -> bool:
     the suffix/paren regexes so a multi-region title never gets rejected
     just because one of its several regions happens to sit last."""
     title = job.get("title") or ""
+    # A title containing two or more business regions is broad multi-region
+    # hiring, not a single-region restriction. Keep it at priority 3.
+    if _has_multi_region_breadth(title):
+        return False
     if not title.strip():
         return False
     if _has_multi_region_breadth(title):
