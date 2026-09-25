@@ -294,25 +294,100 @@ def _snippet(html_or_text: str, max_chars: int = 500_000) -> str:
     return text[:max_chars]
 
 
+# ── Compensation detection (2026-09: vocabulary expansion + false-
+# positive guards) ───────────────────────────────────────────────────
+# The original version only matched a bare "$X - $Y" shape (plus a
+# handful of currency-code variants) and its last, most-permissive
+# pattern matched almost ANY bare dollar figure at all — real postings
+# describe pay in far more ways than that (hourly rates, OTE/on-target
+# earnings for commission-heavy CSM/AM roles, "up to $X" framing, ranges
+# written as "120K-160K" with no currency SYMBOL at all, non-USD symbols
+# like £/€), while CSM/AM/PM job descriptions are also FULL of other
+# dollar figures that are NOT compensation at all — a rep's quota, their
+# book of business, the ARR/pipeline/deal size/territory they'll manage,
+# a company's funding round or valuation. The old bare-figure pattern
+# would have matched any of those exactly as happily as a real salary
+# line. Two fixes applied together below:
+#   1. Vocabulary: many more real compensation phrasings recognized —
+#      base salary, total comp, OTE, pay/salary band, hourly rate, "up
+#      to $X", non-$ currencies, K-ranges with no symbol at all.
+#   2. A disqualifying-context check (both just before AND just after
+#      the match, since real postings write both "$2M territory" and
+#      "managing a $2M book of business" — the disqualifying word can
+#      land on either side of the number): a match sitting next to a
+#      quota/ARR/funding/valuation/territory-style phrase is skipped
+#      even though it fits a compensation-shaped pattern.
+_COMP_CURRENCY = r"(?:US\$|CA\$|C\$|A\$|NZ\$|\$|£|€|₹|USD|GBP|EUR|CAD|AUD|NZD|CHF|SGD|INR)"
+_COMP_NUMBER = r"[\d][\d,]*(?:\.\d+)?\s*[kK]?"
+_COMP_RANGE_SEP = r"(?:\s*(?:[-–—]|to|through)\s*)"
+_COMP_PERIOD = (
+    r"(?:\s*(?:/\s*(?:hr|hour|yr|year)|per\s+(?:hour|annum|year)|"
+    r"annually|yearly|p\.a\.|\bpa\b))?"
+)
+_COMP_KEYWORDS = (
+    r"(?:base\s+)?salary|compensation|\bcomp\b|total\s+comp(?:ensation)?|"
+    r"\bpay\b|wages?|remuneration|stipend|\bOTE\b|on[- ]target\s+earnings|"
+    r"target\s+compensation|expected\s+compensation|annual\s+compensation|"
+    r"pay\s+range|salary\s+range|compensation\s+range|pay\s+scale|"
+    r"salary\s+band|pay\s+band|hourly\s+rate|hourly\s+wage|base\s+pay|"
+    r"starting\s+salary|annual\s+salary"
+)
+# Phrases that mean a nearby dollar figure is almost certainly NOT
+# compensation — a sales quota/territory, revenue/ARR the rep manages,
+# or the company's own funding/valuation, all of which read exactly like
+# a salary range in isolation ("$1M-$5M") but never are one.
+_COMP_DISQUALIFY_RE = re.compile(
+    r"quota|book\s+of\s+business|territory|portfolio|\bARR\b|"
+    r"annual\s+recurring\s+revenue|pipeline|revenue|\bACV\b|\bTCV\b|"
+    r"contract\s+value|deal\s+size|funding|raised|raising|"
+    r"series\s+[a-z]\b|valuation|valued\s+at|market\s+cap|"
+    r"ad\s+spend|media\s+spend|budget|customers?\s+(?:with|worth)|"
+    r"managing\s+(?:a|an)|\bAUM\b|assets\s+under\s+management",
+    re.I,
+)
+_COMP_CONTEXT_BEFORE = 60  # chars scanned before a match for disqualifying context
+_COMP_CONTEXT_AFTER = 40   # chars scanned after a match — "$2M territory" lands here
+
+_COMP_PATTERNS = [
+    # "up to $150,000" / "up to £80K"
+    re.compile(rf"up\s+to\s+{_COMP_CURRENCY}\s*{_COMP_NUMBER}{_COMP_PERIOD}", re.I),
+    # "$120,000 - $180,000" / "£45K-£60K" / "USD 120,000-180,000"
+    re.compile(rf"{_COMP_CURRENCY}\s*{_COMP_NUMBER}{_COMP_RANGE_SEP}{_COMP_CURRENCY}?\s*"
+               rf"{_COMP_NUMBER}{_COMP_PERIOD}", re.I),
+    # "120,000 - 160,000 USD" / "120K-160K annually" — currency AFTER the
+    # range, or no currency symbol at all but an explicit yearly period.
+    re.compile(rf"{_COMP_NUMBER}{_COMP_RANGE_SEP}{_COMP_NUMBER}\s*"
+               rf"(?:{_COMP_CURRENCY}|annually|per\s+year|/\s*year|/\s*yr)", re.I),
+    # keyword-anchored: "salary range: $X - $Y", "OTE of $150K", "base
+    # salary $95,000", "hourly rate: $22/hr" — the keyword itself is the
+    # evidence, so a single bare figure (not necessarily a range) is
+    # enough here, unlike the currency-only patterns above.
+    re.compile(rf"(?:{_COMP_KEYWORDS})[\s:\-]{{1,15}}(?:of\s+)?{_COMP_CURRENCY}\s*"
+               rf"{_COMP_NUMBER}(?:{_COMP_RANGE_SEP}{_COMP_CURRENCY}?\s*{_COMP_NUMBER})?"
+               rf"{_COMP_PERIOD}", re.I),
+    # bare hourly rate: "$22/hr", "$22.50 per hour"
+    re.compile(rf"{_COMP_CURRENCY}\s*{_COMP_NUMBER}\s*(?:/\s*(?:hr|hour)|per\s+hour)", re.I),
+]
+
+
 def _extract_salary(text: str) -> str:
-    """Try to extract salary/compensation from description text."""
+    """Try to extract salary/compensation from description text — see
+    the block comment above for the vocabulary this recognizes and the
+    false-positive guard against quota/ARR/funding/territory figures
+    that look identical in shape to a real compensation range. Patterns
+    are tried in order (most specific/least ambiguous first); within a
+    pattern every match is scanned in order and the first one that
+    clears the disqualifying-context check wins — a rejected match never
+    blocks a real salary line elsewhere in the same description."""
     if not text:
         return ""
-    # Common salary patterns
-    patterns = [
-        # $120,000 - $180,000 or $120K - $180K
-        r"\$[\d,]+\.?\d*\s*[kK]?\s*[-–—to]+\s*\$[\d,]+\.?\d*\s*[kK]?(?:\s*(?:per\s+)?(?:year|annually|yr|pa|p\.a\.))?",
-        # USD 120,000 - 180,000
-        r"(?:USD|EUR|GBP|CAD|AUD)\s*[\d,]+\.?\d*\s*[-–—to]+\s*[\d,]+\.?\d*",
-        # Salary range: $X - $Y
-        r"(?:salary|compensation|pay)\s*(?:range)?[\s:]+\$[\d,]+\.?\d*\s*[kK]?\s*[-–—to]+\s*\$[\d,]+\.?\d*\s*[kK]?",
-        # $120,000 USD/year
-        r"\$[\d,]+\.?\d*\s*[kK]?\s*(?:USD|EUR|GBP)?\s*(?:/\s*(?:year|yr|annually))?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return match.group(0).strip()
+    for pattern in _COMP_PATTERNS:
+        for m in pattern.finditer(text):
+            before = text[max(0, m.start() - _COMP_CONTEXT_BEFORE):m.start()]
+            after = text[m.end():m.end() + _COMP_CONTEXT_AFTER]
+            if _COMP_DISQUALIFY_RE.search(before) or _COMP_DISQUALIFY_RE.search(after):
+                continue  # e.g. "managing a $2M-$5M territory" — not pay
+            return m.group(0).strip()
     return ""
 
 
