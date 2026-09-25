@@ -14,7 +14,7 @@ import time
 import xml.etree.ElementTree as ET
 import urllib.robotparser
 from html import unescape
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 import requests
 from bs4 import BeautifulSoup
 from config import REQUEST_TIMEOUT, MAX_RETRIES
@@ -6253,9 +6253,15 @@ _BOILERPLATE_QUESTION_RE = re.compile(
     r"website|portfolio|github|personal\s*website|"
     r"how\s+did\s+you\s+hear\s+about\s+(?:this|us)|referral|referred\s+by|"
     r"pronouns?|"
-    r"race(?:\s*/\s*ethnicit\w*)?|ethnicit\w*|gender(?:\s*identity)?|"
+    r"race(?:\s*/\s*ethnicit\w*)?|ethnicit\w*|gender(?:\s*identity)?|\bsex\b|"
     r"veteran\s*status|disabilit\w*(?:\s*status)?|"
-    r"sexual\s*orientation"
+    r"sexual\s*orientation|"
+    # 2026-09 (explicit user instruction): age and date-of-birth are
+    # universal PII fields with zero location-classification signal,
+    # same reasoning as name/email/phone above — added alongside the
+    # existing EEO exclusions rather than as a separate category, since
+    # the effect (never appended to description_snippet) is identical.
+    r"\bage\b|date\s*of\s*birth|birth\s*date|\bdob\b"
     r")\s*[:\?]?\s*$",
     re.I,
 )
@@ -6395,21 +6401,30 @@ def _generic_form_url_candidates(url: str) -> list[str]:
     """2026-09: several ATS platforms (and plenty of individual white-
     label tenants on ones we DO have a dedicated fetcher for) simply
     serve their real application form at the plain job-posting URL with
-    "/apply" or "/application" appended — no documented API, no special
-    convention, just that. A handful of platforms below only ever tried
-    the bare listing URL and nothing else, so a tenant using this common
-    pattern was silently missed even though the actual form was one
-    cheap extra request away. Returns the bare URL first (still worth
-    trying — some platforms DO render the form on the listing page
-    itself), then the "/apply" and "/application" variants, de-duplicated
-    and order-preserving."""
+    a suffix like "/apply" or "/application" appended — no documented
+    API, no special convention, just that. A handful of platforms below
+    only ever tried the bare listing URL and nothing else, so a tenant
+    using this common pattern was silently missed even though the actual
+    form was one cheap extra request away. Returns the bare URL first
+    (still worth trying — some platforms DO render the form on the
+    listing page itself), then every common suffix VARIATION seen across
+    real ATS tenants (2026-09: widened from just "/apply"/"/application"
+    — "apply now"/"apply-now" and "application form"/"application-form"
+    are both common real button-label-shaped path variants too), de-
+    duplicated and order-preserving. This is the LAST-resort guessing
+    layer — _fetch_generic_form_questions_multi tries a real, DISCOVERED
+    apply link from the page's own content before ever falling back to
+    these blind guesses; see that function's docstring."""
     if not url:
         return []
     base = url.rstrip("/")
     candidates = [url]
-    if not base.endswith(("/apply", "/application", "/applications/new", "/apply/")):
+    if not base.endswith(("/apply", "/application", "/applications/new", "/apply/",
+                           "/apply-now", "/application-form")):
         candidates.append(base + "/apply")
         candidates.append(base + "/application")
+        candidates.append(base + "/apply-now")
+        candidates.append(base + "/application-form")
     seen = set()
     out = []
     for c in candidates:
@@ -6419,13 +6434,111 @@ def _generic_form_url_candidates(url: str) -> list[str]:
     return out
 
 
+# ── 2026-09 (explicit user instruction: "find the application links and
+# hit it and add that to what regex scans through and what is sent to the
+# AI"): rather than only ever GUESSING a suffix on the listing URL, first
+# look at the listing page's OWN content for a real "Apply" link/button —
+# the exact destination this platform/tenant actually sends a real
+# applicant to. A discovered real link beats a guess: it works even when
+# a tenant's apply flow lives on a completely different domain/path shape
+# than any suffix convention could predict (e.g. a customized in-house
+# board whose "Apply Now" button points at a vendor-hosted form entirely
+# off the listing page's own host), and it's tried BEFORE the blind
+# suffix guesses below so a real link is always preferred over a guess
+# when both are available.
+_APPLY_LINK_TEXT_RE = re.compile(
+    r"apply\s*(?:now|here|today|online)?(?:\s+for\s+this\s+(?:job|role|position))?|"
+    r"apply\s+to\s+this\s+(?:job|role|position)|"
+    r"submit\s+(?:your\s+)?application|start\s+(?:your\s+)?application|"
+    r"begin\s+(?:your\s+)?application|complete\s+(?:the\s+|your\s+)?application|"
+    r"application\s+form|start\s+applying|get\s+started",
+    re.I,
+)
+_APPLY_LINK_HREF_RE = re.compile(
+    r"/appl(?:y|ication)(?:[-_/]|$)|application[-_]?form|apply[-_]?now",
+    re.I,
+)
+
+
+def _discover_real_apply_link(html_text: str, base_url: str) -> str | None:
+    """Scans an already-fetched job-posting page for its OWN real 'Apply'
+    link/button instead of blindly guessing a URL suffix. Two independent
+    signals, either sufficient (mirrors node.py's own
+    _extract_job_listing_link_candidates approach for career-listing
+    links): (1) the link's visible text/aria-label/title reads like an
+    apply CTA (_APPLY_LINK_TEXT_RE), or (2) the link's own URL path/query
+    looks apply-shaped (_APPLY_LINK_HREF_RE) — catches a distinct-domain
+    redirect to a vendor-hosted apply form that plain suffix-guessing on
+    the listing URL would never construct. A link matching both signals
+    outranks one matching only one; returns the single highest-scoring
+    absolute URL, or None if nothing on the page looks like a real apply
+    link at all. Never raises — a malformed page just yields no
+    candidate, same as every other best-effort parse in this project."""
+    try:
+        soup = BeautifulSoup(html_text, "lxml")
+    except Exception:
+        return None
+    best_url = None
+    best_score = 0
+    try:
+        anchors = soup.find_all("a", href=True)
+    except Exception:
+        return None
+    for a in anchors:
+        href = a.get("href") or ""
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        text_sources = " ".join([
+            a.get_text(" ", strip=True) or "",
+            a.get("aria-label") or "",
+            a.get("title") or "",
+        ])
+        score = 0
+        if _APPLY_LINK_TEXT_RE.search(text_sources):
+            score += 1
+        if _APPLY_LINK_HREF_RE.search(href):
+            score += 1
+        if score == 0 or score <= best_score:
+            continue
+        try:
+            resolved = urljoin(base_url, href)
+        except Exception:
+            continue
+        best_score = score
+        best_url = resolved
+    return best_url
+
+
 def _fetch_generic_form_questions_multi(url: str) -> list[dict]:
-    """Same as _fetch_generic_form_questions, but tries the bare URL,
-    then the common "/apply" and "/application" conventions in turn,
-    stopping at the first candidate that yields ANY signal. Use this
-    instead of the single-URL version for any platform/tenant with no
-    other known convention — see _generic_form_url_candidates."""
+    """The full Level-3 chase, in priority order: (1) the bare listing
+    URL itself — some platforms render the form right there; (2) a REAL
+    apply link discovered directly on that same already-fetched page
+    (_discover_real_apply_link) — preferred over any guess since it's
+    the platform's own actual destination, not an assumption about its
+    URL shape; (3) the common suffix-guessing conventions
+    (_generic_form_url_candidates) as the last resort, for platforms
+    whose apply link isn't a plain <a href> this parser can see (e.g. a
+    JS-driven button with no real href at all). Stops at the first
+    candidate that yields ANY signal — a fetch that fails outright is
+    silently treated the same as one that fetched fine but found
+    nothing, matching every other best-effort step in this file."""
+    if not url:
+        return []
+
+    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if r:
+        found = _find_embedded_questions(r.text) or _parse_form_elements(r.text)
+        if found:
+            return found
+        apply_link = _discover_real_apply_link(r.text, url)
+        if apply_link and apply_link != url:
+            found = _fetch_generic_form_questions(apply_link)
+            if found:
+                return found
+
     for candidate in _generic_form_url_candidates(url):
+        if candidate == url:
+            continue  # already tried above, whether or not the fetch itself succeeded
         found = _fetch_generic_form_questions(candidate)
         if found:
             return found
@@ -7178,18 +7291,25 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
     that carve-out already existed and is unaffected by this change since
     crawl_iii.py doesn't call this function at all.
 
-    Jobs on one of the 20 supported ATS platforms (see QUESTION_FETCHERS
-    above) use that platform's dedicated fetcher. Everything else —
-    including archive_ii's unsupported-ATS/"wild" company career sites —
-    falls back to _fetch_wild_questions, the same universal HTML-form
-    parser + /apply,/application URL-guessing used as the Level-3 fallback
-    everywhere else in this file.
+    Jobs on one of the ATS platforms listed in QUESTION_FETCHERS above use
+    that platform's dedicated fetcher. Everything else — including
+    archive_ii's unsupported-ATS/"wild" company career sites, and any
+    platform IN QUESTION_FETCHERS whose dedicated fetcher comes back
+    empty — falls back to _fetch_wild_questions: the same universal
+    HTML-form parser that now (2026-09) also looks for a REAL discovered
+    "Apply" link on the page itself before ever falling back to blind
+    "/apply","/application"-style URL guessing (see
+    _fetch_generic_form_questions_multi/_discover_real_apply_link).
 
     Work authorization / visa sponsorship questions are strong signals that
     a job is NOT globally open, even when its location field just says
-    "Remote". We extract just those and append them to description_snippet
-    so both the keyword classifier's hard overrides and the AI location
-    classifier can use them.
+    "Remote". We extract those (and every other substantive screening
+    question — see _format_screening_questions) and append them to
+    description_snippet so both the keyword classifier's hard overrides
+    and the AI location classifier can use them, while universal PII/EEO
+    boilerplate (name, email, phone, age, sex/gender, race, veteran
+    status, etc. — see _BOILERPLATE_QUESTION_RE) is never appended at all,
+    since none of it carries any location-classification signal.
 
     Call this AFTER enrich_descriptions and BEFORE filter_locations."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7213,14 +7333,17 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
              + "...")
 
     def _fetch_one(job):
-        ats = job.get("source_ats")
+        ats = job.get("source_ats") or "unknown"
         fetcher = QUESTION_FETCHERS.get(ats, _fetch_wild_questions)
         questions = ""
+        outcome = "none"
         try:
             questions = fetcher(job)
         except Exception as e:
             log.debug(f"Failed to fetch questions for {job.get('url', '')} via "
                       f"{ats or 'wild'} fetcher: {e}")
+        if questions:
+            outcome = "wild" if fetcher is _fetch_wild_questions else "dedicated"
         # 2026-09 (explicit user request: "use multiple methods and
         # fallbacks if you have to" so application questions don't
         # silently come back empty): a DEDICATED per-platform fetcher
@@ -7234,32 +7357,77 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
         # empty result from a single extraction method, give every job
         # that went through a DEDICATED fetcher (not already the wild
         # one) a second try via the universal multi-method fallback
-        # (_fetch_wild_questions: embedded-JSON parse + raw form-element
-        # parse, across the bare/​/apply//application URL conventions) —
-        # cheap (one more request, same politeness sleep already below),
-        # only runs when the first method found nothing, and never
-        # replaces a real result the dedicated fetcher DID find.
+        # (_fetch_wild_questions: real-apply-link discovery + embedded-
+        # JSON parse + raw form-element parse, across the bare/apply/
+        # application URL conventions) — cheap (one more request, same
+        # politeness sleep already below), only runs when the first
+        # method found nothing, and never replaces a real result the
+        # dedicated fetcher DID find.
         if not questions and fetcher is not _fetch_wild_questions:
             try:
                 questions = _fetch_wild_questions(job)
             except Exception as e:
                 log.debug(f"Generic fallback also failed for {job.get('url', '')}: {e}")
+            if questions:
+                outcome = "wild_fallback"
         if questions:
             existing = job.get("description_snippet", "") or ""
             job["description_snippet"] = existing + "\n\n" + questions
         time.sleep(random.uniform(0.2, 0.5))
-        return job
+        return job, ats, outcome
 
-    enriched = 0
+    # 2026-09 (explicit user instruction: "logs should be clean AF and
+    # numbers add up"): every submitted job lands in exactly ONE outcome
+    # bucket below, and the buckets are checked to sum back to
+    # len(to_enrich) rather than just trusted to — previously a thread
+    # that raised was silently `except: pass`-ed, quietly shrinking the
+    # total with no trace in the log at all. A per-platform hit
+    # breakdown is logged too, so "did platform X actually return
+    # anything" is answerable straight from the log instead of inferred
+    # from one bare aggregate number.
+    outcome_counts = {"dedicated": 0, "wild": 0, "wild_fallback": 0, "none": 0, "crashed": 0}
+    per_platform_hits: dict[str, int] = {}
+    crashed_platforms: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
         for future in as_completed(futures):
+            submitted_job = futures[future]
             try:
-                job = future.result()
-                if "Application Question:" in (job.get("description_snippet") or ""):
-                    enriched += 1
-            except Exception:
-                pass
+                _job, ats, outcome = future.result()
+            except Exception as e:
+                # _fetch_one already catches every expected failure mode
+                # (a fetcher raising, the wild-fallback raising) — landing
+                # here means something outside those try/excepts broke,
+                # a real bug rather than a normal per-job scrape failure.
+                # Counted explicitly instead of silently swallowed.
+                ats = submitted_job.get("source_ats") or "unknown"
+                outcome = "crashed"
+                crashed_platforms[ats] = crashed_platforms.get(ats, 0) + 1
+                log.debug(f"enrich_application_questions: unexpected failure for "
+                          f"{submitted_job.get('url', '')} ({ats}): {e}")
+            outcome_counts[outcome] += 1
+            if outcome in ("dedicated", "wild", "wild_fallback"):
+                per_platform_hits[ats] = per_platform_hits.get(ats, 0) + 1
 
-    log.info(f"Found work-auth questions for {enriched}/{len(to_enrich)} jobs")
+    total_hit = outcome_counts["dedicated"] + outcome_counts["wild"] + outcome_counts["wild_fallback"]
+    accounted_for = sum(outcome_counts.values())
+    hit_summary = ", ".join(f"{k}:{v}" for k, v in sorted(per_platform_hits.items())) or "none"
+    log.info(
+        "── Application question enrichment summary ──\n"
+        f"  {len(to_enrich)} jobs submitted -> {accounted_for} accounted for "
+        f"(dedicated fetcher: {outcome_counts['dedicated']}, wild/unsupported-platform "
+        f"fallback: {outcome_counts['wild']}, dedicated-then-wild rescue: "
+        f"{outcome_counts['wild_fallback']}, nothing found: {outcome_counts['none']}, "
+        f"unexpected failure: {outcome_counts['crashed']})\n"
+        f"  {total_hit}/{len(to_enrich)} jobs got at least one real Application Question "
+        f"line appended, by platform: {hit_summary}")
+    if accounted_for != len(to_enrich):
+        log.warning(f"enrich_application_questions: {len(to_enrich)} jobs submitted but only "
+                    f"{accounted_for} accounted for above — a job went missing inside the "
+                    f"thread pool, not just failed to find questions. This should never happen.")
+    if crashed_platforms:
+        log.warning(f"enrich_application_questions: unexpected (non-fetch) failures on "
+                    f"{outcome_counts['crashed']} job(s): "
+                    f"{', '.join(f'{k}:{v}' for k, v in sorted(crashed_platforms.items()))}")
+
     return jobs
