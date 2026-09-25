@@ -236,12 +236,6 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
         return None
 
     try:
-        if is_groq:
-            new_count = groq_coordination.bump_daily(name, 1)
-            if new_count is not None and new_count >= _GROQ_DAILY_CAP:
-                _mark_exhausted(name, f"cross-shard daily count reached {new_count}/{_GROQ_DAILY_CAP}")
-                return None
-
         interval = provider.get("min_call_interval", 0.0)
 
         for attempt in range(MAX_RETRIES):
@@ -276,6 +270,42 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                         time.sleep(interval - elapsed)
                 _last_call_times[name] = time.time()
 
+            # 2026-09 ROUND 9: enter_critical_section() (and the renew it
+            # does) only runs ONCE per _ai_call() invocation, at the very
+            # top — a single call can now legitimately take multiple paced
+            # retries in a row (up to MAX_RETRIES * interval, well over
+            # 30s), and nothing was refreshing the remote lock's
+            # claimed_at during that whole stretch. _STALE_SECONDS=60
+            # means a genuinely still-active shard whose own retries (plus
+            # real network latency on top of the pacing waits) happened to
+            # run long could look abandoned to another shard's staleness
+            # check and have the lock legitimately stolen out from under
+            # it mid-call — the exact "even in the slightest" collision
+            # this renews away. Cheap and best-effort (renew() already
+            # swallows its own failures), so doing it on every attempt
+            # instead of just once per call costs nothing when nothing's
+            # wrong and closes this gap when something is slow.
+            if is_groq:
+                groq_coordination.renew()
+                # 2026-09 ROUND 9 FIX: this used to bump the daily counter
+                # exactly ONCE per _ai_call() invocation, before the retry
+                # loop even started — but a single invocation can make up
+                # to MAX_RETRIES real HTTP requests against Groq's actual
+                # account (each 429/retry IS a real request that counts
+                # against the real 1,000/day RPD cap, whether or not it
+                # succeeded). Undercounting by up to 3x here meant the
+                # cross-shard counter could sit well under 1,000 while the
+                # ACCOUNT'S real usage had already reached it — letting
+                # every shard keep sending real requests right at the
+                # boundary instead of rerouting to OpenAI/NVIDIA before
+                # hitting it, which is its own source of unexpected 429s.
+                # Bumping once per actual attempt (here, right before it
+                # fires) keeps the tracked count honest against reality.
+                new_count = groq_coordination.bump_daily(name, 1)
+                if new_count is not None and new_count >= _GROQ_DAILY_CAP:
+                    _mark_exhausted(name, f"cross-shard daily count reached {new_count}/{_GROQ_DAILY_CAP}")
+                    return None
+
             try:
                 resp = client.chat.completions.create(
                     model=provider["model"],
@@ -288,9 +318,17 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 )
                 content = resp.choices[0].message.content
                 if content is None:
-                    log.warning(f"{name} returned null content (attempt {attempt + 1})")
                     if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_BASE_DELAY)
+                        # 2026-09 ROUND 9: no separate fixed sleep here
+                        # either, same reasoning as the rate-limit path
+                        # above — the pacing gate at the top of the next
+                        # loop iteration already enforces the provider's
+                        # real min_call_interval before this retry actually
+                        # fires, so an extra fixed sleep on top of that was
+                        # just wasted latency stacked on the real wait, not
+                        # additional safety.
+                        log.warning(f"{name} returned null content (attempt {attempt + 1}/{MAX_RETRIES}) "
+                                    f"— waiting for the next paced slot before retrying")
                         continue
                     _mark_exhausted(name, "returned null content after all retries")
                     return None
