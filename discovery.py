@@ -138,6 +138,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -3062,6 +3063,196 @@ def _cc_dns_dead_check(url: str) -> bool | None:
         return None
 
 
+# ── 2026-09: local fallback checks for 4 platforms verification.py has
+# had a proven, live-confirmed checker for all along, but that were never
+# wired into THIS file's own live pre-check at all — meaning every CC/
+# Wayback candidate slug on hireology, gem, pageup, or workday sailed
+# straight into archive_i completely unverified, no matter how obviously
+# fake. Faithful sync ports of verification.py's own
+# _verify_hireology/_verify_gem/_verify_pageup/_verify_workday (see each
+# one's docstring there for the full live evidence) — kept here only as
+# the FALLBACK path (see _via_verification below) for if verification.py
+# itself can't be imported; in normal operation these platforms are
+# checked THROUGH verification.py directly, not via these copies. ──
+
+def _cc_check_hireology(slug: str) -> bool | None:
+    try:
+        r = requests.get(f"https://api.hireology.com/v2/public/careers/{slug}",
+                          params={"page": 1, "page_size": 1}, timeout=10,
+                          headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_pageup(slug: str) -> bool | None:
+    """slug is 'portalId|source' (see discovery._url_to_slug_pageup)."""
+    parts = slug.split("|", 1)
+    if len(parts) != 2:
+        return None
+    portal_id, source = parts
+    try:
+        r = requests.get(f"https://careers.pageuppeople.com/{portal_id}/{source}/en/",
+                          timeout=10, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_gem(slug: str) -> bool | None:
+    """Checks board EXISTENCE via the jobBoardExternal GraphQL query, not
+    job count — a real-but-empty board is never mistaken for a dead one
+    (see verification.py's _verify_gem docstring for why the obvious
+    job-LIST query is unsafe here)."""
+    query = ("query JobBoardMeta($boardId: String!) { "
+             "jobBoardExternal(vanityUrlPath: $boardId) { id } }")
+    body = [{"operationName": "JobBoardMeta", "query": query, "variables": {"boardId": slug}}]
+    try:
+        r = requests.post("https://jobs.gem.com/api/public/graphql/batch", json=body,
+                           timeout=10, headers={"Content-Type": "application/json",
+                                                 "Accept": "application/json",
+                                                 "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+        return data[0]["data"]["jobBoardExternal"] is not None
+    except Exception:
+        return None
+
+
+def _cc_check_workday(slug: str) -> bool | None:
+    """slug is 'company|wdN|site_id' (see discovery._url_to_slug_workday).
+    Only Workday's own explicit 404 + errorCode "S21" counts as dead —
+    every other status (403/S22 bot-block, 502 gateway, 422, any other
+    404 shape) is left ambiguous, same decision table as
+    verification.py's _verify_workday."""
+    parts = slug.split("|")
+    if len(parts) != 3:
+        return None
+    company, wd, site_id = parts
+    wd_num = wd[2:] if wd[:2].lower() == "wd" else wd
+    base_url = f"https://{company}.wd{wd_num}.myworkdayjobs.com"
+    api_url = f"{base_url}/wday/cxs/{company}/{site_id}/jobs"
+    headers = {
+        "Accept": "application/json", "Content-Type": "application/json",
+        "User-Agent": _ROBOTS_UA, "Origin": base_url, "Referer": f"{base_url}/{site_id}",
+    }
+    body = {"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""}
+    try:
+        r = requests.post(api_url, json=body, headers=headers, timeout=10)
+    except Exception:
+        return None
+    if r.status_code == 200:
+        return True
+    if r.status_code == 404:
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data.get("errorCode") == "S21":
+            return False
+    return None
+
+
+# ── 2026-09: route the live pre-check THROUGH verification.py itself,
+# instead of hand-maintaining a second, independent copy of "is this slug
+# alive" per platform that can silently drift out of sync with it — which
+# is exactly how hireology/gem/pageup/workday (all four already
+# live-confirmed and checked in verification.py) ended up with NO
+# equivalent check here at all until just above. In normal operation,
+# every platform verification.py has a proven checker for is checked
+# THROUGH that checker (mod.ARCHIVE_II_VERIFIERS[ats_name]), so a future
+# fix or newly-added platform there is picked up here automatically, with
+# no separate discovery.py change required. The local _cc_check_*
+# functions (above and below) are kept only as the FALLBACK path, used
+# only if verification.py itself can't be imported at all — never merely
+# because one individual check came back ambiguous or dead, since those
+# are already legitimate answers, not failures.
+#
+# verification.py does `from discovery import (...)` at ITS own top
+# level, so an eager top-of-file `import verification` HERE would be a
+# circular import — whichever of the two modules happened to start
+# loading first would find the other only half-initialized partway
+# through. Deferred to first actual USE (inside a function body, never at
+# module import time) sidesteps that entirely: by the time anything calls
+# far enough into this module to reach a live-check, discovery.py is
+# already fully loaded either way, so verification.py's own import of it
+# resolves cleanly regardless of which module a given run happens to
+# import first.
+_verification_module = None
+_verification_import_failed = False
+
+
+def _get_verification_module():
+    global _verification_module, _verification_import_failed
+    if _verification_module is not None or _verification_import_failed:
+        return _verification_module
+    try:
+        _crawler_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        verification_dir = os.path.join(_crawler_root, "Verification")
+        if verification_dir not in sys.path:
+            sys.path.insert(0, verification_dir)
+        import verification as _verification_mod
+        _verification_module = _verification_mod
+    except Exception as e:
+        _verification_import_failed = True
+        log.warning(f"Could not load Verification/verification.py for the CC/Wayback live "
+                    f"pre-check ({e}) — falling back to this file's own local checks for "
+                    f"every platform this run.")
+    return _verification_module
+
+
+def _run_verification_checker(coro_fn, *args) -> bool | None:
+    """Runs one of verification.py's real async verifier coroutines to
+    completion from this file's own sync ThreadPoolExecutor worker (see
+    _drop_dead_cc_slugs) — each call gets its own short-lived aiohttp
+    session (these run at up to `max_workers` concurrently across many
+    DIFFERENT companies' hosts, not one shared endpoint, so there's no
+    pooling benefit worth the complexity of a session shared across
+    threads). Translates the result to this file's own True/False/None
+    contract: True=alive, False=confirmed dead, None=ambiguous — ANY
+    exception, including the RuntimeError verification.py's own checkers
+    deliberately raise on an ambiguous status, is never treated as dead,
+    exactly like every local _cc_check_* function's own try/except."""
+    import asyncio
+    import aiohttp
+
+    async def _run():
+        connector = aiohttp.TCPConnector(limit=4)
+        async with aiohttp.ClientSession(connector=connector,
+                                          cookie_jar=aiohttp.DummyCookieJar()) as session:
+            return await coro_fn(session, *args)
+
+    try:
+        return asyncio.run(_run())
+    except Exception:
+        return None
+
+
+def _via_verification(ats_name: str, local_fallback):
+    """Builds a _CC_LIVE_CHECK entry that checks THROUGH
+    verification.py's real ARCHIVE_II_VERIFIERS[ats_name] whenever that
+    module loaded successfully, falling back to `local_fallback` (a plain
+    slug -> bool|None function, same contract as every _cc_check_*
+    function) only when verification.py itself couldn't be imported at
+    all."""
+    def _check(slug):
+        mod = _get_verification_module()
+        if mod is not None:
+            verifier = mod.ARCHIVE_II_VERIFIERS.get(ats_name)
+            if verifier is not None:
+                return _run_verification_checker(verifier, slug)
+        return local_fallback(slug)
+    return _check
+
+
 # ── 2026-09: closes the CT-logs verification gap — these 8 platforms
 # (pinpoint, isolvedhire, flatchr, getro, jazzhr, csod, breezyhr,
 # oracle_cloud_hcm) are all in CT_LOG_SUFFIXES/CT_LOG_LIVE_RESOLVE above
@@ -3189,82 +3380,103 @@ def _cc_check_csod(slug: str) -> bool | None:
     return _cc_dns_dead_check(f"https://{tenant}.csod.com/ux/ats/careersite/{site_id}/home")
 
 
+# 2026-09: every entry below now goes THROUGH verification.py's own
+# ARCHIVE_II_VERIFIERS (via _via_verification) as the primary path — the
+# lambda/local function passed as the second argument is ONLY the
+# fallback used if verification.py itself can't be imported (see
+# _via_verification's docstring above). flatchr/getro/csod have no
+# verification.py equivalent (new research done directly in THIS file —
+# see each function's own docstring above) so they call their local
+# checker directly, unchanged.
 _CC_LIVE_CHECK = {
-    "greenhouse": lambda slug: _cc_check_status(
-        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"),
-    "lever": _cc_check_lever,
-    "ashby": lambda slug: _cc_check_status(
-        f"https://api.ashbyhq.com/posting-api/job-board/{slug}"),
-    "workable": lambda slug: _cc_check_status(
-        f"https://apply.workable.com/api/v1/widget/accounts/{slug}"),
-    "rippling": lambda slug: _cc_check_status(
-        f"https://ats.rippling.com/api/v2/board/{slug}/jobs"),
-    "bamboohr": _cc_check_bamboohr,
-    "icims": lambda slug: _cc_check_multi_host_tenant(
-        [(f"{slug}.icims.com", "/"), (f"careers-{slug}.icims.com", "/")]),
-    "teamtailor": lambda slug: _cc_check_subdomain_tenant(f"{slug}.teamtailor.com"),
-    "recruitee": lambda slug: _cc_check_subdomain_tenant(f"{slug}.recruitee.com"),
-    "softgarden": lambda slug: _cc_check_subdomain_tenant(f"{slug}.softgarden.io"),
-    "zoho": lambda slug: _cc_check_subdomain_tenant(f"{slug}.zohorecruit.com"),
-    "hrmdirect": lambda slug: _cc_check_subdomain_tenant(f"{slug}.hrmdirect.com"),
-    "personio": lambda slug: _cc_check_multi_host_tenant(
-        [(f"{slug}.jobs.personio.de", "/"), (f"{slug}.jobs.personio.com", "/")]),
-    "joincom": lambda slug: _cc_check_status(f"https://join.com/companies/{slug}"),
-    "paylocity": _cc_check_paylocity,
-    "jobvite": _cc_check_jobvite,
-    "avature": lambda slug: _cc_dns_dead_check(f"https://{slug}.avature.net/careers/SearchJobs"),
-    "eploy": lambda slug: _cc_dns_dead_check(
-        f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx"),
-    "taleo": lambda slug: _cc_dns_dead_check(f"https://{slug.split('|', 1)[0]}.taleo.net/"),
-    # 2026-09: closes the CT-logs verification gap — see the block
-    # comment above _cc_check_isolvedhire for the full context.
-    "isolvedhire": _cc_check_isolvedhire,
-    "jazzhr": _cc_check_jazzhr,
+    "greenhouse": _via_verification("greenhouse", lambda slug: _cc_check_status(
+        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs")),
+    "lever": _via_verification("lever", _cc_check_lever),
+    "ashby": _via_verification("ashby", lambda slug: _cc_check_status(
+        f"https://api.ashbyhq.com/posting-api/job-board/{slug}")),
+    "workable": _via_verification("workable", lambda slug: _cc_check_status(
+        f"https://apply.workable.com/api/v1/widget/accounts/{slug}")),
+    "rippling": _via_verification("rippling", lambda slug: _cc_check_status(
+        f"https://ats.rippling.com/api/v2/board/{slug}/jobs")),
+    "bamboohr": _via_verification("bamboohr", _cc_check_bamboohr),
+    "icims": _via_verification("icims", lambda slug: _cc_check_multi_host_tenant(
+        [(f"{slug}.icims.com", "/"), (f"careers-{slug}.icims.com", "/")])),
+    "teamtailor": _via_verification(
+        "teamtailor", lambda slug: _cc_check_subdomain_tenant(f"{slug}.teamtailor.com")),
+    "recruitee": _via_verification(
+        "recruitee", lambda slug: _cc_check_subdomain_tenant(f"{slug}.recruitee.com")),
+    "softgarden": _via_verification(
+        "softgarden", lambda slug: _cc_check_subdomain_tenant(f"{slug}.softgarden.io")),
+    "zoho": _via_verification(
+        "zoho", lambda slug: _cc_check_subdomain_tenant(f"{slug}.zohorecruit.com")),
+    "hrmdirect": _via_verification(
+        "hrmdirect", lambda slug: _cc_check_subdomain_tenant(f"{slug}.hrmdirect.com")),
+    "personio": _via_verification("personio", lambda slug: _cc_check_multi_host_tenant(
+        [(f"{slug}.jobs.personio.de", "/"), (f"{slug}.jobs.personio.com", "/")])),
+    "joincom": _via_verification(
+        "joincom", lambda slug: _cc_check_status(f"https://join.com/companies/{slug}")),
+    "paylocity": _via_verification("paylocity", _cc_check_paylocity),
+    "jobvite": _via_verification("jobvite", _cc_check_jobvite),
+    "avature": _via_verification("avature", lambda slug: _cc_dns_dead_check(
+        f"https://{slug}.avature.net/careers/SearchJobs")),
+    "eploy": _via_verification("eploy", lambda slug: _cc_dns_dead_check(
+        f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx")),
+    "taleo": _via_verification("taleo", lambda slug: _cc_dns_dead_check(
+        f"https://{slug.split('|', 1)[0]}.taleo.net/")),
+    "isolvedhire": _via_verification("isolvedhire", _cc_check_isolvedhire),
+    "jazzhr": _via_verification("jazzhr", _cc_check_jazzhr),
+    "breezyhr": _via_verification("breezyhr", _cc_check_breezyhr),
+    # 2026-09: newly wired up — verification.py already had a proven,
+    # live-confirmed checker for all three, but nothing here ever called
+    # it, so CC/Wayback candidates on these platforms reached archive_i
+    # with zero live verification. See the local _cc_check_hireology/
+    # _cc_check_pageup/_cc_check_workday functions above for the fallback
+    # path's own docstrings.
+    "hireology": _via_verification("hireology", _cc_check_hireology),
+    "pageup": _via_verification("pageup", _cc_check_pageup),
+    "workday": _via_verification("workday", _cc_check_workday),
+    # 2026-09: Gem — via verification.py's board-existence GraphQL query,
+    # not the job-list one (see _cc_check_gem's docstring for why).
+    "gem": _via_verification("gem", _cc_check_gem),
+    # No verification.py equivalent — new research done directly in this
+    # file (see each function's own docstring above).
     "flatchr": _cc_check_flatchr,
     "getro": _cc_check_getro,
-    "breezyhr": _cc_check_breezyhr,
     "csod": _cc_check_csod,
 }
-# NOT included, deliberately:
-#  - workday, smartrecruiters, oracle_cloud_hcm, jobadder, folkshr, adp,
-#    brassring — same platforms in verification.py's own
-#    _UNVERIFIABLE_ATS, for the exact same researched reasons (e.g.
-#    Workday: confirmed 2026-09 that a fake tenant subdomain resolves
-#    anyway, so there's no safe "doesn't exist" signal to check at all —
-#    verification.py never checks these either, archive_i rows on them
-#    are left completely alone, only counted). oracle_cloud_hcm
-#    specifically: CONFIRMED UNSAFE, not just unresearched — a real,
-#    empty tenant returns the exact same 200 + {"items":[],"count":0}
-#    shape a nonexistent one plausibly would, so no live-check could
-#    ever safely tell the two apart (same reasoning verification.py
-#    documents for it). adp: this session found a promising signal (the
-#    real public job-requisitions API 404s for a fabricated cid/ccId
-#    pair and 200s + real JSON for a real one — see search evidence in
-#    this session's transcript) but could NOT confirm live against a
-#    real tenant with zero CURRENT postings, so the oracle_cloud_hcm-
-#    style empty-vs-dead trap isn't ruled out yet; left out of
-#    _CC_LIVE_CHECK on purpose until that's confirmed, rather than
-#    trusting an unconfirmed signal for a real deletion path.
-#  - pinpoint — CONFIRMED (verification.py's own research, current
-#    2026-09) that every live-check attempt made against pinpointhq.com,
-#    real tenant or fake, was refused by that platform's own
-#    tenant-level robots.txt before a response could even be inspected;
-#    no live-confirmed dead/alive signal exists as a result. A real
-#    candidate for future work via tooling that isn't robots-gated the
-#    way this research pass's fetch tooling was — not being skipped for
-#    lack of trying.
-#  - pageup, jobylon — pageup is Class A (single shared host,
-#    careers.pageuppeople.com, tenant identified by path not subdomain —
-#    see _cc_check_paylocity-style path-based signal verification.py
-#    already proved safe for it via _verify_pageup, not yet ported here
-#    since pageup isn't a CT-log platform); jobylon has no cheap
-#    per-company signal at all (see verification.py's own comment on it
-#    — the real scraper needs a full sitemap-wide crawl per row, not a
-#    single cheap request), structurally hard rather than unresearched.
-#    verification.py yet (no verifier AND no _UNVERIFIABLE_ATS entry —
-#    genuinely unresearched, not confirmed either way). Per this
-#    project's zero-guessed-claims rule, they stay unchecked here too
-#    until that research happens — same list to extend in both files.
+# NOT included, deliberately — genuinely no safe "doesn't exist" signal
+# exists for these (same set as verification.py's own _UNVERIFIABLE_ATS,
+# for the exact same researched reasons — see that dict's comments there
+# for the full evidence on each):
+#  - smartrecruiters — the one documented safe check needs
+#    api.smartrecruiters.com, which robots.txt disallows outright.
+#  - oracle_cloud_hcm — CONFIRMED UNSAFE: a real, empty tenant returns
+#    the exact same 200 + {"items":[],"count":0} shape a nonexistent one
+#    plausibly would.
+#  - jobadder, folkshr — no confirmed-safe signal found; jobadder's own
+#    "Nothing here I'm afraid..." message could plausibly be the same one
+#    a real, empty board shows.
+#  - adp — a promising signal exists (the real job-requisitions API 404s
+#    for a fabricated id and 200s for a real one) but was never confirmed
+#    against a real tenant with zero CURRENT postings, so the
+#    oracle_cloud_hcm-style empty-vs-dead trap isn't ruled out yet.
+#  - brassring — has a working scraper, just not yet researched for a
+#    dead-signal (same unresearched, not unverifiable, class as pinpoint
+#    below).
+#  - pinpoint — CONFIRMED that every live-check attempt against
+#    pinpointhq.com, real tenant or fake, was refused by that platform's
+#    own tenant-level robots.txt before a response could even be
+#    inspected.
+#  - successfactors — JS-rendered, no HTTP scraper at all.
+#  - jobylon — no cheap per-company signal exists at all; the real
+#    scraper needs a full sitemap-wide crawl per row, not a single
+#    request.
+# Per this project's zero-guessed-claims rule, all of the above stay
+# unchecked here (as in verification.py) until real live research
+# confirms a safe signal — the same list to extend in both files, and
+# now the ONLY list that needs extending, since every platform that DOES
+# have a verification.py checker is picked up automatically via
+# _via_verification above.
 
 
 _DROP_DEAD_PROGRESS_EVERY = 100  # see _drop_dead_cc_slugs's log line
