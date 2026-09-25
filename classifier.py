@@ -244,18 +244,38 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
 
         interval = provider.get("min_call_interval", 0.0)
 
-        # 2026-09 ROUND 8: the whole check-elapsed / sleep / record sequence
-        # happens under one lock per provider name now — see the ROUND 8
-        # FIX note by _pacing_locks above for why (real paired-429 evidence
-        # of two concurrent batches both racing this same check).
-        with _pacing_lock_for(name):
-            if interval > 0:
-                elapsed = time.time() - _last_call_times.get(name, 0.0)
-                if elapsed < interval:
-                    time.sleep(interval - elapsed)
-            _last_call_times[name] = time.time()
-
         for attempt in range(MAX_RETRIES):
+            # 2026-09 ROUND 9 FIX (real production evidence: a real crawl's
+            # log showed groq-o firing "attempt 1" retries only 5-7 SECONDS
+            # apart, repeatedly, even though min_call_interval=12s and the
+            # cross-shard lock confirmed only one shard was ever calling
+            # Groq at a time). Root cause: this pacing gate used to run
+            # ONCE, before the retry loop started — so it correctly spaced
+            # out the FIRST attempt of each _ai_call() invocation, but once
+            # inside the loop, a 429 on attempt 1 slept only
+            # RETRY_BASE_DELAY*(attempt+1) (5s, then 10s — see below) and
+            # retried WITHOUT ever re-checking the provider's own minimum
+            # spacing. Two compounding effects: (1) that retry itself fired
+            # sooner than the account's real per-minute quota allows,
+            # guaranteeing another 429; and (2) because _last_call_times[name]
+            # was only ever stamped ONCE per _ai_call() call (right before
+            # attempt 1), a DIFFERENT concurrent call to the same provider
+            # would see that stale timestamp, correctly conclude its own
+            # 12s had elapsed, and fire for real WHILE this call's retry was
+            # also in flight — doubling up on requests inside the same
+            # rate-limit window. Moving the pacing gate INSIDE the loop (run
+            # before every real HTTP attempt, not just the first) fixes
+            # both: every actual network call — fresh or retry — always
+            # waits out the full interval since the most recent attempt to
+            # this provider by ANY thread, and _last_call_times is kept
+            # current for every attempt, not just the first.
+            with _pacing_lock_for(name):
+                if interval > 0:
+                    elapsed = time.time() - _last_call_times.get(name, 0.0)
+                    if elapsed < interval:
+                        time.sleep(interval - elapsed)
+                _last_call_times[name] = time.time()
+
             try:
                 resp = client.chat.completions.create(
                     model=provider["model"],
@@ -309,9 +329,17 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                     _mark_exhausted(name, "daily quota reached")
                     return None
                 if is_rate_limit and attempt < MAX_RETRIES - 1:
-                    delay = RETRY_BASE_DELAY * (attempt + 1)
-                    log.warning(f"{name} rate limit hit, retrying in {delay}s (attempt {attempt + 1})")
-                    time.sleep(delay)
+                    # 2026-09 ROUND 9: no separate fixed backoff sleep here
+                    # any more — the pacing gate at the top of the next loop
+                    # iteration already guarantees this retry waits out the
+                    # provider's own min_call_interval since the most recent
+                    # attempt (by ANY thread), which is both the correct
+                    # wait AND enough on its own; a redundant extra sleep
+                    # here on top of that (the old behavior) was strictly
+                    # wasted latency, never extra safety. See the pacing
+                    # gate's own comment above for the full before/after.
+                    log.warning(f"{name} rate limit hit (attempt {attempt + 1}/{MAX_RETRIES}) — "
+                                f"waiting for the next paced slot before retrying")
                     continue
                 # 2026-09 FIX (real production evidence, not hypothetical):
                 # investigated after the pipeline owner reported Groq "failing
@@ -1923,8 +1951,16 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
 
     batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
+        # 2026-09 (explicit user fix — real production log evidence): this
+        # used to say "...keeping as uncertain", which is simply false in
+        # the common case — ai_classify_locations' cascade (see its own
+        # docstring) reroutes this exact batch to another untried provider
+        # moments later, and only writes a final 'uncertain' if EVERY
+        # provider has genuinely been tried and failed. Matches
+        # _classify_role_batch's already-correct wording for the identical
+        # situation on the role side.
         log.warning(f"AI location classification failed ({provider['name']}) "
-                     f"for batch of {len(batch_jobs)}, keeping as uncertain")
+                     f"for batch of {len(batch_jobs)}, rerouting to another provider")
         return batch_results, False
 
     for line in text.splitlines():
