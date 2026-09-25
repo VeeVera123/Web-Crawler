@@ -198,6 +198,35 @@ def _mark_exhausted(name: str, reason: str) -> None:
             groq_coordination.mark_exhausted_shared(name, reason)
 
 
+def _provider_is_exhausted(name: str, *, sync_shared: bool = True) -> bool:
+    """Return whether a provider must receive NO new traffic in this run.
+
+    This is the single circuit-breaker query used by both scheduling and the
+    final request guard.  Local exhaustion is checked first because it is
+    authoritative for this process and costs no network round trip.  Groq
+    exhaustion is then checked in the shared Supabase breaker so a different
+    shard's decision becomes visible BEFORE work is assigned to this provider.
+    """
+    with _exhausted_providers_lock:
+        if name in _exhausted_providers_today:
+            return True
+
+    if sync_shared and name in _GROQ_NAMES and groq_coordination.is_exhausted_shared(name):
+        _mark_exhausted(name, "cross-shard: another shard marked this account exhausted today")
+        return True
+    return False
+
+
+def _available_providers(providers: list[dict]) -> list[dict]:
+    """Return only providers that are currently allowed to receive new work.
+
+    IMPORTANT: this runs immediately before every scheduling/assignment pass.
+    `_ai_call()` still performs its own final check because a provider can die
+    after scheduling but before the worker actually reaches the network.
+    """
+    return [p for p in providers if not _provider_is_exhausted(p["name"])]
+
+
 def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
     Returns response text or None on failure.
@@ -215,27 +244,27 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
     shard count anymore.
     """
     name = provider["name"]
-    if name in _exhausted_providers_today:
-        # Already confirmed out for this run (see _mark_exhausted) — skip
-        # the wasted network call and the repeat log line entirely.
-        # Callers see this exactly like any other failed call (None), so
-        # the existing cross-provider failover path still applies.
+    is_groq = name in _GROQ_NAMES
+
+    # FIRST GUARD: never start work for a provider already known dead.
+    if _provider_is_exhausted(name):
         return None
 
-    is_groq = name in _GROQ_NAMES
-    if is_groq and groq_coordination.is_exhausted_shared(name):
-        # 2026-09 ROUND 8: another shard already discovered this account is
-        # dead for today — cache it locally too so THIS process never has
-        # to make the remote check again for the rest of its run (matches
-        # the local-set fast path at the top of this function).
-        _mark_exhausted(name, "cross-shard: another shard marked this account exhausted today")
-        return None
     if is_groq and not groq_coordination.enter_critical_section():
         log.debug(f"{name}: couldn't claim the cross-shard Groq slot in time — "
                   f"skipping this call (existing failover will retry it on another provider)")
         return None
 
     try:
+        # SECOND GUARD: this closes the critical race that the old code had:
+        # worker A checked "not exhausted", then waited for the Groq lock;
+        # worker B discovered the quota exhaustion and marked it shared; A
+        # subsequently acquired the lock and fired anyway.  The shared check
+        # MUST happen again after the lock is held and immediately before any
+        # pacing/counter/network work.
+        if _provider_is_exhausted(name):
+            return None
+
         interval = provider.get("min_call_interval", 0.0)
 
         for attempt in range(MAX_RETRIES):
@@ -667,7 +696,12 @@ def _classify_role_batch(batch: list[str], provider: dict, client) -> tuple[dict
 
     results = {}
     if text is None:
-        log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, rerouting to another provider")
+        if _provider_is_exhausted(provider["name"]):
+            log.debug(f"Role batch for {provider['name']} abandoned after provider was exhausted; "
+                      f"the batch is being rerouted")
+        else:
+            log.warning(f"AI role classification failed ({provider['name']}) for batch of {len(batch)}, "
+                        f"rerouting to another provider")
         for t in batch:
             results[t] = False
         return results, False
@@ -749,11 +783,11 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
     if not titles:
         return {}
 
-    providers = ROLE_PROVIDERS
-    if not providers:
+    configured_providers = list(ROLE_PROVIDERS)
+    if not configured_providers:
         # Legacy single-provider fallback
         from config import LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
-        providers = [{
+        configured_providers = [{
             "name": LLM_PROVIDER,
             "api_key": LLM_API_KEY,
             "model": LLM_MODEL,
@@ -762,7 +796,16 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             "min_call_interval": 12.5 if LLM_PROVIDER == "cerebras" else 0.0,
         }]
 
-    # ── Split titles round-robin across providers ──
+    # Circuit-breaker filtering happens BEFORE any batch is assigned.
+    # A provider that another shard has already killed never enters this
+    # round's work queue in the first place.
+    providers = _available_providers(configured_providers)
+    if not providers:
+        log.warning("Role AI: all configured providers are currently unavailable; "
+                    "no AI requests will be scheduled for this round")
+        return {t: False for t in titles}
+
+    # ── Split titles round-robin across live providers ──
     provider_titles = {p["name"]: [] for p in providers}
     for i, title in enumerate(titles):
         p = providers[i % len(providers)]
@@ -906,11 +949,11 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
         # shared counter so load spreads across the survivors.
         assignments: dict[str, dict] = {}
         k = 0
+        live_providers = _available_providers(providers)
         for title in failing:
             candidates = [
-                p for p in providers
+                p for p in live_providers
                 if p["name"] not in tried[title]
-                and p["name"] not in _exhausted_providers_today
             ]
             if not candidates:
                 # Genuinely exhausted for THIS title — every provider has
@@ -942,7 +985,7 @@ def ai_classify_roles(titles: list[str]) -> dict[str, bool]:
             for sub_batch in _build_role_batches(p_titles, max_chars=p["max_batch_chars"]):
                 retry_work.append((p, client, sub_batch))
 
-        log.warning(
+        log.info(
             f"Role classification cascade round {_cascade_round}: "
             f"retrying {sum(len(v) for v in by_provider.values())} still-"
             f"failing title(s) across {len(by_provider)} provider(s) "
@@ -1989,6 +2032,15 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
 
     batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
+        # 2026-09 final circuit-breaker logging fix: once a provider is
+        # known dead, this is a reroute event, not a new AI failure. Do not
+        # emit one warning per already-doomed batch.
+        if _provider_is_exhausted(provider["name"]):
+            log.debug(f"Location batch for {provider['name']} abandoned after provider was exhausted; "
+                      f"the batch is being rerouted")
+        else:
+            log.warning(f"AI location classification failed ({provider['name']}) "
+                        f"for batch of {len(batch_jobs)}, rerouting to another provider")
         # 2026-09 (explicit user fix — real production log evidence): this
         # used to say "...keeping as uncertain", which is simply false in
         # the common case — ai_classify_locations' cascade (see its own
@@ -1997,8 +2049,6 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
         # provider has genuinely been tried and failed. Matches
         # _classify_role_batch's already-correct wording for the identical
         # situation on the role side.
-        log.warning(f"AI location classification failed ({provider['name']}) "
-                     f"for batch of {len(batch_jobs)}, rerouting to another provider")
         return batch_results, False
 
     for line in text.splitlines():
@@ -2377,7 +2427,12 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     if not jobs:
         return []
 
-    providers = LOCATION_PROVIDERS
+    configured_providers = list(LOCATION_PROVIDERS)
+    providers = _available_providers(configured_providers)
+    if not providers:
+        log.warning("Location AI: all configured providers are currently unavailable; "
+                    "no AI requests will be scheduled for this round")
+        return [("uncertain", None)] * len(jobs)
 
     # 2026-09: surface missing providers up front. LOCATION_PROVIDERS
     # silently drops any provider whose API key env var isn't set (see
@@ -2586,11 +2641,11 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         # spreads across the survivors instead of piling onto one.
         assignments: dict[int, dict] = {}
         k = 0
+        live_providers = _available_providers(providers)
         for orig_idx, job in failing:
             candidates = [
-                p for p in providers
+                p for p in live_providers
                 if p["name"] not in tried[orig_idx]
-                and p["name"] not in _exhausted_providers_today
             ]
             if not candidates:
                 # Genuinely exhausted for THIS job — every provider has
@@ -2626,7 +2681,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
                 sub_orig_indices = assigned_indices[start_idx:start_idx + len(sub_batch)]
                 retry_work.append((p, client, sub_orig_indices, sub_batch))
 
-        log.warning(
+        log.info(
             f"Location classification cascade round {_cascade_round}: "
             f"retrying {sum(len(v) for v in by_provider.values())} still-"
             f"failing job(s) across {len(by_provider)} provider(s) "
