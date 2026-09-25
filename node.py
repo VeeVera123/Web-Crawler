@@ -299,6 +299,18 @@ def _looks_like_single_job_posting_path(path: str) -> bool:
 # generic CTA crowding out a clearly job-shaped link.
 _MAX_CAREER_LINK_FOLLOW_PER_TIER = 3
 
+# 2026-09: how many hops deep _follow_career_listing_links is now allowed
+# to chase a dead-end chain, and the hard ceiling on total extra fetches
+# across ALL of those hops combined (raised with caution, not removed —
+# see that function's own docstring for the real-world shape this closes:
+# a stub "/careers" page whose "Meet Our Team" link ALSO has no ATS hit,
+# but ITSELF links to the real "View Open Roles" board two clicks away
+# from the original page). Depth alone isn't a cost bound on its own
+# (each hop can fan out to _MAX_CAREER_LINK_FOLLOW_PER_TIER more pages),
+# so the shared total-fetch budget is the real safety valve here.
+_MAX_CAREER_LINK_FOLLOW_DEPTH = 2
+_MAX_CAREER_LINK_TOTAL_FOLLOWS = 5
+
 
 def _extract_job_listing_link_candidates(html: str, base_url: str) -> list[tuple[str, int]]:
     """Finds outbound links on an already-fetched page that look like
@@ -1829,21 +1841,39 @@ async def _gather_page_candidates(detect_fn, pages: list[tuple[str, str] | None]
 
 async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession,
                                         candidates: list[dict], already_fetched: set[str],
-                                        stats: dict) -> list[dict]:
-    """One bounded extra hop past landing/stub pages that had NO ATS hit,
-    looking for the actual job-listings page behind a button like
+                                        stats: dict, _depth: int = 1,
+                                        _budget: list | None = None) -> list[dict]:
+    """A bounded MULTI-hop chase past landing/stub pages that had NO ATS
+    hit, looking for the actual job-listings page behind a button like
     "Explore Roles" / "View All Jobs" — the exact gap that let a real
     company (a /about/careers page linking out to a UKG board on a
     completely different domain) get recorded with no jobs at all
     despite genuinely having open roles, confirmed 2026-09.
 
-    Pools candidate links across EVERY page in `candidates` (not per
-    page) and takes the top-scoring _MAX_CAREER_LINK_FOLLOW_PER_TIER
-    overall, so the added cost stays predictable regardless of how many
-    pages this tier fetched. Cross-domain links are followed exactly as
-    readily as same-domain ones — the whole point is reaching content at
-    a location this project doesn't control (an in-house board on a
-    different subdomain, or hosted by a vendor entirely).
+    2026-09: extended from a single hop to up to _MAX_CAREER_LINK_
+    FOLLOW_DEPTH hops — real career-page chains aren't always one click
+    from the real board. A common real-world shape this closes: a
+    generic "/careers" landing page links to "Meet Our Team" (itself
+    still just a stub, no ATS hit), which in turn links to "View Open
+    Roles" — the real board, two clicks from the original page. The
+    previous version stopped chasing after exactly one hop and would
+    have missed this entirely. Depth alone isn't a cost bound (each hop
+    can still fan out to _MAX_CAREER_LINK_FOLLOW_PER_TIER pages), so
+    `_budget` — a single-item list, threaded through the recursion since
+    a plain int can't be mutated by a closure — caps the TOTAL extra
+    fetches across every hop of one chain combined at
+    _MAX_CAREER_LINK_TOTAL_FOLLOWS; the chase stops the moment either
+    bound is hit, whichever comes first. `_depth`/`_budget` are internal
+    recursion state — every external call site leaves them at their
+    defaults.
+
+    Pools candidate links across EVERY page passed in at a given hop (not
+    per page) and takes the top-scoring candidates up to whatever's left
+    of the shared budget, so the added cost stays predictable regardless
+    of how many pages that hop fetched. Cross-domain links are followed
+    exactly as readily as same-domain ones — the whole point is reaching
+    content at a location this project doesn't control (an in-house
+    board on a different subdomain, or hosted by a vendor entirely).
 
     Each followed page gets:
       (1) a direct URL_TO_SLUG check against the FINAL, redirect-resolved
@@ -1858,13 +1888,16 @@ async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession
           _best_inhouse_candidate() contender.
 
     `already_fetched` is shared and mutated across every tier of a single
-    crawl_one call — never re-fetches a URL this domain's crawl has
-    already tried anywhere (homepage, a CAREER_PATHS guess, a sitemap
-    page, or an earlier follow hop), and a followed link never gets
-    followed a second time from a later tier either. Best-effort
-    throughout: a dead link, a timeout, or a page that turns out to be
-    nothing just yields one fewer candidate, never an error — matching
-    every other fetch in this file."""
+    crawl_one call (and across every hop of this chase) — never re-fetches
+    a URL this domain's crawl has already tried anywhere (homepage, a
+    CAREER_PATHS guess, a sitemap page, or an earlier follow hop), and a
+    followed link never gets followed a second time from a later tier or
+    a later hop either. Best-effort throughout: a dead link, a timeout,
+    or a page that turns out to be nothing just yields one fewer
+    candidate, never an error — matching every other fetch in this file."""
+    if _budget is None:
+        _budget = [_MAX_CAREER_LINK_TOTAL_FOLLOWS]
+
     link_pool: dict[str, int] = {}
     for c in candidates:
         if c["hits"]:
@@ -1874,13 +1907,17 @@ async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession
                 continue
             if score > link_pool.get(url, -1):
                 link_pool[url] = score
-    ranked = sorted(link_pool.items(), key=lambda kv: -kv[1])[:_MAX_CAREER_LINK_FOLLOW_PER_TIER]
+    take = max(0, min(_MAX_CAREER_LINK_FOLLOW_PER_TIER, _budget[0]))
+    ranked = sorted(link_pool.items(), key=lambda kv: -kv[1])[:take]
 
     results = []
     for url, _score in ranked:
+        if _budget[0] <= 0:
+            break
         already_fetched.add(url)
         page = await _fetch_page(session, url, stats)
         stats["career_link_follow_attempted"] += 1
+        _budget[0] -= 1
         if not page:
             continue
         resolved_url, page_html = page
@@ -1892,6 +1929,17 @@ async def _follow_career_listing_links(detect_fn, session: aiohttp.ClientSession
             stats["career_link_follow_ats_hit"] += 1
         results.append({"url": resolved_url, "html": page_html, "hits": merged_hits,
                          "text_len": page_text_len, "has_hiring_vocab": page_hiring_vocab})
+
+    # Chase one hop deeper past any page THIS hop followed that still came
+    # up empty — bounded by both the depth cap and whatever's left of the
+    # shared fetch budget, whichever runs out first.
+    if results and _depth < _MAX_CAREER_LINK_FOLLOW_DEPTH and _budget[0] > 0:
+        still_stuck = [c for c in results if not c["hits"]]
+        if still_stuck:
+            deeper = await _follow_career_listing_links(
+                detect_fn, session, still_stuck, already_fetched, stats,
+                _depth=_depth + 1, _budget=_budget)
+            results += deeper
     return results
 
 
