@@ -578,6 +578,7 @@ SUPPORTED_ATS = {
 _OPENPOSTINGS_ATS_MAP_RAW = {
     "greenhouse": "greenhouse",
     "lever": "lever",
+    "lever_eu": "lever",
     "ashby": "ashby",
     "ashbyhq": "ashby",           # OpenPostings uses "ashbyhq"
     "bamboohr": "bamboohr",
@@ -6229,6 +6230,59 @@ def _normalize_github_ats(value: object, url: str = "") -> str | None:
     return None
 
 
+def _github_slug_from_url(ats: str, url: str) -> str:
+    """Extract a board slug from a registry URL, including API-style URLs."""
+    raw = str(url or '').strip()
+    if not raw:
+        return ''
+    m = re.search(r"\((https?://[^)]+)\)", raw)
+    if m:
+        raw = m.group(1)
+    host = (urlparse(raw).hostname or '').lower()
+
+    # job-radar uses canonical API URLs for several ATSs. Handle these first
+    # because some older URL_TO_SLUG converters intentionally support only
+    # public board URLs and can otherwise return a path segment such as v0.
+    direct_patterns = {
+        'ashby': r'^https?://api\.ashbyhq\.com/posting-api/job-board/([^/?#]+)',
+        'greenhouse': r'^https?://(?:www\.)?boards-api\.greenhouse\.io/v1/boards/([^/?#]+)',
+        'lever': r'^https?://(?:www\.)?api(?:\.eu)?\.lever\.co/v0/postings/([^/?#]+)',
+        'jobvite': r'^https?://jobs\.jobvite\.com/([^/?#]+)/jobs',
+    }
+    pattern = direct_patterns.get(ats)
+    if pattern:
+        m = re.search(pattern, raw, re.I)
+        if m:
+            return m.group(1)
+
+    try:
+        if ats in URL_TO_SLUG:
+            value = URL_TO_SLUG[ats](raw)
+            if value:
+                value = str(value).strip()
+                if value and value.lower() not in {'v0', 'v1', 'jobs', 'postings'}:
+                    return value
+    except Exception:
+        pass
+
+    patterns = {
+        'greenhouse': (r'^https?://(?:www\.)?boards\.greenhouse\.io/(?:v1/boards/)?([^/?#]+)',),
+        'lever': (r'^https?://(?:www\.)?jobs\.lever\.co/([^/?#]+)',),
+        'smartrecruiters': (r'^https?://(?:www\.)?jobs\.smartrecruiters\.com/([^/?#]+)',),
+        'workable': (r'^https?://(?:[^/]+\.)?workable\.com/([^/?#]+)',),
+        'recruitee': (r'^https?://([^./]+)\.recruitee\.com',),
+        'teamtailor': (r'^https?://([^./]+)\.teamtailor\.com',),
+        'personio': (r'^https?://([^./]+)\.jobs\.personio\.com',),
+        'breezyhr': (r'^https?://([^./]+)\.breezy\.hr',),
+        'jazzhr': (r'^https?://(?:www\.)?jobs\.jazzhr\.com/([^/?#]+)',),
+    }
+    for pattern in patterns.get(ats, ()):
+        m = re.search(pattern, raw, re.I)
+        if m:
+            return m.group(1)
+    return ''
+
+
 def _github_registry_fetch(reg: dict) -> object | None:
     """Fetch one explicitly configured GitHub registry file via jsDelivr."""
     repo, branch = reg["repo"], reg["branch"]
@@ -6246,15 +6300,59 @@ def _github_registry_fetch(reg: dict) -> object | None:
 
 
 def _iter_generic_github_json_entries(data: object) -> list[dict]:
-    """Flatten common source-registry JSON shapes without guessing fields."""
-    if isinstance(data, list):
-        return [e for e in data if isinstance(e, dict)]
-    if isinstance(data, dict):
+    """Flatten common source-registry JSON shapes, including ATS-keyed maps.
+
+    Some large registries are arrays of records; others are wrapped under
+    ``sources``/``companies``; and some use the ATS name itself as the key,
+    e.g. ``{"greenhouse": [{...}], "lever": [{...}]}``.  Preserve that
+    parent key as ``platform`` so the downstream normalizer can use it.
+    """
+    out: list[dict] = []
+
+    def walk(value: object, inherited_platform: str | None = None) -> None:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    row = dict(item)
+                    if inherited_platform and not any(
+                        row.get(k) for k in ("platform", "ats", "ats_system", "type")
+                    ):
+                        row["platform"] = inherited_platform
+                    out.append(row)
+                elif isinstance(item, (list, dict)):
+                    walk(item, inherited_platform)
+            return
+
+        if not isinstance(value, dict):
+            return
+
+        # Standard wrappers.
         for key in ("sources", "companies", "boards", "data", "entries"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return [e for e in value if isinstance(e, dict)]
-    return []
+            if key in value and isinstance(value[key], (list, dict)):
+                walk(value[key], inherited_platform)
+                return
+
+        # ATS-keyed registry maps: {"greenhouse": [...], "lever": [...]}
+        # Only treat keys that we can positively normalize as ATS names.
+        recognized = False
+        for key, child in value.items():
+            if _normalize_github_ats(key):
+                recognized = True
+                if isinstance(child, list):
+                    walk(child, str(key))
+                elif isinstance(child, dict):
+                    row = dict(child)
+                    if not any(row.get(k) for k in ("platform", "ats", "ats_system", "type")):
+                        row["platform"] = str(key)
+                    out.append(row)
+        if recognized:
+            return
+
+        # A single record.
+        out.append(dict(value))
+
+    walk(data)
+    return out
 
 
 def _parse_generic_github_json(text: str, repo: str) -> dict[str, dict[str, str]]:
@@ -6269,13 +6367,28 @@ def _parse_generic_github_json(text: str, repo: str) -> dict[str, dict[str, str]
         status = str(e.get("status") or "").strip().lower()
         if status in {"dead", "inactive", "disabled", "removed", "false", "0"} or e.get("enabled") is False:
             continue
-        token = e.get("token") or e.get("slug") or e.get("company_slug")
-        url = e.get("url") or e.get("source_url") or e.get("apply_host") or ""
+        token = e.get("token") or e.get("slug") or e.get("company_slug") or e.get("board_slug")
+        url = e.get("url") or e.get("source_url") or e.get("apply_url") or e.get("apply_host") or ""
+        url = str(url).strip()
+
+        # job-radar's canonical schema is {company, url, platform, ...};
+        # unlike several other registries it does NOT store a separate slug.
+        # Derive it with this project's existing URL_TO_SLUG converters.
         ats = _normalize_github_ats(platform, url)
-        if not ats or not token:
+        if not ats:
             continue
-        # This generic path only handles simple token-shaped boards. Special
-        # compound formats remain owned by the openroles parser above.
+        if not token and url and ats in URL_TO_SLUG:
+            # Some registries store Markdown links as the URL value.
+            m = re.search(r"\\((https?://[^)]+)\\)", url)
+            if m:
+                url = m.group(1)
+            try:
+                token = _github_slug_from_url(ats, url)
+            except Exception:
+                token = ""
+        if not token:
+            continue
+        # Handles both explicit slug/token fields and URL-derived slugs.
         token = str(token).strip()
         if not token or token.lower() in SKIP_SLUGS or not _looks_like_real_slug(token):
             continue
