@@ -55,9 +55,8 @@ Sources:
      docstring for the full explanation of how this reuses the Y
      Combinator resolver rather than being a separate pipeline.)
   11. GitHub repo registries (--source github; 2026-09, new — pre-built ATS
-     slug registries from known public repos, e.g. datascry/openroles' data/tenants/*.json, maccydee/job-radar's
-     sources/sources.json, ethancha0/ats-scraper's data/companies.csv,
-     and elliottdehn/open-jobs' slugs.json, pulled via jsDelivr's CDN mirror, no GitHub
+     slug registries from known public repos, e.g. datascry/openroles'
+     data/tenants/*.json, pulled via jsDelivr's CDN mirror, no GitHub
      API/auth needed. See GITHUB_REGISTRY_REPOS and
      fetch_github_registries_slugs docstring — including the research
      trail for why this is a manually-curated repo list, not a live
@@ -134,7 +133,6 @@ Usage:
 """
 
 import argparse
-import csv
 import json
 import logging
 import os
@@ -5917,14 +5915,17 @@ def fetch_httparchive_slugs(limit_per_tech: int = 200_000, months: int = 24,
 # own descriptions, not assumed). Add more entries here as they're found;
 # the fetch/parse logic below is generic per-repo, not hardcoded to this one.
 GITHUB_REGISTRY_REPOS = [
-    {"repo": "datascry/openroles", "branch": "main", "path_prefix": "data/tenants/",
-     "kind": "openroles"},
+    # datascry/openroles: one JSON registry file per ATS under data/tenants/.
+    {"repo": "datascry/openroles", "branch": "main", "path_prefix": "data/tenants/", "format": "json_dir"},
+    # maccydee/job-radar: a single JSON source registry. Entries use the
+    # job-radar schema (platform/token/company), so they are normalized below.
     {"repo": "maccydee/job-radar", "branch": "main",
-     "path": "sources/sources.json", "kind": "job_radar_sources"},
+     "path": "sources/sources.json", "format": "json_file"},
+    # ethancha0/ats-scraper: a single CSV company inventory. The adapter
+    # accepts the repo's current headers and also infers ATS from a board URL
+    # when an explicit ATS column is absent.
     {"repo": "ethancha0/ats-scraper", "branch": "main",
-     "path": "data/companies.csv", "kind": "ats_scraper_companies"},
-    {"repo": "elliottdehn/open-jobs", "branch": "main",
-     "path": "slugs.json", "kind": "open_jobs_slugs"},
+     "path": "data/companies.csv", "format": "csv_file"},
 ]
 
 # openroles filename (their "ats" field) -> our SUPPORTED_ATS key. Every
@@ -6162,16 +6163,12 @@ def _resolve_csod_career_site_id(portal_slug: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _github_registry_get_json(repo: str, branch: str, path: str):
-    """Fetch one known public GitHub file through jsDelivr."""
-    raw_url = f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path.lstrip('/')}"
-    r = requests.get(raw_url, timeout=90)
-    r.raise_for_status()
-    return r.json()
-
-
 def _github_registry_list_files(repo: str, branch: str, path_prefix: str) -> list[str]:
-    """List every JSON file under path_prefix via jsDelivr's package API."""
+    """List every file path under path_prefix in repo@branch via jsDelivr's
+    package API (data.jsdelivr.com) — no GitHub API call, no auth, no
+    robots block (confirmed live this session; GitHub's own code-search API
+    403s unauthenticated). Returns [] on any failure — logged, not raised,
+    same as every other source's per-repo/per-file error handling below."""
     url = f"https://data.jsdelivr.com/v1/packages/gh/{repo}@{branch}?structure=flat"
     try:
         r = requests.get(url, timeout=30)
@@ -6182,307 +6179,555 @@ def _github_registry_list_files(repo: str, branch: str, path_prefix: str) -> lis
         return []
     files = data.get("files") or []
     return [f["name"].lstrip("/") for f in files
-            if isinstance(f, dict)
-            and f.get("name", "").lstrip("/").startswith(path_prefix)
+            if isinstance(f, dict) and f.get("name", "").lstrip("/").startswith(path_prefix)
             and f["name"].endswith(".json")]
 
 
-def _github_registry_add_url(
-    slugs_by_ats: dict[str, dict[str, str]],
-    url: str,
-    company_name: str = "",
-    hinted_ats: str = "",
-) -> bool:
-    """Resolve a source URL with our own URL_TO_SLUG converters."""
-    url = (url or "").strip()
-    if not url:
-        return False
-    candidates = []
-    hinted = (hinted_ats or "").strip().lower()
-    if hinted in URL_TO_SLUG:
-        candidates.append(hinted)
-    candidates.extend(a for a in URL_TO_SLUG if a not in candidates)
-    for ats in candidates:
-        try:
-            slug = URL_TO_SLUG[ats](url)
-        except Exception:
-            slug = None
-        if not slug or ats not in SUPPORTED_ATS:
+_GITHUB_GENERIC_ATS_ALIASES = {
+    "ashby": "ashby", "ashbyhq": "ashby", "bamboohr": "bamboohr",
+    "breezy": "breezyhr", "breezyhr": "breezyhr", "greenhouse": "greenhouse",
+    "icims": "icims", "jazzhr": "jazzhr", "jobvite": "jobvite", "lever": "lever",
+    "pageup": "pageup", "paycom": "paycom", "paycomonline": "paycom",
+    "personio": "personio", "pinpoint": "pinpoint", "pinpointhq": "pinpoint",
+    "recruitee": "recruitee", "rippling": "rippling", "smartrecruiters": "smartrecruiters",
+    "taleo": "taleo", "teamtailor": "teamtailor", "workable": "workable",
+    "workday": "workday", "zohorecruit": "zoho", "zoho": "zoho",
+    "oracle": "oracle_cloud_hcm", "oraclecloud": "oracle_cloud_hcm",
+    "oracle_cloud_hcm": "oracle_cloud_hcm", "hrmdirect": "hrmdirect",
+    "clearcompany": "hrmdirect", "hireology": "hireology", "isolvedhire": "isolvedhire",
+    "gem": "gem", "avature": "avature", "eploy": "eploy", "jobadder": "jobadder",
+    "brassring": "brassring", "folkshr": "folkshr", "csod": "csod",
+    "cornerstone": "csod", "cornerstoneondemand": "csod", "recruiterbox": "recruiterbox",
+    "trakstar": "recruiterbox", "flatchr": "flatchr", "jobylon": "jobylon",
+}
+
+_GITHUB_ATS_HOST_HINTS = (
+    ("boards.greenhouse.io", "greenhouse"), ("job-boards.greenhouse.io", "greenhouse"),
+    ("lever.co", "lever"), ("ashbyhq.com", "ashby"), ("bamboohr.com", "bamboohr"),
+    ("icims.com", "icims"), ("myworkdayjobs.com", "workday"), ("jobs.personio.com", "personio"),
+    ("smartrecruiters.com", "smartrecruiters"), ("jobs.jobvite.com", "jobvite"),
+    ("recruitee.com", "recruitee"), ("teamtailor.com", "teamtailor"),
+    ("workable.com", "workable"), ("paylocity.com", "paylocity"),
+    ("paycomonline.net", "paycom"), ("taleo.net", "taleo"), ("oraclecloud.com", "oracle_cloud_hcm"),
+    ("avature.net", "avature"), ("jazz.co", "jazzhr"), ("jazzhr.com", "jazzhr"),
+    ("pageuppeople.com", "pageup"), ("pinpointhq.com", "pinpoint"),
+    ("jobylon.com", "jobylon"), ("hireology.com", "hireology"),
+    ("isolvedhire.com", "isolvedhire"), ("gem.com", "gem"),
+    ("recruiterbox.com", "recruiterbox"), ("trakstar.com", "recruiterbox"),
+)
+
+
+def _normalize_github_ats(value: object, url: str = "") -> str | None:
+    """Normalize an upstream ATS/platform label, falling back to its URL."""
+    raw = str(value or "").strip().lower().replace(" ", "").replace("-", "_")
+    if raw in _GITHUB_GENERIC_ATS_ALIASES:
+        return _GITHUB_GENERIC_ATS_ALIASES[raw]
+    host = (urlparse(str(url or "")).hostname or "").lower()
+    for suffix, ats in _GITHUB_ATS_HOST_HINTS:
+        if host == suffix or host.endswith("." + suffix):
+            return ats
+    return None
+
+
+def _github_registry_fetch(reg: dict) -> object | None:
+    """Fetch one explicitly configured GitHub registry file via jsDelivr."""
+    repo, branch = reg["repo"], reg["branch"]
+    path = reg.get("path")
+    if not path:
+        return None
+    url = f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path}"
+    try:
+        r = requests.get(url, timeout=90)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        log.error(f"  {repo}/{path}: failed to fetch: {e}")
+        return None
+
+
+def _iter_generic_github_json_entries(data: object) -> list[dict]:
+    """Flatten common source-registry JSON shapes without guessing fields."""
+    if isinstance(data, list):
+        return [e for e in data if isinstance(e, dict)]
+    if isinstance(data, dict):
+        for key in ("sources", "companies", "boards", "data", "entries"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [e for e in value if isinstance(e, dict)]
+    return []
+
+
+def _parse_generic_github_json(text: str, repo: str) -> dict[str, dict[str, str]]:
+    try:
+        entries = _iter_generic_github_json_entries(json.loads(text))
+    except Exception as e:
+        log.error(f"  {repo}: invalid JSON registry: {e}")
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for e in entries:
+        platform = e.get("platform") or e.get("ats") or e.get("ats_system") or e.get("type")
+        status = str(e.get("status") or "").strip().lower()
+        if status in {"dead", "inactive", "disabled", "removed", "false", "0"} or e.get("enabled") is False:
             continue
-        bare_part = slug.split("|", 1)[0] if "|" in slug else slug
-        if bare_part.lower() in SKIP_SLUGS or not _looks_like_real_slug(slug):
-            return False
-        if slug not in slugs_by_ats[ats]:
-            slugs_by_ats[ats][slug] = company_name
-            return True
-        return False
-    return False
-
-
-def _github_registry_ingest_job_radar(slugs_by_ats, data):
-    rows = data.get("sources") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return 0, {"invalid_shape": 1}
-    added, skipped = 0, {}
-    for row in rows:
-        if not isinstance(row, dict):
+        token = e.get("token") or e.get("slug") or e.get("company_slug")
+        url = e.get("url") or e.get("source_url") or e.get("apply_host") or ""
+        ats = _normalize_github_ats(platform, url)
+        if not ats or not token:
             continue
-        company = (row.get("company") or "").strip()
-        platform = (row.get("platform") or "").strip().lower()
-        if _github_registry_add_url(slugs_by_ats, row.get("url", ""), company, platform):
-            added += 1
-        else:
-            skipped[platform or "unknown"] = skipped.get(platform or "unknown", 0) + 1
-    return added, skipped
-
-
-def _github_registry_ingest_companies_csv(slugs_by_ats, csv_text):
-    added, skipped = 0, {}
-    for row in csv.DictReader(csv_text.splitlines()):
-        company = (row.get("name") or "").strip()
-        platform = (row.get("ats") or "").strip().lower()
-        if _github_registry_add_url(slugs_by_ats, row.get("url", ""), company, platform):
-            added += 1
-        else:
-            skipped[platform or "unknown"] = skipped.get(platform or "unknown", 0) + 1
-    return added, skipped
-
-
-def _github_registry_ingest_open_jobs(
-    slugs_by_ats, data, csod_resolve_time_budget_minutes
-):
-    ats_data = data.get("ats") if isinstance(data, dict) else None
-    if not isinstance(ats_data, dict):
-        return 0, {"invalid_shape": 1}
-
-    provider_map = {
-        "ashby": "ashby", "bamboohr": "bamboohr", "breezy": "breezyhr",
-        "cornerstone": "csod", "greenhouse": "greenhouse", "icims": "icims",
-        "jazzhr": "jazzhr", "jobvite": "jobvite", "join": "joincom",
-        "lever": "lever", "paycom": "paycom", "paylocity": "paylocity",
-        "personio": "personio", "pinpoint": "pinpoint", "recruitee": "recruitee",
-        "recruiterbox": "recruiterbox", "smartrecruiters": "smartrecruiters",
-        "softgarden": "softgarden", "successfactors": "successfactors",
-        "taleo": "taleo", "teamtailor": "teamtailor", "workable": "workable",
-    }
-    added, skipped, csod_candidates = 0, {}, []
-
-    for upstream_ats, payload in ats_data.items():
-        our_ats = provider_map.get(upstream_ats.lower())
-        if not our_ats or our_ats not in SUPPORTED_ATS:
+        # This generic path only handles simple token-shaped boards. Special
+        # compound formats remain owned by the openroles parser above.
+        token = str(token).strip()
+        if not token or token.lower() in SKIP_SLUGS or not _looks_like_real_slug(token):
             continue
+        name = str(e.get("company") or e.get("display_name") or e.get("name") or "").strip()
+        out.setdefault(ats, {})[token] = name
+    return out
 
-        for raw_slug in payload if isinstance(payload, list) else []:
-            slug = str(raw_slug).strip()
-            if not slug:
-                continue
 
-            if our_ats == "csod":
-                if slug.lower() not in SKIP_SLUGS:
-                    csod_candidates.append(slug)
-                continue
-
-            # open-jobs documents Workday as hostname-only and Oracle Cloud
-            # as hostname-only; our local formats require additional fields.
-            # Do not fabricate missing site identifiers.
-            if upstream_ats in ("workday", "oraclecloud"):
-                skipped[upstream_ats] = skipped.get(upstream_ats, 0) + 1
-                continue
-
-            if our_ats == "successfactors":
-                if slug.lower() not in SKIP_SLUGS and _looks_like_real_slug(slug):
-                    if slug not in slugs_by_ats[our_ats]:
-                        slugs_by_ats[our_ats][slug] = ""
-                        added += 1
-                continue
-
-            if slug.split("|", 1)[0].lower() in SKIP_SLUGS or not _looks_like_real_slug(slug):
-                skipped[upstream_ats] = skipped.get(upstream_ats, 0) + 1
-                continue
-            if slug not in slugs_by_ats[our_ats]:
-                slugs_by_ats[our_ats][slug] = ""
-                added += 1
-
-    if csod_candidates:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        deadline = time.monotonic() + csod_resolve_time_budget_minutes * 60
-        with ThreadPoolExecutor(max_workers=30) as pool:
-            futures = {}
-            for portal_slug in csod_candidates:
-                if time.monotonic() >= deadline:
-                    break
-                futures[pool.submit(_resolve_csod_career_site_id, portal_slug)] = portal_slug
-            for fut in as_completed(futures):
-                portal_slug = futures[fut]
+def _parse_generic_github_csv(text: str, repo: str) -> dict[str, dict[str, str]]:
+    import csv
+    try:
+        rows = csv.DictReader(text.splitlines())
+        if not rows.fieldnames:
+            return {}
+        headers = {h.strip().lower(): h for h in rows.fieldnames if h}
+        def pick(row, *names):
+            for n in names:
+                h = headers.get(n)
+                if h and row.get(h):
+                    return row[h]
+            return ""
+        out: dict[str, dict[str, str]] = {}
+        for row in rows:
+            ats = _normalize_github_ats(
+                pick(row, "ats", "ats_system", "platform", "ats_name", "system"),
+                pick(row, "url", "source_url", "apply_url", "apply_host", "careers_url"),
+            )
+            token = pick(row, "slug", "token", "company_slug", "board_slug")
+            url = pick(row, "url", "source_url", "apply_url", "apply_host", "careers_url")
+            # If the CSV has only a URL, derive the token with the project's
+            # existing URL_TO_SLUG converters rather than inventing a path rule.
+            if not token and url and ats in URL_TO_SLUG:
                 try:
-                    csid = fut.result()
+                    token = URL_TO_SLUG[ats](url)
                 except Exception:
-                    csid = None
-                if csid:
-                    slug = f"{portal_slug}|{csid}"
-                    if slug not in slugs_by_ats["csod"]:
-                        slugs_by_ats["csod"][slug] = ""
-                        added += 1
+                    token = ""
+            if not ats or not token:
+                continue
+            token = str(token).strip()
+            if token.lower() in SKIP_SLUGS or not _looks_like_real_slug(token):
+                continue
+            name = pick(row, "company", "company_name", "name", "display_name", "employer")
+            out.setdefault(ats, {})[token] = str(name).strip()
+        return out
+    except Exception as e:
+        log.error(f"  {repo}: invalid CSV registry: {e}")
+        return {}
 
-    return added, skipped
+
+def _merge_github_registry_result(target: dict[str, dict[str, str]], incoming: dict[str, dict[str, str]]) -> int:
+    added = 0
+    for ats, rows in incoming.items():
+        if ats not in target:
+            continue
+        for slug, name in rows.items():
+            if slug not in target[ats]:
+                target[ats][slug] = name
+                added += 1
+    return added
 
 
-def fetch_github_registries_slugs(
-    csod_resolve_time_budget_minutes: int = CSOD_RESOLVE_TIME_BUDGET_MINUTES
-) -> dict[str, dict[str, str]]:
-    """Pull ATS slug registries from the manually curated GitHub repo list."""
+def fetch_github_registries_slugs(csod_resolve_time_budget_minutes: int = CSOD_RESOLVE_TIME_BUDGET_MINUTES
+                                   ) -> dict[str, dict[str, str]]:
+    """Pull pre-built ATS slug registries from known public GitHub repos
+    (see GITHUB_REGISTRY_REPOS) via jsDelivr's CDN mirror. Returns
+    {ats: {slug: company_name}}. See the module comment above this
+    function for the full research trail (why jsDelivr not GitHub's API,
+    why this repo list is short and manual, and why a couple of platforms
+    are deliberately excluded from the ATS map rather than guessed).
+
+    csod is special-cased: unlike workday/brassring/oracle_cloud_hcm (a free
+    local reassembly from openroles' own metadata), a working csod slug
+    needs one live per-tenant HTTP resolve (see
+    _resolve_csod_career_site_id) — run with a small thread pool, bounded by
+    csod_resolve_time_budget_minutes so a large/slow csod.json can't turn
+    one run into an unbounded wall-clock cost; past the budget, whatever's
+    already resolved is kept (same self-stop-gracefully shape as every
+    other long-running source in this file), the rest is simply skipped
+    this run rather than lost (a future run re-attempts them)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    slugs_by_ats = {ats: {} for ats in SUPPORTED_ATS}
-    skipped_ats = {}
+    slugs_by_ats: dict[str, dict[str, str]] = {ats: {} for ats in SUPPORTED_ATS}
+    skipped_ats: dict[str, int] = {}
 
     for reg in GITHUB_REGISTRY_REPOS:
-        repo, branch, kind = reg["repo"], reg.get("branch", "main"), reg["kind"]
-        try:
-            if kind == "openroles":
-                files = _github_registry_list_files(repo, branch, reg["path_prefix"])
-                if not files:
-                    log.warning(f"  {repo}: no tenant files found — skipping")
-                    continue
-                log.info(f"  {repo}: {len(files)} tenant files found")
+        repo, branch = reg["repo"], reg["branch"]
+        # Single-file registries use their native format; the existing
+        # openroles directory remains on the specialized parser below.
+        if reg.get("format") == "json_file":
+            text = _github_registry_fetch(reg)
+            if text is not None:
+                parsed = _parse_generic_github_json(text, repo)
+                added = _merge_github_registry_result(slugs_by_ats, parsed)
+                log.info(f"  {repo}: {added} live registry slugs normalized")
+            continue
+        if reg.get("format") == "csv_file":
+            text = _github_registry_fetch(reg)
+            if text is not None:
+                parsed = _parse_generic_github_csv(text, repo)
+                added = _merge_github_registry_result(slugs_by_ats, parsed)
+                log.info(f"  {repo}: {added} CSV registry slugs normalized")
+            continue
 
-                for path in files:
-                    basename = path[len(reg["path_prefix"]):].removesuffix(".json").lower()
-                    is_workday = basename == "workday"
-                    is_brassring = basename == "brassring"
-                    is_oracle = basename == "oraclecloud"
-                    is_csod = basename == "csod"
+        prefix = reg["path_prefix"]
+        files = _github_registry_list_files(repo, branch, prefix)
+        if not files:
+            log.warning(f"  {repo}: no tenant files found under '{prefix}' — skipping")
+            continue
+        log.info(f"  {repo}: {len(files)} tenant files found")
 
-                    if is_csod:
-                        our_ats = "csod"
-                    elif is_workday:
-                        our_ats = "workday"
-                    elif is_brassring:
-                        our_ats = "brassring"
-                    elif is_oracle:
-                        our_ats = "oracle_cloud_hcm"
-                    else:
-                        our_ats = _GITHUB_REGISTRY_ATS_MAP.get(basename)
-
-                    if not our_ats:
-                        skipped_ats[basename] = skipped_ats.get(basename, 0) + 1
-                        continue
-
-                    raw_url = f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path}"
-                    try:
-                        r = requests.get(raw_url, timeout=60)
-                        r.raise_for_status()
-                        entries = r.json()
-                    except Exception as e:
-                        log.error(f"  {repo}/{path}: failed to fetch/parse: {e}")
-                        continue
-                    if not isinstance(entries, list):
-                        continue
-
-                    live_entries = [
-                        e for e in entries
-                        if isinstance(e, dict) and e.get("status") == "live"
-                    ]
-
-                    if is_csod:
-                        deadline = time.monotonic() + csod_resolve_time_budget_minutes * 60
-                        with ThreadPoolExecutor(max_workers=30) as pool:
-                            futures = {}
-                            for entry in live_entries:
-                                if time.monotonic() >= deadline:
-                                    break
-                                portal_slug = (entry.get("slug") or "").strip()
-                                if portal_slug and portal_slug.lower() not in SKIP_SLUGS:
-                                    futures[pool.submit(
-                                        _resolve_csod_career_site_id, portal_slug
-                                    )] = entry
-                            for fut in as_completed(futures):
-                                entry = futures[fut]
-                                try:
-                                    csid = fut.result()
-                                except Exception:
-                                    csid = None
-                                if csid:
-                                    slug = f"{entry.get('slug', '').strip()}|{csid}"
-                                    if slug not in slugs_by_ats[our_ats]:
-                                        slugs_by_ats[our_ats][slug] = (
-                                            entry.get("display_name") or ""
-                                        ).strip()
-                        continue
-
-                    added = 0
-                    for entry in live_entries:
-                        if is_workday:
-                            slug = _assemble_workday_slug(entry)
-                        elif is_brassring:
-                            slug = _assemble_brassring_slug(entry)
-                        elif is_oracle:
-                            slug = _assemble_oracle_cloud_slug(entry)
-                        else:
-                            slug = (entry.get("slug") or "").strip()
-
-                        if not slug:
-                            continue
-                        bare_part = slug.split("|", 1)[0] if "|" in slug else slug
-                        if bare_part.lower() in SKIP_SLUGS:
-                            continue
-                        if not (is_workday or is_brassring or is_oracle) and not _looks_like_real_slug(slug):
-                            continue
-                        if slug not in slugs_by_ats[our_ats]:
-                            slugs_by_ats[our_ats][slug] = (
-                                entry.get("display_name") or ""
-                            ).strip()
-                            added += 1
-                    if added:
-                        log.info(f"    {basename} -> {our_ats}: {added} live slugs")
+        for path in files:
+            basename = path[len(prefix):].removesuffix(".json").lower()
+            is_workday = basename == "workday"
+            is_brassring = basename == "brassring"
+            is_oracle = basename == "oraclecloud"
+            is_csod = basename == "csod"
+            if is_csod:
+                our_ats = "csod"
+            elif is_workday:
+                our_ats = "workday"
+            elif is_brassring:
+                our_ats = "brassring"
+            elif is_oracle:
+                our_ats = "oracle_cloud_hcm"
+            else:
+                our_ats = _GITHUB_REGISTRY_ATS_MAP.get(basename)
+            if not our_ats:
+                skipped_ats[basename] = skipped_ats.get(basename, 0) + 1
                 continue
 
-            if kind == "job_radar_sources":
-                data = _github_registry_get_json(repo, branch, reg["path"])
-                added, skipped = _github_registry_ingest_job_radar(slugs_by_ats, data)
-                log.info(f"  {repo}: added {added} URL-derived slugs")
-                for k, v in skipped.items():
-                    skipped_ats[f"{repo}:{k}"] = skipped_ats.get(f"{repo}:{k}", 0) + v
-                continue
-
-            if kind == "ats_scraper_companies":
-                raw_url = f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{reg['path']}"
-                r = requests.get(raw_url, timeout=90)
+            raw_url = f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path}"
+            try:
+                r = requests.get(raw_url, timeout=60)
                 r.raise_for_status()
-                added, skipped = _github_registry_ingest_companies_csv(
-                    slugs_by_ats, r.text
-                )
-                log.info(f"  {repo}: added {added} URL-derived slugs")
-                for k, v in skipped.items():
-                    skipped_ats[f"{repo}:{k}"] = skipped_ats.get(f"{repo}:{k}", 0) + v
+                entries = r.json()
+            except Exception as e:
+                log.error(f"  {repo}/{path}: failed to fetch/parse: {e}")
+                continue
+            if not isinstance(entries, list):
+                log.warning(f"  {repo}/{path}: unexpected JSON shape (not a list) — skipping")
                 continue
 
-            if kind == "open_jobs_slugs":
-                data = _github_registry_get_json(repo, branch, reg["path"])
-                added, skipped = _github_registry_ingest_open_jobs(
-                    slugs_by_ats, data, csod_resolve_time_budget_minutes
-                )
-                log.info(f"  {repo}: added {added} usable live slugs")
-                for k, v in skipped.items():
-                    skipped_ats[f"{repo}:{k}"] = skipped_ats.get(f"{repo}:{k}", 0) + v
+            live_entries = [e for e in entries if isinstance(e, dict) and e.get("status") == "live"]
+
+            if is_csod:
+                # Live per-tenant resolve, bounded by time budget — see
+                # docstring. Each entry's bare portal slug ("a-talent")
+                # becomes our 'tenant|careerSiteId' format only if the
+                # resolve succeeds.
+                added = 0
+                deadline = time.monotonic() + csod_resolve_time_budget_minutes * 60
+                budget_hit = False
+                with ThreadPoolExecutor(max_workers=30) as pool:
+                    futures = {}
+                    for entry in live_entries:
+                        if time.monotonic() >= deadline:
+                            budget_hit = True
+                            break
+                        portal_slug = (entry.get("slug") or "").strip()
+                        if not portal_slug or portal_slug.lower() in SKIP_SLUGS:
+                            continue
+                        futures[pool.submit(_resolve_csod_career_site_id, portal_slug)] = entry
+                    for fut in as_completed(futures):
+                        entry = futures[fut]
+                        try:
+                            csid = fut.result()
+                        except Exception:
+                            csid = None
+                        if not csid:
+                            continue
+                        portal_slug = (entry.get("slug") or "").strip()
+                        slug = f"{portal_slug}|{csid}"
+                        name = (entry.get("display_name") or "").strip()
+                        if slug not in slugs_by_ats[our_ats]:
+                            slugs_by_ats[our_ats][slug] = name
+                            added += 1
+                if budget_hit:
+                    log.warning(f"    csod: resolve time budget "
+                                f"({csod_resolve_time_budget_minutes}min) reached — "
+                                f"remaining candidates skipped this run, will be "
+                                f"re-attempted next run")
+                if added:
+                    log.info(f"    csod -> {our_ats}: {added} live slugs (resolved)")
                 continue
 
-            log.warning(f"  {repo}: unknown registry kind '{kind}'")
-        except Exception as e:
-            log.error(f"  {repo}: registry fetch failed: {e}")
+            added = 0
+            for entry in live_entries:
+                if is_workday:
+                    slug = _assemble_workday_slug(entry)
+                elif is_brassring:
+                    slug = _assemble_brassring_slug(entry)
+                elif is_oracle:
+                    slug = _assemble_oracle_cloud_slug(entry)
+                else:
+                    slug = (entry.get("slug") or "").strip()
+
+                if not slug:
+                    continue
+                bare_part = slug.split("|", 1)[0] if "|" in slug else slug
+                if bare_part.lower() in SKIP_SLUGS:
+                    continue
+                if not (is_workday or is_brassring or is_oracle) and not _looks_like_real_slug(slug):
+                    continue
+
+                name = (entry.get("display_name") or "").strip()
+                if slug not in slugs_by_ats[our_ats]:
+                    slugs_by_ats[our_ats][slug] = name
+                    added += 1
+            if added:
+                log.info(f"    {basename} -> {our_ats}: {added} live slugs")
 
     total = sum(len(s) for s in slugs_by_ats.values())
-    log.info(
-        f"GitHub registries total: {total} slugs across "
-        f"{sum(1 for s in slugs_by_ats.values() if s)} platforms"
-    )
+    log.info(f"GitHub registries total: {total} slugs across "
+             f"{sum(1 for s in slugs_by_ats.values() if s)} platforms")
     if skipped_ats:
-        top_skipped = sorted(skipped_ats.items(), key=lambda x: -x[1])[:20]
-        log.info(
-            "  excluded/unusable registry entries: " +
-            ", ".join(f"{k}({v})" for k, v in top_skipped)
-        )
+        top_skipped = sorted(skipped_ats.items(), key=lambda x: -x[1])[:10]
+        log.info(f"  unmapped registry files (excluded, see module comment): "
+                 f"{', '.join(f'{k}({v})' for k, v in top_skipped)}")
     return slugs_by_ats
+
+
+# ══════════════════════════════════════════════════════════
+# SUPABASE UPSERT
+# ══════════════════════════════════════════════════════════
+
+def _oracle_tenant(slug: str) -> str:
+    """Extract the bare tenant name from an oracle_cloud_hcm slug, resolved
+    or not. 'eeho|CX_1' -> 'eeho'; 'eeho.fa.us2|CX_1' -> 'eeho'; 'eeho' -> 'eeho'."""
+    host_prefix = slug.split("|", 1)[0]
+    return host_prefix.split(".", 1)[0]
+
+
+def _is_resolved_oracle_slug(slug: str) -> bool:
+    """True if the slug already carries a discovered '.fa.<region>' domain."""
+    host_prefix = slug.split("|", 1)[0]
+    return ".fa." in host_prefix
+
+
+def _fetch_resolved_oracle_tenants() -> set[str]:
+    """
+    Tenants that already have a resolved oracle_cloud_hcm slug in
+    slug_registry (e.g. 'eeho.fa.us2|CX_1' -> tenant 'eeho').
+
+    scrape_oracle_cloud_hcm() persists the resolved slug once it discovers a
+    legacy tenant's real domain (see supabase_handler.resolve_oracle_slug).
+    Sources like OpenPostings/Common Crawl only ever know the legacy,
+    unresolved tenant name — without this check, upserting them here would
+    re-add the legacy slug next to its resolved twin every week, and the
+    scraper would burn an 11-region brute-force discovery on it all over
+    again on Monday. See _filter_oracle_slugs below.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return set()
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    tenants = set()
+    offset = 0
+    batch_size = 1000
+    try:
+        while True:
+            r = requests.get(
+                # 2026-09: was "slug_registry" — that table doesn't exist
+                # any more (renamed to archive_i a while back; node.py's
+                # ARCHIVE_I_TABLE comment says as much: "was slug_registry").
+                # This function's try/except swallowed the resulting 404
+                # silently every run, so the oracle_cloud_hcm de-dup check
+                # has been returning {} (no resolved tenants found)
+                # unconditionally — legacy tenant slugs could have been
+                # re-added every week instead of being filtered. See
+                # upsert_to_supabase's matching fix for the bigger half of
+                # this same bug (the actual write path — confirmed live via
+                # a real "Could not find the table 'public.slug_registry'"
+                # PostgREST 404 in a run's own logs).
+                f"{SUPABASE_URL}/rest/v1/archive_i",
+                headers=headers,
+                timeout=30,
+                params={
+                    "select": "slug",
+                    "ats": "eq.oracle_cloud_hcm",
+                    "offset": offset,
+                    "limit": batch_size,
+                },
+            )
+            r.raise_for_status()
+            rows = r.json()
+            for row in rows:
+                slug = row.get("slug", "")
+                if _is_resolved_oracle_slug(slug):
+                    tenants.add(_oracle_tenant(slug))
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+    except Exception as e:
+        log.error(f"Failed to fetch existing oracle_cloud_hcm slugs for de-dup check: {e}")
+        return set()
+
+    return tenants
+
+
+def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
+    """
+    Drop legacy (unresolved) oracle_cloud_hcm slugs whose tenant already has
+    a resolved counterpart in slug_registry, so re-enrichment never
+    re-introduces a duplicate that would trigger discovery all over again.
+    Already-resolved slugs in slug_dict (rare, but possible if a source
+    somehow captured one) pass through untouched.
+    """
+    resolved_tenants = _fetch_resolved_oracle_tenants()
+    if not resolved_tenants:
+        return slug_dict
+
+    filtered = {}
+    skipped = 0
+    for slug, name in slug_dict.items():
+        if not _is_resolved_oracle_slug(slug) and _oracle_tenant(slug) in resolved_tenants:
+            skipped += 1
+            continue
+        filtered[slug] = name
+
+    if skipped:
+        log.info(f"  oracle_cloud_hcm: skipped {skipped} legacy slugs already resolved in slug_registry")
+
+    return filtered
+
+
+def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
+                        dry_run: bool = False, skip_live_check: bool = False) -> int:
+    """Upsert slugs to Supabase archive_i. Returns total upserted.
+
+    slugs_by_ats values can be:
+      - set[str]          → slugs only (no company name)
+      - dict[str, str]    → {slug: company_name}
+
+    2026-09: was writing to "slug_registry", a table that no longer
+    exists — it was renamed to archive_i at some point (node.py's
+    ARCHIVE_I_TABLE comment: "was slug_registry"), but this file was never
+    updated to match. Confirmed live via a real run's own logs: every
+    single upsert across every source (Feashliaa, Common Crawl, YC,
+    HTTP Archive, all of it) was failing with PostgREST 404 "Could not
+    find the table 'public.slug_registry'" and just logging an ERROR line
+    per chunk rather than crashing the run — meaning this whole pipeline's
+    actual writes had been silently going nowhere for however long that
+    rename has been live, while every fetch/query/live-HTTP-resolve step
+    still ran (and cost/rate-limited) for nothing. Also drops the "name"
+    field entirely: archive_i has no such column (id/ats/slug/source/
+    first_seen/last_seen only — confirmed against the live schema), so
+    sending it once the table name was fixed would have just traded one
+    failure mode for another (a PostgREST "column not found" 400).
+
+    2026-09 ROUND 2 (explicit user instruction: "run all discovery entries
+    through verification. they must be verified before entry. A life
+    [live] check just like commoncrawl and wayback do now. just extend it
+    to them all."): every discovery source now gets the SAME live
+    pre-check Common Crawl/Wayback/CT-logs already ran on their own
+    (fetch_commoncrawl_slugs/fetch_wayback_slugs/fetch_ct_log_slugs each
+    called _drop_dead_cc_slugs internally, before ever returning — see
+    that function's docstring for the full mechanism and _CC_LIVE_CHECK
+    for the 19 platforms it can actually check). The other 8 sources
+    (Feashliaa, kalil0321, OpenPostings, Latmay H.F, iCIMS HR Jobs, GitHub
+    registries, Edward H.F, Open Jobs Daily H.F, TheirStack, HTTP Archive)
+    previously wrote whatever slug they extracted straight to archive_i
+    with zero live verification, relying entirely on verification.py's
+    separate, LATER cleanup pass to eventually notice and delete anything
+    dead — meaning a dead slug could sit in archive_i, get scraped by the
+    daily ATS scanner, and burn scrape attempts for however long until the
+    next verification.py run caught up. Centralizing the check HERE
+    instead of duplicating a call in every one of those 8 fetch_*_slugs()
+    functions means no source can ever bypass it going forward, including
+    any new source added later. `skip_live_check=True` is for the 3
+    sources that already verified their own slugs before calling this
+    (Common Crawl/Wayback at their own call sites in main(), and CT logs'
+    own incremental per-platform upload path) — re-running the exact same
+    live HTTP checks a second time here would just be wasted network
+    calls against the same hosts, not a correctness issue."""
+    if not skip_live_check:
+        slugs_by_ats = _drop_dead_cc_slugs(slugs_by_ats, source)
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        log.error("SUPABASE_URL or SUPABASE_KEY not set")
+        return 0
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal,resolution=merge-duplicates",
+    }
+
+    total = 0
+    chunk_size = 500
+
+    for ats, slugs in slugs_by_ats.items():
+        if not slugs:
+            continue
+
+        # Normalize: set → dict with empty names, dict stays as-is
+        if isinstance(slugs, set):
+            slug_dict = {s: "" for s in slugs}
+        else:
+            slug_dict = slugs
+
+        # Oracle Cloud HCM: don't re-add a legacy tenant slug that's already
+        # been resolved to its real domain — see _filter_oracle_slugs.
+        if ats == "oracle_cloud_hcm" and not dry_run:
+            slug_dict = _filter_oracle_slugs(slug_dict)
+            if not slug_dict:
+                continue
+
+        items = list(slug_dict.items())
+        ats_total = 0
+
+        for i in range(0, len(items), chunk_size):
+            chunk = items[i:i + chunk_size]
+            # name (company name, when a source has one) has nowhere to
+            # go — archive_i doesn't carry that column — so it's dropped
+            # here rather than sent and rejected. Slug/ATS is still the
+            # part every downstream consumer (node.py's crawl) actually
+            # needs; the name was never more than a nice-to-have.
+            rows = [{"ats": ats, "slug": slug, "source": source} for slug, _name in chunk]
+
+            if dry_run:
+                ats_total += len(chunk)
+                continue
+
+            r = None
+            try:
+                r = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/archive_i",
+                    headers=headers,
+                    json=rows,
+                    timeout=60,
+                    params={"on_conflict": "ats,slug"},
+                )
+                r.raise_for_status()
+                ats_total += len(chunk)
+            except Exception as e:
+                # requests' own exception message ("400 Client Error: Bad
+                # Request for url: ...") never includes PostgREST's actual
+                # reason (e.g. a CHECK constraint violation) — without the
+                # response body, a genuine schema mismatch looks identical
+                # to a transient network blip. Always log it when we have it.
+                body = f" — response: {r.text[:500]}" if r is not None else ""
+                log.error(f"Supabase upsert failed for {ats}: {e}{body}")
+
+        if ats_total:
+            log.info(f"  {ats}: upserted {ats_total} slugs ({source})")
+        total += ats_total
+
+    return total
 
 
 # ══════════════════════════════════════════════════════════
