@@ -75,6 +75,15 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# httpx logs one INFO-level "HTTP Request: ..." line per request by
+# default, which propagates straight through basicConfig's root INFO
+# level — at 19,000+ boards that's tens of thousands of lines drowning
+# out the per-platform completion lines and heartbeat this file actually
+# wants visible. Raised to WARNING so httpx/httpcore only speak up for
+# their own internal problems, not routine successful requests.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # Matches add_jobs_batch()'s default and _build_row()'s default —
 # spelled out explicitly here (rather than relying on those defaults)
 # purely so bump_scan_report()/finish_scan_report_for_pipeline() calls
@@ -269,9 +278,14 @@ async def _scrape_all_async(boards: list[tuple[str, str]]) -> tuple[list[dict], 
         )
         for res in results:
             if isinstance(res, Exception):
+                # 2026-09: no longer logged inline here (real-time per-error
+                # lines during the scrape were exactly the noise the user
+                # asked to remove) — every failure is already recorded into
+                # ats_scrapers.py's grouped-failure collector inside
+                # scrape_board() itself, and reported ONCE, grouped, right
+                # after scrape_all() returns (see scrape_all()'s own
+                # log_scrape_failure_summary() call below).
                 platform_failed += 1
-                if platform_failed <= 3:  # log first 3 errors per platform
-                    log.error(f"  {ats} scrape error: {res}")
                 continue
             slug, jobs = res
             if jobs:
@@ -641,6 +655,16 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
             log.info(f"── Crawling entries ({len(boards)} boards across "
                      f"{len(set(a for a, _ in boards))} ATS platforms) ──")
             all_jobs, boards_ok, boards_failed, boards_with_roles = scrape_all(boards)
+            # 2026-09 BUG FIX: moved here, unconditional, from deep inside
+            # the role-filter branch below (see that spot's own removed
+            # comment) — this used to only fire when csm_jobs was
+            # non-empty, so a shard with real scrape failures but zero
+            # CSM/AM roles this run silently never printed it at all. Also
+            # widened from "Workday only" to every platform: scrape_board()
+            # (ats_scrapers.py) now records every platform's raised
+            # failures into the same grouped collector, not just
+            # Workday's, so this one call surfaces all of them.
+            log_scrape_failure_summary()
 
         # 2026-09: repurpose archive_i.last_seen to mean "last time this
         # slug had ANY role at all" (per explicit user instruction) rather
@@ -699,16 +723,6 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
                 total_jobs_raw=raw_scraped_count,
             )
             return
-
-        # 2026-09 (explicit user request): print grouped scrape-failure
-        # summary (see ats_scrapers.get_scrape_failure_summary's docstring)
-        # right here, in the same "errors section" spot before location
-        # classification starts — replaces a wall of individual per-slug
-        # WARNING lines (Workday 403/422/etc, one per bad tenant) with one
-        # or two grouped lines like "[workday] 12 failed — breakthrought1d
-        # and 4 others: HTTP 422 (HTTP_422); brunswick and 6 others: HTTP
-        # 403 (S22)".
-        log_scrape_failure_summary()
 
         log.info("── Location check (open to global/Africa hires?) ──")
         # Enrich descriptions for platforms that lack them

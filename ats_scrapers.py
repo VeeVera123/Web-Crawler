@@ -245,6 +245,33 @@ def log_scrape_failure_summary() -> None:
         log.warning("── Scrape failures (grouped) ──\n" + summary)
 
 
+def _categorize_scrape_error(err: Exception) -> str:
+    """A short, GROUPABLE reason string for _record_scrape_failure — same
+    shape scrape_workday's own hand-written reasons already use (see its
+    "invalid JSON response"/"connection error"/f"HTTP {code}" calls
+    above), generalized here so every platform's failures group the same
+    way, not just Workday's.
+
+    2026-09: this is the other half of the scrape_board BUG FIX below —
+    _record_scrape_failure existed since 2026-09 but had exactly ONE
+    caller (scrape_workday) in a 39-platform file, so the grouped
+    end-of-run summary was silently empty for every other platform no
+    matter how many boards failed. Called from scrape_board's except
+    clause, this makes every platform's raised failures land in the same
+    summary Workday's already did, with no per-scraper changes needed."""
+    if isinstance(err, httpx.HTTPStatusError):
+        return f"HTTP {err.response.status_code}"
+    if isinstance(err, requests.exceptions.HTTPError) and err.response is not None:
+        return f"HTTP {err.response.status_code}"
+    if isinstance(err, (httpx.TimeoutException, requests.exceptions.Timeout)):
+        return "timeout"
+    if isinstance(err, (httpx.ConnectError, httpx.NetworkError, requests.exceptions.ConnectionError)):
+        return "connection error"
+    if isinstance(err, json.JSONDecodeError):
+        return "invalid JSON response"
+    return type(err).__name__
+
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
@@ -6027,9 +6054,18 @@ async def scrape_board(ats: str, slug: str) -> list[dict]:
     if not fn:
         log.warning(f"Unknown ATS: {ats}")
         return []
-    if asyncio.iscoroutinefunction(fn):
-        return await fn(slug)
-    return await asyncio.to_thread(fn, slug)
+    try:
+        if asyncio.iscoroutinefunction(fn):
+            return await fn(slug)
+        return await asyncio.to_thread(fn, slug)
+    except Exception as e:
+        # Record into the same grouped end-of-run summary scrape_workday's
+        # own hand-written call sites already use (see _categorize_scrape_error's
+        # BUG FIX note) — every platform's raised failures now group the
+        # same way, then re-raise unchanged so crawl_i.py's per-platform
+        # ok/failed counting keeps working exactly as before.
+        _record_scrape_failure(ats, slug, _categorize_scrape_error(e))
+        raise
 
 
 # ── Second-pass: fetch individual job descriptions ─────
