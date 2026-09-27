@@ -294,11 +294,33 @@ async def _scrape_all_async(boards: list[tuple[str, str]]) -> tuple[list[dict], 
     # platform is still a separately-scheduled task racing every other
     # one, only the LOGGING now happens per-completion instead of
     # batched after the last straggler.
+    # 2026-09 BUG FIX (real production evidence, same incident as the fix
+    # above): a platform's OWN inner asyncio.gather() over its boards has
+    # the identical "wait for every single one, then report" problem one
+    # level deeper — if even a single board hits a slow/unresponsive host
+    # and burns through its full MAX_RETRIES+timeout cycle, THAT
+    # platform's line stays silent for however long that takes, no matter
+    # how few boards it has (confirmed live: eploy/avature/folkshr, 15-30
+    # boards each, produced nothing for 2+ minutes). Rather than chase
+    # every possible slow-host case, asyncio.wait() is given a bounded
+    # HEARTBEAT_SECONDS timeout: if no platform finishes within that
+    # window, this logs a "still working" line naming exactly which
+    # platforms are still outstanding, so a real stall is distinguishable
+    # from a live-but-slow run at a glance, on a guaranteed cadence,
+    # instead of the operator having no signal at all either way.
+    HEARTBEAT_SECONDS = 30
     tasks = {asyncio.create_task(_scrape_platform(ats, slugs)): ats
              for ats, slugs in by_ats.items()}
     pending = set(tasks.keys())
     while pending:
-        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            pending, timeout=HEARTBEAT_SECONDS, return_when=asyncio.FIRST_COMPLETED
+        )
+        if not done:
+            still_waiting = sorted(tasks[t] for t in pending)
+            log.info(f"  ...still working — {len(still_waiting)}/{len(tasks)} platform(s) "
+                     f"not yet finished: {', '.join(still_waiting)}")
+            continue
         for task in done:
             ats = tasks[task]
             try:
