@@ -1,21 +1,18 @@
-"""One-off, temporary live verification of OpenAI's BrassRing lead:
-does the real TGnewUI JobDetails page actually contain a
-"VerityZone:jobdescription" / "AnswerValue" field marker, or a
-".jobdescriptionInJobDetails" DOM element? Checked against real,
-currently-live job detail pages before writing any extraction code.
-Uses the actual, already-working scrape_brassring() to get real job
-URLs (a simplified reimplementation missed matches in round 1).
-Removed once confirmed either way.
+"""Round 3: VerityZone/AnswerValue/JobDetailFieldsToDisplay all really
+exist on live pages (confirmed round 2), but the exact
+"VerityZone:jobdescription" adjacency regex an external LLM proposed
+found zero matches. This dumps the raw context around every VerityZone
+occurrence and around JobDetailFieldsToDisplay to find the REAL field
+structure before writing an extraction regex based on it.
 """
 import re
 import sys
 import asyncio
 import requests
-from bs4 import BeautifulSoup
 
 import ats_scrapers as m
 
-BOARD_SLUGS = ["16030|6100", "16030|6086", "25008|5131"]
+BOARD_SLUGS = ["16030|6086", "25008|5131"]
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -28,41 +25,50 @@ async def main() -> int:
         print("=" * 70)
         print(f"board {slug!r}")
         print("=" * 70)
-        try:
-            jobs = await m.scrape_brassring(slug)
-        except Exception as e:
-            print(f"scrape_brassring raised: {type(e).__name__}: {e}")
-            continue
-        print(f"{len(jobs)} job(s) scraped")
+        jobs = await m.scrape_brassring(slug)
         if not jobs:
             continue
-        job = jobs[0]
-        detail_url = job["url"]
-        print(f"sample job: title={job['title']!r} url={detail_url}")
-
+        detail_url = jobs[0]["url"]
         r = session.get(detail_url, headers=HEADERS, timeout=30)
-        print(f"detail page: status={r.status_code}, {len(r.text)} chars")
         html = r.text
+        print(f"detail page: {len(html)} chars")
 
-        for needle in ("VerityZone", "jobdescription", "AnswerValue",
-                       "jobdescriptionInJobDetails", "JobDetailFieldsToDisplay",
-                       "ActualValueFromSolar"):
-            count = html.count(needle)
-            print(f"  {needle!r}: {count} occurrence(s)")
+        print("\n-- context around each 'VerityZone' occurrence (first 6) --")
+        for i, m_ in enumerate(re.finditer("VerityZone", html)):
+            if i >= 6:
+                print(f"  ... ({len(re.findall('VerityZone', html))} total)")
+                break
+            start = max(0, m_.start() - 60)
+            end = min(len(html), m_.end() + 120)
+            print(f"  [{m_.start()}] ...{html[start:end]!r}...")
 
-        vz_match = re.search(r"VerityZone\s*[:=]\s*[\"']?jobdescription", html, re.I)
-        if vz_match:
-            print(f"  VerityZone:jobdescription found at char {vz_match.start()}")
-            context = html[max(0, vz_match.start() - 500):vz_match.start() + 100]
-            print(f"  context before marker: {context!r}")
-        else:
-            print("  NO VerityZone:jobdescription marker found in raw HTML")
+        print("\n-- context around 'JobDetailFieldsToDisplay' --")
+        m2 = re.search("JobDetailFieldsToDisplay", html)
+        if m2:
+            start = max(0, m2.start() - 50)
+            end = min(len(html), m2.end() + 600)
+            print(f"  [{m2.start()}] ...{html[start:end]!r}...")
 
-        soup2 = BeautifulSoup(html, "html.parser")
-        dom_hits = soup2.select(".jobdescriptionInJobDetails")
-        print(f"  .jobdescriptionInJobDetails DOM elements found: {len(dom_hits)}")
-        if dom_hits:
-            print(f"    first element text (first 300 chars): {dom_hits[0].get_text(' ', strip=True)[:300]!r}")
+        print("\n-- context around first 'jobdescription' occurrence that is NOT inside a CSS class attribute --")
+        count = 0
+        for m3 in re.finditer("jobdescription", html, re.I):
+            start = max(0, m3.start() - 80)
+            end = min(len(html), m3.end() + 80)
+            snippet = html[start:end]
+            if 'class=' in snippet.lower() and 'jobdescriptionInJobDetails' in snippet:
+                continue  # skip the obvious CSS-class-attribute hits
+            print(f"  [{m3.start()}] ...{snippet!r}...")
+            count += 1
+            if count >= 6:
+                break
+
+        print("\n-- context around first 3 'AnswerValue' occurrences --")
+        for i, m4 in enumerate(re.finditer("AnswerValue", html)):
+            if i >= 3:
+                break
+            start = max(0, m4.start() - 30)
+            end = min(len(html), m4.end() + 250)
+            print(f"  [{m4.start()}] ...{html[start:end]!r}...")
 
     return 0
 
