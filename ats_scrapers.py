@@ -397,6 +397,85 @@ _LOCATION_SYMBOL_RE = re.compile(
 # posting) while still bounding the pathological case.
 _MAX_LOCATION_SYMBOL_LINES = 5
 
+# 2026-09 ROUND 2 (explicit user follow-up, with a real example: a red
+# map-pin rendered as an actual IMAGE/icon, not a Unicode emoji character
+# — "some location symbols look like the one attached"): plenty of career
+# pages render their pin as a raster/SVG icon (a font-icon <i>/<span> with
+# a "pin"/"location"/"map-marker"/"geo" class, an <img> whose src or alt
+# names the same, or an inline <svg> with such a class/title/aria-label) —
+# none of THOSE ever contain one of the emoji characters
+# _LOCATION_SYMBOL_GLYPHS matches, so the check above silently misses
+# this entire category. This is a SEPARATE, marker-element-based pass
+# (rather than trying to shoehorn image detection into the character-glyph
+# regex above): it looks for the icon ELEMENT itself via its class/src/alt/
+# aria-label/title carrying a location-flavored keyword, then captures the
+# plain text immediately following that element's closing tag — same
+# "marker, then adjacent text" contract as the glyph-based check, and
+# feeds into the exact same "Location Symbol: ..." line/dedup/cap so
+# downstream (has_hard_location_symbol_signal, the AI prompt) doesn't need
+# to know or care which of the two ways the marker was rendered.
+#
+# Deliberately keyword-scoped to the same narrow "clearly means location"
+# set the whole file already trusts for icon-adjacent extraction (see
+# _bs4_find_location_near's class_substrings=("location",) above) plus
+# the few extra terms real icon libraries actually use for a pin (FontAwesome's
+# "fa-map-marker(-alt)", Material Icons' "place"/"room", generic "pin"/"geo"/
+# "map-pin") — NOT bare "map" alone (a "site map" link, an actual embedded
+# map widget class, or "roadmap" would all false-positive on that).
+_LOCATION_ICON_KEYWORDS = (
+    r"pin|location|map-marker|map-pin|marker-icon|\bgeo\b|"
+    r"\bplace\b|\broom\b"  # Material Icons' names for a pin glyph
+)
+_LOCATION_ICON_ELEMENT_RE = re.compile(
+    r"<(img|svg|i|span)\b([^>]*(?:class|src|alt|aria-label|title)\s*=\s*"
+    r'["\'][^"\']*(?:' + _LOCATION_ICON_KEYWORDS + r')[^"\']*["\'][^>]*)'
+    r"(?:/>|>.*?</\1>|>)",
+    re.I | re.DOTALL,
+)
+# Text immediately after the icon element, up to the same kind of boundary
+# _LOCATION_SYMBOL_RE stops at (an intervening tag is fine here — unlike
+# the glyph case, an <img>/<svg> icon is ALREADY the element being matched,
+# so the text after it commonly sits in its own sibling <span> one level
+# out; this is matched against the ORIGINAL html, not the tag-stripped
+# copy, specifically so it can look past exactly one more wrapper tag).
+_LOCATION_ICON_TRAILING_TEXT_RE = re.compile(
+    r"^\s*(?:<[^>]+>\s*)?([^\n\r|•·<" + _LOCATION_SYMBOL_GLYPHS + r"]{2,80}?)"
+    r"(?=\s*(?:[|•·\n\r<]|$|[" + _LOCATION_SYMBOL_GLYPHS + r"]))"
+)
+
+
+def _extract_location_icon_lines(html_or_text: str) -> list[str]:
+    """Companion to _extract_location_symbol_lines for a location marker
+    rendered as an IMAGE/SVG/font-icon element rather than a Unicode
+    emoji glyph (see the module comment above _LOCATION_ICON_KEYWORDS for
+    the real-world trigger). Returns "Location Symbol: <text>" lines,
+    same format/convention as the glyph-based function, so both feed the
+    same downstream dedup/cap/hard-filter/AI-prompt path without either
+    one needing special-case handling."""
+    if not html_or_text or "<" not in html_or_text:
+        return []
+    lines = []
+    seen = set()
+    for m in _LOCATION_ICON_ELEMENT_RE.finditer(html_or_text):
+        tail = html_or_text[m.end():m.end() + 200]
+        tm = _LOCATION_ICON_TRAILING_TEXT_RE.match(tail)
+        if not tm:
+            continue
+        candidate = unescape(re.sub(r"<[^>]+>", " ", tm.group(1)))
+        candidate = re.sub(r"\s+", " ", candidate).strip(" -:—–|")
+        if not candidate or len(candidate) < 2:
+            continue
+        if not re.search(r"[A-Za-z]{2,}", candidate):
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"Location Symbol: {candidate}")
+        if len(lines) >= _MAX_LOCATION_SYMBOL_LINES:
+            break
+    return lines
+
 
 def _extract_location_symbol_lines(html_or_text: str) -> list[str]:
     """Find map-pin/location-glyph + adjacent text pairs in raw (pre-strip)
@@ -474,7 +553,21 @@ def _snippet(html_or_text: str, max_chars: int = 500_000) -> str:
     """
     if not html_or_text:
         return ""
-    location_symbol_lines = _extract_location_symbol_lines(html_or_text)
+    # Both the emoji-glyph marker and the image/SVG/font-icon marker feed
+    # the same "Location Symbol: ..." line format — dedup across BOTH
+    # sources together (not just within each one) so a posting using an
+    # icon library that also happens to include an emoji fallback doesn't
+    # get the same place name written out twice.
+    location_symbol_lines = []
+    _seen_combined = set()
+    for line in _extract_location_symbol_lines(html_or_text) + _extract_location_icon_lines(html_or_text):
+        key = line.lower()
+        if key in _seen_combined:
+            continue
+        _seen_combined.add(key)
+        location_symbol_lines.append(line)
+        if len(location_symbol_lines) >= _MAX_LOCATION_SYMBOL_LINES:
+            break
     text = _SCRIPT_STYLE_RE.sub(" ", html_or_text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
