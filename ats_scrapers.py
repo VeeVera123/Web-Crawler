@@ -2619,7 +2619,6 @@ _SF_JOB_ROW_RE = re.compile(
     r'(?=<a[^>]+href="/job/|\Z)',
     re.I | re.S,
 )
-_SF_LOCALE_RE = re.compile(r'[?&]locale=([a-z]{2}_[A-Z]{2})\b')
 _SF_TRAILING_DATE_RE = re.compile(r'\s*\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{4}\s*$')
 # Some CSB tenants (confirmed live 2026-09 on career.sonepar.com) render
 # each search-result card as ONE <a> wrapping title+location+date together,
@@ -2640,7 +2639,6 @@ _SF_TRAILING_DATE_RE = re.compile(r'\s*\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{4}\s*$')
 _SF_PROPID_RE = re.compile(
     r'data-careersite-propertyid=["\'](\w+)["\'][^>]*>(.*?)<', re.I | re.S
 )
-_SF_MAX_LOCALES = 10
 _SF_MAX_PAGES_PER_LOCALE = 200
 # SAP's own standard CSB template ends every job's real content with this
 # kind of boilerplate before unrelated site chrome/footer — confirmed
@@ -2697,7 +2695,29 @@ async def scrape_successfactors(slug: str) -> list[dict]:
     2026-09 ASYNC MIGRATION (batch 2): _sf_robots_parser/_sf_robots_allows
     and the nested _scrape_locale helper all converted to async def,
     awaiting _get(...) instead of calling _get_requests_sync. Behavior
-    otherwise unchanged."""
+    otherwise unchanged.
+
+    2026-09 BUG FIX (explicit user question, then verified live: "why ten
+    additional languages, are they the same JDs in different languages?
+    if so why don't we just take the one in english and dump the
+    rest"): used to discover every locale link on the tenant's own
+    /search/ page (up to 10) and scrape ALL of them, on the assumption
+    each might expose different postings. Verified against a real
+    multinational tenant (careerstore.munichre.com, 24 open jobs) before
+    changing anything: the SAME 24 job IDs came back under every one of
+    its 4 locales (de_DE/en_GB/en_US/fr_CA) -- SAP Career Site Builder's
+    job list is one shared backend list per tenant; locale only
+    retranslates surrounding page chrome (a sample job's title differed
+    only in trailing "+5 more"/"+5 weitere"/"+5 de plus" boilerplate,
+    never in the actual job content). Scraping every discovered locale
+    was doing up to 10x the real work for zero additional job coverage.
+    Now tries ONE explicit locale (en_US, so the result is deterministically
+    English rather than whatever the tenant's own default happens to
+    render — that same Munich Re test showed the no-locale default pass
+    rendering in French-flavored text, not English) and only falls back
+    to the plain no-locale pass if that returns nothing (a tenant that
+    doesn't support en_US at all, rather than one that simply has no open
+    roles right now -- see the `if not jobs` guard below)."""
     host = (slug or "").strip().lower()
     if not host or "/" in host or " " in host:
         log.debug(f"Invalid SuccessFactors (successfactors) slug format: {slug}")
@@ -2708,11 +2728,6 @@ async def scrape_successfactors(slug: str) -> list[dict]:
     if not await _sf_robots_allows(origin, "/search/"):
         log.debug(f"SuccessFactors: {host} disallows /search/ via robots.txt; skipping")
         return []
-
-    r = await _get(f"{origin}/search/", headers=headers)
-    if r is None:
-        return []
-    locales = list(dict.fromkeys(_SF_LOCALE_RE.findall(r.text)))[:_SF_MAX_LOCALES]
 
     seen_ids: set[str] = set()
     jobs: list[dict] = []
@@ -2780,31 +2795,14 @@ async def scrape_successfactors(slug: str) -> list[dict]:
             # 2026-09: see module-level comment above _pace_host.
             await _pace_host_async(origin)
 
-    # 2026-09 BUG FIX (explicit user report: "an ungodly amount of time is
-    # being spent crawling SAP SuccessFactors"): this used to await each
-    # locale pass ONE AT A TIME -- the default pass, then every locale in
-    # `locales` (up to _SF_MAX_LOCALES=10) in sequence, each internally
-    # paginating up to _SF_MAX_PAGES_PER_LOCALE=200 pages. For a large
-    # multinational tenant with several locales, that's potentially
-    # hundreds of fully sequential round-trips for ONE board, on a
-    # platform with no PLATFORM_WORKERS entry of its own (crawl_i.py's
-    # default of 8 concurrent boards) -- unlike every other pagination
-    # loop in this file, nothing here was actually using the async
-    # migration's concurrency at all. Each locale pass is independent
-    # (its own from-page-1 pagination, stopping on its own empty page)
-    # and safe to run concurrently: seen_ids/jobs are mutated with no
-    # `await` between the membership check and the add/append, so
-    # asyncio's cooperative scheduling can't interleave two locales
-    # mid-mutation. The existing per-host semaphore/pacing (_get/
-    # _pace_host_async) still caps real concurrent requests against this
-    # tenant's own host regardless of how many locale coroutines are
-    # "concurrently" trying. One (rare, cosmetic-only) behavior change:
-    # if the SAME job_id genuinely appears under two different locales,
-    # which locale's title/location wins is no longer deterministically
-    # "default, then locale list order" -- whichever coroutine's request
-    # happens to land first claims it. Every job still gets scraped
-    # exactly once either way.
-    await asyncio.gather(_scrape_locale(None), *(_scrape_locale(loc) for loc in locales))
+    await _scrape_locale("en_US")
+    if not jobs:
+        # en_US genuinely isn't offered by this tenant (rather than the
+        # tenant just having zero open roles right now, which would also
+        # leave `jobs` empty and is expected/normal) -- fall back to
+        # whatever locale the site renders by default rather than
+        # reporting a false zero.
+        await _scrape_locale(None)
 
     return jobs
 

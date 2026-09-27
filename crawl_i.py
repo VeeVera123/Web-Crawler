@@ -163,14 +163,16 @@ PLATFORM_WORKERS = {
     # platform), despite successfactors being a per-tenant-subdomain
     # platform like workday/icims/hrmdirect above, where different
     # boards never share a host and so don't compete for the same
-    # per-host semaphore. Raised to match that tier now that
-    # scrape_successfactors's own locale passes were also parallelized
-    # (see that function's BUG FIX comment) — the two fixes are
-    # independent (per-board vs. within-a-board concurrency) and both
-    # needed: this alone wouldn't have helped a single huge multinational
-    # tenant board that was the slow one, and that alone wouldn't have
-    # helped many boards queuing behind an 8-wide cap.
-    "successfactors": 20,
+    # per-host semaphore. Set to match icims's proven-in-production
+    # ceiling: scrape_successfactors itself was ALSO cut from up to 11
+    # sequential locale passes per board down to 1-2 (see that function's
+    # BUG FIX comment — verified live that extra locales were the exact
+    # same job postings, just retranslated chrome text, not extra
+    # coverage), so each board is now a genuinely light 1-2-request job
+    # rather than the potential hundreds it used to be, and can safely
+    # support the same board-level concurrency as any other per-tenant
+    # platform here.
+    "successfactors": 30,
 }
 
 
