@@ -2172,312 +2172,199 @@ async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 # search endpoint 500s on a cookie-less request. Fixed by priming the
 # session (one GET to Search/Home/Home) before the POST, same as a real
 # browser session would do.
-def _brassring_extract_search_template(html: str) -> dict | None:
-    """Extract the embedded "default search request" JSON template from a
-    real BrassRing searchResults page's raw HTML.
-
-    2026-09 BUG FIX (round 2 — real live evidence via browser network
-    capture, replacing the round-1 fix which was itself based on a wrong
-    assumption): the OLD code POSTed a hand-built, flat form-urlencoded
-    body (`partnerid=X&siteid=Y&keyword=...`) straight to
-    `Search/Ajax/MatchedJobs`. That endpoint name was actually right —
-    but the request shape was completely wrong. Live capture of the real
-    frontend's own XHR to that exact endpoint showed:
-      - Content-Type must be application/json, not form-urlencoded.
-      - The body is a JSON OBJECT with PascalCase keys (PartnerId,
-        SiteId, Keyword, Location, KeywordCustomSolrFields,
-        LocationCustomSolrFields, FacetFilterFields, TurnOffHttps,
-        Latitude, Longitude, PowerSearchOptions), plus a REQUIRED
-        "encryptedsessionvalue" field — an opaque, per-session token the
-        server issues and the client must echo back verbatim. This
-        token cannot be constructed by us; a request without it (or with
-        a wrong one) is presumably what caused every prior request to
-        fail (both the old form-encoded POST and any hand-built JSON
-        attempt without this field).
-      - The response envelope is `{"Jobs":{"Job":[...]}}` — an EXTRA
-        nesting level versus the old code's `data.get("Jobs", [])`
-        assumption (a plain list). Confirmed live via a real captured
-        response beginning `{"Jobs":{"Job":[{"Questions":[...`.
-      - Each job record is NOT flat fields like the old code assumed
-        (JobTitle, JobInfo1, JobInfo2, JobInfo3, AutoReqId, formatted-
-        ShortDescription) — it's `{"Questions": [{"QuestionName": "...",
-        "Value": "..."}, ...]}`, a list of key/value pairs to be
-        flattened into a dict. Confirmed live: one real job's Questions
-        array included entries named "reqid" and "jobtitle" among
-        others.
-
-    The EncryptedSessionValue (and the whole ready-to-POST template
-    around it) is issued by, and embedded directly in, the raw HTML of
-    BrassRing's real search-results page — confirmed live to be present
-    in a PLAIN fetch of that page with no JS execution, so a simple GET
-    (no headless browser) is suffient to obtain it. It's embedded as an
-    HTML-entity-escaped (``&quot;`` for ``"``), backslash-escaped JSON
-    object literal — this function locates it via the literal marker
-    "encryptedsessionvalue" (case-insensitive, since real-world casing
-    varies), walks outward to find the enclosing `{...}` by brace
-    counting on the raw (still-encoded) text — safe because the escaping
-    means literal `{`/`}` characters inside the encoded blob only appear
-    as actual object structure, not inside any string value — then
-    HTML-unescapes and JSON-unescapes it before parsing. Returns None if
-    the marker or a balanced object around it can't be found (the search
-    page didn't render the expected template, e.g. an inactive/invalid
-    tenant), letting the caller treat that as a real failure rather than
-    silently proceeding with a token-less request."""
-    m = re.search(r'encryptedsessionvalue', html, re.I)
-    if not m:
-        return None
-    start = html.rfind("{", 0, m.start())
-    if start < 0:
-        return None
-    depth = 1
-    i = start + 1
-    n = len(html)
-    while depth > 0 and i < n:
-        if html[i] == "{":
-            depth += 1
-        elif html[i] == "}":
-            depth -= 1
-        i += 1
-    if depth != 0:
-        return None
-    raw_blob = html[start:i]
-    try:
-        decoded = unescape(raw_blob)
-        decoded = decoded.replace('\\"', '"').replace("\\\\", "\\")
-        return json.loads(decoded)
-    except Exception:
-        return None
-
-
 async def scrape_brassring(slug: str) -> list[dict]:
-    """BrassRing search API scraper. Slug format: 'partner_id|site_id'.
+    """BrassRing public Talent Gateway scraper.
 
-    2026-09 BUG FIX (round 2 — see _brassring_extract_search_template's
-    docstring above for the full live-evidence trail on the request/
-    response shape). Flow, confirmed live end-to-end against a real,
-    current tenant (Home Depot):
-      1. GET Search/home/Home?partnerid=P&siteid=S — primes the session
-         (unchanged from round 1).
-      2. GET Search/home/HomeWithPreLoad?partnerid=P&siteid=S&
-         PageType=searchResults&SearchType=linkquery&keyWordSearch=&
-         locationSearch= — this is the page a real candidate's "Job
-         search" link lands on. Its JOB LISTINGS are rendered
-         client-side by Angular (confirmed live: a plain GET of this
-         page, no JS executed, does NOT contain the real job titles/
-         counts) — but its raw HTML DOES embed the ready-to-POST search
-         template (including the session token) needed for step 3,
-         confirmed live via a plain fetch with no JS execution.
-      3. POST Search/Ajax/MatchedJobs with that exact template (as JSON,
-         Content-Type: application/json), incrementing PageNumber for
-         each subsequent page. This is the real search endpoint after
-         all — round 1's mistake was reaching it with the wrong request
-         shape (form-encoded, missing the session token, wrong field
-         names), not reaching the wrong endpoint.
+    Accepts the historical ``partner_id|site_id`` identifier and, when
+    discovery preserves it, ``host|partner_id|site_id``.  BrassRing has
+    multiple production front doors (US/EU/China and Akamai/non-Akamai), so
+    a bare partner/site pair cannot uniquely identify the correct host.
 
-    This function still uses its OWN short-lived httpx.AsyncClient
-    (isolated cookie jar) rather than the shared singleton _get()/
-    _post() use for every other platform — see round 1's cookie-
-    isolation fix (preserved unchanged): several tenants' priming
-    requests interleaved through a SHARED client/cookie jar under real
-    concurrency previously caused one tenant's session to be clobbered
-    by another's before its own search POST executed."""
+    Strategy, in order:
+      1. Try the host preserved by discovery, if present.
+      2. Otherwise probe the documented production BrassRing front doors.
+      3. Prime the Talent Gateway session.
+      4. Try current TGnewUI search HTML and embedded job records.
+      5. Try the older MatchedJobs JSON endpoint as a compatibility path.
+
+    We never accept a 200 response by itself as success: the response must
+    contain identifiable job records.
+    """
     parts = slug.split("|")
-    if len(parts) != 2:
-        log.debug(f"Invalid BrassRing slug format: {slug} (expected 'partner_id|site_id')")
-        return []
+    if len(parts) == 3:
+        supplied_host, partner_id, site_id = parts
+        supplied_host = supplied_host.strip()
+        if supplied_host.startswith("http"):
+            supplied_host = urlparse(supplied_host).netloc
+        supplied_host = supplied_host.strip().lower()
+    elif len(parts) == 2:
+        supplied_host, partner_id, site_id = "", parts[0].strip(), parts[1].strip()
+    else:
+        raise RuntimeError(f"BrassRing: invalid board slug {slug!r}; expected partner_id|site_id or host|partner_id|site_id")
+    if not partner_id or not site_id:
+        raise RuntimeError(f"BrassRing: invalid partner/site IDs in {slug!r}")
 
-    partner_id, site_id = parts
-    home_url = "https://sjobs.brassring.com/TGnewUI/Search/Home/Home"
-    search_results_url = "https://sjobs.brassring.com/TGnewUI/Search/home/HomeWithPreLoad"
-    search_url = "https://sjobs.brassring.com/TgNewUI/Search/Ajax/MatchedJobs"
-    user_agent = random.choice(USER_AGENTS)
+    production_hosts = [
+        "sjobs.brassring.com",      # US production, non-Akamai
+        "xjobs.brassring.com",      # US production, Akamai
+        "krb-sjobs.brassring.com",  # EU production, non-Akamai
+        "krb-xjobs.brassring.com",  # EU production, Akamai
+        "krbcn-sjobs.brassring.com",# China production
+    ]
+    hosts = []
+    if supplied_host:
+        hosts.append(supplied_host)
+    for h in production_hosts:
+        if h not in hosts:
+            hosts.append(h)
 
-    # 2026-09: see round 1's cookie-isolation BUG FIX (preserved) for why
-    # this function uses a private client instead of the shared singleton.
-    # _brassring_request mirrors _get/_post's own retry/backoff/
-    # Retry-After contract against this private client, and reuses the
-    # module's host-keyed semaphore (keyed by hostname, not by client
-    # instance) so total concurrency to sjobs.brassring.com stays bounded
-    # the same way it is for every other platform.
-    async def _brassring_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response | None:
-        host_sem = _host_semaphore_for(url)
-        async with host_sem:
-            for attempt in range(MAX_RETRIES + 1):
-                try:
-                    resp = await client.request(method, url, **kwargs)
-                    if resp.status_code == 429:
-                        retry_after = resp.headers.get("Retry-After")
-                        if retry_after and retry_after.strip().isdigit():
-                            wait = min(int(retry_after), 30)
-                        else:
-                            wait = min(2 ** attempt + random.uniform(0, 1), 30)
-                        await asyncio.sleep(wait)
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    }
+
+    def _text(value) -> str:
+        return unescape(re.sub(r"\s+", " ", str(value or "").strip()))
+
+    def _job_dict(host: str, jid: str, title: str = "", location: str = "", desc: str = "", department: str = "", employment: str = "") -> dict:
+        job_url = (f"https://{host}/TGnewUI/Search/home/HomeWithPreLoad"
+                   f"?PageType=JobDetails&partnerid={partner_id}&siteid={site_id}&jobid={jid}")
+        return {
+            "title": title or f"BrassRing job {jid}",
+            "url": job_url,
+            "company": partner_id,
+            "location": location,
+            "country": location.split(",")[-1].strip() if "," in location else "",
+            "department": department,
+            "workplace_type": "",
+            "employment_type": employment,
+            "salary": _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "BrassRing",
+            "slug": slug,
+        }
+
+    def _parse_html(html: str, base_url: str, host: str) -> list[dict]:
+        found, seen = [], set()
+        # Search both visible anchors and embedded JSON/template state.  The
+        # current TGnewUI often renders the card client-side, so anchors are
+        # not guaranteed to exist in the raw response.
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = str(a.get("href") or "")
+            title = _text(a.get_text(" ", strip=True))
+            if not title or len(title) < 2:
+                continue
+            m = re.search(r"(?:[?&](?:jobid|jobId|Areq|reqid)=)([^&#]+)", href, re.I)
+            if not m:
+                m = re.search(r"#jobDetails=([^_&#]+)", href, re.I)
+            if not m:
+                m = re.search(r"/(?:job|jobs)/(\d+[A-Za-z0-9_-]*)", href, re.I)
+            if not m:
+                continue
+            jid = _text(m.group(1))
+            if not jid or jid.lower() in {"home", "search"}:
+                continue
+            container = a
+            blob = title
+            for _ in range(6):
+                container = container.parent
+                if container is None:
+                    break
+                candidate = _text(container.get_text(" ", strip=True))
+                if len(candidate) >= len(title) + 5 and len(candidate) < 5000:
+                    blob = candidate
+                    break
+            loc = ""
+            lm = re.search(r"(?:Location|Job Location)\s*[:|-]\s*([^|]{2,160})", blob, re.I)
+            if lm:
+                loc = _text(lm.group(1))
+            key = jid
+            if key not in seen:
+                seen.add(key)
+                found.append(_job_dict(host, jid, title, loc))
+
+        # Embedded JSON / JS state.  Do not require a specific schema because
+        # BrassRing has changed the Angular payload shape between deployments.
+        if not found:
+            id_patterns = (
+                r'"(?:AutoReqId|JobId|jobId|jobid|Areq|requisitionId)"\s*:\s*"?([A-Za-z0-9_-]+)',
+                r"(?:jobid|jobId|Areq)[=:'\"]+([A-Za-z0-9_-]+)",
+            )
+            for pat in id_patterns:
+                for m in re.finditer(pat, html, re.I):
+                    jid = _text(m.group(1))
+                    if not jid or jid in seen:
                         continue
-                    return resp
-                except Exception as e:
-                    if attempt == MAX_RETRIES:
-                        log.debug(f"BrassRing request failed {url}: {e}")
-                        return None
-                    await asyncio.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
-        return None
+                    seen.add(jid)
+                    found.append(_job_dict(host, jid))
+        return found
 
-    timeout = httpx.Timeout(
-        connect=20.0, read=max(60.0, float(REQUEST_TIMEOUT)), write=30.0, pool=30.0,
-    )
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Step 1: prime the session (unchanged from round 1).
-        try:
-            prime = await _brassring_request(
-                client, "GET", home_url,
-                params={"partnerid": partner_id, "siteid": site_id},
-                headers={
-                    "User-Agent": user_agent,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
-            )
-            if prime is None or prime.status_code >= 400:
-                status = prime.status_code if prime is not None else "no response"
-                raise RuntimeError(f"session-priming GET returned {status}")
-        except Exception as e:
-            raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
-
-        # Step 2: load the real search-results page and extract its
-        # embedded search template (incl. the session token).
-        try:
-            results_page = await _brassring_request(
-                client, "GET", search_results_url,
-                params={
-                    "partnerid": partner_id,
-                    "siteid": site_id,
-                    "PageType": "searchResults",
-                    "SearchType": "linkquery",
-                    "keyWordSearch": "",
-                    "locationSearch": "",
-                },
-                headers={
-                    "User-Agent": user_agent,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
-            )
-            if results_page is None or results_page.status_code >= 400:
-                status = results_page.status_code if results_page is not None else "no response"
-                raise RuntimeError(f"searchResults GET returned {status}")
-            template = _brassring_extract_search_template(results_page.text)
-            if template is None:
-                raise RuntimeError("could not find/parse embedded search template (encryptedsessionvalue) in searchResults page")
-        except Exception as e:
-            raise RuntimeError(f"BrassRing: searchResults page fetch/parse failed for {slug}: {e}") from e
-
-        # Step 3: paginate the real search endpoint using that template.
-        all_jobs = []
-        page = 1
-
-        while True:
-            payload = dict(template)
-            payload["PageNumber"] = page
-
+    timeout = httpx.Timeout(connect=15, read=max(45.0, float(REQUEST_TIMEOUT)), write=20, pool=20)
+    last_reason = "no candidate host produced job records"
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, http2=True) as client:
+        for host in hosts:
+            base = f"https://{host}"
+            home_url = f"{base}/TGnewUI/Search/home/Home"
+            search_url = f"{base}/TGnewUI/Search/home/HomeWithPreLoad"
             try:
-                r = await _brassring_request(
-                    client, "POST", search_url,
-                    json=payload,
-                    headers={
-                        "User-Agent": user_agent,
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Origin": "https://sjobs.brassring.com",
-                        "Referer": search_results_url,
-                    },
-                )
-                if r is None:
-                    if page == 1:
-                        raise RuntimeError(f"BrassRing: request failed for {slug} page 1")
-                    log.debug(f"BrassRing: request failed for {slug} page {page}")
-                    break
-                if r.status_code != 200:
-                    if page == 1:
-                        raise RuntimeError(f"BrassRing: API returned {r.status_code} for {slug} page 1")
-                    log.debug(f"BrassRing: API returned {r.status_code} for {slug} page {page}")
-                    break
-                data = r.json()
-            except RuntimeError:
-                raise
+                prime = await client.get(home_url, params={"partnerid": partner_id, "siteid": site_id}, headers=headers)
+                if prime.status_code >= 400:
+                    last_reason = f"{host}: home HTTP {prime.status_code}"
+                    continue
+
+                # Current public search-page forms. Try both query spellings
+                # seen in indexed/live TGnewUI URLs.
+                candidates = [
+                    {"partnerid": partner_id, "siteid": site_id, "PageType": "searchResults", "SearchType": "linkquery"},
+                    {"partnerid": partner_id, "siteid": site_id, "PageType": "searchResults", "SearchType": "linkquery", "keyWordSearch": "", "locationSearch": ""},
+                ]
+                for params in candidates:
+                    r = await client.get(search_url, params=params, headers={**headers, "Referer": str(prime.url)})
+                    if r.status_code >= 400:
+                        last_reason = f"{host}: search HTTP {r.status_code}"
+                        continue
+                    jobs = await asyncio.to_thread(_parse_html, r.text, str(r.url), host)
+                    if jobs:
+                        return jobs
+
+                # Legacy JSON endpoint. It is not assumed current, but it is
+                # still worth probing after the correct host/session is known.
+                for endpoint in ("/TGnewUI/Search/Ajax/MatchedJobs", "/TgNewUI/Search/Ajax/MatchedJobs"):
+                    ajax = await client.post(
+                        base + endpoint,
+                        data={"partnerid": partner_id, "siteid": site_id, "keyword": "", "location": "", "pagenum": "1", "sortBy": "posteddate", "SortType": "desc"},
+                        headers={**headers, "Accept": "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest", "Origin": base, "Referer": str(prime.url)},
+                    )
+                    if ajax.status_code != 200:
+                        last_reason = f"{host}: {endpoint} HTTP {ajax.status_code}"
+                        continue
+                    try:
+                        data = ajax.json()
+                    except Exception:
+                        continue
+                    arr = data.get("Jobs") if isinstance(data, dict) else None
+                    if not isinstance(arr, list) or not arr:
+                        continue
+                    out = []
+                    for j in arr:
+                        if not isinstance(j, dict):
+                            continue
+                        jid = _text(j.get("AutoReqId") or j.get("JobId") or j.get("Areq"))
+                        title = _text(j.get("JobTitle") or j.get("Title"))
+                        if not jid or not title:
+                            continue
+                        desc = _snippet(j.get("formattedShortDescription") or j.get("Description") or "")
+                        out.append(_job_dict(host, jid, title, _text(j.get("JobInfo1") or j.get("Location")), desc,
+                                             _text(j.get("JobInfo3") or j.get("Department")), _text(j.get("JobInfo2") or j.get("EmploymentType"))))
+                    if out:
+                        return out
             except Exception as e:
-                if page == 1:
-                    raise RuntimeError(f"BrassRing: request failed for {slug}: {e}") from e
-                log.debug(f"BrassRing: request failed for {slug}: {e}")
-                break
+                last_reason = f"{host}: {type(e).__name__}: {e}"
+                log.debug("BrassRing host %s failed for %s: %s", host, slug, e)
+                continue
 
-            # Real response envelope: {"Jobs": {"Job": [...]}} — an
-            # extra nesting level versus round 1's `{"Jobs": [...]}`
-            # assumption. Confirmed live.
-            jobs_array = (data.get("Jobs") or {}).get("Job") or []
-            if not jobs_array:
-                break
-
-            for job in jobs_array:
-                # Real job shape: {"Questions": [{"QuestionName": "...",
-                # "Value": "..."}, ...]} — flatten to a dict for easy
-                # lookup, matching the same convention used elsewhere in
-                # this file for similar Questions-array payloads.
-                q = {}
-                for entry in job.get("Questions") or []:
-                    if isinstance(entry, dict) and entry.get("QuestionName"):
-                        q[entry["QuestionName"].lower()] = entry.get("Value", "")
-
-                auto_req_id = q.get("reqid") or q.get("autoreqid") or ""
-                title = q.get("jobtitle", "")
-                location = q.get("location", "") or q.get("primarylocation", "")
-                department = q.get("category", "") or q.get("jobcategory", "")
-                job_type = q.get("jobtype", "") or q.get("employmenttype", "")
-                short_desc = _snippet(q.get("jobdescription", "") or q.get("shortdescription", ""))
-                salary = _extract_salary(short_desc)
-
-                country = ""
-                if location:
-                    loc_parts = [p.strip() for p in str(location).split(",")]
-                    if len(loc_parts) >= 2:
-                        country = loc_parts[-1]
-
-                job_url = (
-                    f"https://sjobs.brassring.com/TgNewUI/Search/home/HomeWithPreLoad"
-                    f"?partnerid={partner_id}&siteid={site_id}&PageType=JobDetails&jobid={auto_req_id}"
-                )
-
-                all_jobs.append({
-                    "title": str(title).strip(),
-                    "url": job_url,
-                    "company": partner_id,
-                    "location": location,
-                    "country": country,
-                    "department": department,
-                    "workplace_type": "",
-                    "employment_type": job_type,
-                    "salary": salary,
-                    "description_snippet": short_desc,
-                    "source_ats": "BrassRing",
-                    "slug": slug,
-                })
-
-            # 2026-09: TotalHits lived at the top level in round 1's
-            # (wrong) response-shape assumption; the real envelope nests
-            # everything under "Jobs", so look there first, falling back
-            # to a simple "fewer results than a full page" stop condition
-            # if a TotalHits-shaped field isn't present at either level —
-            # safer than assuming a specific key name we haven't
-            # confirmed live for the real envelope.
-            total_hits = data.get("TotalHits") or (data.get("Jobs") or {}).get("TotalHits") or 0
-            if total_hits:
-                if page * 50 >= total_hits:
-                    break
-            elif len(jobs_array) < 50:
-                break
-
-            page += 1
-            # 2026-09: see module-level comment above _pace_host.
-            await _pace_host_async(search_url)
-
-        return all_jobs
+    raise RuntimeError(f"BrassRing: no job records found for {slug}; {last_reason}")
 
 
 # ── Teamtailor ───────────────────────────────────────────
@@ -3356,122 +3243,148 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
 # ── Softgarden ──────────────────────────────────────────
 
 async def scrape_softgarden(slug: str) -> list[dict]:
-    """Softgarden — HTML scraper of the public career microsite.
-    Slug is the company's softgarden subdomain (e.g. 'acme' for
-    acme.softgarden.io). There is NO public unauthenticated REST API —
-    Softgarden's real API (dev.softgarden.de) requires an OAuth2 client
-    credential grant issued per-customer, so we parse the static HTML
-    vacancy listing instead (it is server-rendered, no JS required).
+    """Softgarden scraper using the current public jobs.feed.json first.
 
-    List page:   https://{slug}.softgarden.io/en/vacancies  (falls back to /vacancies)
-    Detail page: https://{slug}.softgarden.io/job/{jobId}/{title-slug}?jobDbPVId={dbId}&l=en
+    Modern Career Page / PCW tenants expose a public schema.org DataFeed at
+    /jobs.feed.json (also /jobs.json and /.well-known/jobs.json). The feed is
+    preferred because it contains complete structured JobPosting records and
+    avoids the Next.js/PCW browser layer. Classic HTML/JSON-LD pages remain a
+    fallback for older tenants.
     """
     company_name = slug.replace("-", " ").title()
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json, text/html;q=0.9,*/*;q=0.8"}
 
-    r = None
-    # 2026-09: widened path list — confirmed live failures against
-    # certificate/a-tile-style discovered slugs (see the discovery-layer
-    # note above scrape_jobadder's invalid-slug guard: these two are
-    # believed to be Softgarden infrastructure/demo hosts rather than real
-    # employer tenants, a discovery.py problem this extra path list
-    # doesn't solve) surfaced that some GENUINE tenants also 404 on both
-    # original paths but serve a real listing under /en/jobs or a
-    # trailing-slash variant — cheap to try, no extra cost on tenants
-    # that already match one of the first two.
-    for path in ("/en/vacancies", "/en/vacancies/", "/vacancies", "/vacancies/",
-                 "/en/jobs", "/en/jobs/"):
-        r = await _get(f"https://{slug}.softgarden.io{path}", headers=headers)
-        if r:
-            break
-    if not r:
-        # 2026-09 BUG FIX: was `return []` — see scrape_brassring's note
-        # above; a total fetch failure across both path variants is a
-        # real failure, not an empty vacancy list, and needs to be
-        # counted as one instead of silently reported as "0 jobs, active."
-        raise RuntimeError(f"Softgarden: vacancy-list fetch failed for {slug}")
+    domains = (
+        f"https://{slug}.career.softgarden.de",
+        f"https://{slug}.softgarden.de",
+        f"https://{slug}.softgarden.io",
+    )
 
-    jobs = []
-    seen = set()
+    def _link_feed(link_header: str | None, base: str) -> str | None:
+        if not link_header:
+            return None
+        for part in re.split(r"\s*,\s*(?=<)", link_header):
+            m = re.search(r'<([^>]+)>\s*;[^,]*rel=["\']alternate["\'][^,]*type=["\']application/json["\']', part, re.I)
+            if m:
+                return urljoin(base, m.group(1))
+            m = re.search(r"<([^>]*jobs(?:\.feed)?\.json[^>]*)>", part, re.I)
+            if m:
+                return urljoin(base, m.group(1))
+        return None
 
-    # ── Primary: JSON-LD JobPosting blocks, if the template includes them ──
-    for ld_match in re.finditer(
-        r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
-        r.text, re.I
-    ):
+    def _make_job(item: dict) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not title or not url:
+            return None
+        org = item.get("hiringOrganization") or {}
+        loc_obj = item.get("jobLocation") or {}
+        if isinstance(loc_obj, list):
+            loc_obj = loc_obj[0] if loc_obj else {}
+        addr = loc_obj.get("address") if isinstance(loc_obj, dict) else {}
+        addr = addr if isinstance(addr, dict) else {}
+        locality = str(addr.get("addressLocality") or "").strip()
+        region = str(addr.get("addressRegion") or "").strip()
+        country = str(addr.get("addressCountry") or "").strip()
+        if isinstance(item.get("jobLocationType"), str) and item.get("jobLocationType"):
+            workplace = str(item.get("jobLocationType"))
+        else:
+            workplace = "Remote" if "TELECOMMUTE" in str(item.get("jobLocationType") or "").upper() else ""
+        location = ", ".join(x for x in (locality, region) if x)
+        desc = _snippet(item.get("description") or "")
+        return {
+            "title": title, "url": url,
+            "company": str(org.get("name") or company_name).strip(),
+            "location": location, "country": country,
+            "department": "", "workplace_type": workplace,
+            "employment_type": item.get("employmentType") or "",
+            "salary": _extract_salary(desc), "description_snippet": desc,
+            "source_ats": "Softgarden", "slug": slug,
+        }
+
+    for domain in domains:
         try:
-            ld_data = json.loads(ld_match.group(1))
-            items = ld_data if isinstance(ld_data, list) else [ld_data]
-            for item in items:
-                if not isinstance(item, dict) or item.get("@type") != "JobPosting":
+            home = await _get(domain + "/", headers=headers)
+            if not home:
+                continue
+
+            feed_candidates = []
+            advertised = _link_feed(home.headers.get("Link"), domain + "/")
+            if advertised:
+                feed_candidates.append(advertised)
+            for path in ("/jobs.feed.json", "/jobs.json", "/.well-known/jobs.json"):
+                u = domain + path
+                if u not in feed_candidates:
+                    feed_candidates.append(u)
+
+            for feed_url in feed_candidates:
+                feed = await _get(feed_url, headers={**headers, "Accept": "application/json,*/*;q=0.8"})
+                if not feed:
                     continue
-                job_url = item.get("url", "")
-                if not job_url or job_url in seen:
+                try:
+                    data = feed.json()
+                except Exception:
                     continue
-                seen.add(job_url)
+                elements = data.get("dataFeedElement", []) if isinstance(data, dict) else []
+                if not isinstance(elements, list):
+                    elements = []
+                jobs, seen = [], set()
+                for element in elements:
+                    item = element.get("item") if isinstance(element, dict) else element
+                    job = _make_job(item)
+                    if job and job["url"] not in seen:
+                        seen.add(job["url"])
+                        jobs.append(job)
+                if jobs:
+                    return jobs
 
-                loc_obj = item.get("jobLocation", {})
-                if isinstance(loc_obj, list) and loc_obj:
-                    loc_obj = loc_obj[0]
-                addr = loc_obj.get("address", {}) if isinstance(loc_obj, dict) else {}
-                loc = addr.get("addressLocality", "") if isinstance(addr, dict) else ""
-                country = addr.get("addressCountry", "") if isinstance(addr, dict) else ""
-                if isinstance(country, dict):
-                    country = country.get("name", "")
+            # Modern HTML fallback: /jobs/ is the documented public index.
+            for path in ("/jobs/", "/jobs"):
+                page = await _get(domain + path, headers=headers)
+                if not page:
+                    continue
+                soup = await asyncio.to_thread(BeautifulSoup, page.text, "html.parser")
+                jobs, seen = [], set()
+                for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+                    try:
+                        data = json.loads(script.string or script.get_text())
+                    except Exception:
+                        continue
+                    values = data if isinstance(data, list) else [data]
+                    for item in values:
+                        if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                            job = _make_job(item)
+                            if job and job["url"] not in seen:
+                                seen.add(job["url"]); jobs.append(job)
+                if jobs:
+                    return jobs
 
-                desc = _snippet(item.get("description", ""))
-                salary = _extract_salary(desc)
-                org = item.get("hiringOrganization", {})
-
-                jobs.append({
-                    "title": (item.get("title") or "").strip(),
-                    "url": job_url,
-                    "company": (org.get("name", "") if isinstance(org, dict) else "").strip() or company_name,
-                    "location": loc,
-                    "country": country,
-                    "department": "",
-                    "workplace_type": "",
-                    "employment_type": item.get("employmentType", ""),
-                    "salary": salary,
-                    "description_snippet": desc,
-                    "source_ats": "Softgarden",
-                    "slug": slug,
-                })
-        except Exception:
+            # Classic Softgarden paths, only after modern feed/index attempts.
+            for path in ("/en/vacancies", "/en/vacancies/", "/vacancies", "/vacancies/", "/en/jobs", "/en/jobs/"):
+                page = await _get(domain + path, headers=headers)
+                if not page:
+                    continue
+                jobs, seen = [], set()
+                for m in re.finditer(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', page.text, re.I | re.S):
+                    try:
+                        data = json.loads(m.group(1))
+                    except Exception:
+                        continue
+                    values = data if isinstance(data, list) else [data]
+                    for item in values:
+                        if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                            job = _make_job(item)
+                            if job and job["url"] not in seen:
+                                seen.add(job["url"]); jobs.append(job)
+                if jobs:
+                    return jobs
+        except Exception as e:
+            log.debug("Softgarden domain %s failed for %s: %s", domain, slug, e)
             continue
 
-    if jobs:
-        return jobs
-
-    # ── Fallback: plain HTML vacancy links ──
-    # Detail links look like /job/{jobId}/{title-slug}?jobDbPVId={dbId}&l=en
-    for match in re.finditer(
-        r'href=["\'](/job/(\d+)/([^"\'?]+)[^"\']*)["\']',
-        r.text, re.I
-    ):
-        path, job_id, title_slug = match.group(1), match.group(2), match.group(3)
-        job_url = f"https://{slug}.softgarden.io{path}"
-        if job_url in seen:
-            continue
-        seen.add(job_url)
-        title = unescape(title_slug.replace("-", " ")).strip().title()
-
-        jobs.append({
-            "title": title,
-            "url": job_url,
-            "company": company_name,
-            "location": "",
-            "country": "",
-            "department": "",
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": "",
-            "description_snippet": "",
-            "source_ats": "Softgarden",
-            "slug": slug,
-        })
-
-    return jobs
+    raise RuntimeError(f"Softgarden: no jobs/feed found for {slug} across known domain generations")
 
 
 # ── Zoho Recruit ────────────────────────────────────────
@@ -3905,115 +3818,100 @@ def scrape_paylocity(slug: str) -> list[dict]:
 # ── Eploy ───────────────────────────────────────────────
 
 async def scrape_eploy(slug: str) -> list[dict]:
-    """Eploy — HTML scrape of the public vacancy search page.
-    Slug is the customer's Eploy portal subdomain (e.g. 'acme' for
-    acme.eploy.net). No public JSON API; the vacancy list and detail
-    pages are plain server-rendered HTML.
+    """Eploy public job-board scraper with host discovery and pagination.
 
-    List page:   https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx
-        (path varies per tenant — several candidate paths are tried below)
-    Detail page: relative to the list page's own URL, confirmed live as
-        "{id}/{title-slug}.html" or "vacancies-amp/{id}/{title-slug}.html"
-        depending on the tenant's template — see the BUG FIX comment
-        below for the live evidence. NOT "/candidate/jobboard/vacancy/…"
-        as this docstring previously (incorrectly) stated.
+    Eploy's public pages are genuinely server-rendered HTML. The important
+    traps are that tenant hostnames vary (plain/web/web2), the list endpoint
+    is commonly ``/vacancies/vacancy-search-results.aspx``, and a page can be
+    HTTP 200 while containing zero roles. We therefore validate by vacancy
+    links and follow the board's own pagination instead of guessing a fixed
+    number of pages.
     """
     company_name = slug.replace("-", " ").title()
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    base = f"https://{slug}.eploy.net"
-
-    r = None
-    list_url = None
-    for path in (
-        "/candidate/jobboard/vacancysearchresults.aspx",
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+    hosts = []
+    for h in (slug, f"{slug}web", f"{slug}web2"):
+        if h not in hosts:
+            hosts.append(h)
+    paths = (
+        "/vacancies/vacancy-search-results.aspx",
         "/candidate/JobBoard/VacancySearchResults.aspx",
+        "/candidate/jobboard/vacancysearchresults.aspx",
         "/vacancies",
-    ):
-        list_url = base + path
-        r = await _get(list_url, headers=headers)
-        if r:
-            break
-    if not r:
-        # 2026-09 BUG FIX: this used to `return []` here — indistinguishable
-        # from "the page loaded fine and genuinely has zero vacancies
-        # listed" to crawl_i.py's per-platform aggregator (see
-        # scrape_brassring's note above for the full explanation of why
-        # that hid every real failure across an entire ATS platform).
-        # Every candidate path failing means the request never actually
-        # succeeded — a real failure, not an empty result.
-        raise RuntimeError(f"Eploy: all vacancy-list URL variants failed for {slug}")
+        "/vacancies/",
+    )
+    # Current live Eploy detail URLs are /vacancies/<numeric-id>/<slug>.html;
+    # retain a broad fallback for older/custom boards.
+    vacancy_re = re.compile(r"(?:^|/)vacancies/(?:vacancies-amp/)?(\d+)(?:/|-)?[^/?#\"']*(?:\.html)?(?:[?#][^\"']*)?$", re.I)
 
-    jobs = []
-    seen = set()
+    async def parse_page(r: httpx.Response, base_url: str) -> tuple[list[dict], list[str]]:
+        soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
+        jobs, seen = [], set()
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href") or "").strip()
+            title = unescape(re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))).strip()
+            if not href or len(title) < 3:
+                continue
+            abs_url = urljoin(base_url, href)
+            path = urlparse(abs_url).path
+            if not (vacancy_re.search(path) or re.search(r"/vacancies/(?:[^/]+/)?\d+(?:/[^/]+)?", path, re.I)):
+                continue
+            if abs_url in seen:
+                continue
+            seen.add(abs_url)
+            location, location_status = _bs4_find_location_near(anchor, class_substrings=("location", "vacancy-location"))
+            jobs.append({
+                "title": title, "url": abs_url, "company": company_name,
+                "location": location, "location_status": location_status,
+                "country": "", "department": "", "workplace_type": "",
+                "employment_type": "", "salary": "", "description_snippet": "",
+                "source_ats": "Eploy", "slug": slug,
+            })
 
-    # 2026-09: migrated location extraction from a fixed-char-window regex
-    # fallback to a DOM-anchored lookup (see _bs4_find_location_near) — the
-    # old approach silently produced "" whenever the location text was
-    # wrapped in extra markup within its window, or could in principle grab
-    # an unrelated sibling's text past the window boundary. Title/URL
-    # extraction stays regex-based (single-field, no adjacency risk).
-    soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
-    # 2026-09 BUG FIX (round 2 — real live evidence via a browser session
-    # against currently-active tenants, not a guess): the ORIGINAL regex
-    # (`/vacancy/(\d+)/`) and round 1's widened version
-    # (`/vacancy/(\d+)`, case-insensitive) were BOTH built on a wrong
-    # assumption about Eploy's real detail-link shape. Live inspection of
-    # a real, currently-active tenant's rendered vacancy-search-results
-    # page (via a real browser, reading the actual DOM anchor — not the
-    # page's visible text, which loses hrefs) showed the real href is
-    # simply "{numeric_id}/{title-slug}.html" — e.g.
-    # "4738/personal-assistant-in-shawlands.html" — with NO "/vacancy/"
-    # segment anywhere in it, and no ".aspx" extension. A second live
-    # tenant (Entain, via its AMP-templated board) confirmed a second
-    # real variant: "vacancies-amp/{numeric_id}/{title-slug}.html". Both
-    # share the same core shape: a bare leading digit sequence (or
-    # "vacancies-amp/" then digits), a slash, a slug, and ".html". This
-    # regex matches either. Also: these hrefs are RELATIVE TO THE
-    # LISTING PAGE'S OWN PATH, not the domain root — confirmed live by
-    # loading the resolved relative path directly and getting the real
-    # job page back. The old `base + path` join was only correct for a
-    # listing page hosted at domain root; it silently breaks for any
-    # tenant whose vacancy-list path has its own subdirectory (e.g.
-    # "/jobs/vacancies/..." on the tenant used for this evidence) since
-    # "https://x.eploy.net" + "4738/foo.html" produces a wrong, dangling
-    # URL that was never even reachable. Switched to urljoin() against
-    # the ACTUAL fetched URL (r.url — post-redirect, since several
-    # candidate paths above 302-redirect before landing on the real
-    # list page) so relative links resolve exactly the way a browser
-    # would resolve them.
-    vacancy_href_re = re.compile(r'(?:^|/)(?:vacancies-amp/)?\d+/[^/?#]+\.html', re.I)
-    final_list_url = str(r.url) if r.url else list_url
-    for anchor in soup.find_all("a", href=vacancy_href_re):
-        path = (anchor.get("href") or "").strip()
-        title = anchor.get_text(strip=True)
-        if not path or not title:
-            continue
-        job_url = path if path.startswith("http") else urljoin(final_list_url, path)
-        if job_url in seen:
-            continue
-        seen.add(job_url)
+        next_urls = []
+        for a in soup.find_all("a", href=True):
+            text = _text(a.get_text(" ", strip=True)) if '_text' in globals() else unescape(re.sub(r"\s+", " ", a.get_text(" ", strip=True)))
+            href = str(a.get("href") or "").strip()
+            if not href:
+                continue
+            if re.search(r"\b(?:next|last)\b|›|»", text, re.I):
+                next_urls.append(urljoin(base_url, href))
+        return jobs, list(dict.fromkeys(next_urls))
 
-        location, location_status = _bs4_find_location_near(
-            anchor, class_substrings=("location", "vacancy-location")
-        )
+    for host in hosts:
+        base = f"https://{host}.eploy.net"
+        for path in paths:
+            first_url = base + path
+            r = await _get(first_url, headers=headers)
+            if not r:
+                continue
+            jobs, next_urls = await parse_page(r, str(r.url) if r.url else first_url)
+            if not jobs:
+                continue
+            seen_jobs = {j["url"] for j in jobs}
+            seen_pages = {str(r.url)}
+            queue = next_urls[:]
+            # Follow only same-host pagination URLs and stop on repeats.
+            while queue:
+                nxt = queue.pop(0)
+                if urlparse(nxt).netloc.lower() != urlparse(str(r.url)).netloc.lower() or nxt in seen_pages:
+                    continue
+                seen_pages.add(nxt)
+                nr = await _get(nxt, headers=headers)
+                if not nr:
+                    break
+                more, more_next = await parse_page(nr, str(nr.url) if nr.url else nxt)
+                for job in more:
+                    if job["url"] not in seen_jobs:
+                        seen_jobs.add(job["url"]); jobs.append(job)
+                for u in more_next:
+                    if u not in seen_pages:
+                        queue.append(u)
+                if not more:
+                    break
+            return jobs
 
-        jobs.append({
-            "title": title,
-            "url": job_url,
-            "company": company_name,
-            "location": location,
-            "location_status": location_status,
-            "country": "",
-            "department": "",
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": "",
-            "description_snippet": "",
-            "source_ats": "Eploy",
-            "slug": slug,
-        })
-
-    return jobs
+    raise RuntimeError(f"Eploy: no vacancy records found for {slug} across host/path variants")
 
 
 # ── Folks HR (Folks Applicant Tracking System) ──────────
@@ -4081,88 +3979,105 @@ async def scrape_folkshr(slug: str) -> list[dict]:
 # ── JobAdder ────────────────────────────────────────────
 
 async def scrape_jobadder(slug: str) -> list[dict]:
-    """JobAdder — HTML scrape of the hosted candidate job board.
-    Slug encodes the JobAdder client-app id and board name as
-    '{client_id}|{board_slug}' (both required to build the URL —
-    JobAdder boards are namespaced per-client, not by company name alone).
+    """JobAdder hosted CareersPage scraper.
 
-    List page:   https://clientapps.jobadder.com/{client_id}/{board_slug}
-    Detail page: https://clientapps.jobadder.com/{client_id}/{board_slug}/job/{job_id}
+    Current live CareersPages use URLs such as
+    ``/66341/nexia-australia/1113369/intermediate-accountant``; older boards
+    may expose ``/job/<id>`` links. Both forms are accepted. The official
+    CareersPage is a public, server-rendered feed updated by JobAdder, so no
+    authenticated API is required for this path.
     """
     if "|" in slug:
         client_id, board_slug = slug.split("|", 1)
     else:
         client_id, board_slug = slug, ""
-
     company_name = board_slug.replace("-", " ").title() or client_id
+    if not client_id.isdigit() or not board_slug:
+        raise RuntimeError(f"JobAdder: invalid discovered board slug {slug!r}; expected numeric_client_id|board_slug")
+    if board_slug.lower() in {"flexslider", "animate-css", "bootstrap", "jquery", "jquery-ui", "fontawesome", "slick", "owl-carousel", "swiper", "vendors"}:
+        raise RuntimeError(f"JobAdder: invalid discovered board slug {slug!r} — frontend/vendor asset name")
 
-    # 2026-09 BUG FIX: discovery has occasionally mistaken a static
-    # frontend/vendor asset name for a real JobAdder board slug (confirmed
-    # live failures: "vendors|flexslider", "vendors|animate-css" — these
-    # are JS library names, not employer board identifiers, and will
-    # never resolve to a real board). Rejecting them here avoids a wasted
-    # request and a confusing error that looks like a platform outage;
-    # the real fix belongs in discovery.py (don't let these become board
-    # records in the first place) — this is a defensive backstop, not a
-    # substitute for that.
-    _INVALID_JOBADDER_BOARD_SLUGS = {
-        "flexslider", "animate-css", "bootstrap", "jquery", "jquery-ui",
-        "fontawesome", "slick", "owl-carousel", "swiper", "vendors",
-    }
-    if board_slug.lower() in _INVALID_JOBADDER_BOARD_SLUGS:
-        raise RuntimeError(
-            f"JobAdder: invalid discovered board slug {slug!r} — looks like "
-            f"a frontend/vendor asset name, not an employer board"
-        )
-
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
     base = f"https://clientapps.jobadder.com/{client_id}/{board_slug}".rstrip("/")
+    candidates = [base, base + "/"]
+    jobs, seen = [], set()
 
-    r = await _get(base, headers=headers)
-    if not r:
-        # 2026-09 BUG FIX: was `return []` — see scrape_brassring's note
-        # above for why that's indistinguishable from a genuinely empty
-        # board to the platform-level failure count. Raise instead so a
-        # total fetch failure is counted and diagnosed, not silently
-        # reported as "0 jobs, board active."
-        raise RuntimeError(f"JobAdder: board fetch failed for {slug}")
-
-    jobs = []
-    seen = set()
-
-    # 2026-09: migrated to DOM-anchored location lookup — see
-    # scrape_eploy's comment above / _bs4_find_location_near's docstring.
-    soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
-    job_href_re = re.compile(r'/job/(\d+)')
-    for anchor in soup.find_all("a", href=job_href_re):
-        path = (anchor.get("href") or "").strip()
-        title = anchor.get_text(strip=True)
-        if not path or not title:
+    for list_url in candidates:
+        r = await _get(list_url, headers=headers)
+        if not r:
             continue
-        job_url = path if path.startswith("http") else f"https://clientapps.jobadder.com{path}"
-        if job_url in seen:
-            continue
-        seen.add(job_url)
+        soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
 
-        location, location_status = _bs4_find_location_near(anchor, class_substrings=("location",))
+        # Canonical current form: /<client>/<board>/<job-id>/<title-slug>[/apply]
+        patterns = [
+            re.compile(rf"^/{re.escape(client_id)}/{re.escape(board_slug)}/(\d+)(?:/[^?#]*)?(?:[?#].*)?$", re.I),
+            re.compile(r"/(?:job|jobs)/(\d+)(?:/[^?#]*)?(?:[?#].*)?$", re.I),
+        ]
+        for a in soup.find_all("a", href=True):
+            href = str(a.get("href") or "").strip()
+            title = unescape(re.sub(r"\s+", " ", a.get_text(" ", strip=True))).strip()
+            if not href or len(title) < 3:
+                continue
+            abs_url = urljoin(str(r.url), href)
+            path = urlparse(abs_url).path
+            jid = None
+            for pat in patterns:
+                m = pat.search(path)
+                if m:
+                    jid = m.group(1); break
+            if not jid:
+                # Also accept the canonical numeric path when the board slug
+                # has been normalized by a redirect.
+                m = re.search(rf"/{re.escape(client_id)}/[^/]+/(\d+)(?:/|$)", path, re.I)
+                if m:
+                    jid = m.group(1)
+            if not jid or abs_url in seen:
+                continue
+            seen.add(abs_url)
+            location, location_status = _bs4_find_location_near(a, class_substrings=("location", "job-location", "location-name"))
+            jobs.append({
+                "title": title, "url": abs_url, "company": company_name,
+                "location": location, "location_status": location_status,
+                "country": "", "department": "", "workplace_type": "",
+                "employment_type": "", "salary": "", "description_snippet": "",
+                "source_ats": "JobAdder", "slug": slug,
+            })
 
-        jobs.append({
-            "title": title,
-            "url": job_url,
-            "company": company_name,
-            "location": location,
-            "location_status": location_status,
-            "country": "",
-            "department": "",
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": "",
-            "description_snippet": "",
-            "source_ats": "JobAdder",
-            "slug": slug,
-        })
+        # JSON-LD fallback for boards whose visible anchors are injected or
+        # represented through application/json state.
+        if not jobs:
+            for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+                try:
+                    data = json.loads(script.string or script.get_text())
+                except Exception:
+                    continue
+                values = data if isinstance(data, list) else [data]
+                for item in values:
+                    if not isinstance(item, dict) or item.get("@type") != "JobPosting":
+                        continue
+                    title = _text(item.get("title"))
+                    url = _text(item.get("url"))
+                    if not title or not url or url in seen:
+                        continue
+                    seen.add(url)
+                    loc = item.get("jobLocation") or {}
+                    if isinstance(loc, list): loc = loc[0] if loc else {}
+                    addr = loc.get("address") if isinstance(loc, dict) else {}
+                    addr = addr if isinstance(addr, dict) else {}
+                    location = ", ".join(str(x).strip() for x in (addr.get("addressLocality"), addr.get("addressRegion"), addr.get("addressCountry")) if x)
+                    desc = _snippet(item.get("description") or "")
+                    jobs.append({
+                        "title": title, "url": url, "company": company_name,
+                        "location": location, "location_status": "extracted" if location else "marker_not_found",
+                        "country": str(addr.get("addressCountry") or ""), "department": "",
+                        "workplace_type": "", "employment_type": item.get("employmentType") or "",
+                        "salary": _extract_salary(desc), "description_snippet": desc,
+                        "source_ats": "JobAdder", "slug": slug,
+                    })
+        if jobs:
+            return jobs
 
-    return jobs
+    raise RuntimeError(f"JobAdder: no job records found for {slug}; board URL was reachable but no current job-link pattern matched")
 
 
 # ── Jobvite ─────────────────────────────────────────────
@@ -4753,109 +4668,178 @@ async def _jobylon_sitemap_urls() -> list[str]:
 
 
 async def scrape_jobylon(slug: str) -> list[dict]:
-    """Jobylon (Nordics) — no general-purpose public API (the documented
-    'Feed API' needs a per-customer hash issued manually by Jobylon
-    support, not self-service). Company LISTING pages
-    (emp.jobylon.com/companies/{id}-{slug}/) require JS, but job DETAIL
-    pages are server-rendered — so this discovers job URLs from the
-    site-wide sitemap.xml, then fetches each detail page and keeps only
-    the ones that link back to this company's page.
+    """Jobylon public company-page scraper with sitemap fallback.
 
-    Slug format: '{id}-{human_slug}' (e.g. '123-acme'), matching the
-    /companies/{id}-{slug}/ path segment. Best-effort: bounded by
-    _JOBYLON_MAX_DETAIL_FETCHES per call, so a company whose jobs aren't
-    reached within that many sitemap entries may come back incomplete."""
-    company_id = slug.split("-", 1)[0]
-    if not company_id.isdigit():
-        log.debug(f"Invalid Jobylon slug format: {slug} (expected '{{numeric_id}}-{{slug}}')")
-        return []
+    The site-wide sitemap is a poor primary source because it contains jobs
+    from every Jobylon customer. Current company pages, however, expose the
+    company's actual Available Jobs and are indexable/server-rendered. We
+    therefore fetch the tenant company page first and recover canonical
+    ``/jobs/<id>-<slug>/`` URLs from HTML/embedded state. Only if that yields
+    no job URLs do we fall back to the bounded site-wide sitemap scan.
+    """
+    company_id, sep, company_slug = slug.partition("-")
+    if not company_id.isdigit() or not company_slug:
+        raise RuntimeError(f"Jobylon: invalid slug {slug!r}; expected '<numeric_id>-<company-slug>'")
+    company_name = company_slug.replace("-", " ").title()
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
 
-    company_path_marker = f"/companies/{company_id}-"
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    company_urls = [
+        f"https://emp.jobylon.com/companies/{company_id}-{company_slug}/",
+        f"https://emp.jobylon.com/companies/{company_id}/",
+    ]
 
-    job_urls = await _jobylon_sitemap_urls()
-    if not job_urls:
-        return []
+    def _extract_job_urls(html: str, base_url: str) -> list[str]:
+        urls, seen = [], set()
+        # Raw HTML, hrefs, JSON state and escaped JSON all commonly preserve
+        # the canonical job URL even when the visual widget is JS-enhanced.
+        patterns = [
+            r'(?:https?:\/\/emp\.jobylon\.com)?(\/jobs\/\d+-[A-Za-z0-9][^"\'<>\\]*)',
+            r'(?:https?:\/\/emp\.jobylon\.com)?(\/jobs\/\d+[^"\'<>\\]*)',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, html, re.I):
+                u = m.group(1).replace("\\/", "/")
+                u = urljoin(base_url, u)
+                u = u.split("#", 1)[0]
+                if "/jobs/" in u and u not in seen:
+                    seen.add(u); urls.append(u)
+        # Also inspect actual anchors in case the HTML uses relative links
+        # with attributes that the regex intentionally avoids.
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            u = urljoin(base_url, str(a.get("href") or "").strip())
+            if re.search(r"/jobs/\d+", u, re.I) and u not in seen:
+                seen.add(u); urls.append(u)
+        return urls
 
-    company_name = slug.split("-", 1)[1].replace("-", " ").title() if "-" in slug else slug
-
-    jobs = []
-    fetched = 0
-    hit_cap = False
-    for job_url in job_urls:
-        if fetched >= _JOBYLON_MAX_DETAIL_FETCHES:
-            hit_cap = True
-            log.debug(f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) "
-                      f"for {slug}, stopping")
-            break
-        r = await _get(job_url, headers=headers)
-        fetched += 1
-        if not r:
-            continue
-        if company_path_marker not in r.text:
-            continue
-
-        title, desc, location = "", "", ""
-        for ld_match in re.finditer(
-            r'<script[^>]*type="application/ld\+json"[^>]*>([^<]+)</script>',
-            r.text, re.I
-        ):
+    async def _parse_detail(job_url: str, r: httpx.Response) -> dict | None:
+        title = desc = location = country = ""
+        for script in BeautifulSoup(r.text, "html.parser").find_all("script", attrs={"type": "application/ld+json"}):
             try:
-                ld_data = json.loads(ld_match.group(1))
+                data = json.loads(script.string or script.get_text())
             except Exception:
                 continue
-            items = ld_data if isinstance(ld_data, list) else [ld_data]
-            for item in items:
-                if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                    title = item.get("title", "")
-                    desc = _snippet(item.get("description", ""))
-                    loc_obj = item.get("jobLocation", {})
-                    if isinstance(loc_obj, list) and loc_obj:
-                        loc_obj = loc_obj[0]
-                    addr = loc_obj.get("address", {}) if isinstance(loc_obj, dict) else {}
-                    location = addr.get("addressLocality", "") if isinstance(addr, dict) else ""
-                    break
-
+            vals = data if isinstance(data, list) else [data]
+            for item in vals:
+                if not isinstance(item, dict) or item.get("@type") != "JobPosting":
+                    continue
+                title = _text(item.get("title"))
+                desc = _snippet(item.get("description") or "")
+                loc = item.get("jobLocation") or {}
+                if isinstance(loc, list): loc = loc[0] if loc else {}
+                addr = loc.get("address") if isinstance(loc, dict) else {}
+                addr = addr if isinstance(addr, dict) else {}
+                location = ", ".join(str(x).strip() for x in (addr.get("addressLocality"), addr.get("addressRegion")) if x)
+                country = str(addr.get("addressCountry") or "")
+                break
         if not title:
-            title_match = re.search(r"<title>([^<]+)</title>", r.text, re.I)
-            title = unescape(title_match.group(1)).strip() if title_match else ""
-
+            m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.I | re.S)
+            title = _text(m.group(1)) if m else ""
         if not title:
+            return None
+        return {
+            "title": title, "url": job_url, "company": company_name,
+            "location": location, "country": country, "department": "",
+            "workplace_type": "", "employment_type": "", "salary": _extract_salary(desc),
+            "description_snippet": desc, "source_ats": "Jobylon", "slug": slug,
+        }
+
+    # Primary: tenant-specific company page.
+    for company_url in company_urls:
+        r = await _get(company_url, headers=headers)
+        if not r:
             continue
+        job_urls = _extract_job_urls(r.text, str(r.url) if r.url else company_url)
+        if job_urls:
+            jobs = []
+            seen = set()
+            # Job detail pages are the authoritative full posting source.
+            for job_url in job_urls:
+                if job_url in seen:
+                    continue
+                seen.add(job_url)
+                jr = await _get(job_url, headers=headers)
+                if not jr:
+                    continue
+                job = await asyncio.to_thread(lambda: None) if False else None
+                # Parsing is small but still synchronous; run it off-loop.
+                def parse_one(resp=jr, u=job_url):
+                    title = desc = location = country = ""
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+                        try: data = json.loads(script.string or script.get_text())
+                        except Exception: continue
+                        vals = data if isinstance(data, list) else [data]
+                        for item in vals:
+                            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                                title = _text(item.get("title")); desc = _snippet(item.get("description") or "")
+                                loc = item.get("jobLocation") or {}
+                                if isinstance(loc, list): loc = loc[0] if loc else {}
+                                addr = loc.get("address") if isinstance(loc, dict) else {}
+                                addr = addr if isinstance(addr, dict) else {}
+                                location = ", ".join(str(x).strip() for x in (addr.get("addressLocality"), addr.get("addressRegion")) if x)
+                                country = str(addr.get("addressCountry") or "")
+                                break
+                    if not title:
+                        tm = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.I | re.S)
+                        title = _text(tm.group(1)) if tm else ""
+                    if not title: return None
+                    return {"title": title, "url": u, "company": company_name, "location": location,
+                            "country": country, "department": "", "workplace_type": "", "employment_type": "",
+                            "salary": _extract_salary(desc), "description_snippet": desc,
+                            "source_ats": "Jobylon", "slug": slug}
+                job = await asyncio.to_thread(parse_one)
+                if job:
+                    jobs.append(job)
+            if jobs:
+                return jobs
 
-        jobs.append({
-            "title": title.strip(),
-            "url": job_url,
-            "company": company_name,
-            "location": location,
-            "country": "",
-            "department": "",
-            "workplace_type": "",
-            "employment_type": "",
-            "salary": _extract_salary(desc) if desc else "",
-            "description_snippet": desc,
-            "source_ats": "Jobylon",
-            "slug": slug,
-        })
-
-    # 2026-09 BUG FIX: exhausting the whole per-company fetch budget
-    # (_JOBYLON_MAX_DETAIL_FETCHES sitemap entries checked) without ever
-    # finding one matching job is a much stronger signal of "the shared
-    # sitemap scan never got far enough to reach this company's postings"
-    # than of "this company genuinely has zero open roles" — a real
-    # zero-postings company wouldn't need hundreds of unrelated pages
-    # checked to establish that. Flag it as a failure rather than a
-    # silent 0 so it's visible instead of indistinguishable from a
-    # genuinely quiet employer (see the sitemap-fetch fix above for the
-    # other half of this same problem).
-    if hit_cap and not jobs:
-        raise RuntimeError(
-            f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) for {slug} "
-            f"without finding any of its postings in the sitemap — likely budget "
-            f"exhaustion, not a genuinely empty board"
-        )
-
-    return jobs
+    # Fallback: bounded site-wide sitemap scan, retained only for company
+    # pages whose HTML doesn't expose the job links. Do not silently call an
+    # exhausted scan an empty board.
+    job_urls = await _jobylon_sitemap_urls()
+    if not job_urls:
+        raise RuntimeError(f"Jobylon: no sitemap URLs available for {slug}")
+    jobs, checked = [], 0
+    company_marker = f"/companies/{company_id}-"
+    for job_url in job_urls:
+        if checked >= _JOBYLON_MAX_DETAIL_FETCHES:
+            break
+        checked += 1
+        r = await _get(job_url, headers=headers)
+        if not r or company_marker not in r.text:
+            continue
+        def parse_fallback(resp=r, u=job_url):
+            soup = BeautifulSoup(resp.text, "html.parser")
+            title = desc = location = country = ""
+            for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+                try: data = json.loads(script.string or script.get_text())
+                except Exception: continue
+                vals = data if isinstance(data, list) else [data]
+                for item in vals:
+                    if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                        title = _text(item.get("title")); desc = _snippet(item.get("description") or "")
+                        loc = item.get("jobLocation") or {}
+                        if isinstance(loc, list): loc = loc[0] if loc else {}
+                        addr = loc.get("address") if isinstance(loc, dict) else {}
+                        addr = addr if isinstance(addr, dict) else {}
+                        location = ", ".join(str(x).strip() for x in (addr.get("addressLocality"), addr.get("addressRegion")) if x)
+                        country = str(addr.get("addressCountry") or "")
+                        break
+            if not title:
+                tm = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.I | re.S); title = _text(tm.group(1)) if tm else ""
+            return {"title": title, "url": u, "company": company_name, "location": location, "country": country,
+                    "department": "", "workplace_type": "", "employment_type": "", "salary": _extract_salary(desc),
+                    "description_snippet": desc, "source_ats": "Jobylon", "slug": slug} if title else None
+        job = await asyncio.to_thread(parse_fallback)
+        if job: jobs.append(job)
+    if jobs:
+        return jobs
+    if checked >= _JOBYLON_MAX_DETAIL_FETCHES:
+        raise RuntimeError(f"Jobylon: exhausted {checked}-URL sitemap fallback for {slug} without finding a company posting")
+    # A complete, successful company-page fetch with no jobs is allowed to
+    # represent a genuinely empty board.
+    raise RuntimeError(f"Jobylon: company page/feed reachable but no published job records found for {slug}")
 
 
 # REMOVED 2026-09: scrape_homerun. Its extractor in discovery.py
