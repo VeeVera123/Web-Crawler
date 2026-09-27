@@ -196,9 +196,43 @@ _CEREBRAS_BASE_INTERVAL = 12.0   # 5 RPM free tier -> 60/5 = 12s/call, single pr
 # real coordination: groq_coordination.py's cross-shard lock guarantees
 # only ONE shard is ever actively calling Groq at a time, so this interval
 # only ever needs to be safe for a SINGLE caller — no division needed.
-_GROQ_BASE_INTERVAL = 12.0        # Shared by BOTH Groq-O and Groq-C below — each is
-                                   # its own independent account with this same real
-                                   # quota, not two views of one pool.
+_GROQ_BASE_INTERVAL = 12.0        # ROLE classification only now (see _GROQ_LOCATION_
+                                   # INTERVAL below for why location needs its own,
+                                   # larger value) -- each of Groq-O/Groq-C is its own
+                                   # independent account with this same real quota,
+                                   # not two views of one pool.
+# 2026-09 FIX (real production evidence: groq-o hitting live 429s at a
+# properly-paced 12s cadence, single-shard-confirmed via the cross-shard
+# lock -- i.e. NOT a pacing race, the account's real TPM was genuinely
+# being exceeded even though only one caller was ever active). Root
+# cause: _GROQ_BASE_INTERVAL's 12s/call math (8,000 TPM / 1,500
+# tokens/call = 5.33 calls/min) was computed once and reused for BOTH
+# role and location classification, but the two have very different real
+# per-call token costs:
+#   - ROLE_SYSTEM_PROMPT is ~326 tokens; role batches are titles only
+#     (max_batch_chars=4_000, ~1,000 tokens) with a small max_tokens
+#     output (max(500, len(batch)*4)) -- genuinely close to the ~1,500
+#     tokens/call this interval assumes.
+#   - LOCATION_SYSTEM_PROMPT is ~2,067 tokens (measured directly off the
+#     live triple-quoted string) -- sent fresh on EVERY call, before a
+#     single byte of the actual job batch. Add the batch body itself (up
+#     to max_batch_chars=6,000 chars, ~1,500 tokens) and the requested
+#     output (max_tokens = max(1500, len(batch_jobs)*8+200), commonly
+#     1,500-2,000+ tokens for a full multi-job batch), and a real
+#     location-classification call to Groq routinely costs 4,500-5,500+
+#     tokens -- roughly 3x what _GROQ_BASE_INTERVAL was tuned for. At a
+#     flat 12s/call (5 calls/min) that's 22,500-27,500 TPM against an
+#     8,000 TPM cap: guaranteed 429s, not a fluke, and exactly what the
+#     real logs showed (429s recurring at the correctly-paced 12s
+#     interval, never faster than that).
+# Fix: give location its own, honestly-computed interval instead of
+# reusing role's. Conservative estimate: ~2,067 (system) + ~1,500
+# (batch) + ~2,000 (output) = ~5,600 tokens/call, rounded up to 6,000 for
+# margin. 8,000 TPM / 6,000 tokens/call = 1.33 calls/min safely fit under
+# the cap, floored to 1/min = 60s/call (a big drop from 12s, but this is
+# what the account's real quota actually allows for a call this size --
+# the alternative is the exact live-429 loop this fix closes).
+_GROQ_LOCATION_INTERVAL = 60.0
 # NVIDIA NIM (integrate.api.nvidia.com) — no single published per-model RPM;
 # NVIDIA's own docs say free-tier limits are model/account-specific, but the
 # commonly reported free-tier figure across NIM-hosted chat models is ~40
@@ -351,7 +385,7 @@ _LOCATION_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=6_000,
-        min_call_interval=_GROQ_BASE_INTERVAL,  # single-shard-safe; the cross-shard lock (groq_coordination.py) is what keeps concurrent shards off Groq now, not this multiplier
+        min_call_interval=_GROQ_LOCATION_INTERVAL,  # location's own real per-call cost (system prompt + batch + output) is ~3x role's -- see _GROQ_LOCATION_INTERVAL's comment. The cross-shard lock (groq_coordination.py) is what keeps concurrent SHARDS off Groq; this interval is what keeps a single active shard from exceeding real per-account TPM.
     ),
     _make_provider(
         "groq-c",
@@ -359,7 +393,7 @@ _LOCATION_PROVIDER_DEFS = [
         "openai/gpt-oss-120b",
         "https://api.groq.com/openai/v1",
         max_batch_chars=6_000,
-        min_call_interval=_GROQ_BASE_INTERVAL,  # single-shard-safe; the cross-shard lock (groq_coordination.py) is what keeps concurrent shards off Groq now, not this multiplier
+        min_call_interval=_GROQ_LOCATION_INTERVAL,  # see groq-o entry above
     ),
 ]
 
