@@ -2172,35 +2172,115 @@ async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 # search endpoint 500s on a cookie-less request. Fixed by priming the
 # session (one GET to Search/Home/Home) before the POST, same as a real
 # browser session would do.
+def _brassring_extract_search_template(html: str) -> dict | None:
+    """Extract the embedded "default search request" JSON template from a
+    real BrassRing searchResults page's raw HTML.
+
+    2026-09 BUG FIX (round 2 — real live evidence via browser network
+    capture, replacing the round-1 fix which was itself based on a wrong
+    assumption): the OLD code POSTed a hand-built, flat form-urlencoded
+    body (`partnerid=X&siteid=Y&keyword=...`) straight to
+    `Search/Ajax/MatchedJobs`. That endpoint name was actually right —
+    but the request shape was completely wrong. Live capture of the real
+    frontend's own XHR to that exact endpoint showed:
+      - Content-Type must be application/json, not form-urlencoded.
+      - The body is a JSON OBJECT with PascalCase keys (PartnerId,
+        SiteId, Keyword, Location, KeywordCustomSolrFields,
+        LocationCustomSolrFields, FacetFilterFields, TurnOffHttps,
+        Latitude, Longitude, PowerSearchOptions), plus a REQUIRED
+        "encryptedsessionvalue" field — an opaque, per-session token the
+        server issues and the client must echo back verbatim. This
+        token cannot be constructed by us; a request without it (or with
+        a wrong one) is presumably what caused every prior request to
+        fail (both the old form-encoded POST and any hand-built JSON
+        attempt without this field).
+      - The response envelope is `{"Jobs":{"Job":[...]}}` — an EXTRA
+        nesting level versus the old code's `data.get("Jobs", [])`
+        assumption (a plain list). Confirmed live via a real captured
+        response beginning `{"Jobs":{"Job":[{"Questions":[...`.
+      - Each job record is NOT flat fields like the old code assumed
+        (JobTitle, JobInfo1, JobInfo2, JobInfo3, AutoReqId, formatted-
+        ShortDescription) — it's `{"Questions": [{"QuestionName": "...",
+        "Value": "..."}, ...]}`, a list of key/value pairs to be
+        flattened into a dict. Confirmed live: one real job's Questions
+        array included entries named "reqid" and "jobtitle" among
+        others.
+
+    The EncryptedSessionValue (and the whole ready-to-POST template
+    around it) is issued by, and embedded directly in, the raw HTML of
+    BrassRing's real search-results page — confirmed live to be present
+    in a PLAIN fetch of that page with no JS execution, so a simple GET
+    (no headless browser) is suffient to obtain it. It's embedded as an
+    HTML-entity-escaped (``&quot;`` for ``"``), backslash-escaped JSON
+    object literal — this function locates it via the literal marker
+    "encryptedsessionvalue" (case-insensitive, since real-world casing
+    varies), walks outward to find the enclosing `{...}` by brace
+    counting on the raw (still-encoded) text — safe because the escaping
+    means literal `{`/`}` characters inside the encoded blob only appear
+    as actual object structure, not inside any string value — then
+    HTML-unescapes and JSON-unescapes it before parsing. Returns None if
+    the marker or a balanced object around it can't be found (the search
+    page didn't render the expected template, e.g. an inactive/invalid
+    tenant), letting the caller treat that as a real failure rather than
+    silently proceeding with a token-less request."""
+    m = re.search(r'encryptedsessionvalue', html, re.I)
+    if not m:
+        return None
+    start = html.rfind("{", 0, m.start())
+    if start < 0:
+        return None
+    depth = 1
+    i = start + 1
+    n = len(html)
+    while depth > 0 and i < n:
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    raw_blob = html[start:i]
+    try:
+        decoded = unescape(raw_blob)
+        decoded = decoded.replace('\\"', '"').replace("\\\\", "\\")
+        return json.loads(decoded)
+    except Exception:
+        return None
+
+
 async def scrape_brassring(slug: str) -> list[dict]:
     """BrassRing search API scraper. Slug format: 'partner_id|site_id'.
 
-    2026-09 BUG FIX (real production evidence — a --ats-only test run
-    showed ALL 40 boards raising the session-priming-failed error, a
-    100% failure rate that appeared only once real concurrency was
-    exercised, not in earlier low-volume smoke tests): this function's
-    priming-cookie approach depends on session cookies issued by the
-    home-page GET being present on the SAME session for the subsequent
-    search POST. The old synchronous code got this isolation for free —
-    _get_session() was thread-local, so each worker thread (and each
-    board scraped sequentially within it) had its own private
-    requests.Session/cookie jar. The async migration's _get()/_post()
-    share ONE process-wide httpx.AsyncClient (and therefore one shared
-    cookie jar) across every concurrently-running board on every
-    platform — harmless for platforms with no session-priming step, but
-    fatal for BrassRing specifically: with several tenants' priming GETs
-    and search POSTs interleaved through asyncio.gather (PLATFORM_WORKERS
-    defaults to 8 concurrent boards when a platform has no explicit
-    entry, which brassring doesn't), one tenant's priming cookies could
-    be overwritten by a DIFFERENT tenant's priming request before the
-    first tenant's own search POST executed — indistinguishable from a
-    real 500 to this function, so the not-yet-existing-then per-board
-    raise (added by the earlier BUG FIX below) is what surfaced it as a
-    100% failure rate rather than silent wrong-tenant data. Fixed by
-    giving BrassRing its own short-lived httpx.AsyncClient per call —
-    the same isolation the old thread-local session provided, scoped
-    to just this one board's own priming+search sequence, with no
-    change to any other platform's shared client."""
+    2026-09 BUG FIX (round 2 — see _brassring_extract_search_template's
+    docstring above for the full live-evidence trail on the request/
+    response shape). Flow, confirmed live end-to-end against a real,
+    current tenant (Home Depot):
+      1. GET Search/home/Home?partnerid=P&siteid=S — primes the session
+         (unchanged from round 1).
+      2. GET Search/home/HomeWithPreLoad?partnerid=P&siteid=S&
+         PageType=searchResults&SearchType=linkquery&keyWordSearch=&
+         locationSearch= — this is the page a real candidate's "Job
+         search" link lands on. Its JOB LISTINGS are rendered
+         client-side by Angular (confirmed live: a plain GET of this
+         page, no JS executed, does NOT contain the real job titles/
+         counts) — but its raw HTML DOES embed the ready-to-POST search
+         template (including the session token) needed for step 3,
+         confirmed live via a plain fetch with no JS execution.
+      3. POST Search/Ajax/MatchedJobs with that exact template (as JSON,
+         Content-Type: application/json), incrementing PageNumber for
+         each subsequent page. This is the real search endpoint after
+         all — round 1's mistake was reaching it with the wrong request
+         shape (form-encoded, missing the session token, wrong field
+         names), not reaching the wrong endpoint.
+
+    This function still uses its OWN short-lived httpx.AsyncClient
+    (isolated cookie jar) rather than the shared singleton _get()/
+    _post() use for every other platform — see round 1's cookie-
+    isolation fix (preserved unchanged): several tenants' priming
+    requests interleaved through a SHARED client/cookie jar under real
+    concurrency previously caused one tenant's session to be clobbered
+    by another's before its own search POST executed."""
     parts = slug.split("|")
     if len(parts) != 2:
         log.debug(f"Invalid BrassRing slug format: {slug} (expected 'partner_id|site_id')")
@@ -2208,60 +2288,18 @@ async def scrape_brassring(slug: str) -> list[dict]:
 
     partner_id, site_id = parts
     home_url = "https://sjobs.brassring.com/TGnewUI/Search/Home/Home"
+    search_results_url = "https://sjobs.brassring.com/TGnewUI/Search/home/HomeWithPreLoad"
     search_url = "https://sjobs.brassring.com/TgNewUI/Search/Ajax/MatchedJobs"
+    user_agent = random.choice(USER_AGENTS)
 
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "User-Agent": random.choice(USER_AGENTS),
-        # 2026-09 BUG FIX: added browser-like AJAX headers — BrassRing's
-        # frontend treats this endpoint as an XHR call, and a bare form
-        # POST without these can reach the endpoint but still get HTTP
-        # 500 (confirmed live this session against 3 independent
-        # partnerid|siteid pairs, all real, live-reachable BrassRing
-        # tenants — this wasn't "the API is dead", the request just
-        # didn't look enough like the real frontend's own call). Not
-        # guaranteed to eliminate every 500 — there may be additional
-        # server-side session/cookie expectations beyond these headers —
-        # but this is the next thing to verify against.
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": "https://sjobs.brassring.com",
-        "Referer": home_url,
-    }
-
-    # Prime the session: BrassRing's AJAX search endpoint needs the cookies
-    # issued by the Home page load, or it 500s. A plain POST without this
-    # step is indistinguishable from "the API is dead" (see module notes
-    # above) — it isn't, it just needs a session first.
-    # 2026-09 BUG FIX: every failure path in this function used to just
-    # `return []`/`break` on a real request/parse failure — completely
-    # indistinguishable, to crawl_i.py's per-platform aggregator, from
-    # "this employer genuinely has zero open postings." That's what let
-    # entire platforms (brassring, paycom, jobylon, eploy, jobadder,
-    # softgarden, isolvedhire) go silently to 0 jobs across EVERY single
-    # board while still reporting "(0 failed)" — the aggregator only
-    # counts a board as failed when scrape_board() *raises*, and nothing
-    # here ever did. Fix: a failure on the FIRST page/request (session
-    # priming, or page 1 itself) now raises instead of swallowing, so it
-    # shows up as a real failure count and (via crawl_i.py's "log first 3
-    # errors per platform") an actual diagnostic message next run. A
-    # failure on a LATER page (pagination already yielded real jobs) is
-    # left as a soft stop — that's "got some jobs, then couldn't get
-    # more," not "got nothing."
-    #
-    # This function uses its OWN short-lived httpx.AsyncClient (isolated
-    # cookie jar) rather than the shared singleton _get()/_post() use for
-    # every other platform — see the cookie-isolation BUG FIX in this
-    # function's own docstring above for why that isolation matters here
-    # specifically. _brassring_request below mirrors _get/_post's own
-    # retry/backoff/Retry-After contract against this private client.
+    # 2026-09: see round 1's cookie-isolation BUG FIX (preserved) for why
+    # this function uses a private client instead of the shared singleton.
+    # _brassring_request mirrors _get/_post's own retry/backoff/
+    # Retry-After contract against this private client, and reuses the
+    # module's host-keyed semaphore (keyed by hostname, not by client
+    # instance) so total concurrency to sjobs.brassring.com stays bounded
+    # the same way it is for every other platform.
     async def _brassring_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response | None:
-        # Reuse the module's own host-keyed semaphore (bounds concurrency
-        # per host the same way _get/_post do for every other platform)
-        # even though this function's client instance is private — the
-        # semaphore is keyed by hostname, not by client, so sharing it
-        # here still caps total concurrent sjobs.brassring.com requests
-        # across every board's own private client.
         host_sem = _host_semaphore_for(url)
         async with host_sem:
             for attempt in range(MAX_RETRIES + 1):
@@ -2287,41 +2325,69 @@ async def scrape_brassring(slug: str) -> list[dict]:
         connect=20.0, read=max(60.0, float(REQUEST_TIMEOUT)), write=30.0, pool=30.0,
     )
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        # Step 1: prime the session (unchanged from round 1).
         try:
             prime = await _brassring_request(
                 client, "GET", home_url,
                 params={"partnerid": partner_id, "siteid": site_id},
                 headers={
-                    "User-Agent": headers["User-Agent"],
+                    "User-Agent": user_agent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
             )
-            # 2026-09 BUG FIX: check the priming request actually succeeded —
-            # previously any status code (even a 4xx/5xx home-page response)
-            # was treated as "primed" since only a raised exception was
-            # caught, and a bad priming response silently carries forward
-            # into every subsequent search POST failing the same way.
             if prime is None or prime.status_code >= 400:
                 status = prime.status_code if prime is not None else "no response"
                 raise RuntimeError(f"session-priming GET returned {status}")
         except Exception as e:
             raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
 
+        # Step 2: load the real search-results page and extract its
+        # embedded search template (incl. the session token).
+        try:
+            results_page = await _brassring_request(
+                client, "GET", search_results_url,
+                params={
+                    "partnerid": partner_id,
+                    "siteid": site_id,
+                    "PageType": "searchResults",
+                    "SearchType": "linkquery",
+                    "keyWordSearch": "",
+                    "locationSearch": "",
+                },
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            if results_page is None or results_page.status_code >= 400:
+                status = results_page.status_code if results_page is not None else "no response"
+                raise RuntimeError(f"searchResults GET returned {status}")
+            template = _brassring_extract_search_template(results_page.text)
+            if template is None:
+                raise RuntimeError("could not find/parse embedded search template (encryptedsessionvalue) in searchResults page")
+        except Exception as e:
+            raise RuntimeError(f"BrassRing: searchResults page fetch/parse failed for {slug}: {e}") from e
+
+        # Step 3: paginate the real search endpoint using that template.
         all_jobs = []
         page = 1
 
         while True:
-            form_data = (
-                f"partnerid={partner_id}&siteid={site_id}"
-                f"&keyword=&location=&pagenum={page}"
-                f"&sortBy=posteddate&SortType=desc"
-            )
+            payload = dict(template)
+            payload["PageNumber"] = page
 
             try:
                 r = await _brassring_request(
                     client, "POST", search_url,
-                    data=form_data,
-                    headers=headers,
+                    json=payload,
+                    headers={
+                        "User-Agent": user_agent,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Origin": "https://sjobs.brassring.com",
+                        "Referer": search_results_url,
+                    },
                 )
                 if r is None:
                     if page == 1:
@@ -2342,29 +2408,40 @@ async def scrape_brassring(slug: str) -> list[dict]:
                 log.debug(f"BrassRing: request failed for {slug}: {e}")
                 break
 
-            jobs_array = data.get("Jobs", [])
+            # Real response envelope: {"Jobs": {"Job": [...]}} — an
+            # extra nesting level versus round 1's `{"Jobs": [...]}`
+            # assumption. Confirmed live.
+            jobs_array = (data.get("Jobs") or {}).get("Job") or []
             if not jobs_array:
                 break
 
             for job in jobs_array:
-                auto_req_id = job.get("AutoReqId", "")
-                title = job.get("JobTitle", "")
-                location = job.get("JobInfo1", "")
-                department = job.get("JobInfo3", "")
-                job_type = job.get("JobInfo2", "")
-                short_desc = _snippet(job.get("formattedShortDescription", ""))
+                # Real job shape: {"Questions": [{"QuestionName": "...",
+                # "Value": "..."}, ...]} — flatten to a dict for easy
+                # lookup, matching the same convention used elsewhere in
+                # this file for similar Questions-array payloads.
+                q = {}
+                for entry in job.get("Questions") or []:
+                    if isinstance(entry, dict) and entry.get("QuestionName"):
+                        q[entry["QuestionName"].lower()] = entry.get("Value", "")
+
+                auto_req_id = q.get("reqid") or q.get("autoreqid") or ""
+                title = q.get("jobtitle", "")
+                location = q.get("location", "") or q.get("primarylocation", "")
+                department = q.get("category", "") or q.get("jobcategory", "")
+                job_type = q.get("jobtype", "") or q.get("employmenttype", "")
+                short_desc = _snippet(q.get("jobdescription", "") or q.get("shortdescription", ""))
                 salary = _extract_salary(short_desc)
 
-                # Try to extract country from location
                 country = ""
                 if location:
-                    loc_parts = [p.strip() for p in location.split(",")]
+                    loc_parts = [p.strip() for p in str(location).split(",")]
                     if len(loc_parts) >= 2:
                         country = loc_parts[-1]
 
                 job_url = (
                     f"https://sjobs.brassring.com/TgNewUI/Search/home/HomeWithPreLoad"
-                    f"?partnerid={partner_id}&siteid={site_id}&jobid={auto_req_id}"
+                    f"?partnerid={partner_id}&siteid={site_id}&PageType=JobDetails&jobid={auto_req_id}"
                 )
 
                 all_jobs.append({
@@ -2382,9 +2459,18 @@ async def scrape_brassring(slug: str) -> list[dict]:
                     "slug": slug,
                 })
 
-            total_hits = data.get("TotalHits", 0)
-            fetched_so_far = page * 50
-            if fetched_so_far >= total_hits:
+            # 2026-09: TotalHits lived at the top level in round 1's
+            # (wrong) response-shape assumption; the real envelope nests
+            # everything under "Jobs", so look there first, falling back
+            # to a simple "fewer results than a full page" stop condition
+            # if a TotalHits-shaped field isn't present at either level —
+            # safer than assuming a specific key name we haven't
+            # confirmed live for the real envelope.
+            total_hits = data.get("TotalHits") or (data.get("Jobs") or {}).get("TotalHits") or 0
+            if total_hits:
+                if page * 50 >= total_hits:
+                    break
+            elif len(jobs_array) < 50:
                 break
 
             page += 1
