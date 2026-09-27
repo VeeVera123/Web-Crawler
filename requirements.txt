@@ -1,4 +1,12 @@
 requests>=2.31
+# httpx[http2] -- 2026-09: async transport migration for ats_scrapers.py's
+# scrape_* functions (replacing requests + ThreadPoolExecutor). The [http2]
+# extra pulls in the 'h2' package -- httpx raises ImportError at client
+# construction time (http2=True) without it, confirmed live this session.
+# requests stays in this file during the batched migration -- not every
+# scrape_*/_fetch_* function is converted yet, and some never will be (see
+# ats_scrapers.py's module docstring for the batch plan).
+httpx[http2]>=0.28
 python-dotenv>=1.0
 openai>=1.0
 anthropic>=0.34

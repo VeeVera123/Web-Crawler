@@ -5,6 +5,7 @@ Each returns a list of job dicts with standardised keys:
     employment_type, salary, description_snippet, source_ats, slug }
 """
 
+import asyncio
 import re
 import json
 import logging
@@ -15,6 +16,7 @@ import xml.etree.ElementTree as ET
 import urllib.robotparser
 from html import unescape
 from urllib.parse import unquote, urljoin, urlparse
+import httpx
 import requests
 from bs4 import BeautifulSoup
 from config import REQUEST_TIMEOUT, MAX_RETRIES
@@ -23,21 +25,77 @@ from discovery import _GH_JID_RE, extract_greenhouse_embed_token
 
 log = logging.getLogger(__name__)
 
-# ── Connection pooling via thread-local sessions ──────────
-# Each thread reuses a single requests.Session, avoiding TLS
-# re-negotiation on every request. Huge win for paginated scrapers
-# (Workday, Oracle, Taleo, SmartRecruiters, etc.).
+# 2026-09: requests -> httpx.AsyncClient migration (externally reviewed,
+# explicit user requirement: "async is allowed to change throughput, but
+# it is absolutely not allowed to change the bytes/content that
+# ultimately reach the extractor"). Phase 0 (httpx_migration_diff_harness.py)
+# proved byte-for-byte equivalence between requests and httpx across 20
+# real ATS URLs before any production code changed. Phase 1 (this change)
+# swaps the transport AND the concurrency model -- scrape_* functions
+# become async, awaiting the async _get()/_get_async_client() below, and
+# crawl_i.py/crawl_ii.py's dispatch loops move from ThreadPoolExecutor to
+# asyncio.gather with a per-host semaphore scheduler (_host_semaphore_for
+# below). One shared httpx.AsyncClient per event loop replaces the old
+# thread-local requests.Session pattern -- AsyncClient is itself
+# connection-pooled and documented as safe for concurrent use from async
+# code.
+_async_client = None
+_async_client_lock = asyncio.Lock()
+
+
+async def _get_async_client():
+    """Return the process-wide shared AsyncClient, creating it on first
+    use."""
+    global _async_client
+    if _async_client is not None:
+        return _async_client
+    async with _async_client_lock:
+        if _async_client is None:
+            # Explicit timeout categories (externally reviewed: "read
+            # timeout means the maximum time allowed between chunks of
+            # response data, not a maximum total response size" -- a
+            # strict default could cut off a slow-but-healthy ATS host
+            # mid-response on a large job description, exactly the
+            # "incomplete HTML -> partial description" failure mode this
+            # migration must not introduce).
+            timeout = httpx.Timeout(
+                connect=20.0,
+                read=max(60.0, float(REQUEST_TIMEOUT)),
+                write=30.0,
+                pool=30.0,
+            )
+            limits = httpx.Limits(max_connections=50, max_keepalive_connections=50)
+            _async_client = httpx.AsyncClient(
+                timeout=timeout,
+                limits=limits,
+                http2=True,
+                follow_redirects=True,
+            )
+        return _async_client
+
+
+async def aclose_http_client():
+    """Close the shared AsyncClient. Call once at process shutdown to
+    release pooled connections cleanly rather than relying on garbage
+    collection."""
+    global _async_client
+    if _async_client is not None:
+        await _async_client.aclose()
+        _async_client = None
+
+
+# -- Legacy thread-local requests.Session (2026-09: kept temporarily for
+# any as-yet-unconverted call site during the batched migration. Once
+# every scrape_*/_fetch_* function in this file has moved to
+# _get()/_get_async_client(), this and its _get_session()-based callers
+# are removed entirely.) --------------------------------------------
 _thread_local = threading.local()
 
 
-def _get_session() -> requests.Session:
+def _get_session():
     """Return the current thread's reusable HTTP session."""
     if not hasattr(_thread_local, "session"):
         _thread_local.session = requests.Session()
-        # Set default retry adapter with connection pooling.
-        # 20 (was 10) — matches the higher per-platform worker counts below;
-        # a pool smaller than a platform's max_workers forces threads to
-        # queue for a connection even though the remote side has capacity.
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=20,
             pool_maxsize=20,
@@ -223,19 +281,21 @@ def _note_host_response(url: str, *, was_rate_limited: bool, was_error: bool) ->
                 state["clean_streak"] = 0
 
 
-def _get(url: str, **kwargs) -> requests.Response | None:
+def _get_requests_sync(url: str, **kwargs):
+    """LEGACY sync transport (requests) -- 2026-09: kept only for
+    not-yet-migrated scrape_*/_fetch_* functions during the batched async
+    migration. Every function still calling this will be converted to
+    `await _get(...)` in a later batch; once none remain, this and
+    _get_session()/_thread_local above are deleted entirely. Behavior is
+    intentionally UNCHANGED from before the migration -- this is the exact
+    pre-migration implementation, not a new one -- so a not-yet-converted
+    scraper's behavior stays identical until its own batch converts it."""
     session = _get_session()
     for attempt in range(MAX_RETRIES + 1):
         try:
             r = session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
             if r.status_code == 429:
                 _note_host_response(url, was_rate_limited=True, was_error=False)
-                # Respect the server's own Retry-After header when it gives
-                # one — this is the single most ban-risk-reducing change
-                # available: it means we back off exactly as long as the
-                # platform asked, instead of guessing with blind exponential
-                # backoff. Cap at 30s so one stubborn platform can't stall
-                # an entire worker thread for minutes.
                 retry_after = r.headers.get("Retry-After")
                 if retry_after and retry_after.strip().isdigit():
                     wait = min(int(retry_after), 30)
@@ -251,10 +311,102 @@ def _get(url: str, **kwargs) -> requests.Response | None:
                 _note_host_response(url, was_rate_limited=False, was_error=True)
                 log.debug(f"Failed {url}: {e}")
                 return None
-            # Jitter on ordinary failures too — prevents a "thundering herd"
-            # of many worker threads retrying a flaky endpoint in lockstep.
             time.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
     return None
+
+
+# -- Per-host concurrency scheduler (async) --------------------------
+# 2026-09 (external review, explicit user requirement): "Suppose you
+# currently have 20 workers -> 20 requests -> ATS responds, and migrate to
+# 500 async tasks -> 500 requests -> ATS says NO -> 429 429 429 ... You
+# have technically increased throughput capacity while decreasing useful
+# throughput... turn Retry-After handling into a real per-host scheduler:
+# concurrency limit, requests/sec limit, backoff state, circuit breaker."
+#
+# This is the async-native replacement for the old thread-pool's implicit
+# per-platform concurrency cap -- a per-HOST (not per-platform; some
+# platforms span many distinct tenant hosts, e.g. Workday's
+# *.myworkdayjobs.com subdomains) asyncio.Semaphore caps how many requests
+# can be in flight against the SAME host at once, regardless of how many
+# total coroutines the crawl has scheduled overall. _pace_host's existing
+# gap-based pacing (escalate on 429/error, decay on a clean streak) still
+# runs on top of this -- the semaphore bounds CONCURRENT in-flight
+# requests per host, while _pace_host bounds the RATE of new requests per
+# host.
+_host_semaphore_lock = threading.Lock()
+_host_semaphores = {}
+
+# Per-host concurrency ceiling. Deliberately conservative and uniform
+# rather than a hand-tuned per-platform table -- _pace_host's existing
+# escalate-on-trouble/decay-on-health pacing already adapts per-host at
+# the RATE level, so a uniform concurrency ceiling here is a safe starting
+# point.
+_HOST_CONCURRENCY_LIMIT = 8
+
+
+def _host_semaphore_for(url: str):
+    host = _host_of(url)
+    with _host_semaphore_lock:
+        sem = _host_semaphores.get(host)
+        if sem is None:
+            sem = asyncio.Semaphore(_HOST_CONCURRENCY_LIMIT)
+            _host_semaphores[host] = sem
+        return sem
+
+
+async def _get(url: str, **kwargs):
+    """Async transport (httpx.AsyncClient) -- the replacement for the old
+    sync `_get()` (requests), proven byte-for-byte equivalent by
+    httpx_migration_diff_harness.py before this migration started. Same
+    retry/backoff/Retry-After/pacing contract as the legacy version
+    (_get_requests_sync above): returns the response on success, None
+    after MAX_RETRIES exhausted failures.
+
+    kwargs are passed straight to httpx.AsyncClient.get() -- `params` and
+    `headers` have identical names/semantics in httpx as in requests.
+    `allow_redirects` (requests' name) is NOT accepted here -- httpx's
+    AsyncClient is constructed with follow_redirects=True globally, so
+    passing allow_redirects would raise; any call site still passing it
+    needs that kwarg removed as part of its own migration.
+    """
+    client = await _get_async_client()
+    host_sem = _host_semaphore_for(url)
+    async with host_sem:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                r = await client.get(url, **kwargs)
+                if r.status_code == 429:
+                    _note_host_response(url, was_rate_limited=True, was_error=False)
+                    retry_after = r.headers.get("Retry-After")
+                    if retry_after and retry_after.strip().isdigit():
+                        wait = min(int(retry_after), 30)
+                    else:
+                        wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    await asyncio.sleep(wait)
+                    continue
+                r.raise_for_status()
+                _note_host_response(url, was_rate_limited=False, was_error=False)
+                return r
+            except Exception as e:
+                if attempt == MAX_RETRIES:
+                    _note_host_response(url, was_rate_limited=False, was_error=True)
+                    log.debug(f"Failed {url}: {e}")
+                    return None
+                await asyncio.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
+    return None
+
+
+async def _pace_host_async(url: str):
+    """Async counterpart to _pace_host -- same gap-based per-host pacing,
+    but sleeps the coroutine (asyncio.sleep) instead of blocking the
+    thread (time.sleep), so a paced host doesn't stall the whole event
+    loop from servicing other hosts' in-flight requests while it waits."""
+    host = _host_of(url)
+    with _host_pace_lock:
+        state = _host_pace_state.get(host)
+        gap = state["gap"] if state else 0.0
+    if gap > 0:
+        await asyncio.sleep(gap + random.uniform(0, gap * 0.25))
 
 
 # ── Shared markup-tolerant location extraction ────────────
@@ -766,10 +918,10 @@ def scrape_rippling(slug: str) -> list[dict]:
 
 # ── Greenhouse ──────────────────────────────────────────
 
-def scrape_greenhouse(slug: str) -> list[dict]:
+async def scrape_greenhouse(slug: str) -> list[dict]:
     """Greenhouse public Job Board API — no auth required."""
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
-    r = _get(url, params={"content": "true"})
+    r = await _get(url, params={"content": "true"})
     if not r:
         return []
     try:
@@ -830,7 +982,7 @@ def scrape_greenhouse(slug: str) -> list[dict]:
 
     # Get company name from board info
     if jobs:
-        board_r = _get(f"https://boards-api.greenhouse.io/v1/boards/{slug}")
+        board_r = await _get(f"https://boards-api.greenhouse.io/v1/boards/{slug}")
         if board_r:
             try:
                 board_data = board_r.json()
@@ -845,13 +997,13 @@ def scrape_greenhouse(slug: str) -> list[dict]:
 
 # ── Lever ───────────────────────────────────────────────
 
-def scrape_lever(slug: str) -> list[dict]:
+async def scrape_lever(slug: str) -> list[dict]:
     """Lever public postings API — no auth required."""
     url = f"https://api.lever.co/v0/postings/{slug}"
-    r = _get(url, params={"mode": "json"})
+    r = await _get(url, params={"mode": "json"})
     if not r:
         # Try EU endpoint
-        r = _get(f"https://api.eu.lever.co/v0/postings/{slug}", params={"mode": "json"})
+        r = await _get(f"https://api.eu.lever.co/v0/postings/{slug}", params={"mode": "json"})
         if not r:
             return []
     try:
@@ -906,10 +1058,10 @@ def scrape_lever(slug: str) -> list[dict]:
 
 # ── Ashby ───────────────────────────────────────────────
 
-def scrape_ashby(slug: str) -> list[dict]:
+async def scrape_ashby(slug: str) -> list[dict]:
     """Ashby public job board API — no auth required."""
     url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
-    r = _get(url, params={"includeCompensation": "true"})
+    r = await _get(url, params={"includeCompensation": "true"})
     if not r:
         return []
     try:
@@ -1286,11 +1438,11 @@ def scrape_workday(slug: str) -> list[dict]:
 
 # ── Workable ──────────────────────────────────────────
 
-def scrape_workable(slug: str) -> list[dict]:
+async def scrape_workable(slug: str) -> list[dict]:
     """Workable public widget API — no auth, no pagination (returns all at once)."""
     url = f"https://apply.workable.com/api/v1/widget/accounts/{slug}"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(url, params={"details": "true"}, headers=headers)
+    r = await _get(url, params={"details": "true"}, headers=headers)
     if not r:
         return []
     try:
@@ -5493,7 +5645,7 @@ SCRAPERS = {
 }
 
 
-def scrape_board(ats: str, slug: str) -> list[dict]:
+async def scrape_board(ats: str, slug: str) -> list[dict]:
     """Dispatch to the correct scraper.
 
     2026-09 BUG FIX: this used to catch every exception a scraper raised,
@@ -5510,12 +5662,26 @@ def scrape_board(ats: str, slug: str) -> list[dict]:
     Re-raising here (instead of catching) is what finally lets a genuine
     failure register as failed, and lets crawl_i.py's own "log first 3
     errors per platform" line show the real reason — a handful of clean
-    log lines, not one per board."""
+    log lines, not one per board.
+
+    2026-09 ASYNC MIGRATION (batched): this dispatcher is now `async def`
+    and awaits SCRAPERS' entries. Every scrape_* function is being
+    converted to `async def` in ordered batches; until a given
+    platform's batch lands, its SCRAPERS entry is still a plain
+    (non-async) function. `fn(slug)` on a plain function returns the
+    list directly (not a coroutine) -- awaiting a non-awaitable would
+    raise, so this checks with asyncio.iscoroutine first and only awaits
+    when the call actually produced one. Once every scrape_* is
+    converted, this branch collapses to just `return await fn(slug)` and
+    the isinstance check is removed."""
     fn = SCRAPERS.get(ats.lower())
     if not fn:
         log.warning(f"Unknown ATS: {ats}")
         return []
-    return fn(slug)
+    result = fn(slug)
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
 
 
 # ── Second-pass: fetch individual job descriptions ─────

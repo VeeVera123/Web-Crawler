@@ -38,6 +38,7 @@ CLI modes (see .github/workflows/crawl.yml for how these compose):
 """
 
 import argparse
+import asyncio
 import hashlib
 import sys
 import logging
@@ -45,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import location_diagnostics
 from ats_scrapers import (scrape_board, enrich_descriptions, enrich_application_questions,
-                          SCRAPERS, log_scrape_failure_summary)
+                          SCRAPERS, log_scrape_failure_summary, aclose_http_client)
 from classifier import (
     keyword_classify_role, ai_classify_roles,
     keyword_classify_location, ai_classify_locations,
@@ -222,6 +223,84 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
     return pairs
 
 
+async def _scrape_all_async(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set[tuple[str, str]]]:
+    """Async core of scrape_all — see that function's docstring for the
+    full behavior contract (unchanged by this migration). Runs under
+    asyncio.run() from the sync scrape_all() wrapper below, so the rest of
+    _run_pipeline (classification, enrichment scheduling, Supabase writes)
+    stays fully synchronous — only the ATS-scraping HTTP fan-out itself
+    moves to asyncio.
+
+    2026-09 ASYNC MIGRATION (batched — see ats_scrapers.py's module
+    docstring): replaces the old two-level ThreadPoolExecutor nesting
+    (one pool of platforms, each running its own pool of per-slug scrape
+    calls) with two levels of asyncio.gather. PLATFORM_WORKERS' per-ATS
+    worker cap becomes an asyncio.Semaphore of the same size — same
+    "don't run more than N of this platform's boards at once" contract,
+    just expressed as a concurrency gate a coroutine awaits on rather than
+    a thread pool's queue depth. ats_scrapers.py's own per-HOST semaphore
+    (_host_semaphore_for) still applies underneath this — a platform like
+    Workday that spans many distinct tenant hosts gets its per-platform
+    cap here AND a separate per-tenant-host cap there, same as before."""
+    all_jobs = []
+    total_ok = 0
+    total_failed = 0
+    boards_with_roles: set[tuple[str, str]] = set()
+
+    # Group boards by ATS to apply per-platform concurrency
+    by_ats = {}
+    for ats, slug in boards:
+        by_ats.setdefault(ats, []).append(slug)
+
+    async def _scrape_platform(ats: str, slugs: list[str]) -> tuple[int, int, list[dict], set[tuple[str, str]]]:
+        """Scrape one ATS platform with appropriate concurrency."""
+        workers = PLATFORM_WORKERS.get(ats, 8)
+        platform_jobs = []
+        platform_failed = 0
+        platform_boards_with_roles: set[tuple[str, str]] = set()
+        sem = asyncio.Semaphore(workers)
+
+        async def _do_scrape(slug):
+            async with sem:
+                return slug, await scrape_board(ats, slug)
+
+        results = await asyncio.gather(
+            *(_do_scrape(s) for s in slugs), return_exceptions=True
+        )
+        for res in results:
+            if isinstance(res, Exception):
+                platform_failed += 1
+                if platform_failed <= 3:  # log first 3 errors per platform
+                    log.error(f"  {ats} scrape error: {res}")
+                continue
+            slug, jobs = res
+            if jobs:
+                platform_jobs.extend(jobs)
+                platform_boards_with_roles.add((ats, slug))
+
+        return len(slugs) - platform_failed, platform_failed, platform_jobs, platform_boards_with_roles
+
+    # Run all platforms concurrently — each has its own per-platform worker limit
+    platform_results = await asyncio.gather(
+        *(_scrape_platform(ats, slugs) for ats, slugs in by_ats.items()),
+        return_exceptions=True,
+    )
+    for ats, res in zip(by_ats.keys(), platform_results):
+        if isinstance(res, Exception):
+            log.error(f"  {ats}: platform error: {res}")
+            continue
+        ok, bad, jobs, with_roles = res
+        all_jobs.extend(jobs)
+        total_ok += ok
+        total_failed += bad
+        boards_with_roles |= with_roles
+        log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
+
+    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed, "
+             f"{len(boards_with_roles)} boards had >=1 role)")
+    return all_jobs, total_ok, total_failed, boards_with_roles
+
+
 def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set[tuple[str, str]]]:
     """Scrape all boards in parallel, grouped by ATS platform.
     Returns (jobs, boards_ok, boards_failed, boards_with_roles).
@@ -237,64 +316,21 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set
     as much as a CSM one. Computing this set here, from the same raw
     per-board result scrape_board() already returns, means the signal
     is correct regardless of what filter_roles()/filter_locations() later
-    decide to keep for the `jobs` table."""
-    all_jobs = []
-    total_ok = 0
-    total_failed = 0
-    boards_with_roles: set[tuple[str, str]] = set()
+    decide to keep for the `jobs` table.
 
-    # Group boards by ATS to apply per-platform concurrency
-    by_ats = {}
-    for ats, slug in boards:
-        by_ats.setdefault(ats, []).append(slug)
+    2026-09 ASYNC MIGRATION: this is now a thin sync wrapper around
+    _scrape_all_async() (asyncio.run()) — every OTHER function in this
+    file (_run_pipeline and everything it calls after this point:
+    classification, enrichment, Supabase writes) stays synchronous and
+    unaware that scraping itself now runs on an event loop internally.
+    aclose_http_client() releases the shared httpx.AsyncClient's pooled
+    connections at the end of each run rather than leaving that to
+    garbage collection."""
+    try:
+        return asyncio.run(_scrape_all_async(boards))
+    finally:
+        asyncio.run(aclose_http_client())
 
-    def _scrape_platform(ats: str, slugs: list[str]) -> tuple[int, int, list[dict], set[tuple[str, str]]]:
-        """Scrape one ATS platform with appropriate concurrency."""
-        workers = PLATFORM_WORKERS.get(ats, 8)
-        platform_jobs = []
-        platform_failed = 0
-        platform_boards_with_roles: set[tuple[str, str]] = set()
-
-        def _do_scrape(slug):
-            return slug, scrape_board(ats, slug)
-
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_do_scrape, s): s for s in slugs}
-            for future in as_completed(futures):
-                try:
-                    slug, jobs = future.result()
-                    if jobs:
-                        platform_jobs.extend(jobs)
-                        platform_boards_with_roles.add((ats, slug))
-                except Exception as e:
-                    platform_failed += 1
-                    if platform_failed <= 3:  # log first 3 errors per platform
-                        log.error(f"  {ats} scrape error: {e}")
-
-        return len(slugs) - platform_failed, platform_failed, platform_jobs, platform_boards_with_roles
-
-    # Run all platforms concurrently — each has its own per-platform worker limit
-    with ThreadPoolExecutor(max_workers=len(by_ats)) as platform_pool:
-        platform_futures = {}
-        for ats, slugs in by_ats.items():
-            f = platform_pool.submit(_scrape_platform, ats, slugs)
-            platform_futures[f] = ats
-
-        for future in as_completed(platform_futures):
-            ats = platform_futures[future]
-            try:
-                ok, bad, jobs, with_roles = future.result()
-                all_jobs.extend(jobs)
-                total_ok += ok
-                total_failed += bad
-                boards_with_roles |= with_roles
-                log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
-            except Exception as e:
-                log.error(f"  {ats}: platform error: {e}")
-
-    log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed, "
-             f"{len(boards_with_roles)} boards had >=1 role)")
-    return all_jobs, total_ok, total_failed, boards_with_roles
 
 
 def filter_roles(jobs: list[dict]) -> list[dict]:
