@@ -6276,6 +6276,116 @@ def _fetch_icims_description(job: dict) -> str:
     return ""
 
 
+_BRASSRING_QA_FIELD_RE = re.compile(
+    r'"AnswerValue"\s*:\s*"(?P<value>(?:[^"\\]|\\.)*)"\s*,\s*'
+    r'"VerityZone"\s*:\s*"(?P<zone>(?:[^"\\]|\\.)*)"\s*,\s*'
+    r'"QuestionType"\s*:\s*"(?P<qtype>(?:[^"\\]|\\.)*)"'
+)
+_BRASSRING_FIELDS_TO_DISPLAY_RE = re.compile(
+    r'"JobDetailFieldsToDisplay"\s*:\s*\{(?P<block>.*?)\}', re.DOTALL
+)
+
+
+def _decode_json_string_fragment(raw: str) -> str:
+    """Decode a JSON string literal's escapes (\\", \\\\, \\/, \\uXXXX, ...)
+    from a regex-captured fragment that was never parsed as part of a full
+    JSON document (see _fetch_brassring_description — the surrounding
+    object isn't valid JSON in isolation, so json.loads can't run on the
+    whole blob, only on this one string re-wrapped in quotes)."""
+    try:
+        return json.loads('"' + raw + '"')
+    except Exception:
+        return raw
+
+
+def _fetch_brassring_description(job: dict) -> str:
+    """Fetch the full description from a BrassRing (TGnewUI) JobDetails page.
+
+    2026-09 BUG FIX: scrape_brassring's working path (HTML search-results
+    parsing) never captured a description at all, and the generic fetcher
+    (_fetch_generic_description) finds nothing here either — confirmed
+    live: BrassRing's rendered page reuses class="description" 30-42
+    times for unrelated UI text (tooltips, category labels), so there's
+    no unique container to match. The legacy AJAX endpoint
+    (/TGnewUI/Search/Ajax/MatchedJobs) that WOULD carry a clean JSON
+    description field is also confirmed live to return HTTP 500 on every
+    request — that endpoint is dead server-side, not just unreachable.
+
+    The real signal (confirmed live, cross-checked against an external
+    LLM's lead): every question/answer field on the page is embedded as
+    an HTML-attribute-encoded JSON fragment shaped like
+    '"AnswerValue":"<value>","VerityZone":"<zone>","QuestionType":"<type>",...'
+    (the outer HTML entity-encodes the JSON's own quotes as &quot;).
+    Critically, WHICH VerityZone key holds the actual job-description
+    prose is tenant-configurable, not a fixed literal string — confirmed
+    live against two real tenants: one's own "JobDetailFieldsToDisplay"
+    config named its Summary field literally "jobdescription", while
+    another's Summary field was "formtext12", with "jobdescription"
+    appearing only inside that tenant's own Section2Fields list instead.
+    So this reads the field name(s) to use from the page's own
+    JobDetailFieldsToDisplay.Summary/.Section2Fields, rather than
+    assuming a literal field name, and only trusts fields whose
+    QuestionType is "textarea" (real prose) — not "text"/"select"/"date"
+    (short metadata like autoreq/department/hotjob), which is what tells
+    apart a real JD section from an unrelated short field regardless of
+    what that tenant happens to have named it."""
+    url = job.get("url", "")
+    if not url:
+        return job.get("description_snippet", "")
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return job.get("description_snippet", "")
+
+    html = unescape(r.text)
+    fields = [
+        {"value": _decode_json_string_fragment(m.group("value")),
+         "zone": m.group("zone"), "qtype": m.group("qtype")}
+        for m in _BRASSRING_QA_FIELD_RE.finditer(html)
+    ]
+    if not fields:
+        return job.get("description_snippet", "")
+    by_zone: dict[str, dict] = {}
+    for f in fields:
+        # A zone can repeat (e.g. across "show more" duplicate blocks) —
+        # keep the longest value seen for it.
+        existing = by_zone.get(f["zone"])
+        if not existing or len(f["value"]) > len(existing["value"]):
+            by_zone[f["zone"]] = f
+
+    summary_zone = None
+    section2: list[str] = []
+    disp_match = _BRASSRING_FIELDS_TO_DISPLAY_RE.search(html)
+    if disp_match:
+        block = disp_match.group("block")
+        sm = re.search(r'"Summary"\s*:\s*"([^"]*)"', block)
+        if sm:
+            summary_zone = sm.group(1)
+        s2m = re.search(r'"Section2Fields"\s*:\s*\[(.*?)\]', block, re.DOTALL)
+        if s2m:
+            section2 = re.findall(r'"([^"]*)"', s2m.group(1))
+
+    candidate_zones = ([summary_zone] if summary_zone else []) + section2
+    parts = []
+    seen_zones = set()
+    for zone in candidate_zones:
+        if zone in seen_zones:
+            continue
+        seen_zones.add(zone)
+        f = by_zone.get(zone)
+        if f and f["qtype"].lower() == "textarea" and f["value"]:
+            parts.append(f["value"])
+
+    if not parts:
+        # This tenant's config didn't name the JD field(s) where expected
+        # — fall back to any real-prose textarea field on the page.
+        parts = [f["value"] for f in fields
+                 if f["qtype"].lower() == "textarea" and len(f["value"]) > 100]
+
+    if not parts:
+        return job.get("description_snippet", "")
+    return _snippet(" ".join(parts))
+
+
 def _fetch_workday_description(job: dict) -> str:
     """Fetch full description from a Workday job detail API.
     Job URL format: https://{company}.wd{N}.myworkdayjobs.com/{site}{path}
@@ -6743,6 +6853,14 @@ DESCRIPTION_FETCHERS = {
     # its jobs reached location/visa classification with zero description
     # text to find eligibility language in.
     "PageUp": _fetch_generic_description,
+    # 2026-09 BUG FIX: BrassRing — scrape_brassring's working scrape path
+    # (HTML search-results parsing) never captured a description either,
+    # and the generic fetcher can't be reused here (its page reuses
+    # class="description" 30-42x for unrelated UI text; see
+    # _fetch_brassring_description's docstring for the full evidence
+    # trail, including why the legacy AJAX endpoint that WOULD have had a
+    # clean description field is confirmed dead server-side).
+    "BrassRing": _fetch_brassring_description,
 }
 
 
