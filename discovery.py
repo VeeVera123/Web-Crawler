@@ -136,6 +136,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -3534,7 +3535,7 @@ _CC_LIVE_CHECK = {
 _DROP_DEAD_PROGRESS_EVERY = 100  # see _drop_dead_cc_slugs's log line
 
 
-def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -> dict:
+def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 8) -> dict:
     """Applied to a CC/Wayback fetch_*_slugs() result right before it's
     returned — see the module comment above _CC_LIVE_CHECK for why only
     these two sources need this. `slugs_by_ats` values may be a set[str]
@@ -3579,15 +3580,64 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 20) -
             work.append((ats, slug, name))
 
     def _check_one(ats, slug, name):
+        # 2026-09 FIX (real production evidence, Supabase-confirmed): a
+        # single run added 10,396 new Workday archive_i rows in one hour,
+        # then a SEPARATE verification.py run (its own default:
+        # shard_count x concurrency=20 total, deliberately gentle -- see
+        # verification.yml's own comment on why it prefers many shards at
+        # LOW per-shard concurrency over one shard hammering a host) found
+        # a large fraction of those same rows genuinely dead within
+        # hours. This function's own concurrency (max_workers=20, ALL
+        # platforms mixed into ONE pool, no per-host pacing at all until
+        # now) hitting a real ATS host's infrastructure with many
+        # simultaneous synchronous requests is exactly the kind of load
+        # that produces spurious timeouts/connection-resets/5xx -- and
+        # every one of this project's checkers (_verify_*/_cc_check_*
+        # alike) deliberately treats any non-confirmed-dead status as
+        # None ("ambiguous, keep"), so a checker that was hit with a
+        # transient failure due to OUR OWN concurrency, not the real
+        # tenant's actual state, silently produces a false "alive, keep"
+        # verdict -- indistinguishable in the log from a real one. A
+        # single retry with a short backoff before accepting an ambiguous
+        # (None) result closes exactly this gap: a checker crashing or
+        # returning None on attempt 1 gets ONE more try (attempt 2 is
+        # deliberately not itself retried further -- this is a light
+        # touch-up for transient noise, not a full retry framework;
+        # something ambiguous twice in a row is treated as genuinely
+        # ambiguous, same as before this fix, and still defaults to
+        # "keep," never to "dead," on a guess). A confirmed False (dead)
+        # or True (alive) result on the FIRST attempt is trusted
+        # immediately and never retried -- retrying a decisive result
+        # would only risk flipping a correct verdict into an incorrect
+        # one from a later transient hiccup, which is not this fix's job.
         checker = _CC_LIVE_CHECK[ats]
-        try:
-            is_dead = checker(slug) is False
-        except Exception:
-            is_dead = False  # a checker crashing is not evidence of death
+        result = None
+        for attempt in range(2):
+            try:
+                result = checker(slug)
+            except Exception:
+                result = None
+            if result is not None:
+                break
+            if attempt == 0:
+                time.sleep(random.uniform(0.5, 1.5))
+        is_dead = result is False
         return ats, slug, name, is_dead
 
     if work:
         total_work = len(work)
+        # 2026-09 FIX: max_workers dropped from a flat 20 (unconditionally,
+        # regardless of how many distinct ATS platforms/hosts are in this
+        # batch) to something gentler by default, matching the same
+        # "don't hammer one host with a burst of concurrent synchronous
+        # requests" reasoning as verification.yml's own low per-shard
+        # concurrency default. This function still fans out across MANY
+        # different companies' hosts at once (that part of the original
+        # 2026-09 fix -- moving off a fully serial loop -- remains correct
+        # and necessary), just at a less aggressive ceiling; combined
+        # with the retry-on-ambiguous fix above, both halves of the same
+        # real production symptom (false "keep" verdicts from OUR OWN
+        # load, not the tenant's real state) are addressed together.
         log.info(f"{label}: live pre-check starting on {total_work} candidate slug(s) "
                  f"({max_workers} at a time — this step has no per-slug log line "
                  f"otherwise, so progress is reported every "
