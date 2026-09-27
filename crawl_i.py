@@ -280,21 +280,37 @@ async def _scrape_all_async(boards: list[tuple[str, str]]) -> tuple[list[dict], 
 
         return len(slugs) - platform_failed, platform_failed, platform_jobs, platform_boards_with_roles
 
-    # Run all platforms concurrently — each has its own per-platform worker limit
-    platform_results = await asyncio.gather(
-        *(_scrape_platform(ats, slugs) for ats, slugs in by_ats.items()),
-        return_exceptions=True,
-    )
-    for ats, res in zip(by_ats.keys(), platform_results):
-        if isinstance(res, Exception):
-            log.error(f"  {ats}: platform error: {res}")
-            continue
-        ok, bad, jobs, with_roles = res
-        all_jobs.extend(jobs)
-        total_ok += ok
-        total_failed += bad
-        boards_with_roles |= with_roles
-        log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
+    # Run all platforms concurrently — each has its own per-platform worker
+    # limit. 2026-09 BUG FIX (real production evidence: a 25,284-board/39-
+    # platform run produced zero per-platform "N jobs from M active boards"
+    # lines until the ENTIRE scrape finished): asyncio.gather() only
+    # returns once every one of its awaitables has completed, so the old
+    # `for ats, res in zip(...)` loop below it — the only place these
+    # lines were logged — never ran until the slowest platform (csod: 308
+    # boards, hrmdirect: 210, ...) finished, however long that took. The
+    # pre-asyncio ThreadPoolExecutor version logged each platform as its
+    # own pool drained; this restores that per-platform-as-it-finishes
+    # visibility without changing the overall concurrency at all — each
+    # platform is still a separately-scheduled task racing every other
+    # one, only the LOGGING now happens per-completion instead of
+    # batched after the last straggler.
+    tasks = {asyncio.create_task(_scrape_platform(ats, slugs)): ats
+             for ats, slugs in by_ats.items()}
+    pending = set(tasks.keys())
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            ats = tasks[task]
+            try:
+                ok, bad, jobs, with_roles = task.result()
+            except Exception as e:
+                log.error(f"  {ats}: platform error: {e}")
+                continue
+            all_jobs.extend(jobs)
+            total_ok += ok
+            total_failed += bad
+            boards_with_roles |= with_roles
+            log.info(f"  {ats}: {len(jobs)} jobs from {ok} active boards ({bad} failed)")
 
     log.info(f"Total raw jobs scraped: {len(all_jobs)} ({total_failed} boards failed, "
              f"{len(boards_with_roles)} boards had >=1 role)")
