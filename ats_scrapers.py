@@ -2173,7 +2173,34 @@ async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 # session (one GET to Search/Home/Home) before the POST, same as a real
 # browser session would do.
 async def scrape_brassring(slug: str) -> list[dict]:
-    """BrassRing search API scraper. Slug format: 'partner_id|site_id'."""
+    """BrassRing search API scraper. Slug format: 'partner_id|site_id'.
+
+    2026-09 BUG FIX (real production evidence — a --ats-only test run
+    showed ALL 40 boards raising the session-priming-failed error, a
+    100% failure rate that appeared only once real concurrency was
+    exercised, not in earlier low-volume smoke tests): this function's
+    priming-cookie approach depends on session cookies issued by the
+    home-page GET being present on the SAME session for the subsequent
+    search POST. The old synchronous code got this isolation for free —
+    _get_session() was thread-local, so each worker thread (and each
+    board scraped sequentially within it) had its own private
+    requests.Session/cookie jar. The async migration's _get()/_post()
+    share ONE process-wide httpx.AsyncClient (and therefore one shared
+    cookie jar) across every concurrently-running board on every
+    platform — harmless for platforms with no session-priming step, but
+    fatal for BrassRing specifically: with several tenants' priming GETs
+    and search POSTs interleaved through asyncio.gather (PLATFORM_WORKERS
+    defaults to 8 concurrent boards when a platform has no explicit
+    entry, which brassring doesn't), one tenant's priming cookies could
+    be overwritten by a DIFFERENT tenant's priming request before the
+    first tenant's own search POST executed — indistinguishable from a
+    real 500 to this function, so the not-yet-existing-then per-board
+    raise (added by the earlier BUG FIX below) is what surfaced it as a
+    100% failure rate rather than silent wrong-tenant data. Fixed by
+    giving BrassRing its own short-lived httpx.AsyncClient per call —
+    the same isolation the old thread-local session provided, scoped
+    to just this one board's own priming+search sequence, with no
+    change to any other platform's shared client."""
     parts = slug.split("|")
     if len(parts) != 2:
         log.debug(f"Invalid BrassRing slug format: {slug} (expected 'partner_id|site_id')")
@@ -2221,113 +2248,150 @@ async def scrape_brassring(slug: str) -> list[dict]:
     # failure on a LATER page (pagination already yielded real jobs) is
     # left as a soft stop — that's "got some jobs, then couldn't get
     # more," not "got nothing."
-    try:
-        prime = await _get(
-            home_url,
-            params={"partnerid": partner_id, "siteid": site_id},
-            headers={
-                "User-Agent": headers["User-Agent"],
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        )
-        # 2026-09 BUG FIX: check the priming request actually succeeded —
-        # previously any status code (even a 4xx/5xx home-page response)
-        # was treated as "primed" since only a raised exception was
-        # caught, and a bad priming response silently carries forward
-        # into every subsequent search POST failing the same way.
-        # (_get already raise_for_status()es internally and returns None
-        # on any non-2xx after retries — a None here IS the "bad status"
-        # case, no separate status_code check needed.)
-        if prime is None:
-            raise RuntimeError("session-priming GET returned no response")
-    except Exception as e:
-        raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
+    #
+    # This function uses its OWN short-lived httpx.AsyncClient (isolated
+    # cookie jar) rather than the shared singleton _get()/_post() use for
+    # every other platform — see the cookie-isolation BUG FIX in this
+    # function's own docstring above for why that isolation matters here
+    # specifically. _brassring_request below mirrors _get/_post's own
+    # retry/backoff/Retry-After contract against this private client.
+    async def _brassring_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response | None:
+        # Reuse the module's own host-keyed semaphore (bounds concurrency
+        # per host the same way _get/_post do for every other platform)
+        # even though this function's client instance is private — the
+        # semaphore is keyed by hostname, not by client, so sharing it
+        # here still caps total concurrent sjobs.brassring.com requests
+        # across every board's own private client.
+        host_sem = _host_semaphore_for(url)
+        async with host_sem:
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    resp = await client.request(method, url, **kwargs)
+                    if resp.status_code == 429:
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after and retry_after.strip().isdigit():
+                            wait = min(int(retry_after), 30)
+                        else:
+                            wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                        await asyncio.sleep(wait)
+                        continue
+                    return resp
+                except Exception as e:
+                    if attempt == MAX_RETRIES:
+                        log.debug(f"BrassRing request failed {url}: {e}")
+                        return None
+                    await asyncio.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
+        return None
 
-    all_jobs = []
-    page = 1
-
-    while True:
-        form_data = (
-            f"partnerid={partner_id}&siteid={site_id}"
-            f"&keyword=&location=&pagenum={page}"
-            f"&sortBy=posteddate&SortType=desc"
-        )
-
+    timeout = httpx.Timeout(
+        connect=20.0, read=max(60.0, float(REQUEST_TIMEOUT)), write=30.0, pool=30.0,
+    )
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         try:
-            r = await _post(
-                search_url,
-                data=form_data,
-                headers=headers,
+            prime = await _brassring_request(
+                client, "GET", home_url,
+                params={"partnerid": partner_id, "siteid": site_id},
+                headers={
+                    "User-Agent": headers["User-Agent"],
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
             )
-            if r is None:
-                if page == 1:
-                    raise RuntimeError(f"BrassRing: request failed for {slug} page 1")
-                log.debug(f"BrassRing: request failed for {slug} page {page}")
-                break
-            if r.status_code != 200:
-                if page == 1:
-                    raise RuntimeError(f"BrassRing: API returned {r.status_code} for {slug} page 1")
-                log.debug(f"BrassRing: API returned {r.status_code} for {slug} page {page}")
-                break
-            data = r.json()
-        except RuntimeError:
-            raise
+            # 2026-09 BUG FIX: check the priming request actually succeeded —
+            # previously any status code (even a 4xx/5xx home-page response)
+            # was treated as "primed" since only a raised exception was
+            # caught, and a bad priming response silently carries forward
+            # into every subsequent search POST failing the same way.
+            if prime is None or prime.status_code >= 400:
+                status = prime.status_code if prime is not None else "no response"
+                raise RuntimeError(f"session-priming GET returned {status}")
         except Exception as e:
-            if page == 1:
-                raise RuntimeError(f"BrassRing: request failed for {slug}: {e}") from e
-            log.debug(f"BrassRing: request failed for {slug}: {e}")
-            break
+            raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
 
-        jobs_array = data.get("Jobs", [])
-        if not jobs_array:
-            break
+        all_jobs = []
+        page = 1
 
-        for job in jobs_array:
-            auto_req_id = job.get("AutoReqId", "")
-            title = job.get("JobTitle", "")
-            location = job.get("JobInfo1", "")
-            department = job.get("JobInfo3", "")
-            job_type = job.get("JobInfo2", "")
-            short_desc = _snippet(job.get("formattedShortDescription", ""))
-            salary = _extract_salary(short_desc)
-
-            # Try to extract country from location
-            country = ""
-            if location:
-                loc_parts = [p.strip() for p in location.split(",")]
-                if len(loc_parts) >= 2:
-                    country = loc_parts[-1]
-
-            job_url = (
-                f"https://sjobs.brassring.com/TgNewUI/Search/home/HomeWithPreLoad"
-                f"?partnerid={partner_id}&siteid={site_id}&jobid={auto_req_id}"
+        while True:
+            form_data = (
+                f"partnerid={partner_id}&siteid={site_id}"
+                f"&keyword=&location=&pagenum={page}"
+                f"&sortBy=posteddate&SortType=desc"
             )
 
-            all_jobs.append({
-                "title": str(title).strip(),
-                "url": job_url,
-                "company": partner_id,
-                "location": location,
-                "country": country,
-                "department": department,
-                "workplace_type": "",
-                "employment_type": job_type,
-                "salary": salary,
-                "description_snippet": short_desc,
-                "source_ats": "BrassRing",
-                "slug": slug,
-            })
+            try:
+                r = await _brassring_request(
+                    client, "POST", search_url,
+                    data=form_data,
+                    headers=headers,
+                )
+                if r is None:
+                    if page == 1:
+                        raise RuntimeError(f"BrassRing: request failed for {slug} page 1")
+                    log.debug(f"BrassRing: request failed for {slug} page {page}")
+                    break
+                if r.status_code != 200:
+                    if page == 1:
+                        raise RuntimeError(f"BrassRing: API returned {r.status_code} for {slug} page 1")
+                    log.debug(f"BrassRing: API returned {r.status_code} for {slug} page {page}")
+                    break
+                data = r.json()
+            except RuntimeError:
+                raise
+            except Exception as e:
+                if page == 1:
+                    raise RuntimeError(f"BrassRing: request failed for {slug}: {e}") from e
+                log.debug(f"BrassRing: request failed for {slug}: {e}")
+                break
 
-        total_hits = data.get("TotalHits", 0)
-        fetched_so_far = page * 50
-        if fetched_so_far >= total_hits:
-            break
+            jobs_array = data.get("Jobs", [])
+            if not jobs_array:
+                break
 
-        page += 1
-        # 2026-09: see module-level comment above _pace_host.
-        await _pace_host_async(search_url)
+            for job in jobs_array:
+                auto_req_id = job.get("AutoReqId", "")
+                title = job.get("JobTitle", "")
+                location = job.get("JobInfo1", "")
+                department = job.get("JobInfo3", "")
+                job_type = job.get("JobInfo2", "")
+                short_desc = _snippet(job.get("formattedShortDescription", ""))
+                salary = _extract_salary(short_desc)
 
-    return all_jobs
+                # Try to extract country from location
+                country = ""
+                if location:
+                    loc_parts = [p.strip() for p in location.split(",")]
+                    if len(loc_parts) >= 2:
+                        country = loc_parts[-1]
+
+                job_url = (
+                    f"https://sjobs.brassring.com/TgNewUI/Search/home/HomeWithPreLoad"
+                    f"?partnerid={partner_id}&siteid={site_id}&jobid={auto_req_id}"
+                )
+
+                all_jobs.append({
+                    "title": str(title).strip(),
+                    "url": job_url,
+                    "company": partner_id,
+                    "location": location,
+                    "country": country,
+                    "department": department,
+                    "workplace_type": "",
+                    "employment_type": job_type,
+                    "salary": salary,
+                    "description_snippet": short_desc,
+                    "source_ats": "BrassRing",
+                    "slug": slug,
+                })
+
+            total_hits = data.get("TotalHits", 0)
+            fetched_so_far = page * 50
+            if fetched_so_far >= total_hits:
+                break
+
+            page += 1
+            # 2026-09: see module-level comment above _pace_host.
+            await _pace_host_async(search_url)
+
+        return all_jobs
 
 
 # ── Teamtailor ───────────────────────────────────────────
@@ -3796,7 +3860,16 @@ async def scrape_eploy(slug: str) -> list[dict]:
     # an unrelated sibling's text past the window boundary. Title/URL
     # extraction stays regex-based (single-field, no adjacency risk).
     soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
-    vacancy_href_re = re.compile(r'/vacancy/(\d+)/')
+    # 2026-09 BUG FIX: real production evidence (a --ats-only test run)
+    # showed 27 boards fetching their vacancy-list page successfully
+    # (HTTP 200) but extracting ZERO jobs from every single one — this
+    # regex was case-sensitive and required a trailing slash after the
+    # numeric id, neither of which is guaranteed across every Eploy
+    # tenant's own template (the list-fetch above already tries both
+    # vacancysearchresults.aspx and VacancySearchResults.aspx casings for
+    # exactly this kind of per-tenant template variance). Widened to be
+    # case-insensitive and to not require a trailing slash.
+    vacancy_href_re = re.compile(r'/vacancy/(\d+)', re.I)
     for anchor in soup.find_all("a", href=vacancy_href_re):
         path = (anchor.get("href") or "").strip()
         title = anchor.get_text(strip=True)
