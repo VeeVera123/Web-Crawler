@@ -921,6 +921,14 @@ def _extract_salary(text: str) -> str:
     return ""
 
 
+def _text(value) -> str:
+    """Coerce a possibly-None/non-string JSON field (title, url, id, …)
+    into a clean, single-line string: collapse internal whitespace and
+    unescape HTML entities. Shared by every scraper that pulls fields
+    out of an embedded JSON blob or JSON-LD block."""
+    return unescape(re.sub(r"\s+", " ", str(value or "").strip()))
+
+
 # ── Rippling ────────────────────────────────────────────
 
 def scrape_rippling(slug: str) -> list[dict]:
@@ -2222,9 +2230,6 @@ async def scrape_brassring(slug: str) -> list[dict]:
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
     }
-
-    def _text(value) -> str:
-        return unescape(re.sub(r"\s+", " ", str(value or "").strip()))
 
     def _job_dict(host: str, jid: str, title: str = "", location: str = "", desc: str = "", department: str = "", employment: str = "") -> dict:
         job_url = (f"https://{host}/TGnewUI/Search/home/HomeWithPreLoad"
@@ -3870,7 +3875,7 @@ async def scrape_eploy(slug: str) -> list[dict]:
 
         next_urls = []
         for a in soup.find_all("a", href=True):
-            text = _text(a.get_text(" ", strip=True)) if '_text' in globals() else unescape(re.sub(r"\s+", " ", a.get_text(" ", strip=True)))
+            text = _text(a.get_text(" ", strip=True))
             href = str(a.get("href") or "").strip()
             if not href:
                 continue
@@ -4599,122 +4604,139 @@ def scrape_flatchr(slug: str) -> list[dict]:
 
 # ── Jobylon ─────────────────────────────────────────────
 
-# Cap how many sitemap-listed job detail pages get fetched per call —
-# the sitemap is site-wide (every customer's jobs, not just this one),
-# so without a bound a single scrape_jobylon call could fetch thousands
-# of unrelated pages just to find this one company's postings.
-_JOBYLON_MAX_DETAIL_FETCHES = 400
 _jobylon_sitemap_cache: dict[str, tuple[float, list[str]]] = {}
 _JOBYLON_SITEMAP_TTL = 3600  # seconds
 # 2026-09: under real async concurrency (PLATFORM_WORKERS lets several
 # Jobylon boards' coroutines run at once via asyncio.gather), multiple
 # boards could previously race to populate this shared, site-wide cache
 # on first access simultaneously — no correctness bug (dict assignment
-# is atomic), but wasteful, redundant duplicate sitemap.xml fetches.
+# is atomic), but wasteful, redundant duplicate sitemap fetches.
 # This lock makes every board after the first simply await the
 # in-flight fetch's result instead of starting its own.
 _jobylon_sitemap_lock = asyncio.Lock()
 
 
-async def _jobylon_sitemap_urls() -> list[str]:
-    """Fetch (and briefly cache) the site-wide job-URL list from
-    emp.jobylon.com/sitemap.xml. Cached for _JOBYLON_SITEMAP_TTL seconds
-    since this is the same site-wide resource for every company scraped
-    in a run — refetching it per-company would be pure waste."""
-    cached = _jobylon_sitemap_cache.get("sitemap")
+async def _jobylon_all_job_urls() -> list[str]:
+    """Fetch (and cache) every job URL on Jobylon, across every customer.
+
+    2026-09 BUG FIX: emp.jobylon.com/sitemap.xml is a sitemap INDEX
+    (confirmed live) — a tiny (~237 byte) <sitemapindex> pointing at one
+    child sitemap, currently sitemap-jobs.xml (confirmed live: ~9,100 job
+    URLs). The old code parsed /sitemap.xml itself for <loc> entries
+    containing "/jobs/" and found none, ever — every scrape_jobylon call
+    then had nothing to search and failed 100% of the time (0 jobs / 40
+    boards in the last real crawl run). This follows the index to its
+    child sitemap(s) instead of assuming /sitemap.xml is the job list.
+
+    Cached for _JOBYLON_SITEMAP_TTL seconds since this is the same
+    site-wide resource for every company scraped in a run — refetching
+    it per-company would be pure waste."""
+    cached = _jobylon_sitemap_cache.get("urls")
     if cached and time.time() - cached[0] < _JOBYLON_SITEMAP_TTL:
         return cached[1]
 
     async with _jobylon_sitemap_lock:
         # Re-check inside the lock — another board's coroutine may have
-        # already populated (or failed-cached) the sitemap while this one
+        # already populated (or failed-cached) the list while this one
         # was waiting to acquire it.
-        cached = _jobylon_sitemap_cache.get("sitemap")
+        cached = _jobylon_sitemap_cache.get("urls")
         if cached and time.time() - cached[0] < _JOBYLON_SITEMAP_TTL:
             return cached[1]
 
-        # 2026-09 BUG FIX: this used to `return []` on a fetch/parse failure —
-        # identical to "the sitemap is just empty," which every one of the
-        # ~118 companies scraped this run would then silently inherit as "0
-        # jobs, active board" (see scrape_jobylon's own note below for the
-        # full explanation). Now raises instead, so scrape_jobylon's caller
-        # actually sees a failure. A short NEGATIVE cache (distinct from the
-        # long positive _JOBYLON_SITEMAP_TTL) stops a real outage from
-        # triggering a fresh failing fetch for every single company in the
-        # same run — one real request's worth of retrying, not ~118.
-        failed_cached = _jobylon_sitemap_cache.get("sitemap_failed_at")
+        # A short NEGATIVE cache (distinct from the long positive
+        # _JOBYLON_SITEMAP_TTL) stops a real outage from triggering a
+        # fresh failing fetch for every single company in the same run —
+        # one real request's worth of retrying, not ~40.
+        failed_cached = _jobylon_sitemap_cache.get("failed_at")
         if failed_cached and time.time() - failed_cached < 60:
             raise RuntimeError("Jobylon: sitemap fetch failed recently, not retrying yet this run")
 
         headers = {"User-Agent": random.choice(USER_AGENTS)}
         r = await _get("https://emp.jobylon.com/sitemap.xml", headers=headers)
         if not r:
-            _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
+            _jobylon_sitemap_cache["failed_at"] = time.time()
             raise RuntimeError("Jobylon: sitemap.xml fetch failed")
-
         try:
-            root = ET.fromstring(r.content)
+            index_root = ET.fromstring(r.content)
         except Exception as e:
-            _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
-            raise RuntimeError(f"Jobylon: sitemap XML parse failed: {e}") from e
+            _jobylon_sitemap_cache["failed_at"] = time.time()
+            raise RuntimeError(f"Jobylon: sitemap index XML parse failed: {e}") from e
 
-        urls = []
-        for loc in root.iter():
-            if loc.tag.endswith("loc") and loc.text and "/jobs/" in loc.text:
-                urls.append(loc.text.strip())
+        child_sitemap_urls = [loc.text.strip() for loc in index_root.iter()
+                               if loc.tag.endswith("loc") and loc.text]
+        if not child_sitemap_urls:
+            _jobylon_sitemap_cache["failed_at"] = time.time()
+            raise RuntimeError("Jobylon: sitemap index had no child <loc> entries")
 
-        _jobylon_sitemap_cache["sitemap"] = (time.time(), urls)
+        urls: list[str] = []
+        for sm_url in child_sitemap_urls:
+            sr = await _get(sm_url, headers=headers)
+            if not sr:
+                continue
+            try:
+                sm_root = ET.fromstring(sr.content)
+            except Exception:
+                continue
+            for loc in sm_root.iter():
+                if loc.tag.endswith("loc") and loc.text and "/jobs/" in loc.text:
+                    urls.append(loc.text.strip())
+
+        if not urls:
+            _jobylon_sitemap_cache["failed_at"] = time.time()
+            raise RuntimeError("Jobylon: sitemap index's child sitemap(s) yielded no job URLs")
+
+        _jobylon_sitemap_cache["urls"] = (time.time(), urls)
         return urls
 
 
 async def scrape_jobylon(slug: str) -> list[dict]:
-    """Jobylon public company-page scraper with sitemap fallback.
+    """Jobylon (Nordics) scraper.
 
-    The site-wide sitemap is a poor primary source because it contains jobs
-    from every Jobylon customer. Current company pages, however, expose the
-    company's actual Available Jobs and are indexable/server-rendered. We
-    therefore fetch the tenant company page first and recover canonical
-    ``/jobs/<id>-<slug>/`` URLs from HTML/embedded state. Only if that yields
-    no job URLs do we fall back to the bounded site-wide sitemap scan.
-    """
+    Confirmed live (2026-09): company pages (emp.jobylon.com/companies/
+    {id}-{slug}/) are old jQuery pages whose job-listing widget
+    (jbl-offer-module.js, keyed by an embedded jbl_company_id JS var)
+    loads via a separate client-side call — the static HTML never
+    contains real job links, only an unrelated example URL pulled from
+    an embedded API-schema blob (a prior attempt at "primary: scrape the
+    company page" found 0 real job links across every real tenant
+    tried). Job DETAIL pages, however, ARE fully server-rendered (real
+    JSON-LD JobPosting, og:title, etc.) and every one of them is listed
+    in the site-wide sitemap (see _jobylon_all_job_urls).
+
+    A detail page's HTML does NOT link back to /companies/{id}-{slug}/
+    at all (confirmed live: 0/60 sampled pages did — a company-marker
+    fallback based on that never matches, regardless of how many pages
+    it checks). It CAN be recovered for free from the sitemap URL
+    itself, though: every job slug is generated as
+    '{job_id}-{company_slug}-{job_title_slug}' (confirmed live, e.g.
+    'https://emp.jobylon.com/jobs/384887-varner-creative-studio-assistant/'
+    for real tenant slug '2160-varner') — so filtering the site-wide URL
+    list for slugs starting with this company's own company_slug finds
+    its postings with zero extra requests; only the (few) matches are
+    then fetched for their real JobPosting data.
+
+    Known limitation: a company whose real Jobylon slug transliterates
+    non-ASCII characters differently than this project's own stored
+    slug (e.g. an umlaut spelled out one way vs. another) won't prefix-
+    match and will read as zero postings — same class of limitation the
+    old sitemap-scan approach had, just via a different mechanism."""
     company_id, sep, company_slug = slug.partition("-")
     if not company_id.isdigit() or not company_slug:
         raise RuntimeError(f"Jobylon: invalid slug {slug!r}; expected '<numeric_id>-<company-slug>'")
     company_name = company_slug.replace("-", " ").title()
-    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    company_urls = [
-        f"https://emp.jobylon.com/companies/{company_id}-{company_slug}/",
-        f"https://emp.jobylon.com/companies/{company_id}/",
-    ]
+    job_urls = await _jobylon_all_job_urls()
+    slug_pat = re.compile(rf"/jobs/\d+-{re.escape(company_slug)}(?:-|/)", re.I)
+    matches = [u for u in job_urls if slug_pat.search(u)]
+    if not matches:
+        # A complete, successful site-wide sitemap fetch with no slug
+        # match is allowed to represent a genuinely empty/closed board.
+        return []
 
-    def _extract_job_urls(html: str, base_url: str) -> list[str]:
-        urls, seen = [], set()
-        # Raw HTML, hrefs, JSON state and escaped JSON all commonly preserve
-        # the canonical job URL even when the visual widget is JS-enhanced.
-        patterns = [
-            r'(?:https?:\/\/emp\.jobylon\.com)?(\/jobs\/\d+-[A-Za-z0-9][^"\'<>\\]*)',
-            r'(?:https?:\/\/emp\.jobylon\.com)?(\/jobs\/\d+[^"\'<>\\]*)',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, html, re.I):
-                u = m.group(1).replace("\\/", "/")
-                u = urljoin(base_url, u)
-                u = u.split("#", 1)[0]
-                if "/jobs/" in u and u not in seen:
-                    seen.add(u); urls.append(u)
-        # Also inspect actual anchors in case the HTML uses relative links
-        # with attributes that the regex intentionally avoids.
-        soup = BeautifulSoup(html, "html.parser")
-        for a in soup.find_all("a", href=True):
-            u = urljoin(base_url, str(a.get("href") or "").strip())
-            if re.search(r"/jobs/\d+", u, re.I) and u not in seen:
-                seen.add(u); urls.append(u)
-        return urls
-
-    async def _parse_detail(job_url: str, r: httpx.Response) -> dict | None:
+    def parse_one(html: str, job_url: str) -> dict | None:
         title = desc = location = country = ""
-        for script in BeautifulSoup(r.text, "html.parser").find_all("script", attrs={"type": "application/ld+json"}):
+        for script in BeautifulSoup(html, "html.parser").find_all("script", attrs={"type": "application/ld+json"}):
             try:
                 data = json.loads(script.string or script.get_text())
             except Exception:
@@ -4733,7 +4755,7 @@ async def scrape_jobylon(slug: str) -> list[dict]:
                 country = str(addr.get("addressCountry") or "")
                 break
         if not title:
-            m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.I | re.S)
+            m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
             title = _text(m.group(1)) if m else ""
         if not title:
             return None
@@ -4744,102 +4766,23 @@ async def scrape_jobylon(slug: str) -> list[dict]:
             "description_snippet": desc, "source_ats": "Jobylon", "slug": slug,
         }
 
-    # Primary: tenant-specific company page.
-    for company_url in company_urls:
-        r = await _get(company_url, headers=headers)
+    jobs = []
+    for job_url in matches:
+        r = await _get(job_url, headers=headers)
         if not r:
             continue
-        job_urls = _extract_job_urls(r.text, str(r.url) if r.url else company_url)
-        if job_urls:
-            jobs = []
-            seen = set()
-            # Job detail pages are the authoritative full posting source.
-            for job_url in job_urls:
-                if job_url in seen:
-                    continue
-                seen.add(job_url)
-                jr = await _get(job_url, headers=headers)
-                if not jr:
-                    continue
-                job = await asyncio.to_thread(lambda: None) if False else None
-                # Parsing is small but still synchronous; run it off-loop.
-                def parse_one(resp=jr, u=job_url):
-                    title = desc = location = country = ""
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-                        try: data = json.loads(script.string or script.get_text())
-                        except Exception: continue
-                        vals = data if isinstance(data, list) else [data]
-                        for item in vals:
-                            if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                                title = _text(item.get("title")); desc = _snippet(item.get("description") or "")
-                                loc = item.get("jobLocation") or {}
-                                if isinstance(loc, list): loc = loc[0] if loc else {}
-                                addr = loc.get("address") if isinstance(loc, dict) else {}
-                                addr = addr if isinstance(addr, dict) else {}
-                                location = ", ".join(str(x).strip() for x in (addr.get("addressLocality"), addr.get("addressRegion")) if x)
-                                country = str(addr.get("addressCountry") or "")
-                                break
-                    if not title:
-                        tm = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.I | re.S)
-                        title = _text(tm.group(1)) if tm else ""
-                    if not title: return None
-                    return {"title": title, "url": u, "company": company_name, "location": location,
-                            "country": country, "department": "", "workplace_type": "", "employment_type": "",
-                            "salary": _extract_salary(desc), "description_snippet": desc,
-                            "source_ats": "Jobylon", "slug": slug}
-                job = await asyncio.to_thread(parse_one)
-                if job:
-                    jobs.append(job)
-            if jobs:
-                return jobs
+        job = await asyncio.to_thread(parse_one, r.text, job_url)
+        if job:
+            jobs.append(job)
 
-    # Fallback: bounded site-wide sitemap scan, retained only for company
-    # pages whose HTML doesn't expose the job links. Do not silently call an
-    # exhausted scan an empty board.
-    job_urls = await _jobylon_sitemap_urls()
-    if not job_urls:
-        raise RuntimeError(f"Jobylon: no sitemap URLs available for {slug}")
-    jobs, checked = [], 0
-    company_marker = f"/companies/{company_id}-"
-    for job_url in job_urls:
-        if checked >= _JOBYLON_MAX_DETAIL_FETCHES:
-            break
-        checked += 1
-        r = await _get(job_url, headers=headers)
-        if not r or company_marker not in r.text:
-            continue
-        def parse_fallback(resp=r, u=job_url):
-            soup = BeautifulSoup(resp.text, "html.parser")
-            title = desc = location = country = ""
-            for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-                try: data = json.loads(script.string or script.get_text())
-                except Exception: continue
-                vals = data if isinstance(data, list) else [data]
-                for item in vals:
-                    if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                        title = _text(item.get("title")); desc = _snippet(item.get("description") or "")
-                        loc = item.get("jobLocation") or {}
-                        if isinstance(loc, list): loc = loc[0] if loc else {}
-                        addr = loc.get("address") if isinstance(loc, dict) else {}
-                        addr = addr if isinstance(addr, dict) else {}
-                        location = ", ".join(str(x).strip() for x in (addr.get("addressLocality"), addr.get("addressRegion")) if x)
-                        country = str(addr.get("addressCountry") or "")
-                        break
-            if not title:
-                tm = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.I | re.S); title = _text(tm.group(1)) if tm else ""
-            return {"title": title, "url": u, "company": company_name, "location": location, "country": country,
-                    "department": "", "workplace_type": "", "employment_type": "", "salary": _extract_salary(desc),
-                    "description_snippet": desc, "source_ats": "Jobylon", "slug": slug} if title else None
-        job = await asyncio.to_thread(parse_fallback)
-        if job: jobs.append(job)
-    if jobs:
-        return jobs
-    if checked >= _JOBYLON_MAX_DETAIL_FETCHES:
-        raise RuntimeError(f"Jobylon: exhausted {checked}-URL sitemap fallback for {slug} without finding a company posting")
-    # A complete, successful company-page fetch with no jobs is allowed to
-    # represent a genuinely empty board.
-    raise RuntimeError(f"Jobylon: company page/feed reachable but no published job records found for {slug}")
+    if not jobs:
+        # Real slug matches existed but every fetch/parse failed — a
+        # transient network/parse problem, not a genuinely empty board.
+        raise RuntimeError(
+            f"Jobylon: {len(matches)} sitemap slug match(es) for {slug} but none "
+            f"could be fetched/parsed into a job"
+        )
+    return jobs
 
 
 # REMOVED 2026-09: scrape_homerun. Its extractor in discovery.py
