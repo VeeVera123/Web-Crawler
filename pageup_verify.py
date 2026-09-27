@@ -72,6 +72,12 @@ async def check_brassring() -> None:
         print(f"  sample: {text_only[:300]!r}")
         has_jd_words = bool(re.search(r"\b(responsibilit|qualificat|requirement|job description|about the role)\b", text_only, re.I))
         print(f"  looks like real JD text present: {has_jd_words}")
+        # What would the existing generic fetcher actually extract from
+        # this exact page? (uses the same job dict, real fetched URL)
+        generic_desc = m._fetch_generic_description(job)
+        print(f"  _fetch_generic_description on this BrassRing page -> {len(generic_desc)} chars")
+        if generic_desc:
+            print(f"    first 400 chars: {generic_desc[:400]!r}")
 
 
 def main() -> int:
