@@ -281,7 +281,33 @@ jobs:
         # crt.sh's public Postgres database directly (its HTTP endpoint's
         # own robots.txt disallows automated access — see discovery.py's
         # module comment above CRTSH_PG_HOST for the full explanation).
-        run: pip install requests python-dotenv google-cloud-bigquery pyarrow psycopg2-binary
+        # 2026-09 FIX (real production evidence): aiohttp/selectolax/
+        # aiodns/beautifulsoup4 added — discovery.py's
+        # _get_verification_module() bridges into
+        # Verification/verification.py for the CC/Wayback live pre-check
+        # (see discovery.py's own module comment on that function).
+        # verification.py's own top-level imports are `import aiohttp`,
+        # `import node` (which itself does `import aiohttp`,
+        # `from selectolax.lexbor import LexborHTMLParser` at ITS top
+        # level, and a guarded, optional `import aiodns` a few call sites
+        # deep — see node.py's own comments on that one degrading
+        # gracefully if absent, unlike the other three), and
+        # `from ats_scrapers import scrape_board` (which needs
+        # `bs4`/beautifulsoup4). NONE of these were ever installed here
+        # because, until a separate 2026-09 fix to the bridge's own
+        # directory-resolution math, the whole import silently failed for
+        # an UNRELATED reason (couldn't even locate the file) before ever
+        # reaching any of these — so this missing-dependency gap was
+        # masked the entire time. Confirmed live: fixing the path bug
+        # immediately surfaced "No module named 'aiohttp'" instead, on
+        # this exact step. verification.yml (which runs verification.py
+        # directly, never through this bridge) already installs
+        # `aiohttp aiodns selectolax requests beautifulsoup4
+        # python-dotenv` for exactly this reason — this brings
+        # Discovery.yml's INDIRECT use of the same module up to the same
+        # requirement (aiodns included for parity/DNS-resolver
+        # performance even though node.py degrades fine without it).
+        run: pip install requests python-dotenv google-cloud-bigquery pyarrow psycopg2-binary aiohttp aiodns selectolax beautifulsoup4
 
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
         env:
