@@ -21,9 +21,13 @@ def main() -> int:
         print(f"{host} partnerid={partner_id} siteid={site_id}")
         print("=" * 70)
         base = f"https://{host}"
-        # Prime session like scrape_brassring does.
-        session.get(f"{base}/TGnewUI/Search/home/Home",
-                    params={"partnerid": partner_id, "siteid": site_id}, headers=HEADERS, timeout=30)
+        # Prime session like scrape_brassring does -- its real AJAX call
+        # also sends Origin/Referer set to the primed home page's URL,
+        # which this diagnostic's first (failed, all-500) run omitted.
+        prime = session.get(f"{base}/TGnewUI/Search/home/Home",
+                             params={"partnerid": partner_id, "siteid": site_id}, headers=HEADERS, timeout=30)
+        print(f"prime: status={prime.status_code} final_url={prime.url}")
+        ajax_headers = {**HEADERS, "Origin": base, "Referer": str(prime.url)}
 
         seen_ids = set()
         for pagenum in (1, 2, 3):
@@ -31,7 +35,7 @@ def main() -> int:
                 f"{base}/TGnewUI/Search/Ajax/MatchedJobs",
                 data={"partnerid": partner_id, "siteid": site_id, "keyword": "",
                       "location": "", "pagenum": str(pagenum), "sortBy": "posteddate", "SortType": "desc"},
-                headers=HEADERS, timeout=30,
+                headers=ajax_headers, timeout=30,
             )
             print(f"page {pagenum}: status={r.status_code}")
             if r.status_code != 200:
