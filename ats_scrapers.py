@@ -14,7 +14,7 @@ import time
 import xml.etree.ElementTree as ET
 import urllib.robotparser
 from html import unescape
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from config import REQUEST_TIMEOUT, MAX_RETRIES
@@ -139,12 +139,97 @@ USER_AGENTS = [
 ]
 
 
+# ── Per-host adaptive rate limiter (2026-09, explicit user request,
+# quoting an external architecture review verbatim: "No delay by default →
+# Request → 200 → immediately continue → 429 → obey Retry-After → 5xx →
+# exponential retry ... turn that into a proper host-aware rate limiter
+# rather than adding random sleeps everywhere") ────────────────────────
+# Every pagination/enrichment loop in this file used to call
+# `time.sleep(random.uniform(0.2-0.3, 0.5-1.0))` UNCONDITIONALLY after
+# every successful page/job fetch — real cost estimated by the user's own
+# source at ~9.7 hours of pure artificial waiting per 100,000 jobs at a
+# 0.35s average, confirmed as the direct cause of at least one real run
+# blowing past its allotted GitHub Actions job timeout. `_get()` above
+# already does the important, correctness-relevant half of "polite HTTP"
+# (honors Retry-After on 429, exponential backoff on failure) — what was
+# missing was ONLY the "no delay by default on a healthy host" half.
+#
+# This is deliberately NOT a full token-bucket/async rate limiter (that's
+# a much bigger, separate change the user explicitly deferred — see this
+# session's own scoping discussion). It's the smallest change that
+# actually removes the unconditional-sleep waste while keeping every
+# existing scraper's call shape (one `_get()` per page, called from a
+# synchronous loop) unchanged: a per-host record of "how much this host
+# currently seems to need to be paced," starting at ZERO wait for a host
+# that's never given any sign of trouble, escalated only when `_get`
+# itself observes a 429/repeated failure against that host, and decayed
+# back toward zero after a run of clean responses. Callers that used to
+# call `time.sleep(random.uniform(a, b))` unconditionally now call
+# `_pace_host(url)` instead, which sleeps 0s the overwhelming majority of
+# the time (a healthy ATS host) and only actually waits when this
+# specific host has recently shown a reason to slow down.
+_host_pace_lock = threading.Lock()
+_host_pace_state: dict[str, dict] = {}  # host -> {"gap": float, "clean_streak": int}
+
+_HOST_PACE_ESCALATE_TO = 1.0    # seconds — applied the moment a host 429s/repeatedly fails
+_HOST_PACE_DECAY_AFTER = 5      # consecutive clean (non-429, non-exception) responses
+_HOST_PACE_DECAY_FACTOR = 0.5   # halve the gap after each decay step
+_HOST_PACE_FLOOR = 0.05         # below this, just snap to 0 — not worth timer overhead
+
+
+def _host_of(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return url
+
+
+def _pace_host(url: str) -> None:
+    """Sleep only as long as this SPECIFIC host currently warrants —
+    zero, for a host that's never shown trouble. Replaces the old
+    unconditional `time.sleep(random.uniform(...))` calls scattered after
+    every successful page/job fetch throughout this file."""
+    host = _host_of(url)
+    with _host_pace_lock:
+        state = _host_pace_state.get(host)
+        gap = state["gap"] if state else 0.0
+    if gap > 0:
+        # Small jitter on top of the current gap — same thundering-herd
+        # reasoning _get()'s own backoff already uses, kept here too since
+        # multiple worker threads can be pacing the same host at once.
+        time.sleep(gap + random.uniform(0, gap * 0.25))
+
+
+def _note_host_response(url: str, *, was_rate_limited: bool, was_error: bool) -> None:
+    """Called from `_get()` after every real HTTP attempt against `url` to
+    keep that host's pacing state current. A 429 or repeated failure
+    escalates the gap immediately (a host that's already complaining
+    doesn't need N more strikes before this project starts being more
+    careful with it); a run of clean responses decays it back down, so a
+    host that had one bad moment doesn't stay artificially slowed for the
+    rest of a multi-thousand-job run."""
+    host = _host_of(url)
+    with _host_pace_lock:
+        state = _host_pace_state.setdefault(host, {"gap": 0.0, "clean_streak": 0})
+        if was_rate_limited or was_error:
+            state["gap"] = max(state["gap"], _HOST_PACE_ESCALATE_TO)
+            state["clean_streak"] = 0
+        else:
+            state["clean_streak"] += 1
+            if state["clean_streak"] >= _HOST_PACE_DECAY_AFTER and state["gap"] > 0:
+                state["gap"] = state["gap"] * _HOST_PACE_DECAY_FACTOR
+                if state["gap"] < _HOST_PACE_FLOOR:
+                    state["gap"] = 0.0
+                state["clean_streak"] = 0
+
+
 def _get(url: str, **kwargs) -> requests.Response | None:
     session = _get_session()
     for attempt in range(MAX_RETRIES + 1):
         try:
             r = session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
             if r.status_code == 429:
+                _note_host_response(url, was_rate_limited=True, was_error=False)
                 # Respect the server's own Retry-After header when it gives
                 # one — this is the single most ban-risk-reducing change
                 # available: it means we back off exactly as long as the
@@ -159,9 +244,11 @@ def _get(url: str, **kwargs) -> requests.Response | None:
                 time.sleep(wait)
                 continue
             r.raise_for_status()
+            _note_host_response(url, was_rate_limited=False, was_error=False)
             return r
         except Exception as e:
             if attempt == MAX_RETRIES:
+                _note_host_response(url, was_rate_limited=False, was_error=True)
                 log.debug(f"Failed {url}: {e}")
                 return None
             # Jitter on ordinary failures too — prevents a "thundering herd"
@@ -264,6 +351,101 @@ _SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.I 
 _ZERO_WIDTH_RE = re.compile(r"[​‌‍‎‏﻿­]")
 
 
+# 2026-09 NEW (explicit user request: "track the location symbol and what
+# location sits by it. Most companies seem to do that too. this would
+# particularly be useful where the API call does not reveal it, like in
+# the case of in-house ATSs"): many job postings render their location as
+# a small icon/glyph immediately followed by a place name — a map-pin
+# emoji, a house/office emoji for onsite-vs-remote, or a plain bullet
+# character used the same way — rather than (or in addition to) a
+# structured location FIELD the scraper can read directly. This is
+# exactly the same signal-not-carried-by-the-API problem the existing
+# "Metadata Location: ..." convention (see _fetch_greenhouse_questions,
+# has_hard_metadata_location_signal in classifier.py) already solves for
+# Greenhouse's own metadata — this generalizes the same idea to the raw
+# HTML/text of ANY posting, before HTML tags are stripped (a glyph often
+# sits in its own <span>/<i> tag right next to a text node, so this must
+# run on the pre-strip markup, not the final plain-text snippet, or the
+# adjacency between icon and place name is lost once tags collapse to
+# whitespace).
+#
+# Deliberately narrow on what counts as a "location symbol": real map-pin/
+# location glyphs (📍🌍🌎🌏🏢🏠🏙), never a bare generic bullet (•/·/-),
+# since a generic bullet is used for countless other list items on a
+# careers page (benefits, requirements, responsibilities) and would flood
+# description_snippet with false "Location Symbol:" lines that have
+# nothing to do with location. The captured "nearby text" is the run of
+# words immediately following the glyph on the same line, up to the next
+# glyph/punctuation boundary that plausibly ends a short location phrase
+# (a following pipe/bullet/newline/another emoji, or a hard sentence stop) —
+# this is intentionally a SHORT capture (a place name / short region
+# phrase, not a whole sentence) since that's what actually sits next to
+# these glyphs on real postings ("📍 Lagos, Nigeria | Full-time",
+# "🌍 Remote - Africa only", "🏢 Onsite: Austin, TX").
+_LOCATION_SYMBOL_GLYPHS = "📍🌍🌎🌏🏢🏠🏙"
+_LOCATION_SYMBOL_RE = re.compile(
+    r"[" + _LOCATION_SYMBOL_GLYPHS + r"]"
+    r"\s*([^\n\r|•·<>]{2,80}?)"
+    r"(?=\s*(?:[|•·\n\r<]|$|[" + _LOCATION_SYMBOL_GLYPHS + r"]))"
+)
+
+# Caps how many distinct "Location Symbol:" lines get appended per posting —
+# a page that uses these glyphs decoratively throughout (e.g. a benefits
+# list with a house emoji per bullet) should not balloon description_snippet
+# with dozens of near-duplicate lines. 5 is generous for the real pattern
+# (one location line, occasionally two for a hybrid "onsite + remote"
+# posting) while still bounding the pathological case.
+_MAX_LOCATION_SYMBOL_LINES = 5
+
+
+def _extract_location_symbol_lines(html_or_text: str) -> list[str]:
+    """Find map-pin/location-glyph + adjacent text pairs in raw (pre-strip)
+    HTML/text and return them as "Location Symbol: <text>" lines, ready to
+    append to a cleaned description_snippet — same convention as
+    ats_scrapers.py's existing "Metadata Location: ..." line for
+    Greenhouse. Returns [] when no such glyph is present (the overwhelming
+    majority of postings), so this costs nothing when unused.
+
+    2026-09 FIX: real markup very often wraps the glyph in its own
+    element separate from the text node right after it (e.g.
+    "<span>📍</span> Lagos, Nigeria") — confirmed by a failing test using
+    exactly that shape. Matching straight against the raw HTML meant the
+    very next character after the glyph was "<" (the closing tag), which
+    the capture group's character class deliberately excludes (so a
+    capture never accidentally swallows a whole tag), so the match failed
+    outright even though a human reading the rendered page sees the pin
+    sitting directly next to "Lagos, Nigeria". Tags are stripped (to
+    nothing, not to a space — a space would itself break the adjacency
+    this function exists to detect) BEFORE the glyph search runs, so the
+    glyph and its neighboring text collapse onto the same run of
+    characters exactly as they'd visually appear to a reader."""
+    if not html_or_text or not any(g in html_or_text for g in _LOCATION_SYMBOL_GLYPHS):
+        return []
+    tagless = re.sub(r"<[^>]+>", "", html_or_text)
+    lines = []
+    seen = set()
+    for m in _LOCATION_SYMBOL_RE.finditer(tagless):
+        candidate = unescape(m.group(1))
+        candidate = re.sub(r"\s+", " ", candidate).strip(" -:—–|")
+        if not candidate or len(candidate) < 2:
+            continue
+        # Skip anything that's clearly not a place (pure digits/punctuation,
+        # or a single common word too generic to be a location on its own —
+        # "Full-time"/"Remote" alone are handled fine elsewhere and aren't
+        # wrong to skip here since they add no NEW signal over what the
+        # location field/other checks already see).
+        if not re.search(r"[A-Za-z]{2,}", candidate):
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"Location Symbol: {candidate}")
+        if len(lines) >= _MAX_LOCATION_SYMBOL_LINES:
+            break
+    return lines
+
+
 def _snippet(html_or_text: str, max_chars: int = 500_000) -> str:
     """Strip HTML, decode entities, drop ATS template/encoding junk, and cap length.
 
@@ -279,9 +461,20 @@ def _snippet(html_or_text: str, max_chars: int = 500_000) -> str:
     long real-world JD still reaches the classifier untouched rather than
     being cut off mid-sentence — which can hide the exact
     restriction/eligibility language the AI is being asked to find.
+
+    2026-09 NEW: also extracts any "location symbol + nearby text" pairs
+    (map-pin/location emoji immediately followed by a place name — see
+    _extract_location_symbol_lines) from the RAW html_or_text before tags
+    are stripped, and appends them as "Location Symbol: ..." lines at the
+    end of the cleaned text, same convention as the existing "Metadata
+    Location: ..." line. This must be extracted here, pre-strip, since
+    stripping HTML tags collapses the glyph and its neighboring text node
+    onto the same whitespace-joined line as everything else, losing the
+    adjacency that makes the signal meaningful in the first place.
     """
     if not html_or_text:
         return ""
+    location_symbol_lines = _extract_location_symbol_lines(html_or_text)
     text = _SCRIPT_STYLE_RE.sub(" ", html_or_text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
@@ -291,6 +484,8 @@ def _snippet(html_or_text: str, max_chars: int = 500_000) -> str:
     text = _TEMPLATE_TOKEN_RE.sub(" ", text)
     text = _SYMBOL_GARBAGE_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
+    if location_symbol_lines:
+        text = (text + " " + " | ".join(location_symbol_lines)).strip() if text else " | ".join(location_symbol_lines)
     return text[:max_chars]
 
 
@@ -984,8 +1179,14 @@ def scrape_workday(slug: str) -> list[dict]:
         if offset >= total:
             break
 
-        # Jitter to avoid bot detection
-        time.sleep(random.uniform(0.3, 1.0))
+        # 2026-09: was an unconditional time.sleep(random.uniform(0.3, 1.0))
+        # on every page regardless of how the last request went — see the
+        # module-level comment above _pace_host for the full reasoning.
+        # Workday's own request above is a direct session.post() (not
+        # _get()), so this host's pace state only escalates if Workday is
+        # ALSO hit via _get() elsewhere; that's fine — it still costs
+        # nothing extra on a healthy run, which is the actual goal here.
+        _pace_host(api_url)
 
     return all_jobs
 
@@ -1192,8 +1393,8 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
         if offset >= total:
             break
 
-        # Jitter to avoid rate limits
-        time.sleep(random.uniform(0.2, 0.6))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(base_url)
 
     return all_jobs
 
@@ -1334,7 +1535,8 @@ def scrape_taleo(slug: str) -> list[dict]:
             break
 
         page_no += 1
-        time.sleep(random.uniform(0.3, 1.0))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(api_url)
 
     return all_jobs
 
@@ -1546,7 +1748,8 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
                 break
 
         offset += limit
-        time.sleep(random.uniform(0.3, 1.0))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(base_api)
 
     return all_jobs
 
@@ -1712,7 +1915,8 @@ def scrape_brassring(slug: str) -> list[dict]:
             break
 
         page += 1
-        time.sleep(random.uniform(0.3, 1.0))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(search_url)
 
     return all_jobs
 
@@ -2050,7 +2254,8 @@ def scrape_successfactors(slug: str) -> list[dict]:
                     "slug": slug,
                 })
             page += 1
-            time.sleep(random.uniform(0.3, 0.8))
+            # 2026-09: see module-level comment above _pace_host.
+            _pace_host(origin)
 
     _scrape_locale(None)
     for loc in locales:
@@ -3035,7 +3240,8 @@ def scrape_joincom(slug: str) -> list[dict]:
         if page >= page_count:
             break
         page += 1
-        time.sleep(random.uniform(0.2, 0.5))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(api_base)
 
     return all_jobs
 
@@ -4162,7 +4368,8 @@ def scrape_csod(slug: str) -> list[dict]:
             working_page_id = candidate
             first_page = result
             break
-        time.sleep(random.uniform(0.2, 0.5))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(search_url)
 
     if working_page_id is None or first_page is None:
         log.debug(f"Cornerstone: no working careerSitePageId found for {tenant} "
@@ -4211,7 +4418,8 @@ def scrape_csod(slug: str) -> list[dict]:
         if len(seen) >= total:
             break
         page_number += 1
-        time.sleep(random.uniform(0.3, 0.8))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(search_url)
         page_data = _csod_search(search_url, headers, site_id, working_page_id, page_number, page_size)
 
     return jobs
@@ -4519,7 +4727,8 @@ def scrape_paycom(slug: str) -> list[dict]:
             })
 
         skip += take
-        time.sleep(random.uniform(0.3, 0.8))
+        # 2026-09: see module-level comment above _pace_host.
+        _pace_host(search_url)
 
     return jobs
 
@@ -6021,7 +6230,12 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
                     job["salary"] = salary
         except Exception as e:
             log.debug(f"Failed to enrich {job['url']}: {e}")
-        time.sleep(random.uniform(0.2, 0.5))
+        # 2026-09: see module-level comment above _pace_host. This runs
+        # under a ThreadPoolExecutor across many DIFFERENT companies'
+        # hosts, so per-host pacing (not one shared blanket delay) is
+        # exactly the right granularity — most hosts here get zero wait.
+        if job.get("url"):
+            _pace_host(job["url"])
         improved = len(job.get("description_snippet") or "") > before_len
         return job, improved
 
@@ -6070,7 +6284,9 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
                         job["salary"] = salary
             except Exception as e:
                 log.debug(f"Fallback fetch failed {job['url']}: {e}")
-            time.sleep(random.uniform(0.3, 0.8))
+            # 2026-09: see module-level comment above _pace_host.
+            if job.get("url"):
+                _pace_host(job["url"])
             return job
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -7373,7 +7589,12 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
         if questions:
             existing = job.get("description_snippet", "") or ""
             job["description_snippet"] = existing + "\n\n" + questions
-        time.sleep(random.uniform(0.2, 0.5))
+        # 2026-09: see module-level comment above _pace_host — was an
+        # unconditional politeness sleep on every job regardless of host
+        # health; now only actually waits for a host that's shown a
+        # reason to.
+        if job.get("url"):
+            _pace_host(job["url"])
         return job, ats, outcome
 
     # 2026-09 (explicit user instruction: "logs should be clean AF and
