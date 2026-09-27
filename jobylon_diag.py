@@ -6,88 +6,87 @@ what it finds, so the real fix can be based on live evidence instead
 of another guess.
 
 Manual-dispatch only, via jobylon-diag.yml.
+
+Round 2: round 1 found sitemap.xml is only 237 bytes (effectively
+empty -- 0 /jobs/ <loc> entries) and that real company pages return 200
+with "/jobs/" appearing SOMEWHERE in ~90-110KB of HTML, but no anchor
+tag matches href=".../jobs/<digits>...". This round inspects what that
+"/jobs/" text actually is, and looks for any embedded JSON state or API
+endpoint the real job data might come from instead.
 """
 import re
 import sys
-import time
 import httpx
 
-REAL_SLUGS = [
-    "2-truecaller",
-    "9-meltwater-group",
-    "20-beemobile",
-    "1364-dermicus",
-    "2160-varner",
-]
+REAL_SLUGS = ["2-truecaller", "9-meltwater-group", "20-beemobile", "2160-varner"]
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
+
+
+def show_context(html: str, needle: str, n: int = 3, width: int = 100) -> None:
+    count = 0
+    for m in re.finditer(re.escape(needle), html, re.I):
+        if count >= n:
+            print(f"    ... ({len(re.findall(re.escape(needle), html, re.I))} total occurrences)")
+            break
+        start = max(0, m.start() - width)
+        end = min(len(html), m.end() + width)
+        snippet = html[start:end].replace("\n", "\\n")
+        print(f"    [{m.start()}] ...{snippet}...")
+        count += 1
+    if count == 0:
+        print(f"    (0 occurrences of {needle!r})")
 
 
 def main() -> int:
     client = httpx.Client(headers=HEADERS, follow_redirects=True, timeout=30, http2=True)
 
     print("=" * 70)
-    print("1. Site-wide sitemap.xml")
+    print("1. FULL sitemap.xml content (it was only 237 bytes)")
     print("=" * 70)
     r = client.get("https://emp.jobylon.com/sitemap.xml")
-    print(f"status={r.status_code} bytes={len(r.content)} content-type={r.headers.get('content-type')}")
-    job_urls = re.findall(r"<loc>([^<]*/jobs/[^<]*)</loc>", r.text)
-    print(f"total <loc> entries containing /jobs/: {len(job_urls)}")
-    for u in job_urls[:5]:
-        print(f"  sample: {u}")
+    print(f"status={r.status_code}")
+    print(repr(r.text))
 
     print()
     print("=" * 70)
-    print("2. Real company pages")
+    print("2. Truecaller company page -- structural investigation")
     print("=" * 70)
-    for slug in REAL_SLUGS:
-        for path in (f"/companies/{slug}/", f"/companies/{slug.split('-')[0]}/"):
-            url = f"https://emp.jobylon.com{path}"
-            try:
-                cr = client.get(url)
-            except Exception as e:
-                print(f"{url} -> EXCEPTION {e}")
-                continue
-            has_jobs_link = "/jobs/" in cr.text
-            has_ld_json = "application/ld+json" in cr.text
-            has_next_data = "__NEXT_DATA__" in cr.text or "_next/static" in cr.text
-            print(f"{url} -> status={cr.status_code} final_url={cr.url} bytes={len(cr.content)} "
-                  f"has_/jobs/_link={has_jobs_link} has_ld+json={has_ld_json} looks_like_js_app_shell={has_next_data}")
-            if has_jobs_link:
-                found = re.findall(r'href=["\']([^"\']*?/jobs/\d+[^"\']*)["\']', cr.text)
-                print(f"    /jobs/ hrefs found: {found[:5]}")
-        time.sleep(0.5)
+    cr = client.get("https://emp.jobylon.com/companies/2-truecaller/")
+    html = cr.text
+    print(f"status={cr.status_code} bytes={len(cr.content)}")
 
-    print()
-    print("=" * 70)
-    print("3. Where does each company's own postings land in the shared sitemap list?")
-    print("=" * 70)
-    if job_urls:
-        for slug in REAL_SLUGS:
-            company_id = slug.split("-")[0]
-            marker = f"/companies/{company_id}-"
-            # Check the first 400 (today's hardcoded cap) job detail pages
-            # for a link back to this company -- but that's 400 * 5 = 2000
-            # requests, too expensive for a diagnostic run. Instead just
-            # report the sitemap's total size, which alone proves/disproves
-            # whether a fixed 400-entry prefix scan could ever be enough.
-            print(f"company {slug}: sitemap has {len(job_urls)} total job URLs site-wide "
-                  f"(current scraper caps its per-company scan at 400)")
+    print("\n-- context around '/jobs/' occurrences --")
+    show_context(html, "/jobs/", n=5)
 
-    print()
-    print("=" * 70)
-    print("4. Does a job detail page's HTML actually link back to /companies/{id}-?")
-    print("=" * 70)
-    for u in job_urls[:3]:
-        try:
-            jr = client.get(u)
-        except Exception as e:
-            print(f"{u} -> EXCEPTION {e}")
-            continue
-        company_links = re.findall(r'/companies/(\d+)-[^"\'<>]*', jr.text)
-        print(f"{u} -> status={jr.status_code} bytes={len(jr.content)} "
-              f"company_links_found={sorted(set(company_links))}")
+    print("\n-- <script src=...> tags (first 15) --")
+    for m in re.findall(r'<script[^>]*\bsrc=["\']([^"\']+)["\']', html, re.I)[:15]:
+        print(f"    {m}")
+
+    print("\n-- <link> tags with rel= (first 15) --")
+    for m in re.findall(r'<link\b[^>]*>', html, re.I)[:15]:
+        print(f"    {m}")
+
+    print("\n-- any inline <script> WITHOUT src (first 5, first 200 chars each) --")
+    inline_scripts = re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', html, re.I | re.S)
+    for s in inline_scripts[:5]:
+        s = s.strip()
+        print(f"    [{len(s)} chars] {s[:200]!r}")
+
+    print("\n-- searching for API/state hints (graphql, __INITIAL, api., hydrat, apollo, application/json) --")
+    for needle in ("graphql", "__INITIAL", "api.jobylon", "hydrat", "apollo", "application/json",
+                   "window.__", "data-testid", "vacan", "career"):
+        found = len(re.findall(re.escape(needle), html, re.I))
+        print(f"    {needle!r}: {found} occurrences")
+
+    print("\n-- <title> and first 500 chars of <body> text (rough) --")
+    tm = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    print(f"    title: {tm.group(1) if tm else None!r}")
+    bm = re.search(r"<body[^>]*>(.*)", html, re.I | re.S)
+    body_text = re.sub(r"<[^>]+>", " ", bm.group(1)[:3000]) if bm else ""
+    body_text = re.sub(r"\s+", " ", body_text).strip()
+    print(f"    body text sample: {body_text[:500]!r}")
 
     client.close()
     return 0
