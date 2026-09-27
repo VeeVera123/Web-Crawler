@@ -754,7 +754,26 @@ def main():
                          help="Total number of shards; each processes ~1/N of the ATS boards")
     parser.add_argument("--finalize", action="store_true",
                          help="Only run cleanup (mark/delete stale jobs) — call once after all shards finish")
+    parser.add_argument("--ats-only", type=str, default="",
+                         help="2026-09 TEMPORARY (async migration testing): comma-separated "
+                              "ATS names (e.g. 'greenhouse,lever,ashby,workable') to restrict "
+                              "this run to — every other platform's boards are skipped before "
+                              "scraping starts. Lets a real end-to-end test (real network, real "
+                              "Supabase writes, real LLM classification) exercise ONLY the "
+                              "platforms whose scrape_* function has been converted to async so "
+                              "far, without the cost/time of scraping the ~34 platforms not yet "
+                              "converted. Remove this flag once the full async migration lands "
+                              "and every platform is converted.")
+    parser.add_argument("--limit", type=int, default=0,
+                         help="2026-09 TEMPORARY (async migration testing): cap the number of "
+                              "boards scraped this run to N (applied AFTER --ats-only, so "
+                              "'--ats-only greenhouse,lever,ashby,workable --limit 40' scrapes "
+                              "only ~10 real boards per platform) -- for a cheap smoke test "
+                              "against real network/Supabase/LLM cost without a full run. "
+                              "0 (default) = no limit. Remove this flag once the full async "
+                              "migration lands.")
     args = parser.parse_args()
+    ats_only = {a.strip().lower() for a in args.ats_only.split(",") if a.strip()}
 
     mode_note = ""
     if args.total_shards > 1:
@@ -781,6 +800,24 @@ def main():
         # a quiet, misleading "completed" with 0 jobs found.
         log.error(f"Failed to load slugs from Supabase after retries — aborting shard: {e}")
         sys.exit(1)
+    if ats_only:
+        before = len(boards)
+        boards = [(a, s) for a, s in boards if a.lower() in ats_only]
+        log.info(f"  --ats-only filter ({', '.join(sorted(ats_only))}): "
+                 f"{before} -> {len(boards)} boards")
+
+    if args.limit and len(boards) > args.limit:
+        by_ats = {}
+        for pair in boards:
+            by_ats.setdefault(pair[0], []).append(pair)
+        per_ats_cap = max(1, args.limit // max(1, len(by_ats)))
+        capped = []
+        for ats, pairs in by_ats.items():
+            capped.extend(pairs[:per_ats_cap])
+        boards = capped[:args.limit]
+        log.info(f"  --limit {args.limit}: capped to {len(boards)} boards "
+                 f"(~{per_ats_cap}/platform across {len(by_ats)} platform(s))")
+
     log.info(f"  {len(boards)} boards assigned to this shard")
     if not boards:
         if args.total_shards == 1:
