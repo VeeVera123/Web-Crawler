@@ -1882,6 +1882,9 @@ def scrape_taleo(slug: str) -> list[dict]:
 
 # ── Oracle Cloud HCM ────────────────────────────────────
 
+_ORACLE_DISCOVERY_BUDGET_SECONDS = 90.0
+
+
 async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     """Oracle Cloud HCM Recruiting REST API.
     Slug format: 'host_prefix|site_number' (e.g. 'eeho.fa.us2|CX_1')
@@ -1895,7 +1898,30 @@ async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     per-call timeout= kwargs are likewise dropped since the async client's
     Timeout is already fixed at construction, same as every other
     converted scraper). Multi-strategy domain-discovery logic, brute-force
-    region loop, and pagination all otherwise unchanged."""
+    region loop, and pagination all otherwise unchanged.
+
+    2026-09 BUG FIX (real production evidence: a batch-2 test run's
+    per-shard log froze entirely mid-Oracle-Cloud-HCM-discovery, with no
+    further output for many minutes): the legacy-short-tenant discovery
+    path below (Method 1: up to 4 sequential probes; Method 2: up to 11
+    more) was NEVER time-bounded, even before this migration — each probe
+    is a full _get() call, and _get() itself can take up to
+    MAX_RETRIES+1 attempts with exponential backoff between them (worst
+    case, several minutes for a single probe against a genuinely
+    unresponsive/nonexistent subdomain). Chained across up to 15
+    sequential probes for one tenant that never resolves, worst-case
+    discovery time for a SINGLE board could run into tens of minutes —
+    previously masked by lower real-world concurrency exposure, now
+    fully exposed once oracle_cloud_hcm boards actually ran concurrently
+    (PLATFORM_WORKERS["oracle_cloud_hcm"] = 16) against real, at-scale
+    traffic for the first time. Fixed by wrapping the whole discovery
+    phase (both methods) in asyncio.wait_for() with a hard wall-clock
+    budget — a tenant that can't be resolved within the budget is
+    treated exactly like "domain discovery failed" (returns [] the same
+    way an exhausted brute-force loop already did), it just can no
+    longer consume unbounded time doing it. Already-resolved slugs
+    (host_prefix containing '.fa.' or a dot) skip discovery entirely and
+    are completely unaffected by this change."""
     parts = slug.split("|")
     if len(parts) == 2:
         host_prefix, site_number = parts
@@ -1930,50 +1956,76 @@ async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         # Legacy short tenant — discover full domain via career page redirect
         tenant = host_prefix
         base_api = None
+        discovered_site_number = site_number
 
-        # Method 1: Hit career page, follow redirects, extract real domain
-        for try_site in (site_number or "CX_1", "CX_1", "CX", "CX_2"):
-            try:
-                probe_url = f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{try_site}/requisitions"
-                probe_r = await _get(probe_url, headers={
-                    "User-Agent": random.choice(USER_AGENTS)})
-                if probe_r is None:
-                    continue
-                # Check if we got redirected to a URL with .fa.{region}
-                final_host = str(probe_r.url).split("/")[2] if probe_r.url else ""
-                if ".fa." in final_host and "oraclecloud.com" in final_host:
-                    real_prefix = final_host.replace(".oraclecloud.com", "")
-                    base_api = f"https://{real_prefix}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
-                    if not site_number:
-                        site_number = try_site
-                    log.debug(f"Oracle Cloud HCM: discovered domain={real_prefix} via redirect for {tenant}")
-                    break
-            except Exception:
-                continue
+        async def _discover_domain() -> tuple[str | None, str | None]:
+            """Method 1 + Method 2 combined, run under the wall-clock
+            budget below. Returns (base_api, site_number), either of
+            which may still be None if nothing was found before the
+            budget or the candidate lists were exhausted."""
+            nonlocal_base_api = None
+            nonlocal_site_number = discovered_site_number
 
-        # Method 2: Brute-force common regions via API
-        if not base_api:
-            for region in ("fa.us2", "fa.us6", "fa.us1", "fa.em2", "fa.em3", "fa.em4",
-                           "fa.ap1", "fa.ap2", "fa.ca1", "fa.sa1", "fa.me1"):
-                test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+            # Method 1: Hit career page, follow redirects, extract real domain
+            for try_site in (nonlocal_site_number or "CX_1", "CX_1", "CX", "CX_2"):
                 try:
-                    test_r = await _get(test_url,
-                        params={"onlyData": "true", "finder": f"findReqs;siteNumber={site_number or 'CX_1'},limit=1,offset=0"},
-                        headers=headers)
-                    if test_r is not None and test_r.status_code == 200:
-                        try:
-                            data = test_r.json()
-                            items = data.get("items", [])
-                            if items and items[0].get("requisitionList"):
-                                base_api = test_url
-                                if not site_number:
-                                    site_number = "CX_1"
-                                log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
-                                break
-                        except Exception:
-                            continue
+                    probe_url = f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{try_site}/requisitions"
+                    probe_r = await _get(probe_url, headers={
+                        "User-Agent": random.choice(USER_AGENTS)})
+                    if probe_r is None:
+                        continue
+                    # Check if we got redirected to a URL with .fa.{region}
+                    final_host = str(probe_r.url).split("/")[2] if probe_r.url else ""
+                    if ".fa." in final_host and "oraclecloud.com" in final_host:
+                        real_prefix = final_host.replace(".oraclecloud.com", "")
+                        nonlocal_base_api = f"https://{real_prefix}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                        if not nonlocal_site_number:
+                            nonlocal_site_number = try_site
+                        log.debug(f"Oracle Cloud HCM: discovered domain={real_prefix} via redirect for {tenant}")
+                        break
                 except Exception:
                     continue
+
+            # Method 2: Brute-force common regions via API
+            if not nonlocal_base_api:
+                for region in ("fa.us2", "fa.us6", "fa.us1", "fa.em2", "fa.em3", "fa.em4",
+                               "fa.ap1", "fa.ap2", "fa.ca1", "fa.sa1", "fa.me1"):
+                    test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                    try:
+                        test_r = await _get(test_url,
+                            params={"onlyData": "true", "finder": f"findReqs;siteNumber={nonlocal_site_number or 'CX_1'},limit=1,offset=0"},
+                            headers=headers)
+                        if test_r is not None and test_r.status_code == 200:
+                            try:
+                                data = test_r.json()
+                                items = data.get("items", [])
+                                if items and items[0].get("requisitionList"):
+                                    nonlocal_base_api = test_url
+                                    if not nonlocal_site_number:
+                                        nonlocal_site_number = "CX_1"
+                                    log.debug(f"Oracle Cloud HCM: discovered region={region} for {tenant}")
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+
+            return nonlocal_base_api, nonlocal_site_number
+
+        try:
+            base_api, discovered_site_number = await asyncio.wait_for(
+                _discover_domain(), timeout=_ORACLE_DISCOVERY_BUDGET_SECONDS
+            )
+        except asyncio.TimeoutError:
+            log.debug(
+                f"Oracle Cloud HCM: domain discovery for {tenant} exceeded "
+                f"{_ORACLE_DISCOVERY_BUDGET_SECONDS:.0f}s budget — giving up "
+                f"(this tenant's subdomains are likely unresponsive, not "
+                f"genuinely nonexistent; a future run will retry from scratch "
+                f"since nothing gets cached on a timeout)"
+            )
+            base_api = None
+        site_number = discovered_site_number
 
         if not base_api:
             log.debug(f"Oracle Cloud HCM: could not discover domain for {tenant}")
