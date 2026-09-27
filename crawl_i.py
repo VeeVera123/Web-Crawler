@@ -375,8 +375,27 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set
     (now-closed) loop, and asyncio refuses to touch a closed loop's
     resources from a different one. Fixed by running both the scrape AND
     the client cleanup inside ONE asyncio.run() call, via a single inner
-    async function — same event loop for creation, use, and teardown."""
+    async function — same event loop for creation, use, and teardown.
+
+    2026-09 BUG FIX: sets a generously-sized default executor before
+    scraping starts. ats_scrapers.py's scrape_board() now runs every
+    not-yet-async-converted scrape_* function via asyncio.to_thread(),
+    which schedules onto the running loop's DEFAULT executor if one was
+    never set — a plain concurrent.futures.ThreadPoolExecutor() sized
+    min(32, os.cpu_count() + 4) (often as few as 6-8 threads on a hosted
+    CI runner). PLATFORM_WORKERS' caps for the still-sync platforms alone
+    (rippling, bamboohr, icims, recruitee, teamtailor, breezyhr, personio,
+    joincom, paylocity, hrmdirect, zoho, jobvite, avature, pageup,
+    flatchr, paycom, hireology, gem, recruiterbox, jazzhr) sum to well
+    over 200 desired concurrent workers, so leaving the default in place
+    would silently re-impose a process-wide bottleneck one level down from
+    the one asyncio.to_thread() was just introduced to fix. 300 gives
+    headroom above that sum with no meaningful per-thread cost (idle
+    threads waiting on a semaphore or socket read are cheap)."""
     async def _scrape_and_cleanup():
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=300)
+        )
         try:
             return await _scrape_all_async(boards)
         finally:

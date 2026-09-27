@@ -5990,23 +5990,46 @@ async def scrape_board(ats: str, slug: str) -> list[dict]:
     log lines, not one per board.
 
     2026-09 ASYNC MIGRATION (batched — see module docstring): this
-    dispatcher is now `async def` and awaits SCRAPERS' entries. Every
-    scrape_* function is being converted to `async def` in ordered
-    batches; until a given platform's batch lands, its SCRAPERS entry is
-    still a plain (non-async) function. `fn(slug)` on a plain function
-    returns the list directly (not a coroutine) — awaiting a non-awaitable
-    would raise, so this checks with asyncio.iscoroutine first and only
-    awaits when the call actually produced one. Once every scrape_* is
-    converted, this branch collapses to just `return await fn(slug)` and
-    the isinstance check is removed."""
+    dispatcher is `async def` and awaits SCRAPERS' entries. Every scrape_*
+    function is being converted to `async def` in ordered batches; until a
+    given platform's batch lands, its SCRAPERS entry is still a plain
+    (non-async) function that makes its own blocking `requests`/
+    `_get_requests_sync` calls.
+
+    2026-09 BUG FIX (real production evidence: full-scale runs producing
+    NO per-platform completion logs and no heartbeat "still working" lines
+    either, for minutes at a time, across every platform including tiny
+    ones): the previous version called `fn(slug)` unconditionally BEFORE
+    checking whether it was a coroutine. For an async scrape_* that's
+    fine (calling an `async def` just constructs a coroutine object — no
+    scraper code runs until it's awaited), but for a still-sync scrape_*
+    that line runs the ENTIRE blocking scrape — every retry, every
+    backoff `time.sleep()` — directly on THIS coroutine, which asyncio is
+    running on the one and only event-loop thread. Since asyncio is
+    single-threaded and cooperative, that blocking call doesn't just stall
+    its own board: it freezes the entire process. No other platform's
+    coroutine can run, and — critically — neither can the heartbeat's own
+    `asyncio.wait(timeout=...)` in crawl_i.py, since even a timeout needs
+    the loop's scheduler to get a turn. With 20 of 39 platforms (roughly
+    half the total board volume) still on plain `def` scrapers, this
+    reduced the "concurrent" crawl to one blocking HTTP call at a time,
+    process-wide, with silence guaranteed for however long that call's
+    retries/backoff took — exactly the symptom reported.
+    Fixed by checking asyncio.iscoroutinefunction(fn) up front: an async
+    scraper is awaited directly as before; a still-sync one is handed to
+    asyncio.to_thread(), which runs it on a real OS thread from the
+    event loop's executor (see crawl_i.py's scrape_all() for that
+    executor's sizing) — the same model the old ThreadPoolExecutor-based
+    version used, so it can never block the loop itself. Once every
+    scrape_* is converted, the sync branch is dead code and can be
+    removed."""
     fn = SCRAPERS.get(ats.lower())
     if not fn:
         log.warning(f"Unknown ATS: {ats}")
         return []
-    result = fn(slug)
-    if asyncio.iscoroutine(result):
-        return await result
-    return result
+    if asyncio.iscoroutinefunction(fn):
+        return await fn(slug)
+    return await asyncio.to_thread(fn, slug)
 
 
 # ── Second-pass: fetch individual job descriptions ─────
