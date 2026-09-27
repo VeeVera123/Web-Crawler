@@ -124,6 +124,26 @@ on:
         required: false
         type: boolean
         default: false
+      # 2026-09 TEMPORARY (async migration testing, explicit user request):
+      # lets Crawl I be scoped down to a handful of real boards on specific
+      # platforms, for a cheap real-network/real-Supabase/real-LLM smoke test
+      # of the requests->httpx async migration as it lands in batches --
+      # without the cost/time of a full crawl across every platform. Passed
+      # straight through to crawl_i.py's own --ats-only/--limit flags (see
+      # that file's --help for the full explanation). Both default to empty/0,
+      # which is a complete no-op -- the scheduled cron run and an ordinary
+      # manual dispatch that leaves these blank are entirely unaffected.
+      # Remove these two inputs (and the flags they pass through) once every
+      # platform is converted and this kind of scoped testing is no longer
+      # needed.
+      ats_only:
+        description: "Crawl I: ATS filter (test)"
+        required: false
+        default: ""
+      crawl_i_limit:
+        description: "Crawl I: board limit (test)"
+        required: false
+        default: "0"
 
 # Belt-and-suspenders: GitHub already serializes runs of the same workflow+ref
 # by default for `schedule`/`workflow_dispatch` unless you opt into concurrent
@@ -243,7 +263,12 @@ jobs:
           # its share, which is harmless.
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
-        run: exec python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
+        run: >
+          exec python crawl_i.py
+          --shard ${{ matrix.shard }}
+          --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
+          ${{ github.event.inputs.ats_only && format('--ats-only {0}', github.event.inputs.ats_only) || '' }}
+          ${{ (github.event.inputs.crawl_i_limit && github.event.inputs.crawl_i_limit != '0') && format('--limit {0}', github.event.inputs.crawl_i_limit) || '' }}
 
   # ── Crawl II — in-house/unsupported career pages (archive_ii) ──────────
   # Runs on the scheduled cron trigger OR on a manual dispatch with
