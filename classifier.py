@@ -1669,6 +1669,19 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_hard_metadata_location_signal(job):
         return "no_match", None, None
 
+    # ── 0.865. HARD OVERRIDE (2026-09, explicit user request: "track the
+    # location symbol and what location sits by it ... particularly
+    # useful ... in the case of in-house ATSs"): a map-pin/location glyph
+    # sitting directly next to a specific, non-global place name in the
+    # raw posting (in-house career pages that don't expose a structured
+    # location field commonly still show this visually) is the same kind
+    # of "the posting named a place through a channel this project's
+    # normal location-field extraction never sees" signal as the
+    # Greenhouse-metadata check just above. See
+    # has_hard_location_symbol_signal's docstring. ──
+    if has_hard_location_symbol_signal(job):
+        return "no_match", None, None
+
     # ── 0.87. HARD OVERRIDE (2026-09, cross-LLM review, real postings:
     # Arcwood's "Account Manager - Louisiana", OpenProject's "(Senior)
     # Account Manager - Europe", HeroDevs' "Channel Account Manager,
@@ -3592,6 +3605,42 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
 # classifier itself accepts, it's exactly as disqualifying as the field
 # saying that value directly.
 _METADATA_LOCATION_LINE_RE = re.compile(r"^Metadata Location:\s*(.+)$", re.M)
+
+# 2026-09 NEW (explicit user request: "track the location symbol and what
+# location sits by it ... this would particularly be useful ... in the
+# case of in-house ATSs"): ats_scrapers.py's _snippet() now appends a
+# "Location Symbol: <text>" line whenever the raw posting HTML/text has a
+# map-pin/location glyph immediately next to a place name (see
+# _extract_location_symbol_lines there) — same "structured-enough signal,
+# check it directly" treatment as _METADATA_LOCATION_LINE_RE above, since
+# a glyph-adjacent place name is a deliberate visual cue a company put
+# there for the exact same reason the location FIELD exists, just not
+# exposed through whatever API/DOM field this project's scrapers read.
+_LOCATION_SYMBOL_LINE_RE = re.compile(r"Location Symbol:\s*([^|]+)")
+
+
+def has_hard_location_symbol_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does an appended "Location
+    Symbol: ..." line (see ats_scrapers.py's _extract_location_symbol_lines)
+    name a specific, non-global place? Same contract/logic as
+    has_hard_metadata_location_signal just above, applied to the
+    glyph-adjacent text instead of ATS metadata — both are "the posting
+    itself named a specific place through a channel the location FIELD
+    didn't capture" signals, so they're deliberately kept as separate,
+    parallel checks rather than merged into one, in case only one of the
+    two ever needs tuning later."""
+    desc = job.get("description_snippet") or ""
+    if not desc:
+        return False
+    for m in _LOCATION_SYMBOL_LINE_RE.finditer(desc):
+        value = m.group(1).strip()
+        if not value:
+            continue
+        if _has_multi_region_breadth(value):
+            continue
+        if not _text_has_global_evidence(value):
+            return True
+    return False
 
 
 def has_hard_metadata_location_signal(job: dict) -> bool:
