@@ -1,0 +1,32 @@
+name: BrassRing AJAX Verify
+
+# One-off, temporary workflow: verifies the BrassRing legacy AJAX
+# MatchedJobs endpoint's pagination/response shape before building a
+# bespoke description fetcher on top of it. Removed once confirmed.
+# Push-triggered (this branch only) since the Claude GitHub App's token
+# can't call the workflow_dispatch API.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [claude/cloud-lg97bh]
+    paths: [brassring_ajax_verify.py, .github/workflows/brassring-ajax-verify.yml]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run BrassRing AJAX verification
+        run: python brassring_ajax_verify.py
