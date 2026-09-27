@@ -99,7 +99,7 @@ def _get_session():
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=20,
             pool_maxsize=20,
-            max_retries=0,  # We handle retries in _get()
+            max_retries=0,  # We handle retries in _get_requests_sync()
         )
         _thread_local.session.mount("https://", adapter)
         _thread_local.session.mount("http://", adapter)
@@ -259,7 +259,7 @@ def _pace_host(url: str) -> None:
 
 
 def _note_host_response(url: str, *, was_rate_limited: bool, was_error: bool) -> None:
-    """Called from `_get()` after every real HTTP attempt against `url` to
+    """Called from `_get_requests_sync()` after every real HTTP attempt against `url` to
     keep that host's pacing state current. A 429 or repeated failure
     escalates the gap immediately (a host that's already complaining
     doesn't need N more strikes before this project starts being more
@@ -285,7 +285,7 @@ def _get_requests_sync(url: str, **kwargs):
     """LEGACY sync transport (requests) -- 2026-09: kept only for
     not-yet-migrated scrape_*/_fetch_* functions during the batched async
     migration. Every function still calling this will be converted to
-    `await _get(...)` in a later batch; once none remain, this and
+    `await _get_requests_sync(...)` in a later batch; once none remain, this and
     _get_session()/_thread_local above are deleted entirely. Behavior is
     intentionally UNCHANGED from before the migration -- this is the exact
     pre-migration implementation, not a new one -- so a not-yet-converted
@@ -840,7 +840,7 @@ def scrape_rippling(slug: str) -> list[dict]:
     page = 0
 
     while True:
-        r = _get(base, params={
+        r = _get_requests_sync(base, params={
             "page": page, "pageSize": 50,
             "searchQuery": "", "city": "", "country": "",
             "state": "", "workplaceType": "",
@@ -898,13 +898,13 @@ def scrape_rippling(slug: str) -> list[dict]:
 
     # Try to get company name from board info
     if all_jobs:
-        r = _get(f"https://ats.rippling.com/api/v2/board/{slug}/jobs",
+        r = _get_requests_sync(f"https://ats.rippling.com/api/v2/board/{slug}/jobs",
                  params={"page": 0, "pageSize": 1})
         if r:
             try:
                 # Get company name from first job detail
                 first_id = all_jobs[0]["url"].split("/")[-1]
-                detail_r = _get(f"https://ats.rippling.com/api/v2/board/{slug}/jobs/{first_id}")
+                detail_r = _get_requests_sync(f"https://ats.rippling.com/api/v2/board/{slug}/jobs/{first_id}")
                 if detail_r:
                     detail = detail_r.json()
                     company_name = detail.get("companyName", "")
@@ -1496,7 +1496,7 @@ def scrape_recruitee(slug: str) -> list[dict]:
         "Accept": "application/json",
         "User-Agent": random.choice(USER_AGENTS),
     }
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return []
     try:
@@ -1573,7 +1573,7 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
     limit = 100
 
     while True:
-        r = _get(base_url, params={"limit": limit, "offset": offset}, headers=headers)
+        r = _get_requests_sync(base_url, params={"limit": limit, "offset": offset}, headers=headers)
         if not r:
             break
         try:
@@ -1657,7 +1657,7 @@ def scrape_taleo(slug: str) -> list[dict]:
         company, section = parts
         # Auto-discover portal ID from career page
         career_url = f"https://{company}.taleo.net/careersection/{section}/jobsearch.ftl"
-        r = _get(career_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        r = _get_requests_sync(career_url, headers={"User-Agent": random.choice(USER_AGENTS)})
         if not r:
             log.debug(f"Taleo: could not fetch career page for {company}/{section}")
             return []
@@ -1880,7 +1880,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
                 "onlyData": "true",
                 "finder": f"findReqs;siteNumber={try_site},limit=1,offset=0",
             }
-            test_r = _get(base_api, params=test_params, headers=headers)
+            test_r = _get_requests_sync(base_api, params=test_params, headers=headers)
             if test_r and test_r.status_code == 200:
                 try:
                     test_data = test_r.json()
@@ -1919,7 +1919,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
             "finder": f"findReqs;siteNumber={site_number},limit={limit},offset={offset}",
         }
 
-        r = _get(base_api, params=params, headers=headers)
+        r = _get_requests_sync(base_api, params=params, headers=headers)
         if not r:
             log.debug(f"Oracle Cloud HCM: API request failed for {tenant}/{site_number} offset={offset}")
             break
@@ -2184,7 +2184,7 @@ def scrape_teamtailor(slug: str) -> list[dict]:
     TT_NS = {"tt": "https://teamtailor.com/locations"}
 
     # ── Primary: RSS feed ──
-    r = _get(rss_url, headers=headers)
+    r = _get_requests_sync(rss_url, headers=headers)
     if r and r.status_code == 200:
         try:
             root = ET.fromstring(r.content)
@@ -2259,7 +2259,7 @@ def scrape_teamtailor(slug: str) -> list[dict]:
 
     # ── Fallback: HTML scrape ──
     html_url = f"https://{slug}.teamtailor.com/jobs"
-    r = _get(html_url, headers=headers)
+    r = _get_requests_sync(html_url, headers=headers)
     if not r:
         return []
 
@@ -2390,7 +2390,7 @@ def _sf_robots_parser(origin: str) -> "urllib.robotparser.RobotFileParser | None
         if origin in _sf_robots_cache:
             return _sf_robots_cache[origin]
     rp = None
-    r = _get(f"{origin}/robots.txt")
+    r = _get_requests_sync(f"{origin}/robots.txt")
     if r is not None:
         rp = urllib.robotparser.RobotFileParser()
         try:
@@ -2431,7 +2431,7 @@ def scrape_successfactors(slug: str) -> list[dict]:
         log.debug(f"SuccessFactors: {host} disallows /search/ via robots.txt; skipping")
         return []
 
-    r = _get(f"{origin}/search/", headers=headers)
+    r = _get_requests_sync(f"{origin}/search/", headers=headers)
     if r is None:
         return []
     locales = list(dict.fromkeys(_SF_LOCALE_RE.findall(r.text)))[:_SF_MAX_LOCALES]
@@ -2445,7 +2445,7 @@ def scrape_successfactors(slug: str) -> list[dict]:
             params = {"page": page}
             if locale:
                 params["locale"] = locale
-            resp = _get(f"{origin}/search/", headers=headers, params=params)
+            resp = _get_requests_sync(f"{origin}/search/", headers=headers, params=params)
             if resp is None:
                 break
             matches = list(_SF_JOB_ROW_RE.finditer(resp.text))
@@ -2529,7 +2529,7 @@ def _fetch_successfactors_description(job: dict) -> str:
     url = job.get("url", "")
     if not url:
         return job.get("description_snippet", "")
-    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if r is None:
         return job.get("description_snippet", "")
     if not job.get("location"):
@@ -2566,7 +2566,7 @@ def scrape_breezyhr(slug: str) -> list[dict]:
     base_url = f"https://{slug}.breezy.hr"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(base_url, headers=headers)
+    r = _get_requests_sync(base_url, headers=headers)
     if not r:
         return []
 
@@ -2699,7 +2699,7 @@ def scrape_jazzhr(slug: str) -> list[dict]:
     base_url = f"https://{slug}.applytojob.com"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(base_url, headers=headers)
+    r = _get_requests_sync(base_url, headers=headers)
     if not r:
         return []
 
@@ -2922,7 +2922,7 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
     url = f"https://{slug}.hrmdirect.com/employment/openings.php?search=true"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return []
 
@@ -3062,7 +3062,7 @@ def scrape_softgarden(slug: str) -> list[dict]:
     # that already match one of the first two.
     for path in ("/en/vacancies", "/en/vacancies/", "/vacancies", "/vacancies/",
                  "/en/jobs", "/en/jobs/"):
-        r = _get(f"https://{slug}.softgarden.io{path}", headers=headers)
+        r = _get_requests_sync(f"https://{slug}.softgarden.io{path}", headers=headers)
         if r:
             break
     if not r:
@@ -3165,7 +3165,7 @@ def scrape_zoho(slug: str) -> list[dict]:
     url = f"https://{slug}.zohorecruit.com/jobs/Careers"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return []
 
@@ -3317,7 +3317,7 @@ def scrape_personio(slug: str) -> list[dict]:
     xml_text = None
     for domain in ["jobs.personio.de", "jobs.personio.com"]:
         url = f"https://{slug}.{domain}/xml?language=en"
-        r = _get(url, headers=headers)
+        r = _get_requests_sync(url, headers=headers)
         if r and r.text.strip().startswith("<?xml"):
             xml_text = r.text
             break
@@ -3399,7 +3399,7 @@ def scrape_joincom(slug: str) -> list[dict]:
     headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html"}
 
     # Step 1: Resolve slug → numeric company_id
-    page_r = _get(f"https://join.com/companies/{slug}", headers=headers)
+    page_r = _get_requests_sync(f"https://join.com/companies/{slug}", headers=headers)
     if not page_r:
         return []
 
@@ -3425,7 +3425,7 @@ def scrape_joincom(slug: str) -> list[dict]:
     page = 1
 
     while True:
-        r = _get(api_base, params={"locale": "en-us", "page": page, "pageSize": 5},
+        r = _get_requests_sync(api_base, params={"locale": "en-us", "page": page, "pageSize": 5},
                  headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
         if not r:
             break
@@ -3506,7 +3506,7 @@ def scrape_paylocity(slug: str) -> list[dict]:
     url = f"https://recruiting.paylocity.com/recruiting/jobs/All/{company_id}/{company_name_slug}"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return []
 
@@ -3604,7 +3604,7 @@ def scrape_eploy(slug: str) -> list[dict]:
         "/candidate/JobBoard/VacancySearchResults.aspx",
         "/vacancies",
     ):
-        r = _get(base + path, headers=headers)
+        r = _get_requests_sync(base + path, headers=headers)
         if r:
             break
     if not r:
@@ -3683,7 +3683,7 @@ def scrape_folkshr(slug: str) -> list[dict]:
     domain = None
     r = None
     for candidate in ("jobs.folksats.app", "jobs.glowinthecloud.com"):
-        r = _get(f"https://{candidate}/{slug}", headers=headers)
+        r = _get_requests_sync(f"https://{candidate}/{slug}", headers=headers)
         if r:
             domain = candidate
             break
@@ -3763,7 +3763,7 @@ def scrape_jobadder(slug: str) -> list[dict]:
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     base = f"https://clientapps.jobadder.com/{client_id}/{board_slug}".rstrip("/")
 
-    r = _get(base, headers=headers)
+    r = _get_requests_sync(base, headers=headers)
     if not r:
         # 2026-09 BUG FIX: was `return []` — see scrape_brassring's note
         # above for why that's indistinguishable from a genuinely empty
@@ -3824,7 +3824,7 @@ def scrape_jobvite(slug: str) -> list[dict]:
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     base = f"https://jobs.jobvite.com/{slug}/jobs"
 
-    r = _get(base, headers=headers)
+    r = _get_requests_sync(base, headers=headers)
     if not r:
         return []
 
@@ -3930,7 +3930,7 @@ def scrape_adp(slug: str) -> list[dict]:
     offset = 0
 
     while True:
-        r = _get(api_url, headers=headers, params={
+        r = _get_requests_sync(api_url, headers=headers, params={
             "cid": cid, "ccId": cc_id, "$top": limit, "$skip": offset,
         })
         if not r:
@@ -4058,7 +4058,7 @@ def scrape_avature(slug: str) -> list[dict]:
 
     r = None
     for path in ("/careers/SearchJobs", "/careers/SearchJobs/", "/en_US/careers/SearchJobs"):
-        r = _get(base + path, headers=headers)
+        r = _get_requests_sync(base + path, headers=headers)
         if r:
             break
     if not r:
@@ -4163,7 +4163,7 @@ def scrape_pageup(slug: str) -> list[dict]:
     base = f"https://careers.pageuppeople.com/{portal_id}/{source}/en"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(f"{base}/", headers=headers)
+    r = _get_requests_sync(f"{base}/", headers=headers)
     if not r:
         return []
 
@@ -4219,7 +4219,7 @@ def scrape_pinpoint(slug: str) -> list[dict]:
     url = f"https://{slug}.pinpointhq.com/postings.json"
     headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
 
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return []
 
@@ -4282,7 +4282,7 @@ def scrape_flatchr(slug: str) -> list[dict]:
     url = f"https://careers.flatchr.io/company/{slug}.json"
     headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
 
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return []
 
@@ -4361,7 +4361,7 @@ def _jobylon_sitemap_urls() -> list[str]:
         raise RuntimeError("Jobylon: sitemap fetch failed recently, not retrying yet this run")
 
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get("https://emp.jobylon.com/sitemap.xml", headers=headers)
+    r = _get_requests_sync("https://emp.jobylon.com/sitemap.xml", headers=headers)
     if not r:
         _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
         raise RuntimeError("Jobylon: sitemap.xml fetch failed")
@@ -4417,7 +4417,7 @@ def scrape_jobylon(slug: str) -> list[dict]:
             log.debug(f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) "
                       f"for {slug}, stopping")
             break
-        r = _get(job_url, headers=headers)
+        r = _get_requests_sync(job_url, headers=headers)
         fetched += 1
         if not r:
             continue
@@ -4582,7 +4582,7 @@ def scrape_csod(slug: str) -> list[dict]:
     site_id = int(site_id_str)
 
     boot_url = f"https://{tenant}.csod.com/ux/ats/careersite/{site_id}/home?c={tenant}"
-    r = _get(boot_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(boot_url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return []
 
@@ -4801,7 +4801,7 @@ def _paycom_bootstrap(clientkey: str, force: bool = False) -> tuple[str, str] | 
     # above for the general problem. Callers (scrape_paycom,
     # _fetch_paycom_description) now distinguish "no bootstrap" from
     # "genuinely 0 jobs" by raising instead of quietly returning [].
-    r = _get(
+    r = _get_requests_sync(
         f"https://www.paycomonline.net/v4/ats/web.php/portal/{clientkey}/career-page",
         headers={"User-Agent": random.choice(USER_AGENTS)},
     )
@@ -5001,7 +5001,7 @@ def _fetch_paycom_description(job: dict) -> str:
         return {"authorization": tok, "Locale": "en-US",
                 "User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get(f"{base}api/ats/job-postings/{job_id}", headers=_detail_headers(token))
+    r = _get_requests_sync(f"{base}api/ats/job-postings/{job_id}", headers=_detail_headers(token))
     if not r:
         # Could be a genuinely dead job, or an expired/wrong cached token
         # — _get() doesn't surface the status code, so cheaply try once
@@ -5010,7 +5010,7 @@ def _fetch_paycom_description(job: dict) -> str:
         if not bootstrap:
             return job.get("description_snippet", "")
         token, base = bootstrap
-        r = _get(f"{base}api/ats/job-postings/{job_id}", headers=_detail_headers(token))
+        r = _get_requests_sync(f"{base}api/ats/job-postings/{job_id}", headers=_detail_headers(token))
         if not r:
             return job.get("description_snippet", "")
     try:
@@ -5070,7 +5070,7 @@ def scrape_hireology(slug: str) -> list[dict]:
     jobs = []
 
     for page in range(1, max_pages + 1):
-        r = _get(f"https://api.hireology.com/v2/public/careers/{slug}",
+        r = _get_requests_sync(f"https://api.hireology.com/v2/public/careers/{slug}",
                   headers=headers, params={"page": page, "page_size": page_size})
         if not r:
             break
@@ -5181,7 +5181,7 @@ def scrape_recruiterbox(slug: str) -> list[dict]:
 
     for page in range(max_pages):
         offset = page * limit
-        r = _get("https://jsapi.recruiterbox.com/v1/openings/",
+        r = _get_requests_sync("https://jsapi.recruiterbox.com/v1/openings/",
                   headers=headers, params={"client_name": slug, "offset": offset, "limit": limit})
         if not r:
             break
@@ -5489,7 +5489,7 @@ def scrape_isolvedhire(slug: str) -> list[dict]:
     # came back empty at once, and needs to be visible, not silent.
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     board_url = f"https://{slug}.isolvedhire.com/jobs/"
-    r = _get(board_url, headers=headers)
+    r = _get_requests_sync(board_url, headers=headers)
     if not r:
         raise RuntimeError(f"isolvedhire: board page fetch failed for {slug}")
 
@@ -5512,7 +5512,7 @@ def scrape_isolvedhire(slug: str) -> list[dict]:
     if not domain_id:
         raise RuntimeError(f"isolvedhire: domain_id match was empty for {slug}")
 
-    r2 = _get(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
+    r2 = _get_requests_sync(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
                headers={**headers, "Accept": "application/json"},
                params={"getParams": '{"isInternal":0}'})
     if not r2:
@@ -5851,7 +5851,7 @@ def _fetch_icims_content(url: str) -> str:
     # Strategy 1: Try ?in_iframe=1 first — this gets the ACTUAL content
     #   (bypasses the wrapper page that loads content via iframe)
     iframe_url = url + ("&" if "?" in url else "?") + "in_iframe=1"
-    r = _get(iframe_url, headers=headers)
+    r = _get_requests_sync(iframe_url, headers=headers)
     if r and r.text:
         # Verify we got real iCIMS content (not a redirect/error page)
         text = r.text
@@ -5864,7 +5864,7 @@ def _fetch_icims_content(url: str) -> str:
             return text
 
     # Strategy 2: Try the original URL (some iCIMS sites don't use iframe)
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if r and r.text:
         text = r.text
         # Check if it's a wrapper page (has iframe src pointing to itself)
@@ -5877,14 +5877,14 @@ def _fetch_icims_content(url: str) -> str:
                 if not iframe_src.startswith("http"):
                     from urllib.parse import urljoin
                     iframe_src = urljoin(url, iframe_src)
-                r2 = _get(iframe_src, headers=headers)
+                r2 = _get_requests_sync(iframe_src, headers=headers)
                 if r2 and r2.text:
                     return r2.text
         return text
 
     # Strategy 3: Try mobile version (cleaner, no iframe)
     mobile_url = url + ("&" if "?" in url else "?") + "mobile=true&needsRedirect=false"
-    r = _get(mobile_url, headers=headers)
+    r = _get_requests_sync(mobile_url, headers=headers)
     if r and r.text:
         return r.text
 
@@ -6024,7 +6024,7 @@ def _fetch_smartrecruiters_description(job: dict) -> str:
     posting_id = parts[-1]
     api_url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{posting_id}"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(api_url, headers=headers)
+    r = _get_requests_sync(api_url, headers=headers)
     if not r:
         return ""
     try:
@@ -6061,7 +6061,7 @@ def _fetch_adp_description(job: dict) -> str:
     url = job.get("_adp_api_detail_url", "")
     if not url:
         return ""
-    r = _get(url, headers={
+    r = _get_requests_sync(url, headers={
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json",
     })
@@ -6077,7 +6077,7 @@ def _fetch_adp_description(job: dict) -> str:
 
 def _fetch_taleo_description(job: dict) -> str:
     """Fetch full description from a Taleo job detail page."""
-    r = _get(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return ""
     # Taleo pages have description in specific divs
@@ -6230,7 +6230,7 @@ def _fetch_generic_description(job: dict) -> str:
     if not url:
         return ""
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return ""
 
@@ -6318,7 +6318,7 @@ def _fetch_teamtailor_location(job: dict) -> str:
     if not url:
         return job.get("description_snippet", "")
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get(url, headers=headers)
+    r = _get_requests_sync(url, headers=headers)
     if not r:
         return job.get("description_snippet", "")
 
@@ -6863,7 +6863,7 @@ def _fetch_generic_form_questions(url: str) -> list[dict]:
     found', which is expected and fine for JS-rendered platforms."""
     if not url:
         return []
-    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return []
     found = _find_embedded_questions(r.text)
@@ -7000,7 +7000,7 @@ def _fetch_generic_form_questions_multi(url: str) -> list[dict]:
     if not url:
         return []
 
-    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if r:
         found = _find_embedded_questions(r.text) or _parse_form_elements(r.text)
         if found:
@@ -7066,14 +7066,14 @@ def _fetch_greenhouse_questions(job: dict) -> str:
         if not jid_match:
             return _fallback()
         job_id = jid_match.group(1)
-        page = _get(url)
+        page = _get_requests_sync(url)
         if not page:
             return _fallback()
         slug = extract_greenhouse_embed_token(page.text)
         if not slug:
             return _fallback()
     api_url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{job_id}?questions=true"
-    r = _get(api_url)
+    r = _get_requests_sync(api_url)
     if not r:
         return _fallback()
     try:
@@ -7150,7 +7150,7 @@ def _fetch_ashby_questions(job: dict) -> str:
 
     # Ashby's posting-api/posting endpoint returns form fields
     api_url = f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}"
-    r = _get(api_url)
+    r = _get_requests_sync(api_url)
     if not r:
         return _fallback()
     try:
@@ -7204,7 +7204,7 @@ def _fetch_lever_questions(job: dict) -> str:
     if not url:
         return ""
     apply_url = url if url.rstrip("/").endswith("/apply") else url.rstrip("/") + "/apply"
-    r = _get(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
 
     questions = []
     if r:
@@ -7238,7 +7238,7 @@ def _fetch_workable_questions(job: dict) -> str:
     if m:
         shortcode = m.group(1)
         api_url = f"https://apply.workable.com/api/v1/jobs/{shortcode}/form"
-        r = _get(api_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        r = _get_requests_sync(api_url, headers={"User-Agent": random.choice(USER_AGENTS)})
         if r:
             try:
                 data = r.json()
@@ -7272,7 +7272,7 @@ def _fetch_recruitee_questions(job: dict) -> str:
     if m and slug:
         offer_slug = m.group(1)
         api_url = f"https://{slug}.recruitee.com/api/offers/{offer_slug}"
-        r = _get(api_url, headers={"Accept": "application/json", "User-Agent": random.choice(USER_AGENTS)})
+        r = _get_requests_sync(api_url, headers={"Accept": "application/json", "User-Agent": random.choice(USER_AGENTS)})
         if r:
             try:
                 data = r.json()
@@ -7301,7 +7301,7 @@ def _fetch_teamtailor_questions(job: dict) -> str:
     if not url:
         return ""
     apply_url = url.rstrip("/") + "/applications/new"
-    r = _get(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
 
     questions = []
     if r:
@@ -7334,7 +7334,7 @@ def _fetch_breezyhr_questions(job: dict) -> str:
     if not url:
         return ""
     apply_url = url.rstrip("/") + "/apply"
-    r = _get(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(apply_url, headers={"User-Agent": random.choice(USER_AGENTS)})
 
     questions = []
     if r:
@@ -7372,7 +7372,7 @@ def _fetch_jazzhr_questions(job: dict) -> str:
     url = job.get("url", "")
     if not url:
         return ""
-    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
 
     questions = []
     if r:
@@ -7403,7 +7403,7 @@ def _fetch_zoho_questions(job: dict) -> str:
     if not url:
         return ""
     questions = []
-    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if r:
         questions = _find_embedded_questions(r.text)
         if not questions:
@@ -7445,7 +7445,7 @@ def _fetch_oracle_cloud_hcm_questions(job: dict) -> str:
                 "ora-irc-cx-userid": str(_uuid.uuid4()),
                 "ora-irc-language": "en",
             }
-            r = _get(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
+            r = _get_requests_sync(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
             if r:
                 data = r.json()
                 _walk_for_questions(data, questions)
@@ -7491,7 +7491,7 @@ def _fetch_adp_questions(job: dict) -> str:
     url = job.get("url", "")
     if not url:
         return ""
-    r = _get(url, headers={
+    r = _get_requests_sync(url, headers={
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json",
     })
@@ -7542,14 +7542,14 @@ def _fetch_rippling_questions(job: dict) -> str:
     slug, job_id = m.group(1), m.group(2)
 
     questions: list[dict] = []
-    r = _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
     build_id_match = _NEXT_BUILD_ID_RE.search(r.text) if r else None
     if build_id_match:
         build_id = build_id_match.group(1)
         data_url = (
             f"https://ats.rippling.com/_next/data/{build_id}/en-US/{slug}/jobs/{job_id}/apply.json"
         )
-        r2 = _get(
+        r2 = _get_requests_sync(
             data_url,
             params={"jobBoardSlug": slug, "jobId": job_id, "step": "application"},
             headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"},
