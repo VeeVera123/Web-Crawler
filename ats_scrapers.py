@@ -55,12 +55,34 @@ log = logging.getLogger(__name__)
 # the old thread-local requests.Session pattern — httpx.AsyncClient is
 # itself connection-pooled and safe to share across concurrent coroutines
 # on the same loop (unlike requests.Session, it's explicitly documented as
-# fine for concurrent use from async code). limits mirror the old
-# pool_connections/pool_maxsize=20 choice, but a single async client can
-# usefully go higher since coroutines waiting on I/O don't hold a thread —
-# tuned to 50/50 as a starting point, still far below any single ATS
-# host's real capacity given per-host pacing below caps concurrency well
-# under this ceiling in practice.
+# fine for concurrent use from async code).
+#
+# 2026-09 BUG FIX (real production evidence: a full 39-platform run with
+# ~19,586 boards on one shard sat with ZERO platform completions —
+# including tiny platforms like eploy (24 boards) and avature (30
+# boards) that normally finish in well under a minute — for 12+ minutes
+# straight): this limit used to be a flat 50/50, reasoned as "still far
+# below any single ATS HOST's real capacity" — but max_connections is
+# the ENTIRE PROCESS's connection budget shared across every platform and
+# every host they touch AT ONCE, not a per-host figure. The old
+# thread-local requests.Session pattern this replaced gave each worker
+# THREAD its own independent pool_maxsize=20 pool, so the real aggregate
+# capacity across a run scaled with however many threads were active
+# (e.g. greenhouse/lever/icims alone could each have 30 threads, each
+# with its own 20-connection pool) — nobody had to size one shared pool
+# for the sum of every platform's concurrency at once, because there
+# wasn't one shared pool. crawl_i.py's PLATFORM_WORKERS alone sums to
+# ~400 across its explicitly configured platforms, before counting the
+# dozen-plus unlisted platforms that fall back to a default of 8 each
+# (~500+ total desired concurrency) — against a 50-connection shared
+# pool, every platform's own semaphore says "go ahead, 8-30 of you can
+# run" and then virtually all of them queue behind each other for one of
+# only 50 real slots, process-wide, silently (httpx's connection-pool
+# wait produces no log line of its own). Raised to comfortably cover
+# that real configured demand with headroom for future platforms, rather
+# than a number sized by comparison to a single host's tolerance.
+_ASYNC_CLIENT_MAX_CONNECTIONS = 600
+_ASYNC_CLIENT_MAX_KEEPALIVE = 300
 _async_client: httpx.AsyncClient | None = None
 _async_client_lock = asyncio.Lock()
 
@@ -93,7 +115,8 @@ async def _get_async_client() -> httpx.AsyncClient:
                 write=30.0,
                 pool=30.0,
             )
-            limits = httpx.Limits(max_connections=50, max_keepalive_connections=50)
+            limits = httpx.Limits(max_connections=_ASYNC_CLIENT_MAX_CONNECTIONS,
+                                   max_keepalive_connections=_ASYNC_CLIENT_MAX_KEEPALIVE)
             _async_client = httpx.AsyncClient(
                 timeout=timeout,
                 limits=limits,
