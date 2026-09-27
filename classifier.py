@@ -2081,8 +2081,10 @@ Respond ONLY with lines like:
 def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
     """Classify a single batch of jobs by location using a specific provider.
 
-    Descriptions are sent IN FULL (only bounded by MAX_DESC_CHARS, applied
-    once already in _build_dynamic_batches) — no further per-batch slicing.
+    Descriptions are sent IN FULL — no per-job truncation happens anywhere
+    in this pipeline any more (see _assign_jobs_by_desc_length's ROUND 7
+    note: a job is routed to whichever provider's max_batch_chars can hold
+    its full description, never cut to fit). No further per-batch slicing.
     Previously this re-truncated every job's description to an EVEN SPLIT of
     max_user_chars across the whole batch (e.g. a full-size batch could cut
     each job down to ~4K chars regardless of how short the batch's other
@@ -2561,7 +2563,9 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     # each provider an arbitrary MIX of short and long descriptions with
     # zero regard for that provider's own char budget. Groq's real
     # rate-limit-driven max_batch_chars is only 6,000 (see config.py) while
-    # descriptions here go up to 30,000 chars each (MAX_DESC_CHARS) — so
+    # a real JD can run into the tens of thousands of characters (see
+    # ats_scrapers.py's _snippet(), whose cap is a 500,000-char defensive
+    # ceiling, not a normal operating size) — so
     # whenever a job with a real multi-thousand-char JD landed on Groq, its
     # batch was capped at 1 job long before _dynamic_job_cap's 5-10 job
     # ceiling ever mattered, while OpenAI/NVIDIA (3.2-3.3M char budgets)
