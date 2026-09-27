@@ -323,13 +323,28 @@ def scrape_all(boards: list[tuple[str, str]]) -> tuple[list[dict], int, int, set
     file (_run_pipeline and everything it calls after this point:
     classification, enrichment, Supabase writes) stays synchronous and
     unaware that scraping itself now runs on an event loop internally.
-    aclose_http_client() releases the shared httpx.AsyncClient's pooled
-    connections at the end of each run rather than leaving that to
-    garbage collection."""
-    try:
-        return asyncio.run(_scrape_all_async(boards))
-    finally:
-        asyncio.run(aclose_http_client())
+
+    2026-09 BUG FIX (real production evidence: "RuntimeError: Event loop
+    is closed" on GitHub Actions, confirmed live during async migration
+    batch 1 testing): this used to call asyncio.run() TWICE in
+    sequence — once for _scrape_all_async(boards), then a SEPARATE
+    asyncio.run() for aclose_http_client(). Each asyncio.run() call
+    creates a brand-new event loop and fully tears it down when it
+    returns. The shared httpx.AsyncClient (and its underlying TCP/TLS
+    connections) are created inside the FIRST loop — by the time the
+    second, separate asyncio.run() spins up a NEW loop and tries to
+    close that client, the connections are still bound to the first
+    (now-closed) loop, and asyncio refuses to touch a closed loop's
+    resources from a different one. Fixed by running both the scrape AND
+    the client cleanup inside ONE asyncio.run() call, via a single inner
+    async function — same event loop for creation, use, and teardown."""
+    async def _scrape_and_cleanup():
+        try:
+            return await _scrape_all_async(boards)
+        finally:
+            await aclose_http_client()
+
+    return asyncio.run(_scrape_and_cleanup())
 
 
 
