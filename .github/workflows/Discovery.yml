@@ -322,6 +322,30 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/gcp-key.json
+          # 2026-09 FIX (real production evidence): discovery.py's
+          # verification.py bridge (_get_verification_module, see
+          # discovery.py's own module comment on that function) does
+          # `import ats_scrapers` transitively (verification.py itself
+          # does `from ats_scrapers import scrape_board`), which pulls in
+          # config.py -- and config.py's legacy single-provider fallback
+          # does a BARE `os.environ["CEREBRAS_API_KEY"]` lookup (raises
+          # KeyError, not a graceful default) whenever LLM_PROVIDER
+          # resolves to "cerebras" (its own default when unset) and no
+          # multi-provider role/location keys are configured -- see
+          # verification.py's own top-of-file "NOTE ON CEREBRAS_API_KEY"
+          # comment, which already documented this exact gotcha for
+          # anything that imports ats_scrapers.scrape_board(), including
+          # verification.py's own direct runs (verification.yml already
+          # passes this same secret on every one of its steps for exactly
+          # this reason). Discovery.yml never needed it before because
+          # the bridge always failed earlier (first a directory-
+          # resolution bug, then a missing aiohttp/selectolax/
+          # beautifulsoup4 dependency) -- confirmed live: fixing BOTH of
+          # those immediately surfaced this exact KeyError next, on this
+          # exact step, nothing here actually calls an LLM. Cerebras
+          # never fires a real request as a result of this -- it exists
+          # solely to satisfy config.py's own import-time key check.
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python discovery.py --source ${{ matrix.source }} ${{ matrix.extra_args }}
         # GCP_PROJECT_ID/GCP_SA_KEY are optional — discovery.py logs a
