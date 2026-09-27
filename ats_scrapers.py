@@ -3825,19 +3825,26 @@ async def scrape_eploy(slug: str) -> list[dict]:
     pages are plain server-rendered HTML.
 
     List page:   https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx
-    Detail page: https://{slug}.eploy.net/candidate/jobboard/vacancy/{id}/{title-slug}
+        (path varies per tenant — several candidate paths are tried below)
+    Detail page: relative to the list page's own URL, confirmed live as
+        "{id}/{title-slug}.html" or "vacancies-amp/{id}/{title-slug}.html"
+        depending on the tenant's template — see the BUG FIX comment
+        below for the live evidence. NOT "/candidate/jobboard/vacancy/…"
+        as this docstring previously (incorrectly) stated.
     """
     company_name = slug.replace("-", " ").title()
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     base = f"https://{slug}.eploy.net"
 
     r = None
+    list_url = None
     for path in (
         "/candidate/jobboard/vacancysearchresults.aspx",
         "/candidate/JobBoard/VacancySearchResults.aspx",
         "/vacancies",
     ):
-        r = await _get(base + path, headers=headers)
+        list_url = base + path
+        r = await _get(list_url, headers=headers)
         if r:
             break
     if not r:
@@ -3860,22 +3867,42 @@ async def scrape_eploy(slug: str) -> list[dict]:
     # an unrelated sibling's text past the window boundary. Title/URL
     # extraction stays regex-based (single-field, no adjacency risk).
     soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
-    # 2026-09 BUG FIX: real production evidence (a --ats-only test run)
-    # showed 27 boards fetching their vacancy-list page successfully
-    # (HTTP 200) but extracting ZERO jobs from every single one — this
-    # regex was case-sensitive and required a trailing slash after the
-    # numeric id, neither of which is guaranteed across every Eploy
-    # tenant's own template (the list-fetch above already tries both
-    # vacancysearchresults.aspx and VacancySearchResults.aspx casings for
-    # exactly this kind of per-tenant template variance). Widened to be
-    # case-insensitive and to not require a trailing slash.
-    vacancy_href_re = re.compile(r'/vacancy/(\d+)', re.I)
+    # 2026-09 BUG FIX (round 2 — real live evidence via a browser session
+    # against currently-active tenants, not a guess): the ORIGINAL regex
+    # (`/vacancy/(\d+)/`) and round 1's widened version
+    # (`/vacancy/(\d+)`, case-insensitive) were BOTH built on a wrong
+    # assumption about Eploy's real detail-link shape. Live inspection of
+    # a real, currently-active tenant's rendered vacancy-search-results
+    # page (via a real browser, reading the actual DOM anchor — not the
+    # page's visible text, which loses hrefs) showed the real href is
+    # simply "{numeric_id}/{title-slug}.html" — e.g.
+    # "4738/personal-assistant-in-shawlands.html" — with NO "/vacancy/"
+    # segment anywhere in it, and no ".aspx" extension. A second live
+    # tenant (Entain, via its AMP-templated board) confirmed a second
+    # real variant: "vacancies-amp/{numeric_id}/{title-slug}.html". Both
+    # share the same core shape: a bare leading digit sequence (or
+    # "vacancies-amp/" then digits), a slash, a slug, and ".html". This
+    # regex matches either. Also: these hrefs are RELATIVE TO THE
+    # LISTING PAGE'S OWN PATH, not the domain root — confirmed live by
+    # loading the resolved relative path directly and getting the real
+    # job page back. The old `base + path` join was only correct for a
+    # listing page hosted at domain root; it silently breaks for any
+    # tenant whose vacancy-list path has its own subdirectory (e.g.
+    # "/jobs/vacancies/..." on the tenant used for this evidence) since
+    # "https://x.eploy.net" + "4738/foo.html" produces a wrong, dangling
+    # URL that was never even reachable. Switched to urljoin() against
+    # the ACTUAL fetched URL (r.url — post-redirect, since several
+    # candidate paths above 302-redirect before landing on the real
+    # list page) so relative links resolve exactly the way a browser
+    # would resolve them.
+    vacancy_href_re = re.compile(r'(?:^|/)(?:vacancies-amp/)?\d+/[^/?#]+\.html', re.I)
+    final_list_url = str(r.url) if r.url else list_url
     for anchor in soup.find_all("a", href=vacancy_href_re):
         path = (anchor.get("href") or "").strip()
         title = anchor.get_text(strip=True)
         if not path or not title:
             continue
-        job_url = path if path.startswith("http") else base + path
+        job_url = path if path.startswith("http") else urljoin(final_list_url, path)
         if job_url in seen:
             continue
         seen.add(job_url)
