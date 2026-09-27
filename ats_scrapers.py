@@ -12,6 +12,7 @@ import logging
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 import urllib.robotparser
 from html import unescape
@@ -339,6 +340,22 @@ def _pace_host(url: str) -> None:
         # reasoning _get()'s own backoff already uses, kept here too since
         # multiple worker threads can be pacing the same host at once.
         time.sleep(gap + random.uniform(0, gap * 0.25))
+
+
+async def _pace_host_async(url: str) -> None:
+    """Same contract as _pace_host, for callers running as a genuine
+    coroutine on the shared event loop rather than a worker thread (2026-09
+    description-enrichment async migration) — a blocking time.sleep() here
+    would freeze every OTHER concurrent enrichment fetch for the pace
+    duration, exactly the bug scrape_board's own migration just fixed one
+    layer up. Reads the same _host_pace_state a still-sync caller's
+    _pace_host would, just sleeps with asyncio.sleep() instead."""
+    host = _host_of(url)
+    with _host_pace_lock:
+        state = _host_pace_state.get(host)
+        gap = state["gap"] if state else 0.0
+    if gap > 0:
+        await asyncio.sleep(gap + random.uniform(0, gap * 0.25))
 
 
 def _note_host_response(url: str, *, was_rate_limited: bool, was_error: bool) -> None:
@@ -6712,19 +6729,31 @@ _CONTAINER_RE = re.compile(
 )
 
 
-def _fetch_generic_description(job: dict) -> str:
+async def _fetch_generic_description(job: dict) -> str:
     """Generic description fetcher — loads the job URL and tries, IN
     ORDER, every extraction method that's useful across real career-page
     templates, then keeps the LONGEST usable result rather than stopping
     at the first one that merely clears a length floor. See the module
     comment above for the two real bugs this fixed (meta-description
     tried too early, too few fallback methods).
-    Also extracts location as a side-effect if job has no location."""
+    Also extracts location as a side-effect if job has no location.
+
+    2026-09 ASYNC MIGRATION (description-enrichment speed pass, explicit
+    user request — "fetching descriptions was what really took the most
+    time in the old code"): converted to async/httpx (await _get(...))
+    ahead of every other description fetcher, since this one function is
+    shared by 15 of DESCRIPTION_FETCHERS' 25 platform entries (BreezyHR,
+    JazzHR, HRMDirect, Paylocity, Softgarden, Eploy, FolksHR, JobAdder,
+    Jobvite, Avature, Zoho, BambooHR, Hireology, isolvedhire, PageUp) plus
+    the Stage-2 fallback path every OTHER platform can also hit — the
+    single highest-leverage function in the whole enrichment stage.
+    Everything below this point is pure CPU (regex/string parsing over
+    already-fetched HTML) and was already fine either way."""
     url = job.get("url", "")
     if not url:
         return ""
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get_requests_sync(url, headers=headers)
+    r = await _get(url, headers=headers)
     if not r:
         return ""
 
@@ -6793,7 +6822,7 @@ def _fetch_generic_description(job: dict) -> str:
     return ""
 
 
-def _fetch_joincom_description(job: dict) -> str:
+async def _fetch_joincom_description(job: dict) -> str:
     """Fetch full description from JOIN.com job detail API."""
     url = job.get("url", "")
     if not url:
@@ -6801,7 +6830,7 @@ def _fetch_joincom_description(job: dict) -> str:
     # Extract job ID from URL: /companies/{slug}/jobs/{idParam}
     # We need the numeric ID, which requires an extra lookup
     # Try the generic fetcher on the job page (has JSON-LD)
-    return _fetch_generic_description(job)
+    return await _fetch_generic_description(job)
 
 
 def _fetch_teamtailor_location(job: dict) -> str:
@@ -6956,14 +6985,35 @@ DESCRIPTION_FETCHERS = {
 MIN_REAL_DESC_CHARS = 150
 
 
-def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
+def enrich_descriptions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
     """Fetch individual job descriptions for platforms that don't
     include them in the list API. Call this AFTER the role filter
     so we only fetch details for the small subset of CSM/AM jobs.
 
-    Modifies jobs in place and returns the same list."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    Modifies jobs in place and returns the same list.
 
+    2026-09 ASYNC MIGRATION (explicit user request — "fetching
+    descriptions was what really took the most time in the old code...
+    more important than the [scrape_board fix] we just did"): this used
+    to be a flat ThreadPoolExecutor(max_workers=20) regardless of how
+    many jobs needed enrichment, capping this whole stage's concurrency
+    an order of magnitude below the board-scrape phase's ~250-900. Now
+    runs on its own asyncio.run() (same one-loop-for-everything pattern
+    as scrape_all()/_scrape_and_cleanup — a shared httpx.AsyncClient
+    can't cross event loops, so creation, use, and aclose_http_client()
+    all happen inside this one call), dispatching each job's fetcher via
+    asyncio.iscoroutinefunction(): the now-async _fetch_generic_description
+    (15 of DESCRIPTION_FETCHERS' 25 platform entries, plus every Stage-2
+    fallback below) is awaited directly on the shared async client; every
+    still-sync specialized fetcher (iCIMS, Workday, SmartRecruiters,
+    Taleo, Teamtailor, ADP, Paycom, SuccessFactors, BrassRing) runs via
+    asyncio.to_thread() exactly like scrape_board's own still-sync
+    scrapers — never called inline, so a slow one can't block any other
+    job's fetch. max_workers raised 20 -> 150: this stage only runs on
+    the much smaller "jobs missing a description/location after role
+    filtering" subset, not the full board count, so a wide semaphore
+    here doesn't risk the same host-level overload the scrape phase's
+    per-host semaphore already guards against independently."""
     to_enrich = [j for j in jobs
                  if j.get("source_ats") in DESCRIPTION_FETCHERS
                  and (len(j.get("description_snippet") or "") < MIN_REAL_DESC_CHARS
@@ -6976,101 +7026,126 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     log.info(f"Enriching {len(to_enrich)} jobs (missing description or location) "
              f"across {to_enrich_platforms} platforms...")
 
-    def _fetch_one(job):
-        # 2026-09: track whether THIS fetch actually improved the job, not
-        # just whether the job has any description afterward — a job that
-        # qualified for to_enrich because it had a short-but-real
-        # description (< MIN_REAL_DESC_CHARS, still non-empty) already had
-        # a truthy description_snippet BEFORE this fetch ran, so checking
-        # the after-state alone counted it as "enriched" even when the
-        # fetch found nothing new. That inflated the "Enriched X/Y" count
-        # above what this pass actually accomplished.
-        before_len = len(job.get("description_snippet") or "")
-        fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
-        try:
-            desc = fetcher(job)
-            # Only replace the existing description if the fetch produced
-            # something at least as long — a detail-page fetch can itself
-            # fail partially (rate-limited, JS-rendered shell, changed DOM)
-            # and return a short/empty result. Since this function can now
-            # run on jobs that already have a short-but-real description
-            # (see MIN_REAL_DESC_CHARS), never let a worse result clobber a
-            # better one already in hand.
-            if desc and len(desc) >= before_len:
-                job["description_snippet"] = desc
-                salary = _extract_salary(desc)
-                if salary and not job.get("salary"):
-                    job["salary"] = salary
-        except Exception as e:
-            log.debug(f"Failed to enrich {job['url']}: {e}")
-        # 2026-09: see module-level comment above _pace_host. This runs
-        # under a ThreadPoolExecutor across many DIFFERENT companies'
-        # hosts, so per-host pacing (not one shared blanket delay) is
-        # exactly the right granularity — most hosts here get zero wait.
+    async def _call_fetcher(fetcher, job, sem):
+        """Dispatch one job's fetch + host-pacing without ever blocking the
+        loop, whichever kind of fetcher this platform still has (mirrors
+        scrape_board's own dispatch — see that function's BUG FIX note)."""
+        is_async = asyncio.iscoroutinefunction(fetcher)
+        async with sem:
+            desc = await fetcher(job) if is_async else await asyncio.to_thread(fetcher, job)
         if job.get("url"):
-            _pace_host(job["url"])
-        improved = len(job.get("description_snippet") or "") > before_len
-        return job, improved
+            if is_async:
+                await _pace_host_async(job["url"])
+            else:
+                await asyncio.to_thread(_pace_host, job["url"])
+        return desc
 
-    enriched = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
-        for future in as_completed(futures):
-            try:
-                job, improved = future.result()
-                if improved:
-                    enriched += 1
-            except Exception:
-                pass
-
-    not_improved = len(to_enrich) - enriched
-
-    # ── Fallback: fetch job URL directly for ANY job still missing a JD ──
-    # Some ATS APIs don't return descriptions, but the job page itself has one.
-    # This catches Workday, iCIMS, SuccessFactors, etc. where the API fetch failed.
-    #
-    # NOTE: this scans ALL of `jobs`, not just `to_enrich` above, and uses a
-    # STRICTER definition of "missing" (completely empty description_snippet)
-    # than to_enrich's (short OR missing-location). So a job can be in
-    # to_enrich, fail to improve there, and still NOT show up here — e.g. it
-    # was only missing LOCATION (already had a full description), or it had
-    # a short-but-real description that the fetch just couldn't beat. The
-    # reconciliation numbers below make that explicit instead of leaving two
-    # similar-looking counts that don't obviously add up to each other.
-    still_missing = [j for j in jobs if not j.get("description_snippet")
-                     and j.get("url")]
-    from_enrich_pass = 0
-    other_platforms = 0
-    fallback_ok = 0
-    if still_missing:
-        still_missing_urls = {j["url"] for j in still_missing}
-        from_enrich_pass = sum(1 for j in to_enrich if j.get("url") in still_missing_urls)
-        other_platforms = len(still_missing) - from_enrich_pass
-
-        def _fetch_fallback(job):
-            try:
-                desc = _fetch_generic_description(job)
-                if desc:
-                    job["description_snippet"] = desc
-                    salary = _extract_salary(desc)
-                    if salary and not job.get("salary"):
-                        job["salary"] = salary
-            except Exception as e:
-                log.debug(f"Fallback fetch failed {job['url']}: {e}")
-            # 2026-09: see module-level comment above _pace_host.
-            if job.get("url"):
-                _pace_host(job["url"])
-            return job
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_fetch_fallback, j): j for j in still_missing}
-            for future in as_completed(futures):
+    async def _run():
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=max_workers)
+        )
+        sem = asyncio.Semaphore(max_workers)
+        try:
+            async def _fetch_one(job):
+                # 2026-09: track whether THIS fetch actually improved the
+                # job, not just whether the job has any description
+                # afterward — a job that qualified for to_enrich because
+                # it had a short-but-real description (< MIN_REAL_DESC_CHARS,
+                # still non-empty) already had a truthy description_snippet
+                # BEFORE this fetch ran, so checking the after-state alone
+                # counted it as "enriched" even when the fetch found nothing
+                # new. That inflated the "Enriched X/Y" count above what
+                # this pass actually accomplished.
+                before_len = len(job.get("description_snippet") or "")
+                fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
                 try:
-                    job = future.result()
-                    if job.get("description_snippet"):
-                        fallback_ok += 1
-                except Exception:
-                    pass
+                    desc = await _call_fetcher(fetcher, job, sem)
+                    # Only replace the existing description if the fetch
+                    # produced something at least as long — a detail-page
+                    # fetch can itself fail partially (rate-limited,
+                    # JS-rendered shell, changed DOM) and return a
+                    # short/empty result. Since this function can now run
+                    # on jobs that already have a short-but-real
+                    # description (see MIN_REAL_DESC_CHARS), never let a
+                    # worse result clobber a better one already in hand.
+                    if desc and len(desc) >= before_len:
+                        job["description_snippet"] = desc
+                        salary = _extract_salary(desc)
+                        if salary and not job.get("salary"):
+                            job["salary"] = salary
+                except Exception as e:
+                    log.debug(f"Failed to enrich {job.get('url', '')}: {e}")
+                return len(job.get("description_snippet") or "") > before_len
+
+            improved_flags = await asyncio.gather(
+                *(_fetch_one(j) for j in to_enrich), return_exceptions=True
+            )
+            enriched = sum(1 for f in improved_flags if f is True)
+
+            # ── Fallback population: fetch job URL directly for ANY job
+            # still missing a JD ── Some ATS APIs don't return
+            # descriptions, but the job page itself has one. This catches
+            # Workday, iCIMS, SuccessFactors, etc. where the API fetch
+            # failed.
+            #
+            # NOTE: this scans ALL of `jobs`, not just `to_enrich` above,
+            # and uses a STRICTER definition of "missing" (completely
+            # empty description_snippet) than to_enrich's (short OR
+            # missing-location). So a job can be in to_enrich, fail to
+            # improve there, and still NOT show up here — e.g. it was
+            # only missing LOCATION (already had a full description), or
+            # it had a short-but-real description the fetch just
+            # couldn't beat. The reconciliation numbers in the summary
+            # below make that explicit.
+            #
+            # 2026-09 BUG FIX: this MUST be computed here, after Stage 1's
+            # gather above has actually run and mutated jobs in place —
+            # computing it earlier (before Stage 1 started) meant it read
+            # every to_enrich job's PRE-fetch empty description_snippet,
+            # not just the ones Stage 1 genuinely failed to fill in. That
+            # put every to_enrich job through a WASTED second fetch, and
+            # — since _fetch_fallback below has no length comparison
+            # (unlike Stage 1's), unlike a job that already had a real
+            # Stage 1 result — a worse Stage 2 result could silently
+            # clobber a perfectly good Stage 1 one. Caught locally via a
+            # deliberately flaky-fetcher test before this ever shipped.
+            still_missing = [j for j in jobs if not j.get("description_snippet")
+                             and j.get("url")]
+            from_enrich_pass = 0
+            other_platforms = 0
+            if still_missing:
+                still_missing_urls = {j["url"] for j in still_missing}
+                from_enrich_pass = sum(1 for j in to_enrich if j.get("url") in still_missing_urls)
+                other_platforms = len(still_missing) - from_enrich_pass
+
+            fallback_ok = 0
+            if still_missing:
+                async def _fetch_fallback(job):
+                    try:
+                        async with sem:
+                            desc = await _fetch_generic_description(job)
+                        if desc:
+                            job["description_snippet"] = desc
+                            salary = _extract_salary(desc)
+                            if salary and not job.get("salary"):
+                                job["salary"] = salary
+                    except Exception as e:
+                        log.debug(f"Fallback fetch failed {job.get('url', '')}: {e}")
+                    if job.get("url"):
+                        await _pace_host_async(job["url"])
+                    return bool(job.get("description_snippet"))
+
+                fallback_flags = await asyncio.gather(
+                    *(_fetch_fallback(j) for j in still_missing), return_exceptions=True
+                )
+                fallback_ok = sum(1 for f in fallback_flags if f is True)
+
+            return enriched, fallback_ok, len(still_missing), from_enrich_pass, other_platforms
+        finally:
+            await aclose_http_client()
+
+    enriched, fallback_ok, still_missing_count, from_enrich_pass, other_platforms = asyncio.run(_run())
+    not_improved = len(to_enrich) - enriched
 
     # NOTE: Location-only pass removed — it was redundant.
     # _fetch_generic_description (used by both primary and fallback enrichment)
@@ -7087,7 +7162,7 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
     # to the line above it or explicitly says why it doesn't, so the whole
     # picture is visible from the log alone.
     partial_not_improved = not_improved - from_enrich_pass
-    still_empty_after_fallback = len(still_missing) - fallback_ok
+    still_empty_after_fallback = still_missing_count - fallback_ok
     summary_lines = [
         "── Description/location enrichment summary ──",
         f"  Stage 1 (API re-fetch): {len(to_enrich)} jobs needed enrichment "
@@ -7098,9 +7173,9 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 20) -> list[dict]:
         f"         {partial_not_improved} already had a short/partial description, or were only "
         f"missing location -> not eligible for Stage 2 (which only targets completely-empty descriptions)",
     ]
-    if still_missing:
+    if still_missing_count:
         summary_lines += [
-            f"  Stage 2 (direct job-page fetch): {len(still_missing)} jobs with a completely empty "
+            f"  Stage 2 (direct job-page fetch): {still_missing_count} jobs with a completely empty "
             f"description ({from_enrich_pass} carried over from Stage 1 + {other_platforms} from OTHER "
             f"platforms whose own list API returned a blank description, never part of Stage 1)",
             f"    -> {fallback_ok} recovered a description directly from the job page",
@@ -8258,7 +8333,7 @@ def _fetch_wild_questions(job: dict) -> str:
     return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
-def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> list[dict]:
+def enrich_application_questions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
     """Fetch application questions for EVERY job that has a URL.
 
     2026-09 ROUND 2 (explicit user instruction: "Make sure that all jobs
@@ -8300,9 +8375,22 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
     status, etc. — see _BOILERPLATE_QUESTION_RE) is never appended at all,
     since none of it carries any location-classification signal.
 
-    Call this AFTER enrich_descriptions and BEFORE filter_locations."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    Call this AFTER enrich_descriptions and BEFORE filter_locations.
 
+    2026-09 ASYNC MIGRATION (same speed pass as enrich_descriptions):
+    every QUESTION_FETCHERS entry (and _fetch_wild_questions) is still a
+    plain sync function -- none of the 21 have been converted to httpx
+    yet, so this doesn't get the "await the fetcher directly on the
+    shared client" win enrich_descriptions' generic fetcher now does.
+    What it DOES get: its own asyncio.run() (same one-loop pattern as
+    scrape_all()/enrich_descriptions -- httpx.AsyncClient can't cross
+    event loops, so creation/use/aclose_http_client() all stay inside
+    this one call) dispatching every fetcher through asyncio.to_thread()
+    instead of a flat ThreadPoolExecutor(max_workers=15), with
+    max_workers raised 15 -> 150 to match. A real concurrency win even
+    with zero fetcher-body changes: 10x the jobs can be mid-fetch at
+    once, each still safely isolated to its own OS thread exactly like
+    the old ThreadPoolExecutor model, just drawing from a bigger pool."""
     to_enrich = [j for j in jobs if j.get("url")]
 
     if not to_enrich:
@@ -8321,44 +8409,45 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
              + (f" — {wild_count} on unsupported/wild sites, generic fallback" if wild_count else "")
              + "...")
 
-    def _fetch_one(job):
+    async def _fetch_one(job, sem):
         ats = job.get("source_ats") or "unknown"
         fetcher = QUESTION_FETCHERS.get(ats, _fetch_wild_questions)
         questions = ""
         outcome = "none"
-        try:
-            questions = fetcher(job)
-        except Exception as e:
-            log.debug(f"Failed to fetch questions for {job.get('url', '')} via "
-                      f"{ats or 'wild'} fetcher: {e}")
-        if questions:
-            outcome = "wild" if fetcher is _fetch_wild_questions else "dedicated"
-        # 2026-09 (explicit user request: "use multiple methods and
-        # fallbacks if you have to" so application questions don't
-        # silently come back empty): a DEDICATED per-platform fetcher
-        # returning nothing doesn't necessarily mean the posting has no
-        # real screening form — it can just as easily mean this one
-        # tenant customized their form, or the platform's API/HTML shape
-        # drifted since that fetcher was written, which is a real,
-        # confirmed failure mode elsewhere in this file (see e.g.
-        # scrape_brassring's "missing session priming" history and the
-        # JazzHR "REVIVED" note above). Rather than accept a silent
-        # empty result from a single extraction method, give every job
-        # that went through a DEDICATED fetcher (not already the wild
-        # one) a second try via the universal multi-method fallback
-        # (_fetch_wild_questions: real-apply-link discovery + embedded-
-        # JSON parse + raw form-element parse, across the bare/apply/
-        # application URL conventions) — cheap (one more request, same
-        # politeness sleep already below), only runs when the first
-        # method found nothing, and never replaces a real result the
-        # dedicated fetcher DID find.
-        if not questions and fetcher is not _fetch_wild_questions:
+        async with sem:
             try:
-                questions = _fetch_wild_questions(job)
+                questions = await asyncio.to_thread(fetcher, job)
             except Exception as e:
-                log.debug(f"Generic fallback also failed for {job.get('url', '')}: {e}")
+                log.debug(f"Failed to fetch questions for {job.get('url', '')} via "
+                          f"{ats or 'wild'} fetcher: {e}")
             if questions:
-                outcome = "wild_fallback"
+                outcome = "wild" if fetcher is _fetch_wild_questions else "dedicated"
+            # 2026-09 (explicit user request: "use multiple methods and
+            # fallbacks if you have to" so application questions don't
+            # silently come back empty): a DEDICATED per-platform fetcher
+            # returning nothing doesn't necessarily mean the posting has no
+            # real screening form — it can just as easily mean this one
+            # tenant customized their form, or the platform's API/HTML shape
+            # drifted since that fetcher was written, which is a real,
+            # confirmed failure mode elsewhere in this file (see e.g.
+            # scrape_brassring's "missing session priming" history and the
+            # JazzHR "REVIVED" note above). Rather than accept a silent
+            # empty result from a single extraction method, give every job
+            # that went through a DEDICATED fetcher (not already the wild
+            # one) a second try via the universal multi-method fallback
+            # (_fetch_wild_questions: real-apply-link discovery + embedded-
+            # JSON parse + raw form-element parse, across the bare/apply/
+            # application URL conventions) — cheap (one more request, same
+            # politeness sleep already below), only runs when the first
+            # method found nothing, and never replaces a real result the
+            # dedicated fetcher DID find.
+            if not questions and fetcher is not _fetch_wild_questions:
+                try:
+                    questions = await asyncio.to_thread(_fetch_wild_questions, job)
+                except Exception as e:
+                    log.debug(f"Generic fallback also failed for {job.get('url', '')}: {e}")
+                if questions:
+                    outcome = "wild_fallback"
         if questions:
             existing = job.get("description_snippet", "") or ""
             job["description_snippet"] = existing + "\n\n" + questions
@@ -8367,8 +8456,8 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
         # health; now only actually waits for a host that's shown a
         # reason to.
         if job.get("url"):
-            _pace_host(job["url"])
-        return job, ats, outcome
+            await asyncio.to_thread(_pace_host, job["url"])
+        return ats, outcome
 
     # 2026-09 (explicit user instruction: "logs should be clean AF and
     # numbers add up"): every submitted job lands in exactly ONE outcome
@@ -8382,26 +8471,37 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 15) -> lis
     outcome_counts = {"dedicated": 0, "wild": 0, "wild_fallback": 0, "none": 0, "crashed": 0}
     per_platform_hits: dict[str, int] = {}
     crashed_platforms: dict[str, int] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_fetch_one, j): j for j in to_enrich}
-        for future in as_completed(futures):
-            submitted_job = futures[future]
-            try:
-                _job, ats, outcome = future.result()
-            except Exception as e:
-                # _fetch_one already catches every expected failure mode
-                # (a fetcher raising, the wild-fallback raising) — landing
-                # here means something outside those try/excepts broke,
-                # a real bug rather than a normal per-job scrape failure.
-                # Counted explicitly instead of silently swallowed.
-                ats = submitted_job.get("source_ats") or "unknown"
-                outcome = "crashed"
-                crashed_platforms[ats] = crashed_platforms.get(ats, 0) + 1
-                log.debug(f"enrich_application_questions: unexpected failure for "
-                          f"{submitted_job.get('url', '')} ({ats}): {e}")
-            outcome_counts[outcome] += 1
-            if outcome in ("dedicated", "wild", "wild_fallback"):
-                per_platform_hits[ats] = per_platform_hits.get(ats, 0) + 1
+
+    async def _run():
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=max_workers)
+        )
+        sem = asyncio.Semaphore(max_workers)
+        try:
+            return await asyncio.gather(
+                *(_fetch_one(j, sem) for j in to_enrich), return_exceptions=True
+            )
+        finally:
+            await aclose_http_client()
+
+    results = asyncio.run(_run())
+    for job, res in zip(to_enrich, results):
+        if isinstance(res, Exception):
+            # _fetch_one already catches every expected failure mode
+            # (a fetcher raising, the wild-fallback raising) — landing
+            # here means something outside those try/excepts broke,
+            # a real bug rather than a normal per-job scrape failure.
+            # Counted explicitly instead of silently swallowed.
+            ats = job.get("source_ats") or "unknown"
+            outcome = "crashed"
+            crashed_platforms[ats] = crashed_platforms.get(ats, 0) + 1
+            log.debug(f"enrich_application_questions: unexpected failure for "
+                      f"{job.get('url', '')} ({ats}): {res}")
+        else:
+            ats, outcome = res
+        outcome_counts[outcome] += 1
+        if outcome in ("dedicated", "wild", "wild_fallback"):
+            per_platform_hits[ats] = per_platform_hits.get(ats, 0) + 1
 
     total_hit = outcome_counts["dedicated"] + outcome_counts["wild"] + outcome_counts["wild_fallback"]
     accounted_for = sum(outcome_counts.values())
