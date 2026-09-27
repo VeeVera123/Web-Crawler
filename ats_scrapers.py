@@ -6731,6 +6731,18 @@ DESCRIPTION_FETCHERS = {
     # isolvedhire's list endpoint has NO description field at all (see
     # scrape_isolvedhire's docstring) — every job needs this fetch.
     "isolvedhire": _fetch_generic_description,
+    # 2026-09 BUG FIX: PageUp — scrape_pageup's search-results page never
+    # carried a description at all (hardcoded "" with no enrichment
+    # registered anywhere), the only platform in this whole file with that
+    # combination. Its own docstring already documents that job detail
+    # pages ARE plain server-rendered HTML ("no JS needed"), so the
+    # generic fetcher (JSON-LD -> meta description -> common JD
+    # containers) applies exactly as it does for Softgarden/Eploy/etc.
+    # PageUp is a dominant AU/NZ enterprise ATS (Telstra, Commonwealth
+    # Bank, Coles, ...), so this was a real, high-volume gap: every one of
+    # its jobs reached location/visa classification with zero description
+    # text to find eligibility language in.
+    "PageUp": _fetch_generic_description,
 }
 
 
