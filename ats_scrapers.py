@@ -25,39 +25,68 @@ from discovery import _GH_JID_RE, extract_greenhouse_embed_token
 
 log = logging.getLogger(__name__)
 
-# 2026-09: requests -> httpx.AsyncClient migration (externally reviewed,
-# explicit user requirement: "async is allowed to change throughput, but
-# it is absolutely not allowed to change the bytes/content that
-# ultimately reach the extractor"). Phase 0 (httpx_migration_diff_harness.py)
-# proved byte-for-byte equivalence between requests and httpx across 20
-# real ATS URLs before any production code changed. Phase 1 (this change)
-# swaps the transport AND the concurrency model -- scrape_* functions
-# become async, awaiting the async _get()/_get_async_client() below, and
-# crawl_i.py/crawl_ii.py's dispatch loops move from ThreadPoolExecutor to
-# asyncio.gather with a per-host semaphore scheduler (_host_semaphore_for
-# below). One shared httpx.AsyncClient per event loop replaces the old
-# thread-local requests.Session pattern -- AsyncClient is itself
-# connection-pooled and documented as safe for concurrent use from async
-# code.
-_async_client = None
+# ── Async HTTP transport (2026-09: requests -> httpx.AsyncClient) ──────
+# Migration plan (externally reviewed, explicit user requirement: "async
+# is allowed to change throughput, but it is absolutely not allowed to
+# change the bytes/content that ultimately reach the extractor"):
+#   Phase 0: differential test harness (httpx_migration_diff_harness.py)
+#     proved byte-for-byte equivalence between requests and httpx across
+#     20 real ATS URLs (4 platforms) before any production code changed —
+#     see that file and .github/workflows/httpx-migration-test.yml.
+#   Phase 1 (this change): swap the transport AND the concurrency model —
+#     every scrape_* function becomes `async def`, awaiting this async
+#     _get()/_get_client(), and crawl_i.py/crawl_ii.py's dispatch loops
+#     move from ThreadPoolExecutor to asyncio.gather with a per-host
+#     semaphore scheduler (see _host_semaphore below) instead of a flat
+#     worker-count cap — this is what actually unlocks the throughput win,
+#     since a sync requests.Session().get() call blocks its whole thread
+#     for the full round-trip, while an awaited httpx call frees the event
+#     loop to run other hosts' requests in the meantime.
+#   BeautifulSoup itself stays fully synchronous (it isn't async-aware and
+#     never will be) — CPU-bound HTML parsing is offloaded to a thread via
+#     asyncio.to_thread at each scraper's own parsing step, so a large/
+#     complex page's parse time doesn't block the event loop from
+#     servicing other in-flight requests. See each converted scrape_*
+#     function for its own `await asyncio.to_thread(BeautifulSoup, ...)`
+#     call (added only where a function actually uses BeautifulSoup).
+#
+# One shared httpx.AsyncClient per event loop (there's exactly one event
+# loop per crawl process, so effectively one client per process) replaces
+# the old thread-local requests.Session pattern — httpx.AsyncClient is
+# itself connection-pooled and safe to share across concurrent coroutines
+# on the same loop (unlike requests.Session, it's explicitly documented as
+# fine for concurrent use from async code). limits mirror the old
+# pool_connections/pool_maxsize=20 choice, but a single async client can
+# usefully go higher since coroutines waiting on I/O don't hold a thread —
+# tuned to 50/50 as a starting point, still far below any single ATS
+# host's real capacity given per-host pacing below caps concurrency well
+# under this ceiling in practice.
+_async_client: httpx.AsyncClient | None = None
 _async_client_lock = asyncio.Lock()
 
 
-async def _get_async_client():
+async def _get_async_client() -> httpx.AsyncClient:
     """Return the process-wide shared AsyncClient, creating it on first
-    use."""
+    use. Must be called from within a running event loop (asyncio.Lock()
+    at module scope is safe here only because it's never awaited outside
+    an event loop context — the crawl entrypoints always run under
+    asyncio.run()/asyncio.gather())."""
     global _async_client
     if _async_client is not None:
         return _async_client
     async with _async_client_lock:
         if _async_client is None:
-            # Explicit timeout categories (externally reviewed: "read
+            # Explicit timeout categories (2026-09 external review: "read
             # timeout means the maximum time allowed between chunks of
-            # response data, not a maximum total response size" -- a
-            # strict default could cut off a slow-but-healthy ATS host
-            # mid-response on a large job description, exactly the
-            # "incomplete HTML -> partial description" failure mode this
-            # migration must not introduce).
+            # response data, not a maximum total response size" — httpx's
+            # strict defaults could otherwise cut off a slow-but-healthy
+            # ATS host mid-response on a large job description, exactly
+            # the "incomplete HTML -> partial description" failure mode
+            # the migration explicitly must not introduce). Derived from
+            # this project's existing REQUEST_TIMEOUT (config.py) for the
+            # read leg — connect/write/pool kept short since those legs
+            # failing slowly is pure wasted time, never a source of
+            # truncated content.
             timeout = httpx.Timeout(
                 connect=20.0,
                 read=max(60.0, float(REQUEST_TIMEOUT)),
@@ -68,34 +97,38 @@ async def _get_async_client():
             _async_client = httpx.AsyncClient(
                 timeout=timeout,
                 limits=limits,
-                http2=True,
+                http2=True,           # HTTP/2 preferred; httpx falls back to 1.1 automatically on incompatibility
                 follow_redirects=True,
             )
         return _async_client
 
 
-async def aclose_http_client():
-    """Close the shared AsyncClient. Call once at process shutdown to
-    release pooled connections cleanly rather than relying on garbage
-    collection."""
+async def aclose_http_client() -> None:
+    """Close the shared AsyncClient. Call once at process shutdown (after
+    the crawl's asyncio.run() returns) to release pooled connections
+    cleanly rather than relying on garbage collection."""
     global _async_client
     if _async_client is not None:
         await _async_client.aclose()
         _async_client = None
 
 
-# -- Legacy thread-local requests.Session (2026-09: kept temporarily for
-# any as-yet-unconverted call site during the batched migration. Once
-# every scrape_*/_fetch_* function in this file has moved to
-# _get()/_get_async_client(), this and its _get_session()-based callers
-# are removed entirely.) --------------------------------------------
+# ── Legacy thread-local requests.Session (2026-09: kept temporarily for
+# any as-yet-unconverted call site during the batched migration — see the
+# module docstring's Phase 1 note. Once every scrape_*/_fetch_* function
+# in this file has moved to _get()/_get_async_client(), this and its
+# _get_session()-based callers are removed entirely.) ──────────────────
 _thread_local = threading.local()
 
 
-def _get_session():
+def _get_session() -> requests.Session:
     """Return the current thread's reusable HTTP session."""
     if not hasattr(_thread_local, "session"):
         _thread_local.session = requests.Session()
+        # Set default retry adapter with connection pooling.
+        # 20 (was 10) — matches the higher per-platform worker counts below;
+        # a pool smaller than a platform's max_workers forces threads to
+        # queue for a connection even though the remote side has capacity.
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=20,
             pool_maxsize=20,
@@ -281,15 +314,16 @@ def _note_host_response(url: str, *, was_rate_limited: bool, was_error: bool) ->
                 state["clean_streak"] = 0
 
 
-def _get_requests_sync(url: str, **kwargs):
-    """LEGACY sync transport (requests) -- 2026-09: kept only for
+def _get_requests_sync(url: str, **kwargs) -> requests.Response | None:
+    """LEGACY sync transport (requests) — 2026-09: kept only for
     not-yet-migrated scrape_*/_fetch_* functions during the batched async
-    migration. Every function still calling this will be converted to
-    `await _get_requests_sync(...)` in a later batch; once none remain, this and
-    _get_session()/_thread_local above are deleted entirely. Behavior is
-    intentionally UNCHANGED from before the migration -- this is the exact
-    pre-migration implementation, not a new one -- so a not-yet-converted
-    scraper's behavior stays identical until its own batch converts it."""
+    migration (see the module docstring's Phase 1 note). Every function
+    still calling this will be converted to `await _get_requests_sync(...)` in a later
+    batch; once none remain, this and _get_session()/_thread_local above
+    are deleted entirely. Behavior is intentionally UNCHANGED from before
+    the migration — this is the exact pre-migration implementation, not a
+    new one — so a not-yet-converted scraper's behavior stays identical
+    until its own batch converts it."""
     session = _get_session()
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -315,7 +349,7 @@ def _get_requests_sync(url: str, **kwargs):
     return None
 
 
-# -- Per-host concurrency scheduler (async) --------------------------
+# ── Per-host concurrency scheduler (async) ──────────────────────────────
 # 2026-09 (external review, explicit user requirement): "Suppose you
 # currently have 20 workers -> 20 requests -> ATS responds, and migrate to
 # 500 async tasks -> 500 requests -> ATS says NO -> 429 429 429 ... You
@@ -324,27 +358,33 @@ def _get_requests_sync(url: str, **kwargs):
 # concurrency limit, requests/sec limit, backoff state, circuit breaker."
 #
 # This is the async-native replacement for the old thread-pool's implicit
-# per-platform concurrency cap -- a per-HOST (not per-platform; some
-# platforms span many distinct tenant hosts, e.g. Workday's
-# *.myworkdayjobs.com subdomains) asyncio.Semaphore caps how many requests
-# can be in flight against the SAME host at once, regardless of how many
-# total coroutines the crawl has scheduled overall. _pace_host's existing
-# gap-based pacing (escalate on 429/error, decay on a clean streak) still
-# runs on top of this -- the semaphore bounds CONCURRENT in-flight
-# requests per host, while _pace_host bounds the RATE of new requests per
-# host.
+# per-platform concurrency cap (crawl_i.py's ThreadPoolExecutor(max_workers=N)
+# per ATS) — a per-HOST (not per-platform; some platforms span many
+# distinct tenant hosts, e.g. Workday's *.myworkdayjobs.com subdomains)
+# asyncio.Semaphore caps how many requests can be in flight against the
+# SAME host at once, regardless of how many total coroutines the crawl has
+# scheduled overall. _pace_host's existing gap-based pacing (escalate on
+# 429/error, decay on a clean streak) still runs on top of this — the
+# semaphore bounds CONCURRENT in-flight requests per host, while
+# _pace_host bounds the RATE of new requests per host; together they cover
+# both halves of "don't hammer one host" the external review called for.
 _host_semaphore_lock = threading.Lock()
-_host_semaphores = {}
+_host_semaphores: dict[str, asyncio.Semaphore] = {}
 
 # Per-host concurrency ceiling. Deliberately conservative and uniform
-# rather than a hand-tuned per-platform table -- _pace_host's existing
-# escalate-on-trouble/decay-on-health pacing already adapts per-host at
-# the RATE level, so a uniform concurrency ceiling here is a safe starting
-# point.
+# rather than a hand-tuned per-platform table (the external review's
+# suggested "Greenhouse high, Workday moderate, Taleo/BrassRing
+# conservative" tiers need real measured data this project doesn't have
+# yet) — _pace_host's existing escalate-on-trouble/decay-on-health pacing
+# already adapts per-host at the RATE level, so a uniform concurrency
+# ceiling here is a safe starting point: no host can ever have more than
+# this many requests in flight at once, healthy or not, and a host that
+# starts showing 429s/errors gets slowed further by _pace_host's gap on
+# top of this ceiling, not instead of it.
 _HOST_CONCURRENCY_LIMIT = 8
 
 
-def _host_semaphore_for(url: str):
+def _host_semaphore_for(url: str) -> asyncio.Semaphore:
     host = _host_of(url)
     with _host_semaphore_lock:
         sem = _host_semaphores.get(host)
@@ -354,20 +394,24 @@ def _host_semaphore_for(url: str):
         return sem
 
 
-async def _get(url: str, **kwargs):
-    """Async transport (httpx.AsyncClient) -- the replacement for the old
+async def _get(url: str, **kwargs) -> httpx.Response | None:
+    """Async transport (httpx.AsyncClient) — the replacement for the old
     sync `_get()` (requests), proven byte-for-byte equivalent by
     httpx_migration_diff_harness.py before this migration started. Same
     retry/backoff/Retry-After/pacing contract as the legacy version
     (_get_requests_sync above): returns the response on success, None
-    after MAX_RETRIES exhausted failures.
+    after MAX_RETRIES exhausted failures — callers that already handle
+    "_get() returned None" correctly need NO changes to that handling,
+    only `await` added at the call site.
 
-    kwargs are passed straight to httpx.AsyncClient.get() -- `params` and
-    `headers` have identical names/semantics in httpx as in requests.
-    `allow_redirects` (requests' name) is NOT accepted here -- httpx's
-    AsyncClient is constructed with follow_redirects=True globally, so
-    passing allow_redirects would raise; any call site still passing it
-    needs that kwarg removed as part of its own migration.
+    kwargs are passed straight to httpx.AsyncClient.get() — `params` and
+    `headers` (the two ever used by callers in this file) have identical
+    names/semantics in httpx as in requests. `allow_redirects` (requests'
+    name) is NOT accepted here — httpx's AsyncClient is constructed with
+    follow_redirects=True globally (see _get_async_client), so passing
+    allow_redirects would raise; any call site still passing it needs that
+    kwarg removed as part of its own migration (see each converted
+    scrape_*'s diff).
     """
     client = await _get_async_client()
     host_sem = _host_semaphore_for(url)
@@ -392,12 +436,58 @@ async def _get(url: str, **kwargs):
                     _note_host_response(url, was_rate_limited=False, was_error=True)
                     log.debug(f"Failed {url}: {e}")
                     return None
+                # Jitter on ordinary failures too — prevents a "thundering
+                # herd" of many coroutines retrying a flaky endpoint in
+                # lockstep.
                 await asyncio.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
     return None
 
 
-async def _pace_host_async(url: str):
-    """Async counterpart to _pace_host -- same gap-based per-host pacing,
+async def _post(url: str, **kwargs) -> httpx.Response | None:
+    """Async POST counterpart to _get, for the handful of scrapers that
+    hit a search/query endpoint via POST with a JSON body (Workday,
+    Taleo, Cornerstone OnDemand/csod, and any future platform's own
+    _*_search-style helper) instead of a GET with query params. Same
+    retry/backoff/Retry-After/pacing contract as _get, and same
+    exception-swallowing-into-None return convention every existing
+    caller already expects from `requests.Session().post(...)` wrapped
+    in try/except — callers that already handle "returned None" need
+    only `await` added at the call site.
+
+    kwargs are passed straight to httpx.AsyncClient.post() — `json`,
+    `data`, `params`, and `headers` (the ones used by callers in this
+    file) have identical names/semantics in httpx as in requests.
+    `allow_redirects`/`timeout` are NOT accepted here for the same
+    reason as _get (see its docstring) — the client is constructed once
+    with follow_redirects=True and a fixed httpx.Timeout.
+    """
+    client = await _get_async_client()
+    host_sem = _host_semaphore_for(url)
+    async with host_sem:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                r = await client.post(url, **kwargs)
+                if r.status_code == 429:
+                    _note_host_response(url, was_rate_limited=True, was_error=False)
+                    retry_after = r.headers.get("Retry-After")
+                    if retry_after and retry_after.strip().isdigit():
+                        wait = min(int(retry_after), 30)
+                    else:
+                        wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    await asyncio.sleep(wait)
+                    continue
+                return r
+            except Exception as e:
+                if attempt == MAX_RETRIES:
+                    _note_host_response(url, was_rate_limited=False, was_error=True)
+                    log.debug(f"POST failed {url}: {e}")
+                    return None
+                await asyncio.sleep(min(2 ** attempt + random.uniform(0, 0.5), 15))
+    return None
+
+
+async def _pace_host_async(url: str) -> None:
+    """Async counterpart to _pace_host — same gap-based per-host pacing,
     but sleeps the coroutine (asyncio.sleep) instead of blocking the
     thread (time.sleep), so a paced host doesn't stall the whole event
     loop from servicing other hosts' in-flight requests while it waits."""
@@ -1295,9 +1385,15 @@ def scrape_icims(slug: str) -> list[dict]:
 
 # ── Workday ────────────────────────────────────────────
 
-def scrape_workday(slug: str) -> list[dict]:
+async def scrape_workday(slug: str) -> list[dict]:
     """Workday CXS JSON API. Slug format: 'company|wd#|site_id'.
-    POST to /wday/cxs/{company}/{site_id}/jobs for paginated results."""
+    POST to /wday/cxs/{company}/{site_id}/jobs for paginated results.
+
+    2026-09 ASYNC MIGRATION (batch 2): converted from _get_session().post()
+    to await _post(...) — same httpx.AsyncClient transport as _get,
+    proven byte-for-byte equivalent to requests by
+    httpx_migration_diff_harness.py. Behavior otherwise unchanged: same
+    payload shape, same pagination loop, same failure handling."""
     parts = slug.split("|")
     if len(parts) != 3:
         log.warning(f"[workday] Invalid slug format (expected 'company|wd#|site_id'): {slug!r}")
@@ -1328,16 +1424,13 @@ def scrape_workday(slug: str) -> list[dict]:
             "searchText": "",
         }
 
-        try:
-            r = _get_session().post(
-                api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT
-            )
-        except Exception as e:
+        r = await _post(api_url, json=payload, headers=headers)
+        if r is None:
             log.debug(
                 f"[workday] Request failed for slug={slug!r} offset={offset} "
-                f"url={api_url}: {type(e).__name__}: {e}"
+                f"url={api_url}"
             )
-            _record_scrape_failure("workday", company, f"connection error ({type(e).__name__})")
+            _record_scrape_failure("workday", company, "connection error")
             break
 
         if r.status_code != 200:
@@ -1427,11 +1520,9 @@ def scrape_workday(slug: str) -> list[dict]:
         # 2026-09: was an unconditional time.sleep(random.uniform(0.3, 1.0))
         # on every page regardless of how the last request went — see the
         # module-level comment above _pace_host for the full reasoning.
-        # Workday's own request above is a direct session.post() (not
-        # _get()), so this host's pace state only escalates if Workday is
-        # ALSO hit via _get() elsewhere; that's fine — it still costs
-        # nothing extra on a healthy run, which is the actual goal here.
-        _pace_host(api_url)
+        # 2026-09 ASYNC MIGRATION: now uses _pace_host_async (asyncio.sleep)
+        # since Workday's own request above is now the async _post().
+        await _pace_host_async(api_url)
 
     return all_jobs
 
@@ -1564,8 +1655,11 @@ def scrape_recruitee(slug: str) -> list[dict]:
 
 # ── SmartRecruiters ───────────────────────────────────
 
-def scrape_smartrecruiters(slug: str) -> list[dict]:
-    """SmartRecruiters Posting API — no auth for public postings, paginated."""
+async def scrape_smartrecruiters(slug: str) -> list[dict]:
+    """SmartRecruiters Posting API — no auth for public postings, paginated.
+
+    2026-09 ASYNC MIGRATION (batch 2): converted _get_requests_sync to
+    await _get(...). Behavior otherwise unchanged."""
     base_url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     all_jobs = []
@@ -1573,7 +1667,7 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
     limit = 100
 
     while True:
-        r = _get_requests_sync(base_url, params={"limit": limit, "offset": offset}, headers=headers)
+        r = await _get(base_url, params={"limit": limit, "offset": offset}, headers=headers)
         if not r:
             break
         try:
@@ -1639,7 +1733,7 @@ def scrape_smartrecruiters(slug: str) -> list[dict]:
             break
 
         # 2026-09: see module-level comment above _pace_host.
-        _pace_host(base_url)
+        await _pace_host_async(base_url)
 
     return all_jobs
 
@@ -1788,10 +1882,20 @@ def scrape_taleo(slug: str) -> list[dict]:
 
 # ── Oracle Cloud HCM ────────────────────────────────────
 
-def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
+async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
     """Oracle Cloud HCM Recruiting REST API.
     Slug format: 'host_prefix|site_number' (e.g. 'eeho.fa.us2|CX_1')
-    or legacy 'tenant|site_number' (e.g. 'eeho|CX_1') or tenant-only."""
+    or legacy 'tenant|site_number' (e.g. 'eeho|CX_1') or tenant-only.
+
+    2026-09 ASYNC MIGRATION (batch 2): every _get_session()/_get_requests_sync
+    call converted to await _get(...) (httpx's AsyncClient is already
+    constructed with follow_redirects=True globally, so the explicit
+    allow_redirects=True on the domain-discovery probe below is dropped —
+    same effective behavior, just the httpx-native way to express it; the
+    per-call timeout= kwargs are likewise dropped since the async client's
+    Timeout is already fixed at construction, same as every other
+    converted scraper). Multi-strategy domain-discovery logic, brute-force
+    region loop, and pagination all otherwise unchanged."""
     parts = slug.split("|")
     if len(parts) == 2:
         host_prefix, site_number = parts
@@ -1831,10 +1935,12 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
         for try_site in (site_number or "CX_1", "CX_1", "CX", "CX_2"):
             try:
                 probe_url = f"https://{tenant}.oraclecloud.com/hcmUI/CandidateExperience/en/sites/{try_site}/requisitions"
-                probe_r = _get_session().get(probe_url, headers={
-                    "User-Agent": random.choice(USER_AGENTS)}, timeout=15, allow_redirects=True)
+                probe_r = await _get(probe_url, headers={
+                    "User-Agent": random.choice(USER_AGENTS)})
+                if probe_r is None:
+                    continue
                 # Check if we got redirected to a URL with .fa.{region}
-                final_host = probe_r.url.split("/")[2] if probe_r.url else ""
+                final_host = str(probe_r.url).split("/")[2] if probe_r.url else ""
                 if ".fa." in final_host and "oraclecloud.com" in final_host:
                     real_prefix = final_host.replace(".oraclecloud.com", "")
                     base_api = f"https://{real_prefix}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
@@ -1851,10 +1957,10 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
                            "fa.ap1", "fa.ap2", "fa.ca1", "fa.sa1", "fa.me1"):
                 test_url = f"https://{tenant}.{region}.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
                 try:
-                    test_r = _get_session().get(test_url,
+                    test_r = await _get(test_url,
                         params={"onlyData": "true", "finder": f"findReqs;siteNumber={site_number or 'CX_1'},limit=1,offset=0"},
-                        headers=headers, timeout=8)
-                    if test_r.status_code == 200:
+                        headers=headers)
+                    if test_r is not None and test_r.status_code == 200:
                         try:
                             data = test_r.json()
                             items = data.get("items", [])
@@ -1880,7 +1986,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
                 "onlyData": "true",
                 "finder": f"findReqs;siteNumber={try_site},limit=1,offset=0",
             }
-            test_r = _get_requests_sync(base_api, params=test_params, headers=headers)
+            test_r = await _get(base_api, params=test_params, headers=headers)
             if test_r and test_r.status_code == 200:
                 try:
                     test_data = test_r.json()
@@ -1919,7 +2025,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
             "finder": f"findReqs;siteNumber={site_number},limit={limit},offset={offset}",
         }
 
-        r = _get_requests_sync(base_api, params=params, headers=headers)
+        r = await _get(base_api, params=params, headers=headers)
         if not r:
             log.debug(f"Oracle Cloud HCM: API request failed for {tenant}/{site_number} offset={offset}")
             break
@@ -1994,7 +2100,7 @@ def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 
         offset += limit
         # 2026-09: see module-level comment above _pace_host.
-        _pace_host(base_api)
+        await _pace_host_async(base_api)
 
     return all_jobs
 
@@ -2382,7 +2488,7 @@ _sf_robots_cache: dict[str, "urllib.robotparser.RobotFileParser | None"] = {}
 _sf_robots_lock = threading.Lock()
 
 
-def _sf_robots_parser(origin: str) -> "urllib.robotparser.RobotFileParser | None":
+async def _sf_robots_parser(origin: str) -> "urllib.robotparser.RobotFileParser | None":
     """Per-tenant robots.txt, cached per origin. Returns None (treated as
     allow-all below, same convention every other scraper here uses when a
     platform has no robots.txt at all) if it can't be fetched/parsed."""
@@ -2390,7 +2496,7 @@ def _sf_robots_parser(origin: str) -> "urllib.robotparser.RobotFileParser | None
         if origin in _sf_robots_cache:
             return _sf_robots_cache[origin]
     rp = None
-    r = _get_requests_sync(f"{origin}/robots.txt")
+    r = await _get(f"{origin}/robots.txt")
     if r is not None:
         rp = urllib.robotparser.RobotFileParser()
         try:
@@ -2402,8 +2508,8 @@ def _sf_robots_parser(origin: str) -> "urllib.robotparser.RobotFileParser | None
     return rp
 
 
-def _sf_robots_allows(origin: str, path: str) -> bool:
-    rp = _sf_robots_parser(origin)
+async def _sf_robots_allows(origin: str, path: str) -> bool:
+    rp = await _sf_robots_parser(origin)
     if rp is None:
         return True
     try:
@@ -2412,14 +2518,19 @@ def _sf_robots_allows(origin: str, path: str) -> bool:
         return True
 
 
-def scrape_successfactors(slug: str) -> list[dict]:
+async def scrape_successfactors(slug: str) -> list[dict]:
     """SAP SuccessFactors — Career Site Builder tenants only (legacy
     shared-host tenants stay unscraped, see block comment above). Slug is
     the tenant's own branded host (e.g. 'careers.swissre.com') — there's
     no vendor domain suffix or per-tenant ID to extract the way every
     other platform here has; discovery happens via node.py's
     _detect_successfactors_hit content-fingerprint check instead of a
-    URL_TO_SLUG converter."""
+    URL_TO_SLUG converter.
+
+    2026-09 ASYNC MIGRATION (batch 2): _sf_robots_parser/_sf_robots_allows
+    and the nested _scrape_locale helper all converted to async def,
+    awaiting _get(...) instead of calling _get_requests_sync. Behavior
+    otherwise unchanged."""
     host = (slug or "").strip().lower()
     if not host or "/" in host or " " in host:
         log.debug(f"Invalid SuccessFactors (successfactors) slug format: {slug}")
@@ -2427,11 +2538,11 @@ def scrape_successfactors(slug: str) -> list[dict]:
     origin = f"https://{host}"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    if not _sf_robots_allows(origin, "/search/"):
+    if not await _sf_robots_allows(origin, "/search/"):
         log.debug(f"SuccessFactors: {host} disallows /search/ via robots.txt; skipping")
         return []
 
-    r = _get_requests_sync(f"{origin}/search/", headers=headers)
+    r = await _get(f"{origin}/search/", headers=headers)
     if r is None:
         return []
     locales = list(dict.fromkeys(_SF_LOCALE_RE.findall(r.text)))[:_SF_MAX_LOCALES]
@@ -2439,13 +2550,13 @@ def scrape_successfactors(slug: str) -> list[dict]:
     seen_ids: set[str] = set()
     jobs: list[dict] = []
 
-    def _scrape_locale(locale: str | None):
+    async def _scrape_locale(locale: str | None):
         page = 1
         while page <= _SF_MAX_PAGES_PER_LOCALE:
             params = {"page": page}
             if locale:
                 params["locale"] = locale
-            resp = _get_requests_sync(f"{origin}/search/", headers=headers, params=params)
+            resp = await _get(f"{origin}/search/", headers=headers, params=params)
             if resp is None:
                 break
             matches = list(_SF_JOB_ROW_RE.finditer(resp.text))
@@ -2500,11 +2611,11 @@ def scrape_successfactors(slug: str) -> list[dict]:
                 })
             page += 1
             # 2026-09: see module-level comment above _pace_host.
-            _pace_host(origin)
+            await _pace_host_async(origin)
 
-    _scrape_locale(None)
+    await _scrape_locale(None)
     for loc in locales:
-        _scrape_locale(loc)
+        await _scrape_locale(loc)
 
     return jobs
 
@@ -4541,8 +4652,8 @@ _CSOD_CLOUD_RE = re.compile(r'"cloud"\s*:\s*"(https://[a-z0-9.\-]*api\.csod\.com
 _CSOD_PAGE_ID_BRUTE_FORCE_MAX = 20  # small, cheap range — matches career-ops' own fallback scope
 
 
-def _csod_search(search_url: str, headers: dict, site_id: int, page_id: int,
-                  page_number: int, page_size: int = 25) -> dict | None:
+async def _csod_search(search_url: str, headers: dict, site_id: int, page_id: int,
+                        page_number: int, page_size: int = 25) -> dict | None:
     """One POST to the anonymous job-search API. Returns the 'data' object
     on a real Success response, None on any failure/unexpected shape."""
     payload = {
@@ -4553,10 +4664,10 @@ def _csod_search(search_url: str, headers: dict, site_id: int, page_id: int,
         "radius": None, "postingsWithinDays": None,
         "customFieldCheckboxKeys": [], "customFieldDropdowns": [], "customFieldRadios": [],
     }
+    resp = await _post(search_url, json=payload, headers=headers)
+    if resp is None or resp.status_code != 200:
+        return None
     try:
-        resp = _get_session().post(search_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
-        if resp.status_code != 200:
-            return None
         data = resp.json()
     except Exception:
         return None
@@ -4566,11 +4677,15 @@ def _csod_search(search_url: str, headers: dict, site_id: int, page_id: int,
     return result if isinstance(result, dict) else None
 
 
-def scrape_csod(slug: str) -> list[dict]:
+async def scrape_csod(slug: str) -> list[dict]:
     """Cornerstone OnDemand — anonymous-bearer-JWT public JSON API.
     Slug format: 'tenant|careerSiteId' (careerSiteId from the URL path,
     e.g. 'cn360|3' — see discovery.py's _url_to_slug_csod). See the block
-    comment above for the full live-verified evidence trail."""
+    comment above for the full live-verified evidence trail.
+
+    2026-09 ASYNC MIGRATION (batch 2): _csod_search converted from
+    _get_session().post() to await _post(...); scrape_csod's own
+    bootstrap GET converted to await _get(...). Behavior unchanged."""
     parts = slug.split("|")
     if len(parts) != 2:
         log.debug(f"Invalid Cornerstone (csod) slug format: {slug}")
@@ -4582,7 +4697,7 @@ def scrape_csod(slug: str) -> list[dict]:
     site_id = int(site_id_str)
 
     boot_url = f"https://{tenant}.csod.com/ux/ats/careersite/{site_id}/home?c={tenant}"
-    r = _get_requests_sync(boot_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    r = await _get(boot_url, headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return []
 
@@ -4608,13 +4723,13 @@ def scrape_csod(slug: str) -> list[dict]:
     working_page_id = None
     first_page = None
     for candidate in page_id_candidates:
-        result = _csod_search(search_url, headers, site_id, candidate, page_number=1)
+        result = await _csod_search(search_url, headers, site_id, candidate, page_number=1)
         if result and result.get("totalCount", 0) > 0:
             working_page_id = candidate
             first_page = result
             break
         # 2026-09: see module-level comment above _pace_host.
-        _pace_host(search_url)
+        await _pace_host_async(search_url)
 
     if working_page_id is None or first_page is None:
         log.debug(f"Cornerstone: no working careerSitePageId found for {tenant} "
@@ -4664,8 +4779,8 @@ def scrape_csod(slug: str) -> list[dict]:
             break
         page_number += 1
         # 2026-09: see module-level comment above _pace_host.
-        _pace_host(search_url)
-        page_data = _csod_search(search_url, headers, site_id, working_page_id, page_number, page_size)
+        await _pace_host_async(search_url)
+        page_data = await _csod_search(search_url, headers, site_id, working_page_id, page_number, page_size)
 
     return jobs
 
@@ -5664,14 +5779,14 @@ async def scrape_board(ats: str, slug: str) -> list[dict]:
     errors per platform" line show the real reason — a handful of clean
     log lines, not one per board.
 
-    2026-09 ASYNC MIGRATION (batched): this dispatcher is now `async def`
-    and awaits SCRAPERS' entries. Every scrape_* function is being
-    converted to `async def` in ordered batches; until a given
-    platform's batch lands, its SCRAPERS entry is still a plain
-    (non-async) function. `fn(slug)` on a plain function returns the
-    list directly (not a coroutine) -- awaiting a non-awaitable would
-    raise, so this checks with asyncio.iscoroutine first and only awaits
-    when the call actually produced one. Once every scrape_* is
+    2026-09 ASYNC MIGRATION (batched — see module docstring): this
+    dispatcher is now `async def` and awaits SCRAPERS' entries. Every
+    scrape_* function is being converted to `async def` in ordered
+    batches; until a given platform's batch lands, its SCRAPERS entry is
+    still a plain (non-async) function. `fn(slug)` on a plain function
+    returns the list directly (not a coroutine) — awaiting a non-awaitable
+    would raise, so this checks with asyncio.iscoroutine first and only
+    awaits when the call actually produced one. Once every scrape_* is
     converted, this branch collapses to just `return await fn(slug)` and
     the isinstance check is removed."""
     fn = SCRAPERS.get(ats.lower())
