@@ -78,6 +78,24 @@ async def check_brassring() -> None:
         print(f"  _fetch_generic_description on this BrassRing page -> {len(generic_desc)} chars")
         if generic_desc:
             print(f"    first 400 chars: {generic_desc[:400]!r}")
+        # Structural probe: find recognizable description container
+        # class/id names in the RAW html (before any tag-stripping), and
+        # show where the job title's own text re-appears in the visible
+        # text (real body content usually starts there, after nav/cookie
+        # banner boilerplate).
+        for pat in (r'class="[^"]*(?:job-?description|jobDetail|description)[^"]*"',
+                    r'id="[^"]*(?:job-?description|jobDetail|description)[^"]*"',
+                    r'"description"\s*:\s*"', r'"JobDescription"\s*:\s*"',
+                    r'ng-bind[^=]*="[^"]*[Dd]esc'):
+            hits = re.findall(pat, html)
+            if hits:
+                print(f"    raw-html marker {pat!r}: {len(hits)} hit(s), e.g. {hits[0]!r}")
+        title_pos = text_only.find(job["title"].split(" - ")[0][:20]) if job["title"] else -1
+        second_title_pos = text_only.find(job["title"].split(" - ")[0][:20], title_pos + 1) if title_pos != -1 else -1
+        print(f"  title first appears at char {title_pos}, "
+              f"re-appears at {second_title_pos} (out of {len(text_only)} total)")
+        if second_title_pos != -1:
+            print(f"    text around 2nd occurrence: {text_only[second_title_pos:second_title_pos+400]!r}")
 
 
 def main() -> int:
