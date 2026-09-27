@@ -100,7 +100,31 @@ def _hard_exit_on_sigint(signum, frame):
     os._exit(130)
 
 
-signal.signal(signal.SIGINT, _hard_exit_on_sigint)
+# 2026-09 FIX (real production evidence): this used to call
+# signal.signal() unconditionally at MODULE IMPORT TIME -- fine for this
+# file's own normal use (crawl_i.py/crawl_ii.py import it once, early, on
+# the process's main thread, before any worker thread exists), but
+# Python only runs a module's top-level code once, on whichever thread
+# imports it FIRST. discovery.py's own live-check bridge
+# (_get_verification_module -> Verification/verification.py, which does
+# `import node` at ITS OWN top level) runs from inside a
+# ThreadPoolExecutor worker thread, not the main thread -- the first
+# worker to trigger that import chain hit `signal.signal()` from a
+# non-main thread, which unconditionally raises "signal only works in
+# main thread of the main interpreter", confirmed live in production
+# (see discovery.py's own bridge -- every platform's live-check fell back
+# to local-only checks because of this, exactly the same failure mode
+# the bridge's OTHER two bugs this session already caused, just a third,
+# different root cause). Guarded so a background-thread import degrades
+# gracefully (this file's own SIGINT fast-exit simply doesn't apply to
+# whatever OTHER program's main thread is already handling Ctrl-C in
+# that case -- nothing to fix there, it's not this import's job) while a
+# normal main-thread import keeps the exact same fast-exit behavior as
+# before.
+try:
+    signal.signal(signal.SIGINT, _hard_exit_on_sigint)
+except ValueError:
+    pass  # not the main thread of the main interpreter -- see comment above
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
