@@ -3192,12 +3192,63 @@ _verification_import_failed = False
 
 
 def _get_verification_module():
+    """Locate and import Verification/verification.py as a sibling of
+    this file's own directory tree.
+
+    2026-09 FIX: this used to assume exactly ONE fixed layout — that
+    discovery.py always lives one subfolder below the repo root (i.e. a
+    local `Main/` subfolder, like this project's own local working copy
+    on disk), and unconditionally walked up TWO directory levels
+    (dirname(dirname(...))) to reach what it assumed was the repo root
+    before looking for `Verification/` there. That assumption is WRONG
+    for the actual GitHub repo this project pushes to and runs CI
+    against: confirmed live by reading Discovery.yml's own run step
+    (`run: exec python discovery.py ...`, no `Main/` prefix, no
+    `working-directory:` override) and crawl.yml's (`pip install -r
+    requirements.txt`, `python crawl_i.py`, same thing) — every one of
+    those bare relative paths only resolves at all if the actual checked-
+    out repo has discovery.py/crawl_i.py/requirements.txt sitting
+    DIRECTLY AT REPO ROOT, not under a Main/ subfolder. So on the real CI
+    runner, this file's own directory (dirname(abspath(__file__))) IS
+    already the repo root, one level up is ONE TOO MANY, and the old
+    dirname(dirname(...)) walked straight past the checked-out repo
+    entirely, landing on a directory that never had a Verification/
+    folder in it at all — hence the exact symptom reported live:
+    "Could not load Verification/verification.py ... (No module named
+    'verification')", silently falling back to this file's own weaker
+    local checks for the whole run, every run, on CI.
+
+    Locally (this project's own working copy, and the linked device's
+    mirror of it) discovery.py DOES still live one level below the repo
+    root in a Main/ subfolder, so the OLD two-level-up math is still
+    right there. Both layouts are real and both must keep working, so
+    this now tries BOTH candidate roots (one level up, then two) and
+    picks whichever one actually contains a Verification/verification.py
+    file, rather than assuming either one blindly. This makes the lookup
+    self-correcting even if the layout shifts again later — the check is
+    "does Verification/verification.py exist under this candidate root",
+    not "which layout am I told to assume."
+    """
     global _verification_module, _verification_import_failed
     if _verification_module is not None or _verification_import_failed:
         return _verification_module
     try:
-        _crawler_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        verification_dir = os.path.join(_crawler_root, "Verification")
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        _candidate_roots = [
+            _this_dir,                                   # flat CI layout: discovery.py at repo root
+            os.path.dirname(_this_dir),                   # local layout: discovery.py under Main/
+        ]
+        verification_dir = None
+        for _root in _candidate_roots:
+            _candidate = os.path.join(_root, "Verification")
+            if os.path.isfile(os.path.join(_candidate, "verification.py")):
+                verification_dir = _candidate
+                break
+        if verification_dir is None:
+            raise ModuleNotFoundError(
+                "no Verification/verification.py found under either candidate root "
+                f"({[os.path.join(r, 'Verification') for r in _candidate_roots]})"
+            )
         if verification_dir not in sys.path:
             sys.path.insert(0, verification_dir)
         import verification as _verification_mod
