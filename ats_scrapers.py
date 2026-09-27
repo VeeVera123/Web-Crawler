@@ -2780,9 +2780,31 @@ async def scrape_successfactors(slug: str) -> list[dict]:
             # 2026-09: see module-level comment above _pace_host.
             await _pace_host_async(origin)
 
-    await _scrape_locale(None)
-    for loc in locales:
-        await _scrape_locale(loc)
+    # 2026-09 BUG FIX (explicit user report: "an ungodly amount of time is
+    # being spent crawling SAP SuccessFactors"): this used to await each
+    # locale pass ONE AT A TIME -- the default pass, then every locale in
+    # `locales` (up to _SF_MAX_LOCALES=10) in sequence, each internally
+    # paginating up to _SF_MAX_PAGES_PER_LOCALE=200 pages. For a large
+    # multinational tenant with several locales, that's potentially
+    # hundreds of fully sequential round-trips for ONE board, on a
+    # platform with no PLATFORM_WORKERS entry of its own (crawl_i.py's
+    # default of 8 concurrent boards) -- unlike every other pagination
+    # loop in this file, nothing here was actually using the async
+    # migration's concurrency at all. Each locale pass is independent
+    # (its own from-page-1 pagination, stopping on its own empty page)
+    # and safe to run concurrently: seen_ids/jobs are mutated with no
+    # `await` between the membership check and the add/append, so
+    # asyncio's cooperative scheduling can't interleave two locales
+    # mid-mutation. The existing per-host semaphore/pacing (_get/
+    # _pace_host_async) still caps real concurrent requests against this
+    # tenant's own host regardless of how many locale coroutines are
+    # "concurrently" trying. One (rare, cosmetic-only) behavior change:
+    # if the SAME job_id genuinely appears under two different locales,
+    # which locale's title/location wins is no longer deterministically
+    # "default, then locale list order" -- whichever coroutine's request
+    # happens to land first claims it. Every job still gets scraped
+    # exactly once either way.
+    await asyncio.gather(_scrape_locale(None), *(_scrape_locale(loc) for loc in locales))
 
     return jobs
 

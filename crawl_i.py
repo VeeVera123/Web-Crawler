@@ -155,6 +155,22 @@ PLATFORM_WORKERS = {
                                     # but unauthenticated public endpoint — stay modest
     "avature": 8,                  # per-customer subdomain, but templates vary wildly
                                     # and reliability is lower — keep it conservative
+
+    # 2026-09 BUG FIX (explicit user report: "an ungodly amount of time
+    # is being spent crawling SAP SuccessFactors"): successfactors had NO
+    # entry here at all, silently falling back to the default of 8 —
+    # same low cap as ashby (deliberately conservative for a stricter
+    # platform), despite successfactors being a per-tenant-subdomain
+    # platform like workday/icims/hrmdirect above, where different
+    # boards never share a host and so don't compete for the same
+    # per-host semaphore. Raised to match that tier now that
+    # scrape_successfactors's own locale passes were also parallelized
+    # (see that function's BUG FIX comment) — the two fixes are
+    # independent (per-board vs. within-a-board concurrency) and both
+    # needed: this alone wouldn't have helped a single huge multinational
+    # tenant board that was the slow one, and that alone wouldn't have
+    # helped many boards queuing behind an 8-wide cap.
+    "successfactors": 20,
 }
 
 
