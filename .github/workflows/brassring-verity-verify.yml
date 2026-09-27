@@ -1,0 +1,33 @@
+name: BrassRing VerityZone Verify
+
+# One-off, temporary workflow: verifies (against real, currently-live
+# BrassRing job detail pages) whether the "VerityZone:jobdescription" /
+# "AnswerValue" field marker an external LLM suggested actually exists
+# in the current markup, before writing any extraction code around it.
+# Removed once confirmed either way. Push-triggered (this branch only)
+# since the Claude GitHub App's token can't call workflow_dispatch.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [claude/cloud-lg97bh]
+    paths: [brassring_verity_verify.py, .github/workflows/brassring-verity-verify.yml]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run VerityZone verification
+        run: python brassring_verity_verify.py
