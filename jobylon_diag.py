@@ -1,46 +1,50 @@
-"""Round 4: job detail pages have 0/60 backlinks to /companies/<id>- (the
-marker the current scraper's fallback searches for), so that whole
-matching strategy is dead regardless of cap size. But sitemap-jobs.xml's
-9133 URL slugs visibly encode "<job_id>-<company-name-slug>-<job-title-
-slug>" (e.g. "385238-hema-teamleider-winkel", "356-adnoesis-java-
-utvecklare"). This checks whether the URL slug itself can identify a
-job's company (prefix match against the known company_slug, zero extra
-requests beyond the one sitemap fetch), and confirms a match is real by
-checking the fetched detail page's embedded jbl_company_id JS variable
-(the same one seen on the company page) against the expected numeric id.
-"""
+"""Round 5: confirmed the URL-slug company match works (varner matched
+11 real postings by "/jobs/<id>-varner-..." prefix, zero false positives
+expected since it's the full company slug). jbl_company_id isn't
+embedded on job detail pages though (only on company pages), so this
+inspects one matched detail page's actual structure -- JSON-LD, title,
+hiringOrganization -- to build the real parser and confirm the company
+match is genuine (not just a coincidental slug prefix)."""
 import re
 import sys
+import json
 import httpx
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
 
-KNOWN = [("2", "truecaller"), ("9", "meltwater-group"), ("20", "beemobile"), ("2160", "varner")]
+URL = "https://emp.jobylon.com/jobs/384887-varner-creative-studio-assistant/"
 
 
 def main() -> int:
-    client = httpx.Client(headers=HEADERS, follow_redirects=True, timeout=60, http2=True)
+    client = httpx.Client(headers=HEADERS, follow_redirects=True, timeout=30, http2=True)
+    r = client.get(URL)
+    print(f"status={r.status_code} bytes={len(r.content)}")
 
-    r = client.get("https://emp.jobylon.com/sitemap-jobs.xml")
-    job_urls = re.findall(r"<loc>([^<]+)</loc>", r.text)
-    print(f"sitemap-jobs.xml: {len(job_urls)} URLs\n")
+    ld_blocks = re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', r.text, re.I | re.S)
+    print(f"ld+json script blocks: {len(ld_blocks)}")
+    for b in ld_blocks:
+        try:
+            data = json.loads(b)
+        except Exception as e:
+            print(f"  PARSE FAILED: {e}")
+            print(f"  raw[:300]={b[:300]!r}")
+            continue
+        print(f"  parsed OK, top-level type: {data.get('@type') if isinstance(data, dict) else type(data)}")
+        print(json.dumps(data, indent=2)[:2000])
 
-    for company_id, company_slug in KNOWN:
-        print("=" * 70)
-        print(f"company {company_id}-{company_slug}")
-        print("=" * 70)
-        pat = re.compile(rf"/jobs/\d+-{re.escape(company_slug)}(-|/)", re.I)
-        matched = [u for u in job_urls if pat.search(u)]
-        print(f"  slug-prefix matches in sitemap: {len(matched)}")
-        for u in matched[:3]:
-            print(f"    {u}")
-        if matched:
-            jr = client.get(matched[0])
-            m = re.search(r"jbl_company_id\s*=\s*(\d+)", jr.text)
-            print(f"  first match's embedded jbl_company_id: {m.group(1) if m else None} "
-                  f"(expected {company_id}) -> {'MATCH' if m and m.group(1) == company_id else 'MISMATCH/MISSING'}")
-        print()
+    print("\n-- title --")
+    tm = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.I | re.S)
+    print(tm.group(1) if tm else None)
+
+    print("\n-- jbl_company_id / jbl_company anywhere? --")
+    for pat in (r"jbl_company_id\s*=\s*\d+", r"company_id[\"']?\s*[:=]\s*\d+", r'"company"\s*:\s*\{[^}]{0,200}'):
+        found = re.findall(pat, r.text, re.I)
+        print(f"  {pat!r}: {found[:3]}")
+
+    print("\n-- meta og: tags --")
+    for m in re.findall(r'<meta[^>]*property=["\']og:[^"\']+["\'][^>]*>', r.text, re.I):
+        print(f"  {m}")
 
     client.close()
     return 0
