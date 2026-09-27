@@ -1740,7 +1740,7 @@ async def scrape_smartrecruiters(slug: str) -> list[dict]:
 
 # ── Taleo (Oracle legacy) ────────────────────────────────
 
-def scrape_taleo(slug: str) -> list[dict]:
+async def scrape_taleo(slug: str) -> list[dict]:
     """Taleo REST API scraper — direct POST, no session/CSRF needed.
     Slug format: 'company|section|portal_id' or 'company|section' (portal auto-discovered)."""
     import json as _json
@@ -1751,7 +1751,7 @@ def scrape_taleo(slug: str) -> list[dict]:
         company, section = parts
         # Auto-discover portal ID from career page
         career_url = f"https://{company}.taleo.net/careersection/{section}/jobsearch.ftl"
-        r = _get_requests_sync(career_url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        r = await _get(career_url, headers={"User-Agent": random.choice(USER_AGENTS)})
         if not r:
             log.debug(f"Taleo: could not fetch career page for {company}/{section}")
             return []
@@ -1808,13 +1808,15 @@ def scrape_taleo(slug: str) -> list[dict]:
         }
 
         try:
-            resp = _get_session().post(
+            resp = await _post(
                 api_url,
                 params={"lang": "en", "portal": portal_id},
                 headers=headers,
                 data=_json.dumps(payload),
-                timeout=REQUEST_TIMEOUT,
             )
+            if resp is None:
+                log.debug(f"Taleo: API request failed for {company}")
+                break
             if resp.status_code != 200:
                 log.debug(f"Taleo: API returned {resp.status_code} for {company}")
                 break
@@ -1875,7 +1877,7 @@ def scrape_taleo(slug: str) -> list[dict]:
 
         page_no += 1
         # 2026-09: see module-level comment above _pace_host.
-        _pace_host(api_url)
+        await _pace_host_async(api_url)
 
     return all_jobs
 
@@ -2170,7 +2172,7 @@ async def scrape_oracle_cloud_hcm(slug: str) -> list[dict]:
 # search endpoint 500s on a cookie-less request. Fixed by priming the
 # session (one GET to Search/Home/Home) before the POST, same as a real
 # browser session would do.
-def scrape_brassring(slug: str) -> list[dict]:
+async def scrape_brassring(slug: str) -> list[dict]:
     """BrassRing search API scraper. Slug format: 'partner_id|site_id'."""
     parts = slug.split("|")
     if len(parts) != 2:
@@ -2220,23 +2222,24 @@ def scrape_brassring(slug: str) -> list[dict]:
     # left as a soft stop — that's "got some jobs, then couldn't get
     # more," not "got nothing."
     try:
-        prime = _get_session().get(
+        prime = await _get(
             home_url,
             params={"partnerid": partner_id, "siteid": site_id},
             headers={
                 "User-Agent": headers["User-Agent"],
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True,
         )
         # 2026-09 BUG FIX: check the priming request actually succeeded —
         # previously any status code (even a 4xx/5xx home-page response)
         # was treated as "primed" since only a raised exception was
         # caught, and a bad priming response silently carries forward
         # into every subsequent search POST failing the same way.
-        if prime.status_code >= 400:
-            raise RuntimeError(f"HTTP {prime.status_code}")
+        # (_get already raise_for_status()es internally and returns None
+        # on any non-2xx after retries — a None here IS the "bad status"
+        # case, no separate status_code check needed.)
+        if prime is None:
+            raise RuntimeError("session-priming GET returned no response")
     except Exception as e:
         raise RuntimeError(f"BrassRing: session-priming GET failed for {slug}: {e}") from e
 
@@ -2251,13 +2254,16 @@ def scrape_brassring(slug: str) -> list[dict]:
         )
 
         try:
-            r = _get_session().post(
+            r = await _post(
                 search_url,
                 data=form_data,
                 headers=headers,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
             )
+            if r is None:
+                if page == 1:
+                    raise RuntimeError(f"BrassRing: request failed for {slug} page 1")
+                log.debug(f"BrassRing: request failed for {slug} page {page}")
+                break
             if r.status_code != 200:
                 if page == 1:
                     raise RuntimeError(f"BrassRing: API returned {r.status_code} for {slug} page 1")
@@ -2319,7 +2325,7 @@ def scrape_brassring(slug: str) -> list[dict]:
 
         page += 1
         # 2026-09: see module-level comment above _pace_host.
-        _pace_host(search_url)
+        await _pace_host_async(search_url)
 
     return all_jobs
 
@@ -3199,7 +3205,7 @@ def scrape_hrmdirect(slug: str) -> list[dict]:
 
 # ── Softgarden ──────────────────────────────────────────
 
-def scrape_softgarden(slug: str) -> list[dict]:
+async def scrape_softgarden(slug: str) -> list[dict]:
     """Softgarden — HTML scraper of the public career microsite.
     Slug is the company's softgarden subdomain (e.g. 'acme' for
     acme.softgarden.io). There is NO public unauthenticated REST API —
@@ -3225,7 +3231,7 @@ def scrape_softgarden(slug: str) -> list[dict]:
     # that already match one of the first two.
     for path in ("/en/vacancies", "/en/vacancies/", "/vacancies", "/vacancies/",
                  "/en/jobs", "/en/jobs/"):
-        r = _get_requests_sync(f"https://{slug}.softgarden.io{path}", headers=headers)
+        r = await _get(f"https://{slug}.softgarden.io{path}", headers=headers)
         if r:
             break
     if not r:
@@ -3748,7 +3754,7 @@ def scrape_paylocity(slug: str) -> list[dict]:
 
 # ── Eploy ───────────────────────────────────────────────
 
-def scrape_eploy(slug: str) -> list[dict]:
+async def scrape_eploy(slug: str) -> list[dict]:
     """Eploy — HTML scrape of the public vacancy search page.
     Slug is the customer's Eploy portal subdomain (e.g. 'acme' for
     acme.eploy.net). No public JSON API; the vacancy list and detail
@@ -3767,7 +3773,7 @@ def scrape_eploy(slug: str) -> list[dict]:
         "/candidate/JobBoard/VacancySearchResults.aspx",
         "/vacancies",
     ):
-        r = _get_requests_sync(base + path, headers=headers)
+        r = await _get(base + path, headers=headers)
         if r:
             break
     if not r:
@@ -3789,7 +3795,7 @@ def scrape_eploy(slug: str) -> list[dict]:
     # wrapped in extra markup within its window, or could in principle grab
     # an unrelated sibling's text past the window boundary. Title/URL
     # extraction stays regex-based (single-field, no adjacency risk).
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
     vacancy_href_re = re.compile(r'/vacancy/(\d+)/')
     for anchor in soup.find_all("a", href=vacancy_href_re):
         path = (anchor.get("href") or "").strip()
@@ -3826,7 +3832,7 @@ def scrape_eploy(slug: str) -> list[dict]:
 
 # ── Folks HR (Folks Applicant Tracking System) ──────────
 
-def scrape_folkshr(slug: str) -> list[dict]:
+async def scrape_folkshr(slug: str) -> list[dict]:
     """Folks HR — HTML scrape of the public careers microsite.
     Slug is the company identifier on the shared board domain.
     No public API; listing and detail pages are server-rendered HTML.
@@ -3846,7 +3852,7 @@ def scrape_folkshr(slug: str) -> list[dict]:
     domain = None
     r = None
     for candidate in ("jobs.folksats.app", "jobs.glowinthecloud.com"):
-        r = _get_requests_sync(f"https://{candidate}/{slug}", headers=headers)
+        r = await _get(f"https://{candidate}/{slug}", headers=headers)
         if r:
             domain = candidate
             break
@@ -3888,7 +3894,7 @@ def scrape_folkshr(slug: str) -> list[dict]:
 
 # ── JobAdder ────────────────────────────────────────────
 
-def scrape_jobadder(slug: str) -> list[dict]:
+async def scrape_jobadder(slug: str) -> list[dict]:
     """JobAdder — HTML scrape of the hosted candidate job board.
     Slug encodes the JobAdder client-app id and board name as
     '{client_id}|{board_slug}' (both required to build the URL —
@@ -3926,7 +3932,7 @@ def scrape_jobadder(slug: str) -> list[dict]:
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     base = f"https://clientapps.jobadder.com/{client_id}/{board_slug}".rstrip("/")
 
-    r = _get_requests_sync(base, headers=headers)
+    r = await _get(base, headers=headers)
     if not r:
         # 2026-09 BUG FIX: was `return []` — see scrape_brassring's note
         # above for why that's indistinguishable from a genuinely empty
@@ -3940,7 +3946,7 @@ def scrape_jobadder(slug: str) -> list[dict]:
 
     # 2026-09: migrated to DOM-anchored location lookup — see
     # scrape_eploy's comment above / _bs4_find_location_near's docstring.
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = await asyncio.to_thread(BeautifulSoup, r.text, "html.parser")
     job_href_re = re.compile(r'/job/(\d+)')
     for anchor in soup.find_all("a", href=job_href_re):
         path = (anchor.get("href") or "").strip()
@@ -4039,7 +4045,7 @@ def scrape_jobvite(slug: str) -> list[dict]:
 
 # ── ADP Workforce Now (recruiting/staffing) ──────────────
 
-def scrape_adp(slug: str) -> list[dict]:
+async def scrape_adp(slug: str) -> list[dict]:
     """ADP Workforce Now — public career-center JSON API (no auth).
     Slug encodes both required identifiers as '{cid}|{ccId}':
       cid  = the customer id (query param 'cid')
@@ -4093,7 +4099,7 @@ def scrape_adp(slug: str) -> list[dict]:
     offset = 0
 
     while True:
-        r = _get_requests_sync(api_url, headers=headers, params={
+        r = await _get(api_url, headers=headers, params={
             "cid": cid, "ccId": cc_id, "$top": limit, "$skip": offset,
         })
         if not r:
@@ -4374,7 +4380,7 @@ def scrape_pageup(slug: str) -> list[dict]:
 
 # ── Pinpoint ────────────────────────────────────────────
 
-def scrape_pinpoint(slug: str) -> list[dict]:
+async def scrape_pinpoint(slug: str) -> list[dict]:
     """Pinpoint (UK) — public unauthenticated JSON API.
     Slug is the customer subdomain (e.g. 'acme' for acme.pinpointhq.com).
     Confirmed live: GET https://{slug}.pinpointhq.com/postings.json
@@ -4382,7 +4388,7 @@ def scrape_pinpoint(slug: str) -> list[dict]:
     url = f"https://{slug}.pinpointhq.com/postings.json"
     headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
 
-    r = _get_requests_sync(url, headers=headers)
+    r = await _get(url, headers=headers)
     if not r:
         return []
 
@@ -4499,9 +4505,17 @@ def scrape_flatchr(slug: str) -> list[dict]:
 _JOBYLON_MAX_DETAIL_FETCHES = 400
 _jobylon_sitemap_cache: dict[str, tuple[float, list[str]]] = {}
 _JOBYLON_SITEMAP_TTL = 3600  # seconds
+# 2026-09: under real async concurrency (PLATFORM_WORKERS lets several
+# Jobylon boards' coroutines run at once via asyncio.gather), multiple
+# boards could previously race to populate this shared, site-wide cache
+# on first access simultaneously — no correctness bug (dict assignment
+# is atomic), but wasteful, redundant duplicate sitemap.xml fetches.
+# This lock makes every board after the first simply await the
+# in-flight fetch's result instead of starting its own.
+_jobylon_sitemap_lock = asyncio.Lock()
 
 
-def _jobylon_sitemap_urls() -> list[str]:
+async def _jobylon_sitemap_urls() -> list[str]:
     """Fetch (and briefly cache) the site-wide job-URL list from
     emp.jobylon.com/sitemap.xml. Cached for _JOBYLON_SITEMAP_TTL seconds
     since this is the same site-wide resource for every company scraped
@@ -4510,41 +4524,49 @@ def _jobylon_sitemap_urls() -> list[str]:
     if cached and time.time() - cached[0] < _JOBYLON_SITEMAP_TTL:
         return cached[1]
 
-    # 2026-09 BUG FIX: this used to `return []` on a fetch/parse failure —
-    # identical to "the sitemap is just empty," which every one of the
-    # ~118 companies scraped this run would then silently inherit as "0
-    # jobs, active board" (see scrape_jobylon's own note below for the
-    # full explanation). Now raises instead, so scrape_jobylon's caller
-    # actually sees a failure. A short NEGATIVE cache (distinct from the
-    # long positive _JOBYLON_SITEMAP_TTL) stops a real outage from
-    # triggering a fresh failing fetch for every single company in the
-    # same run — one real request's worth of retrying, not ~118.
-    failed_cached = _jobylon_sitemap_cache.get("sitemap_failed_at")
-    if failed_cached and time.time() - failed_cached < 60:
-        raise RuntimeError("Jobylon: sitemap fetch failed recently, not retrying yet this run")
+    async with _jobylon_sitemap_lock:
+        # Re-check inside the lock — another board's coroutine may have
+        # already populated (or failed-cached) the sitemap while this one
+        # was waiting to acquire it.
+        cached = _jobylon_sitemap_cache.get("sitemap")
+        if cached and time.time() - cached[0] < _JOBYLON_SITEMAP_TTL:
+            return cached[1]
 
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    r = _get_requests_sync("https://emp.jobylon.com/sitemap.xml", headers=headers)
-    if not r:
-        _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
-        raise RuntimeError("Jobylon: sitemap.xml fetch failed")
+        # 2026-09 BUG FIX: this used to `return []` on a fetch/parse failure —
+        # identical to "the sitemap is just empty," which every one of the
+        # ~118 companies scraped this run would then silently inherit as "0
+        # jobs, active board" (see scrape_jobylon's own note below for the
+        # full explanation). Now raises instead, so scrape_jobylon's caller
+        # actually sees a failure. A short NEGATIVE cache (distinct from the
+        # long positive _JOBYLON_SITEMAP_TTL) stops a real outage from
+        # triggering a fresh failing fetch for every single company in the
+        # same run — one real request's worth of retrying, not ~118.
+        failed_cached = _jobylon_sitemap_cache.get("sitemap_failed_at")
+        if failed_cached and time.time() - failed_cached < 60:
+            raise RuntimeError("Jobylon: sitemap fetch failed recently, not retrying yet this run")
 
-    try:
-        root = ET.fromstring(r.content)
-    except Exception as e:
-        _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
-        raise RuntimeError(f"Jobylon: sitemap XML parse failed: {e}") from e
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        r = await _get("https://emp.jobylon.com/sitemap.xml", headers=headers)
+        if not r:
+            _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
+            raise RuntimeError("Jobylon: sitemap.xml fetch failed")
 
-    urls = []
-    for loc in root.iter():
-        if loc.tag.endswith("loc") and loc.text and "/jobs/" in loc.text:
-            urls.append(loc.text.strip())
+        try:
+            root = ET.fromstring(r.content)
+        except Exception as e:
+            _jobylon_sitemap_cache["sitemap_failed_at"] = time.time()
+            raise RuntimeError(f"Jobylon: sitemap XML parse failed: {e}") from e
 
-    _jobylon_sitemap_cache["sitemap"] = (time.time(), urls)
-    return urls
+        urls = []
+        for loc in root.iter():
+            if loc.tag.endswith("loc") and loc.text and "/jobs/" in loc.text:
+                urls.append(loc.text.strip())
+
+        _jobylon_sitemap_cache["sitemap"] = (time.time(), urls)
+        return urls
 
 
-def scrape_jobylon(slug: str) -> list[dict]:
+async def scrape_jobylon(slug: str) -> list[dict]:
     """Jobylon (Nordics) — no general-purpose public API (the documented
     'Feed API' needs a per-customer hash issued manually by Jobylon
     support, not self-service). Company LISTING pages
@@ -4565,7 +4587,7 @@ def scrape_jobylon(slug: str) -> list[dict]:
     company_path_marker = f"/companies/{company_id}-"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    job_urls = _jobylon_sitemap_urls()
+    job_urls = await _jobylon_sitemap_urls()
     if not job_urls:
         return []
 
@@ -4580,7 +4602,7 @@ def scrape_jobylon(slug: str) -> list[dict]:
             log.debug(f"Jobylon: hit detail-fetch cap ({_JOBYLON_MAX_DETAIL_FETCHES}) "
                       f"for {slug}, stopping")
             break
-        r = _get_requests_sync(job_url, headers=headers)
+        r = await _get(job_url, headers=headers)
         fetched += 1
         if not r:
             continue
@@ -5614,7 +5636,7 @@ _ISOLVEDHIRE_DOMAIN_ID_RE = re.compile(
 )
 
 
-def scrape_isolvedhire(slug: str) -> list[dict]:
+async def scrape_isolvedhire(slug: str) -> list[dict]:
     """isolvedhire (iSolved Hire) — public unauthenticated JSON API
     (2026-09, new platform). Slug is the customer subdomain
     (e.g. '1stccu' for 1stccu.isolvedhire.com).
@@ -5656,7 +5678,7 @@ def scrape_isolvedhire(slug: str) -> list[dict]:
     # came back empty at once, and needs to be visible, not silent.
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     board_url = f"https://{slug}.isolvedhire.com/jobs/"
-    r = _get_requests_sync(board_url, headers=headers)
+    r = await _get(board_url, headers=headers)
     if not r:
         raise RuntimeError(f"isolvedhire: board page fetch failed for {slug}")
 
@@ -5679,7 +5701,7 @@ def scrape_isolvedhire(slug: str) -> list[dict]:
     if not domain_id:
         raise RuntimeError(f"isolvedhire: domain_id match was empty for {slug}")
 
-    r2 = _get_requests_sync(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
+    r2 = await _get(f"https://{slug}.isolvedhire.com/core/jobs/{domain_id}",
                headers={**headers, "Accept": "application/json"},
                params={"getParams": '{"isInternal":0}'})
     if not r2:
