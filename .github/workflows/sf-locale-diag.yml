@@ -1,0 +1,27 @@
+name: SuccessFactors locale diagnostic (temporary)
+
+on:
+  push:
+    branches: [claude/cloud-lg97bh]
+    paths:
+      - "successfactors_locale_diag.py"
+      - ".github/workflows/sf-locale-diag.yml"
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install httpx
+        run: pip install "httpx[http2]"
+
+      - name: Run diagnostic
+        run: python successfactors_locale_diag.py
