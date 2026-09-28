@@ -1515,14 +1515,36 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
 # ── Location priority tiers (for sort order on upsert) ────
 # Lower number = higher priority. Populates jobs.location_priority (the
 # column already existed in the schema, unused, before this).
-PRIORITY_GLOBAL = 1   # explicit worldwide/anywhere/global-hiring signal
-PRIORITY_AFRICA = 2   # Africa (continent) or bare EMEA match
-PRIORITY_UNSURE = 3   # allowed fallback tier: the posting is not
-                       # positively global/EMEA/Africa-specific, but it also
-                       # has no disqualifying geographic restriction. This
-                       # includes bare Remote/N/A/blank locations and genuine
-                       # multi-region scope such as AMER + LATAM or APAC +
-                       # AMER. These roles are intentionally kept.
+PRIORITY_GLOBAL = 1   # ONLY a strictly, unambiguously worldwide/anywhere/
+                       # global-hiring signal — never just "several regions",
+                       # however many.
+PRIORITY_AFRICA = 2   # 2026-09 BUG FIX (explicit user instruction: precise
+                       # definition of what earns each priority number) —
+                       # covers FOUR cases, not just "Africa or bare EMEA":
+                       #   1. Africa as a continent (not a single member
+                       #      country)
+                       #   2. Bare EMEA, no narrower qualifier
+                       #   3. EMEA + 2 or more OTHER business regions
+                       #      together (e.g. "EMEA, LATAM, AMER")
+                       #   4. 2 or more business regions together WITHOUT
+                       #      EMEA (e.g. "LATAM, AMER", "APAC, AMER, LATAM")
+                       # Cases 3/4 used to be bucketed at PRIORITY_UNSURE
+                       # ("genuine multi-region scope... intentionally kept"
+                       # at the uncertain tier) — that was wrong per the
+                       # corrected policy: multi-region breadth (2+ distinct
+                       # regions, whether or not EMEA is one of them) is
+                       # exactly what this tier is for, not a reason to
+                       # under-rank it as merely "uncertain". See
+                       # _has_multi_region_breadth's two call sites below and
+                       # LOCATION_SYSTEM_PROMPT's MATCH_AFRICA section.
+PRIORITY_UNSURE = 3   # allowed fallback tier, but a NARROW one: only when
+                       # the posting is truly, truly without ANY location
+                       # restriction signal AND does not meet the
+                       # PRIORITY_AFRICA multi-region bar above either — bare
+                       # Remote/N/A/blank locations, or genuine ambiguity
+                       # after reading the whole posting. A job naming 2+
+                       # distinct business regions is PRIORITY_AFRICA (2),
+                       # never this tier — see PRIORITY_AFRICA's comment.
 
 
 # ── Africa-continent detection ────────────────────────────
@@ -1803,16 +1825,21 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # rejected the job as no_match: exactly backwards, since 2+ regions is
     # stronger evidence of broad hiring than bare EMEA alone, not weaker.
     # Checked BEFORE the bare-EMEA residue check for that reason — this is
-    # a superset case, not a competing one. Bucketed at PRIORITY_AFRICA,
-    # the same tier bare EMEA already uses (broader than a single region,
-    # narrower than an explicit "global"/"worldwide" claim).
+    # a superset case, not a competing one.
+    #
+    # 2026-09 BUG FIX (explicit user instruction, precise priority-number
+    # policy): this used to return PRIORITY_UNSURE here despite this exact
+    # block's OWN comment already saying "bucketed at PRIORITY_AFRICA" —
+    # a real comment/code mismatch, not just a wording gap. Corrected to
+    # match both the comment's original intent and the user's explicit
+    # rule: 2+ distinct business regions named together (EMEA + others, OR
+    # 2+ regions with no EMEA at all — "LATAM, AMER", "APAC, AMER, LATAM")
+    # is PRIORITY_AFRICA (2), the same tier bare EMEA/Africa-continent use
+    # — broader than a single region, narrower than an explicit
+    # "global"/"worldwide" claim, but a genuine MATCH, not merely
+    # "uncertain, kept anyway". See PRIORITY_AFRICA's own comment above.
     if _has_multi_region_breadth(loc):
-        # Multiple regions are allowed, but they are not equivalent to an
-        # explicit global/EMEA/Africa-wide claim. Keep them in the uncertain
-        # tier exactly as requested: AMER + LATAM, APAC + AMER, MENA + APAC,
-        # etc. are broad enough to retain, but not strong enough for priority
-        # 1 or 2.
-        return "unsure", PRIORITY_UNSURE, "multi_region"
+        return "match", PRIORITY_AFRICA, None
 
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
     if re.search(r"\bemea\b", loc_lower):
@@ -1866,8 +1893,13 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
         return "match", PRIORITY_GLOBAL, None
     if _text_has_africa_or_emea_evidence(full_text):
         return "match", PRIORITY_AFRICA, None
+    # 2026-09 BUG FIX: see the identical fix + rationale on the
+    # location-FIELD multi-region check above (step 2.5) — same policy
+    # correction applies here for multi-region evidence found in the JD
+    # TEXT instead of the location field: PRIORITY_AFRICA (2), not
+    # PRIORITY_UNSURE (3).
     if _has_multi_region_breadth(full_text):
-        return "unsure", PRIORITY_UNSURE, "multi_region"
+        return "match", PRIORITY_AFRICA, None
 
     # ── 5. Bare "Remote" with nothing else qualifying it → UNSURE
     # (send to AI). Any OTHER text attached to "remote" (a city, a
@@ -1937,11 +1969,14 @@ LOCATION_SYSTEM_PROMPT = """\
 You decide whether a job posting should be included in a list of roles \
 open to candidates working remotely from ANYWHERE in the world, from \
 across the EMEA region (Europe/Middle East/Africa), from anywhere on \
-the African continent, OR across two or more business regions such as \
-AMER + LATAM, APAC + AMER, or EMEA + APAC. A role with no geographic \
+the African continent, OR across two or more business regions together \
+(such as AMER + LATAM, APAC + AMER, EMEA + APAC, or EMEA + LATAM + AMER — \
+ANY 2 or more of AMER/LATAM/APAC/EMEA/MENA/ANZ/NAM/DACH named together, \
+whether or not EMEA is one of them). A role with no geographic \
 restriction signal at all is also allowed and must be labeled UNCERTAIN \
-(priority 3). A single narrow region such as APAC or LATAM by itself, a \
-single country, or a single city/state is not allowed.
+(priority 3). A single narrow region such as APAC or LATAM BY ITSELF \
+(nothing else named alongside it), a single country, or a single \
+city/state is not allowed.
 
 Every job you're shown here already has an ambiguous LOCATION field \
 (bare "Remote", blank, or a placeholder like "N/A") — the location field \
@@ -1957,18 +1992,30 @@ reason to say MATCH_GLOBAL or MATCH_AFRICA — read for real content, and \
 if there genuinely isn't any after reading everything provided, say \
 UNCERTAIN rather than guessing.
 
-Respond with exactly one of these four labels per job:
+Respond with exactly one of these four labels per job. The three tiers \
+below (MATCH_GLOBAL, MATCH_AFRICA, UNCERTAIN) are STRICT and mutually \
+exclusive by exactly how broad the posting's hiring scope is — read all \
+three definitions before choosing, since "broad enough to keep" is not \
+the same question as "which tier":
 
-MATCH_GLOBAL — positive evidence of genuinely worldwide hiring:
+MATCH_GLOBAL (priority 1) — ONLY for STRICTLY, unambiguously worldwide \
+roles. Positive evidence of genuinely global hiring:
 - Description or title explicitly says "global", "worldwide", "anywhere \
   in the world", "international", "work from anywhere", "distributed \
   team", "location-agnostic", "hire in any country", or a clear \
   equivalent
-- Hiring across many countries spanning multiple continents (not just \
-  "a few offices" — genuine "we hire wherever you are" language)
+- Hiring across many countries spanning multiple continents in a way \
+  that clearly means "wherever you are" (not just "a few offices" or a \
+  specific named list of 2-4 business regions — a named list of regions, \
+  however many, is the MATCH_AFRICA tier below, not this one, unless the \
+  posting ALSO makes an explicit worldwide/anywhere claim on top of it)
 - No geographic restrictions AND the role/company context clearly \
   supports global openness (e.g. "our fully remote team spans 30+ \
   countries across 6 continents")
+Do NOT use MATCH_GLOBAL just because a posting names several regions. \
+"We hire across EMEA, LATAM, APAC, and AMER" names four regions — that \
+is MATCH_AFRICA (priority 2), not global, unless the posting separately \
+states an actual worldwide/anywhere claim.
 
 DO NOT treat as MATCH_GLOBAL evidence — generic company-branding/EEO \
 boilerplate that is NOT about candidate eligibility at all:
@@ -1990,15 +2037,25 @@ boilerplate that is NOT about candidate eligibility at all:
   nothing — keep reading for something more concrete, and if nothing \
   concrete exists anywhere in the posting, say UNCERTAIN.
 
-MATCH_AFRICA — positive evidence of hiring across the African continent \
-(as a continent, not a single African country) or across the EMEA region:
-- Description or title explicitly says "Africa" (as a hiring region, \
-  not just "we have a Cape Town office") or names 2+ different African \
-  countries as places the company hires from
-- Description or title says "EMEA" with no further single-country/city \
-  qualifier narrowing it back down to one place
-- A single African country alone (e.g. "based in Nigeria", "Kenya \
-  office only") is NOT enough — that's one country, not the continent
+MATCH_AFRICA (priority 2) — covers FOUR distinct cases. This tier is \
+BROADER than just "Africa or bare EMEA" — read all four:
+1. The African continent, not a single member country: description or \
+   title explicitly says "Africa" (as a hiring region, not just "we \
+   have a Cape Town office") or names 2+ different African countries as \
+   places the company hires from. A single African country alone (e.g. \
+   "based in Nigeria", "Kenya office only") is NOT enough — that's one \
+   country, not the continent.
+2. Bare EMEA: description or title says "EMEA" with no further \
+   single-country/city qualifier narrowing it back down to one place.
+3. EMEA PLUS 2 or more OTHER business regions named together (e.g. \
+   "EMEA, LATAM, AMER" or "EMEA and APAC and LATAM").
+4. 2 or more business regions named together WITHOUT EMEA (e.g. "LATAM, \
+   AMER", "APAC, AMER, LATAM"). Genuine multi-region breadth is \
+   MATCH_AFRICA even when EMEA isn't one of the named regions — it \
+   takes 2 or more DIFFERENT regions together to qualify. A SINGLE \
+   region alone (just "APAC" alone, just "LATAM" alone, with nothing \
+   else named) is NOT this tier — see NO_MATCH's "restricted to a \
+   single region" bullet below.
 
 NO_MATCH — evidence of a country- or narrow-region-specific restriction:
 - "must be authorized/eligible to work in [country]"
@@ -2053,23 +2110,29 @@ NO_MATCH — evidence of a country- or narrow-region-specific restriction:
   words "must be located in" — the bare state tag itself IS the \
   restriction; don't wait for boilerplate phrasing to confirm it.
 
-UNCERTAIN — ALLOWED, priority 3. Use this when the posting has no \
-confirmed disqualifying geographic restriction and no stronger priority-1/2 \
-signal:
+UNCERTAIN (priority 3) — ALLOWED, but the NARROWEST tier: use this ONLY \
+when the posting is truly, truly without ANY geographic restriction \
+signal AND does not meet the MATCH_AFRICA multi-region bar above either. \
+This is not a safe default for "broad but I'm not sure how broad" — a \
+posting naming 2+ business regions together is MATCH_AFRICA (see case 4 \
+above), never UNCERTAIN, no matter how the regions are combined:
 - Location is blank, N/A, unspecified, or otherwise absent, and the JD does \
   not reveal a restriction
 - Location is simply "Remote" with no geographic qualifier and the JD does \
   not reveal a restriction
-- The role is explicitly open across two or more business regions (for \
-  example AMER + LATAM, APAC + AMER, LATAM + Europe) but does not make a \
-  stronger worldwide/EMEA/Africa-continent claim
 - Ambiguous language remains after reading the entire posting, but there is \
-  no concrete country/region restriction
+  no concrete country/region restriction AND no multi-region/EMEA/Africa/ \
+  global evidence either
 
 IMPORTANT: When there is no description or no clear signal, say \
 UNCERTAIN. Do NOT default to MATCH_GLOBAL or MATCH_AFRICA — only use \
 those when you see real positive evidence, per the definitions above. \
-When in doubt, UNCERTAIN.
+But do NOT default to UNCERTAIN either when a posting clearly meets one \
+of the four MATCH_AFRICA cases (Africa continent, bare EMEA, EMEA + \
+other regions, or 2+ regions without EMEA) — that specific, nameable \
+evidence is exactly what MATCH_AFRICA is for, not a reason to hedge. \
+When genuinely in doubt after checking all four MATCH_AFRICA cases and \
+the NO_MATCH list above, then say UNCERTAIN.
 
 Respond ONLY with lines like:
 1 MATCH_GLOBAL
