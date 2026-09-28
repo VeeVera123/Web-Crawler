@@ -136,18 +136,21 @@ log = logging.getLogger("crawl_ii")
 SOURCE_PIPELINE = "crawl_ii"
 DEFAULT_ATS_LABEL = "in_house"  # jobs.ats value for every Crawl II row — free-text column, no CHECK
 
-CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "150"))
+CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "300"))
 # 2026-09 (explicit user report: crawl_ii "took a shit ton of time...
-# increase concurrency"): raised 60 -> 150. Every target here is an
-# independent company's own career site (not a shared ATS platform), so
-# unlike crawl_i.py's per-platform host semaphores there's no single host
-# whose concurrency needs protecting from this bump — node.new_connector()
-# already sizes its aiohttp connector off node.py's own CRAWL_CONCURRENCY
-# (400, giving a 550-connection pool), comfortably above this. See
-# PARSE_POOL_WORKERS just below for the other half of this fix — raising
-# fetch concurrency alone without also widening the CPU-bound parse pool
-# just moves the bottleneck instead of removing it.
-PARSE_POOL_WORKERS = int(os.environ.get("CRAWL_II_PARSE_WORKERS", "32"))
+# increase concurrency"; raised 60 -> 150, then explicit follow-up "bump
+# concurrency to 300... node.py safely did 400, it can do 300 here"):
+# every target here is an independent company's own career site (not a
+# shared ATS platform), so unlike crawl_i.py's per-platform host
+# semaphores there's no single host whose concurrency needs protecting
+# from this bump — node.new_connector() already sizes its aiohttp
+# connector off node.py's own CRAWL_CONCURRENCY (400, giving a
+# 550-connection pool), comfortably above this. See PARSE_POOL_WORKERS
+# just below for the other half of this fix — raising fetch concurrency
+# alone without also widening the CPU-bound parse pool just moves the
+# bottleneck instead of removing it; scaled proportionally with this bump
+# (32 -> 64) for the same reason.
+PARSE_POOL_WORKERS = int(os.environ.get("CRAWL_II_PARSE_WORKERS", "64"))
 TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_II_TIME_BUDGET_MINUTES", "300"))
 BATCH_SIZE = int(os.environ.get("CRAWL_II_BATCH_SIZE", "300"))  # pages per micro-batch before pushing
 MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches for one company
