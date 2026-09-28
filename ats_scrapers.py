@@ -2774,6 +2774,44 @@ async def scrape_successfactors(slug: str) -> list[dict]:
                 )
                 if prop_location:
                     location = prop_location
+
+                # 2026-09 BUG FIX (real production data, explicit user
+                # report — "how the hell is classifier letting in roles
+                # like these" on a job whose title/URL plainly named a US
+                # city; confirmed via Supabase this is NOT a classifier
+                # bug at all: ~20+ diverse real tenants -- Spire Energy,
+                # Sportfive, Ottobock, FUCHS, NIBCO, Kemira, and more --
+                # all showed location="" with the ENTIRE card's text
+                # glued into title, the classifier just working with
+                # garbage input it had no way to detect as garbage). The
+                # PROPID fallback above assumes SAP's
+                # data-careersite-propertyid attribute is present, but
+                # for every one of these real tenants it isn't -- that
+                # fallback essentially never fires for them. These
+                # whole-card-in-one-<a> tenants consistently render
+                # TITLE, then LOCATION, then DATE/department/company,
+                # each separated by a large whitespace run (multi-line
+                # indentation between DOM elements) rather than the
+                # single spaces a real multi-word title has. Splitting
+                # the raw tag-stripped text on runs of 2+ whitespace
+                # characters recovers this positionally: segment 0 is
+                # always the real title, segment 1 (when present) is
+                # always the location, confirmed against every one of
+                # the ~20 diverse real tenants pulled live from
+                # Supabase. Only runs when location is STILL blank after
+                # the PROPID check above, so a tenant with proper
+                # propertyid tagging is unaffected either way.
+                if not location:
+                    raw_segments = [
+                        s.strip() for s in re.split(
+                            r"\s{2,}", unescape(re.sub(r"<[^>]+>", " ", title_html))
+                        ) if s.strip()
+                    ]
+                    if len(raw_segments) >= 2:
+                        if not prop_fields.get("title"):
+                            title = raw_segments[0]
+                        location = raw_segments[1]
+
                 jobs.append({
                     "title": title,
                     "url": f"{origin}{job_path}",
