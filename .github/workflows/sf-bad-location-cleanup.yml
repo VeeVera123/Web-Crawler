@@ -1,0 +1,30 @@
+name: SuccessFactors bad-location cleanup (temporary)
+
+on:
+  push:
+    branches: [claude/cloud-lg97bh]
+    paths:
+      - "sf_bad_location_cleanup.py"
+      - ".github/workflows/sf-bad-location-cleanup.yml"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Archive Notion pages for the 173 bad-location SuccessFactors jobs
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python sf_bad_location_cleanup.py
