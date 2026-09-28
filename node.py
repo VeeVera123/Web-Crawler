@@ -3030,14 +3030,30 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     return len(tasks), elapsed, rate, time_budget_hit
 
 
-def new_parse_pool() -> concurrent.futures.Executor:
+def new_parse_pool(max_workers: int | None = None) -> concurrent.futures.Executor:
     """ThreadPoolExecutor (2026-08, was ProcessPoolExecutor) — see
     PARSE_WORKERS' comment above for why. Every caller (people_data_labs_probe.py,
     opendata_probe.py, common_crawl_probe.py, bigpicture_probe.py,
     github_org_probe.py, host_crawl_v2.py) just passes this straight into
     crawl_batch()'s loop.run_in_executor() call, so no caller-side changes
-    were needed for this fix to take effect."""
-    return concurrent.futures.ThreadPoolExecutor(max_workers=PARSE_WORKERS)
+    were needed for this fix to take effect.
+
+    2026-09 (explicit user report: crawl_ii "took a shit ton of time...
+    increase concurrency"): max_workers is optional, defaulting to the
+    shared PARSE_WORKERS constant exactly as before for every existing
+    caller above (none of them pass it). crawl_ii.py now passes its own
+    larger value — its network-fetch concurrency (CRAWL_CONCURRENCY) was
+    raised well past PARSE_WORKERS=16, and every fetched page's CPU-bound
+    JSON-LD/heuristic parsing funnels through this SAME pool, so a fetch
+    concurrency bump with no matching parse-pool bump just moves the
+    bottleneck from the network to here instead of actually finishing
+    faster. Kept as an explicit per-caller override rather than raising
+    the shared default, since every other caller here (opendata,
+    common_crawl, bigpicture, people_data_labs, workable) runs at its own
+    established, separately-tuned fetch concurrency and doesn't need — or
+    necessarily want — a bigger shared parse pool changing its own
+    CPU/memory footprint on the runner."""
+    return concurrent.futures.ThreadPoolExecutor(max_workers=max_workers or PARSE_WORKERS)
 
 
 def new_connector() -> aiohttp.TCPConnector:

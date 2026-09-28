@@ -136,7 +136,18 @@ log = logging.getLogger("crawl_ii")
 SOURCE_PIPELINE = "crawl_ii"
 DEFAULT_ATS_LABEL = "in_house"  # jobs.ats value for every Crawl II row — free-text column, no CHECK
 
-CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "60"))
+CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "150"))
+# 2026-09 (explicit user report: crawl_ii "took a shit ton of time...
+# increase concurrency"): raised 60 -> 150. Every target here is an
+# independent company's own career site (not a shared ATS platform), so
+# unlike crawl_i.py's per-platform host semaphores there's no single host
+# whose concurrency needs protecting from this bump — node.new_connector()
+# already sizes its aiohttp connector off node.py's own CRAWL_CONCURRENCY
+# (400, giving a 550-connection pool), comfortably above this. See
+# PARSE_POOL_WORKERS just below for the other half of this fix — raising
+# fetch concurrency alone without also widening the CPU-bound parse pool
+# just moves the bottleneck instead of removing it.
+PARSE_POOL_WORKERS = int(os.environ.get("CRAWL_II_PARSE_WORKERS", "32"))
 TIME_BUDGET_MINUTES = int(os.environ.get("CRAWL_II_TIME_BUDGET_MINUTES", "300"))
 BATCH_SIZE = int(os.environ.get("CRAWL_II_BATCH_SIZE", "300"))  # pages per micro-batch before pushing
 MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches for one company
@@ -1620,8 +1631,12 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     time_budget_seconds = TIME_BUDGET_MINUTES * 60
     # Shared ThreadPoolExecutor for every CPU-bound parse call this shard
     # makes (see extract_postings_from_page's docstring) — same
-    # new_parse_pool() node.py's own crawl engine uses.
-    parse_pool = node.new_parse_pool()
+    # new_parse_pool() node.py's own crawl engine uses, but sized to THIS
+    # file's own (now higher) fetch concurrency via the explicit override
+    # (see PARSE_POOL_WORKERS above) rather than node.py's shared
+    # PARSE_WORKERS default, which every OTHER new_parse_pool() caller
+    # still gets unchanged.
+    parse_pool = node.new_parse_pool(max_workers=PARSE_POOL_WORKERS)
 
     try:
         try:
