@@ -115,7 +115,7 @@ from classifier import (  # noqa: E402
 # platform without a dedicated fetcher — which covers most of this file's
 # unsupported/"wild" company career sites) needed no new code to support
 # this; the only gap was that nothing here ever called it.
-from ats_scrapers import enrich_application_questions  # noqa: E402
+from ats_scrapers import enrich_application_questions_async  # noqa: E402
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
     get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
@@ -1514,7 +1514,14 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     # classifier's hard overrides and the AI stage catch country-restricted
     # roles that the bare description text alone wouldn't reveal.
     log.info("  enriching application questions across all ATS platforms...")
-    role_matched = enrich_application_questions(role_matched)
+    # 2026-09 BUG FIX (real production crash: "RuntimeError: asyncio.run()
+    # cannot be called from a running event loop", shard aborted entirely):
+    # crawl_batch_ii is itself `async def`, already running inside
+    # _run_shard's own asyncio.run() -- calling the sync
+    # enrich_application_questions() wrapper (which starts its OWN nested
+    # asyncio.run()) from here always raised. Awaiting the async core
+    # directly is the fix; see that function's own BUG FIX note.
+    role_matched = await enrich_application_questions_async(role_matched)
 
     global_jobs, confidences = _filter_locations(role_matched)
     report_stats["global_jobs"] = len(global_jobs)

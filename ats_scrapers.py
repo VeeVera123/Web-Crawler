@@ -7005,10 +7005,20 @@ DESCRIPTION_FETCHERS = {
 MIN_REAL_DESC_CHARS = 150
 
 
-def enrich_descriptions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
-    """Fetch individual job descriptions for platforms that don't
-    include them in the list API. Call this AFTER the role filter
-    so we only fetch details for the small subset of CSM/AM jobs.
+async def enrich_descriptions_async(jobs: list[dict], max_workers: int = 150) -> list[dict]:
+    """Async-native core of enrich_descriptions — call this directly with
+    `await` from code that's ALREADY running inside an event loop (e.g. a
+    future crawl_ii.py caller; crawl_i.py itself calls the sync wrapper
+    below instead). Does NOT call asyncio.run() or aclose_http_client()
+    itself — only a caller that fully owns the event loop's lifecycle
+    should close the shared httpx client, since this coroutine has no way
+    to know whether the loop it's running on has other work planned in it
+    afterward. See enrich_application_questions_async's BUG FIX note for
+    the real production crash (crawl_ii.py) this split was made to fix.
+
+    Fetch individual job descriptions for platforms that don't include
+    them in the list API. Call this AFTER the role filter so we only
+    fetch details for the small subset of CSM/AM jobs.
 
     Modifies jobs in place and returns the same list.
 
@@ -7017,23 +7027,20 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
     more important than the [scrape_board fix] we just did"): this used
     to be a flat ThreadPoolExecutor(max_workers=20) regardless of how
     many jobs needed enrichment, capping this whole stage's concurrency
-    an order of magnitude below the board-scrape phase's ~250-900. Now
-    runs on its own asyncio.run() (same one-loop-for-everything pattern
-    as scrape_all()/_scrape_and_cleanup — a shared httpx.AsyncClient
-    can't cross event loops, so creation, use, and aclose_http_client()
-    all happen inside this one call), dispatching each job's fetcher via
-    asyncio.iscoroutinefunction(): the now-async _fetch_generic_description
-    (15 of DESCRIPTION_FETCHERS' 25 platform entries, plus every Stage-2
-    fallback below) is awaited directly on the shared async client; every
-    still-sync specialized fetcher (iCIMS, Workday, SmartRecruiters,
-    Taleo, Teamtailor, ADP, Paycom, SuccessFactors, BrassRing) runs via
-    asyncio.to_thread() exactly like scrape_board's own still-sync
-    scrapers — never called inline, so a slow one can't block any other
-    job's fetch. max_workers raised 20 -> 150: this stage only runs on
-    the much smaller "jobs missing a description/location after role
-    filtering" subset, not the full board count, so a wide semaphore
-    here doesn't risk the same host-level overload the scrape phase's
-    per-host semaphore already guards against independently."""
+    an order of magnitude below the board-scrape phase's ~250-900.
+    Dispatches each job's fetcher via asyncio.iscoroutinefunction(): the
+    now-async _fetch_generic_description (15 of DESCRIPTION_FETCHERS' 25
+    platform entries, plus every Stage-2 fallback below) is awaited
+    directly on the shared async client; every still-sync specialized
+    fetcher (iCIMS, Workday, SmartRecruiters, Taleo, Teamtailor, ADP,
+    Paycom, SuccessFactors, BrassRing) runs via asyncio.to_thread()
+    exactly like scrape_board's own still-sync scrapers — never called
+    inline, so a slow one can't block any other job's fetch. max_workers
+    raised 20 -> 150: this stage only runs on the much smaller "jobs
+    missing a description/location after role filtering" subset, not the
+    full board count, so a wide semaphore here doesn't risk the same
+    host-level overload the scrape phase's per-host semaphore already
+    guards against independently."""
     to_enrich = [j for j in jobs
                  if j.get("source_ats") in DESCRIPTION_FETCHERS
                  and (len(j.get("description_snippet") or "") < MIN_REAL_DESC_CHARS
@@ -7060,111 +7067,106 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
                 await asyncio.to_thread(_pace_host, job["url"])
         return desc
 
-    async def _run():
-        asyncio.get_running_loop().set_default_executor(
-            ThreadPoolExecutor(max_workers=max_workers)
-        )
-        sem = asyncio.Semaphore(max_workers)
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=max_workers)
+    )
+    sem = asyncio.Semaphore(max_workers)
+
+    async def _fetch_one(job):
+        # 2026-09: track whether THIS fetch actually improved the
+        # job, not just whether the job has any description
+        # afterward — a job that qualified for to_enrich because
+        # it had a short-but-real description (< MIN_REAL_DESC_CHARS,
+        # still non-empty) already had a truthy description_snippet
+        # BEFORE this fetch ran, so checking the after-state alone
+        # counted it as "enriched" even when the fetch found nothing
+        # new. That inflated the "Enriched X/Y" count above what
+        # this pass actually accomplished.
+        before_len = len(job.get("description_snippet") or "")
+        fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
         try:
-            async def _fetch_one(job):
-                # 2026-09: track whether THIS fetch actually improved the
-                # job, not just whether the job has any description
-                # afterward — a job that qualified for to_enrich because
-                # it had a short-but-real description (< MIN_REAL_DESC_CHARS,
-                # still non-empty) already had a truthy description_snippet
-                # BEFORE this fetch ran, so checking the after-state alone
-                # counted it as "enriched" even when the fetch found nothing
-                # new. That inflated the "Enriched X/Y" count above what
-                # this pass actually accomplished.
-                before_len = len(job.get("description_snippet") or "")
-                fetcher = DESCRIPTION_FETCHERS[job["source_ats"]]
-                try:
-                    desc = await _call_fetcher(fetcher, job, sem)
-                    # Only replace the existing description if the fetch
-                    # produced something at least as long — a detail-page
-                    # fetch can itself fail partially (rate-limited,
-                    # JS-rendered shell, changed DOM) and return a
-                    # short/empty result. Since this function can now run
-                    # on jobs that already have a short-but-real
-                    # description (see MIN_REAL_DESC_CHARS), never let a
-                    # worse result clobber a better one already in hand.
-                    if desc and len(desc) >= before_len:
-                        job["description_snippet"] = desc
-                        salary = _extract_salary(desc)
-                        if salary and not job.get("salary"):
-                            job["salary"] = salary
-                except Exception as e:
-                    log.debug(f"Failed to enrich {job.get('url', '')}: {e}")
-                return len(job.get("description_snippet") or "") > before_len
+            desc = await _call_fetcher(fetcher, job, sem)
+            # Only replace the existing description if the fetch
+            # produced something at least as long — a detail-page
+            # fetch can itself fail partially (rate-limited,
+            # JS-rendered shell, changed DOM) and return a
+            # short/empty result. Since this function can now run
+            # on jobs that already have a short-but-real
+            # description (see MIN_REAL_DESC_CHARS), never let a
+            # worse result clobber a better one already in hand.
+            if desc and len(desc) >= before_len:
+                job["description_snippet"] = desc
+                salary = _extract_salary(desc)
+                if salary and not job.get("salary"):
+                    job["salary"] = salary
+        except Exception as e:
+            log.debug(f"Failed to enrich {job.get('url', '')}: {e}")
+        return len(job.get("description_snippet") or "") > before_len
 
-            improved_flags = await asyncio.gather(
-                *(_fetch_one(j) for j in to_enrich), return_exceptions=True
-            )
-            enriched = sum(1 for f in improved_flags if f is True)
+    improved_flags = await asyncio.gather(
+        *(_fetch_one(j) for j in to_enrich), return_exceptions=True
+    )
+    enriched = sum(1 for f in improved_flags if f is True)
 
-            # ── Fallback population: fetch job URL directly for ANY job
-            # still missing a JD ── Some ATS APIs don't return
-            # descriptions, but the job page itself has one. This catches
-            # Workday, iCIMS, SuccessFactors, etc. where the API fetch
-            # failed.
-            #
-            # NOTE: this scans ALL of `jobs`, not just `to_enrich` above,
-            # and uses a STRICTER definition of "missing" (completely
-            # empty description_snippet) than to_enrich's (short OR
-            # missing-location). So a job can be in to_enrich, fail to
-            # improve there, and still NOT show up here — e.g. it was
-            # only missing LOCATION (already had a full description), or
-            # it had a short-but-real description the fetch just
-            # couldn't beat. The reconciliation numbers in the summary
-            # below make that explicit.
-            #
-            # 2026-09 BUG FIX: this MUST be computed here, after Stage 1's
-            # gather above has actually run and mutated jobs in place —
-            # computing it earlier (before Stage 1 started) meant it read
-            # every to_enrich job's PRE-fetch empty description_snippet,
-            # not just the ones Stage 1 genuinely failed to fill in. That
-            # put every to_enrich job through a WASTED second fetch, and
-            # — since _fetch_fallback below has no length comparison
-            # (unlike Stage 1's), unlike a job that already had a real
-            # Stage 1 result — a worse Stage 2 result could silently
-            # clobber a perfectly good Stage 1 one. Caught locally via a
-            # deliberately flaky-fetcher test before this ever shipped.
-            still_missing = [j for j in jobs if not j.get("description_snippet")
-                             and j.get("url")]
-            from_enrich_pass = 0
-            other_platforms = 0
-            if still_missing:
-                still_missing_urls = {j["url"] for j in still_missing}
-                from_enrich_pass = sum(1 for j in to_enrich if j.get("url") in still_missing_urls)
-                other_platforms = len(still_missing) - from_enrich_pass
+    # ── Fallback population: fetch job URL directly for ANY job
+    # still missing a JD ── Some ATS APIs don't return
+    # descriptions, but the job page itself has one. This catches
+    # Workday, iCIMS, SuccessFactors, etc. where the API fetch
+    # failed.
+    #
+    # NOTE: this scans ALL of `jobs`, not just `to_enrich` above,
+    # and uses a STRICTER definition of "missing" (completely
+    # empty description_snippet) than to_enrich's (short OR
+    # missing-location). So a job can be in to_enrich, fail to
+    # improve there, and still NOT show up here — e.g. it was
+    # only missing LOCATION (already had a full description), or
+    # it had a short-but-real description the fetch just
+    # couldn't beat. The reconciliation numbers in the summary
+    # below make that explicit.
+    #
+    # 2026-09 BUG FIX: this MUST be computed here, after Stage 1's
+    # gather above has actually run and mutated jobs in place —
+    # computing it earlier (before Stage 1 started) meant it read
+    # every to_enrich job's PRE-fetch empty description_snippet,
+    # not just the ones Stage 1 genuinely failed to fill in. That
+    # put every to_enrich job through a WASTED second fetch, and
+    # — since _fetch_fallback below has no length comparison
+    # (unlike Stage 1's), unlike a job that already had a real
+    # Stage 1 result — a worse Stage 2 result could silently
+    # clobber a perfectly good Stage 1 one. Caught locally via a
+    # deliberately flaky-fetcher test before this ever shipped.
+    still_missing = [j for j in jobs if not j.get("description_snippet")
+                     and j.get("url")]
+    from_enrich_pass = 0
+    other_platforms = 0
+    if still_missing:
+        still_missing_urls = {j["url"] for j in still_missing}
+        from_enrich_pass = sum(1 for j in to_enrich if j.get("url") in still_missing_urls)
+        other_platforms = len(still_missing) - from_enrich_pass
 
-            fallback_ok = 0
-            if still_missing:
-                async def _fetch_fallback(job):
-                    try:
-                        async with sem:
-                            desc = await _fetch_generic_description(job)
-                        if desc:
-                            job["description_snippet"] = desc
-                            salary = _extract_salary(desc)
-                            if salary and not job.get("salary"):
-                                job["salary"] = salary
-                    except Exception as e:
-                        log.debug(f"Fallback fetch failed {job.get('url', '')}: {e}")
-                    if job.get("url"):
-                        await _pace_host_async(job["url"])
-                    return bool(job.get("description_snippet"))
+    fallback_ok = 0
+    if still_missing:
+        async def _fetch_fallback(job):
+            try:
+                async with sem:
+                    desc = await _fetch_generic_description(job)
+                if desc:
+                    job["description_snippet"] = desc
+                    salary = _extract_salary(desc)
+                    if salary and not job.get("salary"):
+                        job["salary"] = salary
+            except Exception as e:
+                log.debug(f"Fallback fetch failed {job.get('url', '')}: {e}")
+            if job.get("url"):
+                await _pace_host_async(job["url"])
+            return bool(job.get("description_snippet"))
 
-                fallback_flags = await asyncio.gather(
-                    *(_fetch_fallback(j) for j in still_missing), return_exceptions=True
-                )
-                fallback_ok = sum(1 for f in fallback_flags if f is True)
+        fallback_flags = await asyncio.gather(
+            *(_fetch_fallback(j) for j in still_missing), return_exceptions=True
+        )
+        fallback_ok = sum(1 for f in fallback_flags if f is True)
 
-            return enriched, fallback_ok, len(still_missing), from_enrich_pass, other_platforms
-        finally:
-            await aclose_http_client()
-
-    enriched, fallback_ok, still_missing_count, from_enrich_pass, other_platforms = asyncio.run(_run())
+    still_missing_count = len(still_missing)
     not_improved = len(to_enrich) - enriched
 
     # NOTE: Location-only pass removed — it was redundant.
@@ -7211,6 +7213,24 @@ def enrich_descriptions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
     log.info("\n".join(summary_lines))
 
     return jobs
+
+
+def enrich_descriptions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
+    """Sync wrapper around enrich_descriptions_async, for callers with NO
+    event loop already running (crawl_i.py calls this — its own scrape_all()
+    asyncio.run() has already returned and torn its loop down by the time
+    this runs). A caller that's already inside a running loop must await
+    enrich_descriptions_async directly instead — see that function's own
+    docstring, and enrich_application_questions_async's BUG FIX note for
+    the real crash (crawl_ii.py: "asyncio.run() cannot be called from a
+    running event loop") this split exists to prevent."""
+    async def _run_and_close():
+        try:
+            return await enrich_descriptions_async(jobs, max_workers)
+        finally:
+            await aclose_http_client()
+
+    return asyncio.run(_run_and_close())
 
 
 # ── Application Question Enrichment ─────────────────────
@@ -8353,8 +8373,29 @@ def _fetch_wild_questions(job: dict) -> str:
     return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
 
 
-def enrich_application_questions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
-    """Fetch application questions for EVERY job that has a URL.
+async def enrich_application_questions_async(jobs: list[dict], max_workers: int = 150) -> list[dict]:
+    """Async-native core of enrich_application_questions — call this
+    directly with `await` from code that's ALREADY running inside an
+    event loop. Does NOT call asyncio.run() or aclose_http_client()
+    itself — only a caller that fully owns the event loop's lifecycle
+    should close the shared httpx client.
+
+    2026-09 BUG FIX (real production crash: crawl_ii.py's crawl_batch_ii
+    — itself `async def`, running under _run_shard's own asyncio.run() —
+    called the old sync-only enrich_application_questions(), which tried
+    to start ANOTHER asyncio.run() from inside that already-running loop:
+    "RuntimeError: asyncio.run() cannot be called from a running event
+    loop", confirmed live, shard aborted entirely with zero questions
+    enriched and the coroutine never awaited. crawl_i.py's own call site
+    never hit this because it calls the sync wrapper from plain code
+    AFTER scrape_all()'s own loop has already returned and torn down —
+    crawl_ii.py is a genuinely different calling shape (async all the way
+    through), not a bug in how it calls this, so the fix is here: split
+    into this awaitable core plus the thin sync wrapper below, so each
+    caller can use whichever fits its own context instead of this
+    function silently assuming it owns the process's only event loop.
+
+    Fetch application questions for EVERY job that has a URL.
 
     2026-09 ROUND 2 (explicit user instruction: "Make sure that all jobs
     have their application questions fetched. All of them. ... everything
@@ -8492,19 +8533,13 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 150) -> li
     per_platform_hits: dict[str, int] = {}
     crashed_platforms: dict[str, int] = {}
 
-    async def _run():
-        asyncio.get_running_loop().set_default_executor(
-            ThreadPoolExecutor(max_workers=max_workers)
-        )
-        sem = asyncio.Semaphore(max_workers)
-        try:
-            return await asyncio.gather(
-                *(_fetch_one(j, sem) for j in to_enrich), return_exceptions=True
-            )
-        finally:
-            await aclose_http_client()
-
-    results = asyncio.run(_run())
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=max_workers)
+    )
+    sem = asyncio.Semaphore(max_workers)
+    results = await asyncio.gather(
+        *(_fetch_one(j, sem) for j in to_enrich), return_exceptions=True
+    )
     for job, res in zip(to_enrich, results):
         if isinstance(res, Exception):
             # _fetch_one already catches every expected failure mode
@@ -8545,3 +8580,20 @@ def enrich_application_questions(jobs: list[dict], max_workers: int = 150) -> li
                     f"{', '.join(f'{k}:{v}' for k, v in sorted(crashed_platforms.items()))}")
 
     return jobs
+
+
+def enrich_application_questions(jobs: list[dict], max_workers: int = 150) -> list[dict]:
+    """Sync wrapper around enrich_application_questions_async, for
+    callers with NO event loop already running (crawl_i.py — its own
+    scrape_all() asyncio.run() has already returned by the time this
+    runs). crawl_ii.py's crawl_batch_ii is itself `async def` and must
+    `await enrich_application_questions_async(...)` directly instead —
+    see that function's BUG FIX note for the crash calling this sync
+    wrapper from inside a running loop causes."""
+    async def _run_and_close():
+        try:
+            return await enrich_application_questions_async(jobs, max_workers)
+        finally:
+            await aclose_http_client()
+
+    return asyncio.run(_run_and_close())
