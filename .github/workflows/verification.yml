@@ -40,6 +40,19 @@ name: Verification Engine — archive_i + archive_ii
 # still technically reachable, only whether it has produced a single
 # role (any role — not scoped to CSM/AM) in the last ~6 months. See
 # verification.py's run_stale_role_cleanup.
+#
+# 2026-09 BUG FIX (real production failure: "ModuleNotFoundError: No
+# module named 'httpx'" on every one of this workflow's three jobs):
+# each "Install dependencies" step here had its own hand-picked package
+# list (aiohttp/aiodns/selectolax/requests/beautifulsoup4/python-dotenv)
+# instead of `pip install -r requirements.txt` — written back when
+# verification.py's `from ats_scrapers import scrape_board` pulled in a
+# fully requests-based ats_scrapers.py, never updated when that file's
+# async migration made `httpx[http2]` a hard, unconditional import-time
+# dependency. Same staleness-vs-requirements.txt bug class as the
+# slug_registry/table-name issue already fixed above — replaced all
+# three with `pip install -r requirements.txt` so this can't drift out
+# of sync with ats_scrapers.py's real import graph again.
 on:
   schedule:
     # GitHub Actions cron has no native "every N days" — a day-of-month
@@ -126,7 +139,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+        run: pip install -r requirements.txt
 
       - name: "Verify shard ${{ matrix.shard }}/${{ github.event.inputs.shard_count || '20' }}"
         env:
@@ -170,7 +183,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+        run: pip install -r requirements.txt
 
       - name: Download every shard's summary
         uses: actions/download-artifact@v4
@@ -210,7 +223,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install aiohttp aiodns selectolax requests beautifulsoup4 python-dotenv
+        run: pip install -r requirements.txt
 
       - name: "Stale-role cleanup (~183 days, no role found)"
         env:
