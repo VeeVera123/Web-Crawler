@@ -6,6 +6,7 @@ on:
       - "diag_probe2.py"
       - "diag_probe3.py"
       - "diag_probe4.py"
+      - "diag_probe5.py"
       - ".github/workflows/tmp-diag-probe2.yml"
 
 jobs:
@@ -18,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python diag_probe4.py
+      - run: python diag_probe5.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
