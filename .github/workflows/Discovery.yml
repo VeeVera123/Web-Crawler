@@ -37,9 +37,11 @@ jobs:
   # that the budget it was freed for no longer exists. Latmay stays a
   # single unsharded job, same single-Parquet-file reasoning as always.
   #
-  # 19-job matrix over 11 sources (was 23 jobs/12 sources — ct_logs'
-  # 4 shards removed 2026-09, see that source's own comment below), all
-  # running in parallel — instead of one
+  # 16-job matrix over 9 sources (was 23 jobs/12 sources — ct_logs' 4
+  # shards removed 2026-09, and feashliaa/kalil/openpostings/github
+  # (registries) collapsed from 4 separate jobs into 1 `github_combined`
+  # job, both changes explicit user requests — see those sources' own
+  # comments below), all running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -134,19 +136,26 @@ jobs:
   # CHECK constraint already includes 'ct_logs' (added when this source
   # was first built) so no migration is needed to turn it back on.
   #
-  # 2026-09: added github (single job, unsharded — a short,
-  # manually-curated list of known public GitHub repos, currently just
-  # datascry/openroles, that publish pre-built ATS tenant/slug JSON files;
-  # fetched via jsDelivr's CDN mirror, no GitHub API/auth involved, so no
-  # extra secret or rate-limit concern here). Most mapped platforms are a
-  # free local reassembly from that repo's own metadata (workday, brassring,
-  # oracle_cloud_hcm); csod needs one bounded live per-tenant HTTP resolve
-  # instead (see --csod-resolve-budget-minutes, default 15min — cheap
-  # enough this job doesn't need its own timeout override). See
-  # discovery.py's module docstring (source 11) and
-  # fetch_github_registries_slugs' own docstring for the full research
-  # trail, including why successfactors and UKG/ultipro are deliberately
-  # excluded rather than mapped.
+  # GitHub repo registries (a short, manually-curated list of known public
+  # GitHub repos, currently just datascry/openroles, that publish
+  # pre-built ATS tenant/slug JSON files; fetched via jsDelivr's CDN
+  # mirror, no GitHub API/auth involved, so no extra secret or rate-limit
+  # concern here). Most mapped platforms are a free local reassembly from
+  # that repo's own metadata (workday, brassring, oracle_cloud_hcm); csod
+  # needs one bounded live per-tenant HTTP resolve instead (see
+  # --csod-resolve-budget-minutes, default 15min). See discovery.py's
+  # module docstring (source 11) and fetch_github_registries_slugs' own
+  # docstring for the full research trail, including why successfactors
+  # and UKG/ultipro are deliberately excluded rather than mapped.
+  #
+  # 2026-09 FOLLOW-UP (explicit user request): this job used to run
+  # standalone (--source github). It's now folded into the single
+  # `github_combined` job above alongside feashliaa/kalil/openpostings —
+  # all 4 upsert under the same consolidated 'Github' archive_i.source
+  # value already (see discovery.py's CONSOLIDATION comment), so running
+  # them as 4 separate matrix jobs/runners wasn't actually consolidated in
+  # the sense meant. See discovery.py's "FOLLOW-UP" comment on its 4
+  # `if args.source in (X, "github_combined", "all")` blocks.
   #
   # 2026-09: Open Jobs Daily H.F (huggingface.co/datasets/Yigit-Karaman/
   # open-jobs-daily, 15 Parquet files across 2 configs, CC0-1.0) added as
@@ -189,12 +198,8 @@ jobs:
       fail-fast: false   # one bad source/shard shouldn't cancel the rest
       matrix:
         include:
-          - source: feashliaa
-            name: feashliaa
-          - source: kalil
-            name: kalil
-          - source: openpostings
-            name: openpostings
+          - source: github_combined
+            name: Github (Feashliaa+Kalil+OpenPostings+Registries)
           - source: commoncrawl
             name: common crawl 1
             extra_args: "--cc-shard 0 --cc-total-shards 3"
@@ -217,8 +222,6 @@ jobs:
             name: Latmay H.F
           - source: icims_hrjobs
             name: iCIMS HR Jobs
-          - source: github
-            name: GitHub registries
           - source: edwarddgao
             name: Edward H.F 1
             extra_args: "--hf-shard 0 --hf-total-shards 3"

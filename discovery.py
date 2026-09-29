@@ -98,6 +98,20 @@ Sources:
   give for free (see main()'s "GITHUB (consolidated source) BREAKDOWN"
   log block).
 
+  2026-09 FOLLOW-UP (explicit user request — "I hope the shards ... have
+  been merged not just on supabase but on github too so they are all
+  upserted from the same runner"): the consolidation above only changed
+  the Supabase label; Discovery.yml's matrix still ran feashliaa/kalil/
+  openpostings/github (registries) as 4 SEPARATE jobs/runners, which
+  wasn't actually consolidated in the sense meant. Added a new
+  `--source github_combined` value that runs all 4 fetch+upsert passes
+  sequentially in ONE process — see the 4 `if args.source in (X,
+  "github_combined", "all")` conditions below. Discovery.yml's matrix now
+  has ONE "Github" job using `--source github_combined` instead of the 4
+  separate ones. The 4 individual --source values (feashliaa/kalil/
+  openpostings/github) still work unchanged, for manual/debugging use —
+  only the CI matrix wiring changed.
+
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
   ATS-hosted directly (they're the company's OWN careers page), so it
@@ -145,6 +159,7 @@ Usage:
     python discovery.py --source theirstack    # TheirStack only
     python discovery.py --source httparchive   # HTTP Archive (BigQuery) only
     python discovery.py --source github        # GitHub repo registries only
+    python discovery.py --source github_combined # Feashliaa+kalil+OpenPostings+GitHub registries, ONE process (what Discovery.yml's CI matrix runs now)
     python discovery.py --source commoncrawl --cc-shard 0 --cc-total-shards 2
     python discovery.py --source commoncrawl --cc-shard 1 --cc-total-shards 2
     python discovery.py --dry-run              # count without writing
@@ -6972,15 +6987,22 @@ def main():
     )
     parser.add_argument(
         "--source",
-        choices=["feashliaa", "kalil", "openpostings", "commoncrawl",
-                 "wayback", "ct_logs", "theirstack", "httparchive",
-                 "latmay", "edwarddgao", "openjobsdaily",
+        choices=["feashliaa", "kalil", "openpostings", "github_combined",
+                 "commoncrawl", "wayback", "ct_logs", "theirstack",
+                 "httparchive", "latmay", "edwarddgao", "openjobsdaily",
                  "icims_hrjobs", "github", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
              "to 'wayback' 2026-09 when this source was generalized to "
-             "every ATS platform, not just ADP.",
+             "every ATS platform, not just ADP. 'github_combined' "
+             "(2026-09, new) runs feashliaa+kalil+openpostings+github "
+             "(GitHub registries) in ONE process/runner — see main()'s "
+             "comment on those 4 blocks and Discovery.yml's matrix, which "
+             "uses this instead of 4 separate matrix jobs now that all 4 "
+             "upsert under the same consolidated 'Github' archive_i.source "
+             "value. The 4 individual --source values still work too, for "
+             "manual/debugging use.",
     )
     parser.add_argument(
         "--crawls", type=int, default=6,
@@ -7174,7 +7196,7 @@ def main():
     github_repo_summary: dict[str, tuple[int, int | None]] = {}
 
     # Source 1: Feashliaa (50k+ slugs for 6 platforms)
-    if args.source in ("feashliaa", "all"):
+    if args.source in ("feashliaa", "github_combined", "all"):
         log.info("\n--- FEASHLIAA (6 platforms, 50k+ slugs) ---")
         fa_slugs = fetch_feashliaa_slugs()
         fa_total = sum(len(s) for s in fa_slugs.values())
@@ -7189,7 +7211,7 @@ def main():
             github_repo_summary["Feashliaa"] = (fa_total, None)
 
     # Source 2: kalil0321/ats-scrapers (26 platforms, CSV inventories)
-    if args.source in ("kalil", "all"):
+    if args.source in ("kalil", "github_combined", "all"):
         log.info("\n--- KALIL0321 (26 platforms, CSV inventories) ---")
         ka_slugs = fetch_kalil_slugs()
         ka_total = sum(len(s) for s in ka_slugs.values())
@@ -7204,7 +7226,7 @@ def main():
             github_repo_summary["Kalil"] = (ka_total, None)
 
     # Source 3: OpenPostings (110k+ companies across 80+ ATSs)
-    if args.source in ("openpostings", "all"):
+    if args.source in ("openpostings", "github_combined", "all"):
         log.info("\n--- OPENPOSTINGS (110k+ companies) ---")
         op_slugs = fetch_openpostings_slugs()
         op_total = sum(len(s) for s in op_slugs.values())
@@ -7352,7 +7374,7 @@ def main():
     # Source 11: GitHub repo registries (pre-built ATS slug files from
     # known public repos, e.g. datascry/openroles — see
     # fetch_github_registries_slugs docstring)
-    if args.source in ("github", "all"):
+    if args.source in ("github", "github_combined", "all"):
         log.info("\n--- GITHUB REGISTRIES (pre-built ATS slug files) ---")
         gr_slugs = fetch_github_registries_slugs(
             csod_resolve_time_budget_minutes=args.csod_resolve_budget_minutes)
