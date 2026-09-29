@@ -1,7 +1,7 @@
 """
 CRAWL III — direct job-board consumer for stapply.ai's bulk, pre-scraped
 CSVs (Phenom, UKG, SAP/SuccessFactors, Dayforce, Eightfold, Recruitee,
-MokaHR).
+MokaHR, welcometothejungle).
 
 2026-09 (explicit user instruction): a third, independent crawl pipeline,
 alongside Crawl I (crawl_i.py — known-ATS live scanner) and Crawl II
@@ -29,7 +29,7 @@ per-job HTTP round-trip at all, for either the initial scrape OR the
 enrichment step Crawl I/II both need — literally "just regex [and AI], not
 fetching," per the explicit design instruction this file was built from.
 
-SEVEN SOURCES, WHY EACH IS GENUINE INCREMENTAL COVERAGE:
+EIGHT SOURCES, WHY EACH IS GENUINE INCREMENTAL COVERAGE:
   - phenom          — no scraper/discovery support of our own at all.
   - ukg             — no scraper/discovery support of our own at all.
   - successfactors (the "SAP" ask — stapply has no separate "sap" key) —
@@ -59,8 +59,22 @@ SEVEN SOURCES, WHY EACH IS GENUINE INCREMENTAL COVERAGE:
                       cross-tenant endpoint found. stapply's CSV (31,943
                       rows, confirmed live via manifest.json) is the only
                       practical way to get this coverage. NOTE this source
-                      is the exception to the "English/US-market" language
-                      assumption below — see LANGUAGE FILTERING.
+                      is one of two exceptions to the "English/US-market"
+                      language assumption below — see LANGUAGE FILTERING.
+  - welcometothejungle — 2026-09 (explicit user request): a French-market
+                      job board/ATS, not one of our supported platforms.
+                      Confirmed live this session: stapply's own
+                      welcometothejungle rows link to
+                      welcometothejungle.com's OWN job page (apply_url is
+                      always empty, ats_type is literally
+                      "welcometothejungle") — never to an underlying
+                      ATS we could otherwise slug-discover — so there is
+                      no possible discovery.py registry path here, unlike
+                      the other GitHub-registry-style sources; this stapply
+                      CSV is the only practical way to get this coverage,
+                      same reasoning as moka. Also the second exception to
+                      the "English/US-market" language assumption below —
+                      most welcometothejungle postings are French.
 
 LANGUAGE FILTERING (explicit, deliberate, and SCOPED TO THIS FILE ONLY):
 no language-detection library is used here. classifier.py's role-keyword
@@ -68,20 +82,22 @@ regexes (CS_KEYWORDS/AM_KEYWORDS/etc. — see keyword_classify_role) are
 English-only phrases ("customer success", "account manager", ...) — a
 non-English title essentially never matches, so it's filtered out at
 filter_roles() before it ever reaches location classification, same as
-any other title that isn't CSM/AM/PM/OM. Six of these seven sources are
+any other title that isn't CSM/AM/PM/OM. Six of these eight sources are
 enterprise HR-suite platforms whose postings skew heavily English/US-
-market, so the volume this misses is expected to be small. The seventh,
-moka, is the opposite case: MokaHR's customer base (Trip.com, SHEIN,
-Zhihu, BIGO, ...) skews heavily Chinese-market/Chinese-language, so this
-source's postings will mostly self-filter out at filter_roles() as non-
-English titles rather than genuinely lacking CSM/AM/PM/OM roles — this is
-expected and fine (same self-filtering behavior, just a much higher miss
-rate for this one source than the other six), not a bug to chase. Per
-explicit instruction, none of this is a general policy. A future
-EURES/Bundesagentur/jobs.ch/jobbank.gc.ca-style batch (non-English-market
-job boards) remains a SEPARATE, not-yet-authorized effort that would need
-a real language-ID step (langdetect/fastText) — do not extend this file's
-English-only assumption to that batch.
+market, so the volume this misses is expected to be small. The other two,
+moka and welcometothejungle, are the opposite case: MokaHR's customer base
+(Trip.com, SHEIN, Zhihu, BIGO, ...) skews heavily Chinese-market/Chinese-
+language, and welcometothejungle skews heavily French-market/French-
+language — both sources' postings will mostly self-filter out at
+filter_roles() as non-English titles rather than genuinely lacking
+CSM/AM/PM/OM roles — this is expected and fine (same self-filtering
+behavior, just a much higher miss rate for these two sources than the
+other six), not a bug to chase. Per explicit instruction, none of this is
+a general policy. A future EURES/Bundesagentur/jobs.ch/jobbank.gc.ca-style
+batch (non-English-market job boards) remains a SEPARATE, not-yet-
+authorized effort that would need a real language-ID step (langdetect/
+fastText) — do not extend this file's English-only assumption to that
+batch.
 
 AGGRESSIVE STALENESS POLICY (explicit instruction — "today or latest the
 day before"): stapply's CSV schema has NO closed/status/is_active field —
@@ -181,6 +197,16 @@ STAPPLY_SOURCES = {
     # source-agnostic _row_to_job()/parse_source_csv() with no special-
     # casing needed, same as the other 6.
     "moka": f"{STAPPLY_BASE}/moka/jobs.csv",
+    # 2026-09 (explicit user request): welcometothejungle — confirmed live
+    # this session (temporary probe workflow, since fetched and removed)
+    # that stapply's welcometothejungle rows always carry an empty
+    # apply_url and a "url" pointing at welcometothejungle.com's own job
+    # page (ats_type is literally "welcometothejungle", never a resolvable
+    # underlying ATS) — so there is no slug to extract for a discovery.py
+    # registry path, same reasoning that put moka here instead of a live
+    # scraper. Same 25-column schema as every other source, no special-
+    # casing needed.
+    "welcometothejungle": f"{STAPPLY_BASE}/welcometothejungle/jobs.csv",
 }
 
 _FETCH_TIMEOUT = aiohttp.ClientTimeout(total=180, connect=30)

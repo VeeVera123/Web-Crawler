@@ -4,7 +4,7 @@ name: Crawl
 # Runs up to three independent pipelines against the same `jobs` table:
 #   Crawl I   (crawl_i.py)   — known-ATS scanner reading archive_i
 #   Crawl II  (crawl_ii.py)  — heuristic in-house/unsupported career-page scraper reading archive_ii
-#   Crawl III (crawl_iii.py) — stapply.ai direct job-board CSV consumer (Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee)
+#   Crawl III (crawl_iii.py) — stapply.ai direct job-board CSV consumer (Phenom/UKG/SAP/Dayforce/Eightfold/Recruitee/MokaHR/welcometothejungle)
 # Every row is tagged jobs.source_pipeline ('crawl_i'/'crawl_ii'/'crawl_iii'),
 # and each pipeline's own finalize step only ever cleans up its own tagged
 # rows — see each crawl_*.py's run_finalize() docstring.
