@@ -7113,6 +7113,37 @@ def _fetch_rippling_description(job: dict) -> str:
     return ""
 
 
+_AVATURE_TITLE_LOCATION_RE = re.compile(r"<title>\s*[^<]*?\s-\s([^<]+?)\s-\s\d+\s-\s[^<]+</title>", re.I)
+
+
+async def _fetch_avature_description(job: dict) -> str:
+    """Runs the normal generic fetch (JD + its own JSON-LD/meta location
+    side-effect), then falls back to Avature's own JobDetail <title>
+    convention for location if it's still empty afterward.
+
+    2026-09 BUG FIX (live-confirmed via ats_capability_probe audit):
+    15/17 live samples had a completely empty location despite real,
+    fetchable JD content — Avature's white-labeled templates rarely
+    embed JobPosting JSON-LD (confirmed live: 0/1 sampled had it), so
+    _extract_location_from_html's usual signals find nothing. Every
+    sampled page's own <title> tag DID reliably carry the location
+    between two ' - ' separators though (confirmed live:
+    "Warehouse/Logistics Specialist/Driver BNA - Nashville, Tennessee,
+    United States - 22128 - Insperity" — {title} - {location} - {reqId}
+    - {company}), a template convention specific to Avature's JobDetail
+    page, not assumed to generalize to any other platform."""
+    desc = await _fetch_generic_description(job)
+    if not job.get("location"):
+        url = job.get("url", "")
+        if url:
+            r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+            if r:
+                m = _AVATURE_TITLE_LOCATION_RE.search(r.text)
+                if m:
+                    job["location"] = _text(unescape(m.group(1)))
+    return desc
+
+
 # Platforms that need description enrichment
 DESCRIPTION_FETCHERS = {
     "iCIMS": _fetch_icims_description,
@@ -7138,7 +7169,10 @@ DESCRIPTION_FETCHERS = {
     "FolksHR": _fetch_generic_description,
     "JobAdder": _fetch_generic_description,
     "Jobvite": _fetch_generic_description,
-    "Avature": _fetch_generic_description,
+    # 2026-09 BUG FIX: was _fetch_generic_description alone — see
+    # _fetch_avature_description above for the added <title>-based
+    # location fallback.
+    "Avature": _fetch_avature_description,
     # ADP's list API does NOT include requisitionDescription — confirmed
     # live; only the per-item DETAIL endpoint does (see
     # _fetch_adp_description). An earlier version of this file assumed

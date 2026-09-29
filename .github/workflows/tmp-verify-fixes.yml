@@ -1,16 +1,13 @@
-name: tmp-diag-probe2
+name: tmp-verify-fixes
 
 on:
   push:
     paths:
-      - "diag_probe2.py"
-      - "diag_probe3.py"
-      - "diag_probe4.py"
-      - "diag_probe5.py"
-      - ".github/workflows/tmp-diag-probe2.yml"
+      - "verify_fixes.py"
+      - ".github/workflows/tmp-verify-fixes.yml"
 
 jobs:
-  diag:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -19,7 +16,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python diag_probe5.py
+      - run: python verify_fixes.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
