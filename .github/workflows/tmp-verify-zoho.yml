@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python Verification/verification.py --table archive_i --ats zoho --concurrency 20
+      - run: python Verification/verification.py --table archive_i --ats zoho --concurrency 20 --execute
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
