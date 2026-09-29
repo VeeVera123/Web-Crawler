@@ -621,10 +621,12 @@ def _build_row(job: dict, location_confidence: str, source_pipeline: str = "craw
         "date_added": today,
         "last_seen": today,
         "is_active": True,
-        # 1=Global, 2=Africa, 3=Unsure — set by crawl_i.py's filter_locations().
-        # Falls back to 3 (Unsure) for any job that somehow reaches here
-        # without it set, rather than silently sorting as if it were tier 0.
-        "location_priority": job.get("location_priority", 3),
+        # "1"=Global, "2"=Africa, "3"=Unsure (text column since 2026-09, to
+        # hold future "3a"/"3b"/"4a"/"4b" sub-tiers — see classifier.py's
+        # PRIORITY_* constants). Falls back to "3" (Unsure) for any job that
+        # somehow reaches here without it set, rather than silently sorting
+        # as if it were tier 0.
+        "location_priority": job.get("location_priority", "3"),
         "source_pipeline": source_pipeline,
         # 2026-09 (explicit user request): "CS"/"AM"/"PM"/"OM", set by
         # filter_roles()/_filter_roles() via classifier.classify_role_category().

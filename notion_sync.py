@@ -114,17 +114,20 @@ PROP_GLOBALLY_HIRING = "Globally Hiring"
 
 STATUS_NOT_APPLIED = "Not Applied"
 
-# classifier.py's jobs.location_priority (1/2/3 — see its own
-# PRIORITY_GLOBAL/PRIORITY_AFRICA/PRIORITY_UNSURE constants) is exactly
-# the signal behind this field: 1 = an explicit worldwide/anywhere/
-# global-hiring match, 2 = Africa-the-continent or a bare EMEA match,
-# 3 = kept as a plausible role but geographic scope was never actually
-# confirmed. Mapped to the three Notion Select options at 2026-09
-# explicit request.
+# classifier.py's jobs.location_priority ("1"/"2"/"3" — see its own
+# PRIORITY_GLOBAL/PRIORITY_AFRICA/PRIORITY_UNSURE constants; text column
+# since 2026-09, to hold future "3a"/"3b"/"4a"/"4b" sub-tiers without
+# another migration) is exactly the signal behind this field: "1" = an
+# explicit worldwide/anywhere/global-hiring match, "2" = Africa-the-
+# continent or a bare EMEA match, "3" = kept as a plausible role but
+# geographic scope was never actually confirmed. Mapped to Notion Select
+# options at 2026-09 explicit request. Phase 2 of the ranking revamp will
+# add entries here for the new "3a"/"3b"/"4a"/"4b" values once that
+# reclassification logic exists.
 _LOCATION_PRIORITY_TO_NOTION = {
-    1: "Global",
-    2: "EMEA",
-    3: "Uncertain",
+    "1": "Global",
+    "2": "EMEA",
+    "3": "Uncertain",
 }
 
 # Notion Status select label -> Supabase jobs.application_status value

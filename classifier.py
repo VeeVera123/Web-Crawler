@@ -1513,12 +1513,16 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
 
 
 # ── Location priority tiers (for sort order on upsert) ────
-# Lower number = higher priority. Populates jobs.location_priority (the
-# column already existed in the schema, unused, before this).
-PRIORITY_GLOBAL = 1   # ONLY a strictly, unambiguously worldwide/anywhere/
+# 2026-09: jobs.location_priority was widened from int to text (still
+# holding just "1"/"2"/"3" for now) so Phase 2 of the ranking revamp can
+# introduce "3a"/"3b"/"4a"/"4b" sub-tiers without another schema migration
+# — see the Supabase migration location_priority_to_alphanumeric_text.
+# These three constants are plain strings for that reason, not because the
+# tier semantics changed. Lower/earlier tier = higher priority.
+PRIORITY_GLOBAL = "1"   # ONLY a strictly, unambiguously worldwide/anywhere/
                        # global-hiring signal — never just "several regions",
                        # however many.
-PRIORITY_AFRICA = 2   # 2026-09 BUG FIX (explicit user instruction: precise
+PRIORITY_AFRICA = "2"   # 2026-09 BUG FIX (explicit user instruction: precise
                        # definition of what earns each priority number) —
                        # covers FOUR cases, not just "Africa or bare EMEA":
                        #   1. Africa as a continent (not a single member
@@ -1537,7 +1541,7 @@ PRIORITY_AFRICA = 2   # 2026-09 BUG FIX (explicit user instruction: precise
                        # under-rank it as merely "uncertain". See
                        # _has_multi_region_breadth's two call sites below and
                        # LOCATION_SYSTEM_PROMPT's MATCH_AFRICA section.
-PRIORITY_UNSURE = 3   # allowed fallback tier, but a NARROW one: only when
+PRIORITY_UNSURE = "3"   # allowed fallback tier, but a NARROW one: only when
                        # the posting is truly, truly without ANY location
                        # restriction signal AND does not meet the
                        # PRIORITY_AFRICA multi-region bar above either — bare
