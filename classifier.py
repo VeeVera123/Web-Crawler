@@ -3283,7 +3283,62 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
     # 2+ different African countries already counts as continent evidence
     # rather than a single-country restriction.
     r"north\s+america|americas|mena|middle\s+east|"
-    r"anz|dach|benelux|nordics?"
+    r"anz|dach|benelux|nordics?|"
+    # 2026-09 ROUND 6 (explicit user-provided region-vocabulary taxonomy,
+    # cross-checked against this file's existing region coverage — the
+    # user's own summary: "AMER/AMERICAS and multi-region combinations
+    # should remain allowed/uncertain rather than automatically rejected"
+    # and explicitly "do NOT make [EMEA/Africa] restrictive" — both
+    # already true of the existing code and unchanged here; every entry
+    # below is a genuinely NEW single-region name, added the same way
+    # every other entry in this fragment already works: restrictive when
+    # named ALONE, but see _REGION_ONLY_WORDS_RE/_has_multi_region_breadth
+    # below — 2+ of these (or these + an existing region) named together
+    # is still broad multi-region evidence, not a restriction.
+    #
+    # Europe sub-regions — same treatment as the existing bare "europe"
+    # entry above (restrictive alone; Europe itself was never given
+    # Africa/EMEA's special accepted status).
+    r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
+    r"northern\s+europe|"
+    # EU/EEA family — synonyms of the existing "european union"/bare "eu"
+    # entries above.
+    r"european\s+economic\s+area|eea|"
+    # Gulf region.
+    r"gulf\s+cooperation\s+council|gcc|gulf|"
+    # 2026-09 JUDGMENT CALL (flagged for review): African SUB-regions —
+    # NOT bare "Africa" or "Sub-Saharan Africa", both of which keep their
+    # existing dedicated accepted/non-restrictive treatment (ROUND 3
+    # above; the user's own message re-confirmed Sub-Saharan Africa's
+    # "existing special treatment" rather than asking to change it). A
+    # named SUB-region (West/East/Central/Southern/North Africa) is
+    # treated as restrictive-if-alone instead, the same relationship
+    # "North America" already has to the broader (non-restrictive-by-
+    # name-alone) "Americas" — i.e. the continent-wide claim stays
+    # accepted, but a specific sub-region within it is still a real
+    # narrowing. Not explicitly confirmed by the user for this exact
+    # sub-case; correct this mapping if that reading is wrong.
+    r"southern\s+africa|west\s+africa|east\s+africa|central\s+africa|"
+    r"north\s+africa|"
+    # Asia sub-regions, plus bare "asia" itself (parallel to "europe" above
+    # — no continent gets automatic accepted status except Africa/EMEA).
+    # Ordered longest/most-specific first (south-east/southeast/south/
+    # east/central asia) before the bare "asia" fallback, so a compound
+    # sub-region name doesn't get shadowed by the generic single-word
+    # alternative when this fragment is embedded with a leading \b (regex
+    # alternation picks the FIRST successful alternative at a position,
+    # not the longest) — same discipline this file's "americas" already
+    # keeps ordered before "amer"/"amers" in _REGION_ONLY_WORDS_RE below.
+    r"south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|asia|"
+    r"oceania|pacific|"
+    r"central\s+america|south\s+america|caribbean|"
+    r"cee|cis|"
+    r"japac|apj|"
+    # Compound country-pair groupings — treated as a single named place
+    # (like any 2-country whitelist), not a "business region" for
+    # _has_multi_region_breadth purposes, so deliberately NOT added to
+    # _REGION_ONLY_WORDS_RE below.
+    r"uk\s*(?:&|and)\s*ireland|british\s+isles"
 )
 
 # 2026-09 ROUND 3 (explicit user correction, quoted directly: "if it has
@@ -3302,7 +3357,21 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
 # guard is specifically about BUSINESS-REGION names, not country lists).
 _REGION_ONLY_WORDS_RE = re.compile(
     r"\b(?:europe|emea|apac|latam|asia[\s\-]?pacific|north\s+america|"
-    r"americas|amer|amers|mena|middle\s+east|anz|dach|benelux|nordics?)\b",
+    r"americas|amer|amers|mena|middle\s+east|anz|dach|benelux|nordics?|"
+    # 2026-09 ROUND 6: same new business-region set added to
+    # _COUNTRY_AUTH_NAMES_RE_FRAGMENT above — kept in sync so "hiring in
+    # Western Europe, Gulf, and CIS" (3 distinct new regions) or "EMEA,
+    # Southeast Asia, and Caribbean" (mixing an existing + new regions)
+    # both count as multi-region breadth. UK & Ireland/British Isles
+    # deliberately excluded — see that fragment's own comment.
+    r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
+    r"northern\s+europe|european\s+economic\s+area|eea|"
+    r"gulf\s+cooperation\s+council|gcc|gulf|"
+    r"southern\s+africa|west\s+africa|east\s+africa|central\s+africa|"
+    r"north\s+africa|"
+    r"south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|asia|"
+    r"oceania|pacific|central\s+america|south\s+america|caribbean|"
+    r"cee|cis|japac|apj)\b",
     re.I,
 )
 
@@ -3447,7 +3516,31 @@ _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     r"|\bremote\s+(?:in|within|from)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     r"|\bremote\s*\(\s*(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s*\)"
     r"|\bwork(?:ing)?\s+from\s+"
-    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
+    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    # 2026-09 ROUND 6 (explicit user-provided restrictive-language
+    # taxonomy): "physically" as a modal PREFIX before the residence verb —
+    # the existing verb group above only allows optional words BETWEEN the
+    # verb and "in"/"within" ("permanently", "only", "solely", "primarily"),
+    # never a word before the verb itself, so "must be PHYSICALLY located
+    # in X" / "physically reside in X" were both real gaps.
+    r"|\b(?:must\s+(?:be\s+)?)?physically\s+(?:located|based|reside)\s+"
+    r"(?:in|within)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    # "must have/maintain a primary/permanent residence in X", "primary/
+    # permanent residence in X required" — a distinct noun-phrase shape
+    # ("residence", not the residence VERB the main clause above expects).
+    r"|\bmust\s+(?:have|maintain)\s+(?:a\s+)?(?:permanent|primary)\s+residence\s+"
+    r"(?:in|within)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\b(?:permanent|primary)\s+residence\s+(?:in|within)\s+(?:the\s+)?"
+    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+(?:is\s+)?required\b"
+    # Tax/legal residence/residency — a distinct jurisdictional concept
+    # from physical/permanent residence above, but phrased the same
+    # restrictive way in real postings.
+    r"|\b(?:legal|tax)\s+residen(?:ce|cy)\s+(?:in|within)\s+(?:the\s+)?"
+    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+(?:is\s+)?required\b"
+    r"|\bmust\s+be\s+a\s+tax\s+resident\s+of\s+(?:the\s+)?"
+    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\bmust\s+maintain\s+tax\s+residency\s+(?:in|within)\s+(?:the\s+)?"
+    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
     re.I,
 )
 
@@ -3523,9 +3616,35 @@ _CANDIDATE_PLACE_RE = re.compile(
 # Explicitly accepted broad place names. Anything else captured by the
 # role/candidate patterns above is treated as a specific geographic
 # restriction.
+#
+# NOTE this list mixes two different things, by original design: regions
+# that are genuinely ACCEPTED outright (EMEA/Africa/Global/Worldwide/
+# International/Anywhere), and regions that are themselves restrictive-if-
+# alone elsewhere in this file (APAC/LATAM/AMER/Americas/MENA) but are
+# listed here so THIS SPECIFIC sentence-scan detector treats them as "a
+# recognized region name, defer to the region-specific/multi-region-aware
+# checks elsewhere" rather than misfiring as if it had found a concrete
+# CITY. 2026-09 ROUND 6: every new region name added to
+# _COUNTRY_AUTH_NAMES_RE_FRAGMENT/_REGION_ONLY_WORDS_RE above is added
+# here for the same reason — without it, this detector's capitalized-word
+# capture (_ROLE_SPECIFIC_PLACE_RE/_CANDIDATE_PLACE_RE, which stops at the
+# first lowercase connector like "and") would treat "based in Western
+# Europe and Gulf" as if only "Western Europe" were named and hard-reject
+# it here, before the multi-region-breadth-aware checks later in the
+# override chain (has_entity_or_exclusion_restriction_signal's
+# _HIRING_LIMITED_TO_PLACE_RE, _has_multi_region_breadth guards, etc.)
+# ever get a chance to recognize the "and Gulf" as broadening evidence.
 _BROAD_REGION_VALUE_RE = re.compile(
     r"\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa|Global|Worldwide|"
-    r"International|Anywhere|APAC|LATAM|AMER|Americas|MENA)\b", re.I,
+    r"International|Anywhere|APAC|LATAM|AMER|Americas|MENA|"
+    r"Western\s+Europe|Eastern\s+Europe|Central\s+Europe|Southern\s+Europe|"
+    r"Northern\s+Europe|European\s+Economic\s+Area|EEA|"
+    r"Gulf\s+Cooperation\s+Council|GCC|Gulf|"
+    r"Southern\s+Africa|West\s+Africa|East\s+Africa|Central\s+Africa|"
+    r"North\s+Africa|"
+    r"South[\s\-]?East\s+Asia|South\s+Asia|East\s+Asia|Central\s+Asia|Asia|"
+    r"Oceania|Pacific|South\s+America|Central\s+America|Caribbean|"
+    r"CEE|CIS|JAPAC|APJ|UK\s*(?:&|and)\s*Ireland|British\s+Isles)\b", re.I,
 )
 
 def has_role_specific_place_restriction_signal(job: dict) -> bool:
@@ -3554,8 +3673,26 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
             # Multi-region structured locations are explicitly allowed.
             regions = {m.group(0).lower() for m in re.finditer(
                 r"\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa|Global|Worldwide|International|Anywhere|"
-                r"APAC|LATAM|AMER|AMERs|Americas|MENA|Europe|Asia|Asia[-\s]?Pacific|"
-                r"North\s+America|South\s+America|Central\s+America|ANZ|DACH|Benelux|Nordics?)\b",
+                r"APAC|LATAM|AMER|AMERs|Americas|MENA|"
+                # 2026-09 ROUND 6: new business regions, ordered
+                # specific-before-generic (e.g. "South East Asia"/"South
+                # Asia" before bare "Asia") the same way "Asia[-\s]?Pacific"
+                # already had to be ordered before bare "Asia" below — this
+                # is a finditer() scan, not fullmatch, so alternation order
+                # determines which alternative wins at a given position.
+                r"Western\s+Europe|Eastern\s+Europe|Central\s+Europe|"
+                r"Southern\s+Europe|Northern\s+Europe|"
+                r"European\s+Economic\s+Area|EEA|"
+                r"Gulf\s+Cooperation\s+Council|GCC|Gulf|"
+                r"Southern\s+Africa|West\s+Africa|East\s+Africa|"
+                r"Central\s+Africa|North\s+Africa|"
+                r"South[\s\-]?East\s+Asia|South\s+Asia|East\s+Asia|Central\s+Asia|"
+                r"Asia[-\s]?Pacific|Asia|"
+                r"Oceania|Pacific|Caribbean|"
+                r"CEE|CIS|JAPAC|APJ|"
+                r"Europe|"
+                r"North\s+America|South\s+America|Central\s+America|"
+                r"ANZ|DACH|Benelux|Nordics?)\b",
                 normalized, re.I)}
             # A location consisting of two or more business regions is an
             # allowed multi-region scope, regardless of whether EMEA is one
@@ -4119,7 +4256,44 @@ _ENTITY_PAYROLL_RESTRICTION_RE = re.compile(
     r"|\b(?:must|will)\s+be\s+employed\s+through\s+(?:our|a|an)\s+(?:eor|peo)\b"
     r"|\bonly\s+(?:able\s+to\s+)?onboard(?:ed)?\s+(?:candidates\s+)?through\s+(?:our|a|an)\s+(?:eor|peo)\b"
     r"|\bcountries\s+(?:where\s+)?(?:we|the\s+company)\s+(?:currently\s+)?(?:have|has)\s+"
-    r"(?:an?\s+)?(?:eor|peo|payroll)\s+(?:partner|provider|entity|presence)\b",
+    r"(?:an?\s+)?(?:eor|peo|payroll)\s+(?:partner|provider|entity|presence)\b"
+    # 2026-09 ROUND 6 (explicit user-provided restrictive-language taxonomy,
+    # cross-checked against this file's existing coverage). Same "full
+    # multi-word construction only" design rule as the block above — none
+    # of these fire on bare "EOR"/"payroll"/"entity" alone.
+    #
+    # Negative-capability modal broadening: the existing "unable to
+    # employ/hire/onboard ... in/outside/from" clause above doesn't match
+    # the equally common "cannot"/"can't"/"do not"/"don't" phrasing of the
+    # exact same statement ("we cannot employ in Brazil", "we don't hire
+    # from India").
+    r"|\b(?:cannot|can'?t|(?:do|does)\s+not|(?:don|doesn)'?t)\s+(?:currently\s+)?"
+    r"(?:employ|hire|onboard)\s+(?:you\s+|candidates\s+|applicants\s+)?(?:in|outside|from)\b"
+    # "must be employed in/through our <place> entity" — the existing
+    # EOR/PEO-only version above doesn't cover a named-country entity
+    # phrasing.
+    r"|\bmust\s+be\s+employed\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bemployment\s+through\s+(?:our|a|an)\s+(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+entity\s+only\b"
+    # Payroll-specific (distinct from the existing "EOR/PEO/payroll
+    # partner/provider/entity/presence" clause above, which requires
+    # "countries where we have" phrasing specifically).
+    r"|\bpayroll\s+(?:is\s+)?only\s+(?:available|supported)\s+(?:in|for)\b"
+    r"|\bpayroll\s+(?:is\s+)?(?:available|supported)\s+only\s+(?:in|for)\b"
+    r"|\bpayroll\s+(?:is\s+)?restricted\s+to\b"
+    r"|\bwe\s+can\s+only\s+payroll\s+employees\s+in\b"
+    r"|\bwe\s+can\s+only\s+employ\s+people\s+in\b"
+    # EOR-specific broadening — the existing clauses above only cover "must
+    # be employed through an EOR" and "onboarded through an EOR"; they
+    # don't cover EOR *coverage/availability* being scoped to a country
+    # list, which is the more common real phrasing.
+    r"|\beor\s+(?:is\s+)?only\s+available\s+(?:in|for)\b"
+    r"|\beor\s+(?:is\s+)?available\s+only\s+(?:in|for)\b"
+    r"|\beor\s+coverage\s+(?:is\s+)?(?:only\s+)?(?:in|for)\b"
+    r"|\beor[\s\-]supported\s+countries\s+only\b"
+    r"|\beor\s+countries\s+only\b"
+    r"|\bwe\s+can\s+(?:hire|employ)\s+through\s+(?:an?\s+)?eor\s+only\s+in\b"
+    r"|\bwe\s+only\s+support\s+employment\s+through\s+(?:an?\s+)?eor\s+in\b"
+    r"|\bemployment\s+through\s+an?\s+eor\s+is\s+limited\s+to\b",
     re.I,
 )
 
@@ -4149,7 +4323,63 @@ _COUNTRY_LIST_ONLY_RE = re.compile(
     r"\bthe\s+following\s+countries\s+only\b"
     r"|\brestricted\s+to\s+(?:the\s+)?following\s+countries\b"
     r"|\bonly\s+open\s+to\s+(?:candidates|applicants)\s+in\s+(?:the\s+)?following\s+countries\b"
-    r"|\bwe\s+only\s+hire\s+in\s+the\s+following\s+countries\b",
+    r"|\bwe\s+only\s+hire\s+in\s+the\s+following\s+countries\b"
+    # 2026-09 ROUND 6 (explicit user-provided restrictive-language
+    # taxonomy): "we CAN only hire" (an extra modal the original pattern
+    # above didn't allow) and the sibling "employ" verb.
+    r"|\bwe\s+can\s+only\s+(?:hire|employ)\s+in\s+the\s+following\s+countries\b"
+    # "we currently hire/employ in the following countries" — a bare
+    # declarative statement of the list, no "only"/"restricted" wording,
+    # but — same reasoning already applied to
+    # _COUNTRY_WHITELIST_PHRASE_RE's "one of the following countries"
+    # above — "the following countries" is itself an inherently closed-list
+    # construction in practice, not an illustrative example.
+    r"|\bwe\s+currently\s+(?:hire|employ)\s+in\s+the\s+following\s+countries\b"
+    # "eligible countries/locations are limited to/include only X".
+    r"|\beligible\s+(?:countries|locations)\s+(?:are\s+)?limited\s+to\b"
+    r"|\beligible\s+(?:countries|locations)\s+include\s+only\b"
+    # "we accept applicants/candidates only from X" / "applications
+    # (are) (accepted/open) only from X" / "applications are
+    # limited/restricted to X".
+    r"|\bwe\s+accept\s+(?:applicants|candidates)\s+only\s+from\b"
+    r"|\bapplications?\s+(?:are\s+)?(?:accepted|open)\s+only\s+(?:from|in)\b"
+    r"|\bapplications?\s+only\s+accepted\s+from\b"
+    r"|\bapplications?\s+(?:are\s+)?(?:limited|restricted)\s+to\b",
+    re.I,
+)
+
+# 2026-09 ROUND 6 (explicit user-provided restrictive-language taxonomy):
+# "hiring/employment is limited/restricted to <place>", "we hire/employ/
+# recruit only/exclusively in <place>", "remote is available/restricted/
+# limited only in <place>", "this remote role is only available in
+# <place>" — all place-anchored (unlike _COUNTRY_LIST_ONLY_RE above, which
+# is anchored on the "following countries" PHRASING itself, these name the
+# actual place), so reuse _COUNTRY_AUTH_NAMES_RE_FRAGMENT the same way
+# _COUNTRY_BASED_RESTRICTION_RE does. Sibling to that regex, kept separate
+# since these are an "eligibility IS restricted to X" shape rather than a
+# "candidate must reside/be based in X" shape.
+_HIRING_LIMITED_TO_PLACE_RE = re.compile(
+    r"\b(?:hiring|employment)\s+(?:is\s+)?(?:limited|restricted)\s+to\s+(?:the\s+)?"
+    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwe\s+(?:hire|employ|recruit)\s+(?:only|exclusively)\s+in\s+(?:the\s+)?"
+    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bremote\s+(?:is\s+|positions?\s+are\s+|work\s+is\s+)?(?:available\s+only|"
+    r"restricted\s+to|limited\s+to|only\s+available)\s+(?:in\s+)?(?:the\s+)?"
+    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bthis\s+remote\s+(?:role|position|opportunity)\s+is\s+only\s+available\s+in\s+"
+    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bavailable\s+(?:only|exclusively)\s+within\s+(?:the\s+)?"
+    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    # NOTE: deliberately NOT a bare "restricted/limited to <place>" with no
+    # subject — real postings use that exact shape for things unrelated to
+    # hiring eligibility (e.g. "international travel is limited to Germany
+    # and France for client visits"), which would false-positive-reject a
+    # job that says nothing about candidate location. "geographically"
+    # anchors it to an eligibility statement instead; "hiring is limited/
+    # restricted to X" and "employment is limited/restricted to X" above
+    # already cover the other common real subjects.
+    r"|\b(?:geographically\s+(?:restricted|limited)|(?:restricted|limited)\s+geographically)\s+to\s+"
+    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
 )
 
@@ -4158,15 +4388,23 @@ def has_entity_or_exclusion_restriction_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter: does this job's description state
     — via a company-capability statement ("we don't have a legal entity in
     your country", "can only employ where we have an EOR/PEO"), an explicit
-    exclusion ("not open to candidates outside the US"), or a curated-list
-    phrasing ("the following countries only") — that eligibility is
-    restricted to a specific place or list, even though none of these
-    phrasings look like the classic "must reside/be based in <country>"
-    shape the other hard overrides already catch? See the module comments
-    above _ENTITY_PAYROLL_RESTRICTION_RE, _EXCLUSION_OUTSIDE_RE, and
-    _COUNTRY_LIST_ONLY_RE. Per the user's explicit design constraint, none
-    of these fire on bare "EOR"/"PEO"/"payroll"/"country"/"region" alone —
-    only on the full construction.
+    exclusion ("not open to candidates outside the US"), a curated-list
+    phrasing ("the following countries only"), or a place-anchored "hiring
+    is limited to X"/"remote is only available in X" statement — that
+    eligibility is restricted to a specific place or list, even though none
+    of these phrasings look like the classic "must reside/be based in
+    <country>" shape the other hard overrides already catch? See the module
+    comments above _ENTITY_PAYROLL_RESTRICTION_RE, _EXCLUSION_OUTSIDE_RE,
+    _COUNTRY_LIST_ONLY_RE, and _HIRING_LIMITED_TO_PLACE_RE. Per the user's
+    explicit design constraint, none of these fire on bare "EOR"/"PEO"/
+    "payroll"/"country"/"region" alone — only on the full construction.
+
+    2026-09 ROUND 6: _HIRING_LIMITED_TO_PLACE_RE is checked sentence-by-
+    sentence with a _has_multi_region_breadth guard (same reasoning as
+    has_hard_country_specific_auth_signal above it in this file) — "hiring
+    is limited to LATAM, EMEA, and APAC" names a single region-fragment
+    word ("latam") but is actually broad multi-region evidence, not a
+    single-place restriction, and must not be hard-rejected.
     """
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
@@ -4180,6 +4418,10 @@ def has_entity_or_exclusion_restriction_signal(job: dict) -> bool:
         if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
             continue
         if _EXCLUSION_OUTSIDE_RE.search(sentence):
+            return True
+        if _has_multi_region_breadth(sentence):
+            continue
+        if _HIRING_LIMITED_TO_PLACE_RE.search(sentence):
             return True
     return False
 
@@ -4248,19 +4490,43 @@ _HYPHENATED_BASED_ONLY_RE = re.compile(
     re.I,
 )
 
+# 2026-09 ROUND 6 (explicit user-provided restrictive-language taxonomy —
+# flagged directly: "Your existing hyphenated detector specifically
+# requires `only` in its main form, so it is deliberately narrower" — a
+# major missing construction is the SAME hyphenated-place-based phrasing
+# without "only" at all, in a "for <place>-based applicants" shape — "for
+# US-based applicants", "for Canada-based candidates", "for UK-based
+# employees"). Deliberately requires the leading "for" (not just a bare
+# "<place>-based applicants" anywhere in text) — "for" is what turns this
+# into an eligibility-defining statement ("this role is FOR ...") rather
+# than a merely descriptive mention ("our largely US-based team..."),
+# keeping it as narrow as the "only"-anchored version above.
+_FOR_PLACE_BASED_RE = re.compile(
+    r"\bfor\s+(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\s+"
+    r"(?:candidates?|applicants?|employees?|team\s+members?)\b",
+    re.I,
+)
+
 
 def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter: does this job's description state
     a residence-verb-governed timezone requirement ("must be located in a
     US timezone" — see _TIMEZONE_LOCATION_RE's module comment for why this
     is distinct from safe "overlap" scheduling wording), an explicit
-    relocation requirement naming a place (_RELOCATION_REQUIRED_RE), or a
+    relocation requirement naming a place (_RELOCATION_REQUIRED_RE), a
     hyphenated "<place>-based candidates only" construction
-    (_HYPHENATED_BASED_ONLY_RE)? Checked sentence-by-sentence with the same
+    (_HYPHENATED_BASED_ONLY_RE), or the same hyphenated shape without
+    "only" in a "for <place>-based applicants" construction
+    (_FOR_PLACE_BASED_RE)? Checked sentence-by-sentence with the same
     team/office-context guard and global-evidence guard as
-    has_hard_country_based_restriction_signal above, since all three of
-    these phrasings could in principle appear in a sentence describing the
+    has_hard_country_based_restriction_signal above, since all of these
+    phrasings could in principle appear in a sentence describing the
     COMPANY's own timezone/location rather than a candidate requirement.
+    _FOR_PLACE_BASED_RE additionally gets a _has_multi_region_breadth
+    guard (the others in this function predate that guard and aren't
+    touched here) since "for US-based, UK-based, or Germany-based
+    applicants" names 3 places but is broad multi-region hiring, not a
+    single-place restriction.
     """
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
@@ -4294,6 +4560,10 @@ def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
         # office/team-referencing shape, so the team-context guard is kept
         # here to stay consistent with the rest of the file's pattern.
         if not _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence) and _HYPHENATED_BASED_ONLY_RE.search(sentence):
+            return True
+        if (not _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence)
+                and not _has_multi_region_breadth(sentence)
+                and _FOR_PLACE_BASED_RE.search(sentence)):
             return True
     return False
 
