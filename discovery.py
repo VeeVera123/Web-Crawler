@@ -74,9 +74,12 @@ Sources:
   14. Aramente H.F — REMOVED 2026-09 at the user's request (see main()'s
      Source 14 comment). fetch_eutechjobs_slugs() itself is left
      defined/unused.
-  15. Certificate Transparency logs (--source ct_logs; 2026-09, new —
-     crt.sh's free CT-log index, queried directly, no seed file/dataset
-     needed. Covers 18 subdomain-per-tenant platforms — see
+  15. Certificate Transparency logs (--source ct_logs; 2026-09, new,
+     DISABLED 2026-09 at the user's request — no CI matrix job/shards
+     anymore, and no longer swept in by --source all; still runnable
+     manually via an explicit --source ct_logs, see main()'s Source 5b
+     comment) — crt.sh's free CT-log index, queried directly, no seed
+     file/dataset needed. Covers 18 subdomain-per-tenant platforms — see
      fetch_ct_log_slugs docstring and the CT_LOG_SUFFIXES comment above it
      for exactly which platforms this can/can't help and why.)
 
@@ -135,7 +138,7 @@ Usage:
     python discovery.py --source openpostings  # OpenPostings only
     python discovery.py --source commoncrawl   # Common Crawl only
     python discovery.py --source wayback       # Wayback CDX (all platforms) only
-    python discovery.py --source ct_logs       # Certificate Transparency (crt.sh) only
+    python discovery.py --source ct_logs       # Certificate Transparency (crt.sh) only — DISABLED in CI/--source all, manual-only, see Source 5b comment in main()
     python discovery.py --source latmay        # Latmay H.F (Hugging Face) only
     python discovery.py --source edwarddgao    # Edward H.F (Hugging Face) only
     python discovery.py --source openjobsdaily # Open Jobs Daily H.F (Hugging Face) only
@@ -7263,10 +7266,17 @@ def main():
         else:
             grand_total += wb_total
 
-    # Source 5b: Certificate Transparency logs (crt.sh) — 2026-09, new.
-    # Only helps the subdomain-per-tenant platforms in CT_LOG_SUFFIXES —
-    # see that dict's module comment for the full reasoning.
-    if args.source in ("ct_logs", "all"):
+    # Source 5b: Certificate Transparency logs (crt.sh) — 2026-09, new,
+    # DISABLED 2026-09 at the user's request: no longer swept in by
+    # `--source all` (only an explicit `--source ct_logs` runs it), and
+    # Discovery.yml no longer gives it any matrix job/shards — see that
+    # workflow's ct_logs comment for the full reasoning and how to
+    # re-enable. This function/block is left fully intact, same "commented
+    # out of the matrix, function still defined" treatment this file
+    # already gives Y Combinator/Zalize H.F/Aramente H.F. Only helps the
+    # subdomain-per-tenant platforms in CT_LOG_SUFFIXES — see that dict's
+    # module comment for the full reasoning.
+    if args.source == "ct_logs":
         log.info("\n--- CERTIFICATE TRANSPARENCY LOGS (crt.sh) ---")
         # 2026-09: upsert INCREMENTALLY, per platform, as each one clears
         # live verification — not once at the very end after every

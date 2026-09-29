@@ -9,11 +9,10 @@ on:
         description: "Per-job timeout, in minutes"
         required: false
         default: "300"
-      only_ct_logs:
-        description: "Run ONLY the CT logs (crt.sh) shards, skip every other source"
-        required: false
-        type: boolean
-        default: false
+      # only_ct_logs REMOVED 2026-09 at the user's request, alongside
+      # disabling ct_logs itself (see the matrix comment below) — with no
+      # ct_logs matrix jobs left to filter down to, this input would do
+      # nothing. Re-add both together if ct_logs is ever turned back on.
 
 # Belt-and-suspenders, same reasoning as daily_scan.yml's concurrency block —
 # GitHub already serializes same-workflow schedule/workflow_dispatch runs by
@@ -38,7 +37,9 @@ jobs:
   # that the budget it was freed for no longer exists. Latmay stays a
   # single unsharded job, same single-Parquet-file reasoning as always.
   #
-  # 23-job matrix over 12 sources, all running in parallel — instead of one
+  # 19-job matrix over 11 sources (was 23 jobs/12 sources — ct_logs'
+  # 4 shards removed 2026-09, see that source's own comment below), all
+  # running in parallel — instead of one
   # job running everything back-to-back. Each source is already an
   # independent fetch-and-resolve pass (bulk single download for most,
   # thousands of live per-company fetches for sources 6-7), so sharding
@@ -113,26 +114,25 @@ jobs:
   # clustering key. See fetch_httparchive_candidate_urls' docstring for
   # the full reasoning.
   #
-  # ct_logs runs as 4 separate jobs (platform-sharded, via --ct-shard/
-  # --ct-total-shards, same scheme as commoncrawl/wayback above) — was 1
-  # unsharded job covering all ~20 CT-logs platforms sequentially,
-  # confirmed live 2026-09 to take 30-60+ minutes end to end (crt.sh's own
-  # pool-exhaustion retries, plus for the Class B platforms a live HTTP
-  # fetch per candidate host). discovery.py's fetch_ct_log_slugs also now
-  # upserts each platform's verified slugs to Supabase AS SOON AS that
-  # platform clears live verification, not once at the very end — between
-  # the two changes, a killed/interrupted run now loses at most whatever
-  # hadn't finished yet, not everything. Covers ~20 subdomain-per-tenant/
-  # live-resolve platforms; see discovery.py's CT_LOG_SUFFIXES/
-  # CT_LOG_LIVE_RESOLVE comments for exactly which platforms this can/
-  # can't help and why. This job can also be run BY ITSELF, skipping
-  # every other source, via the `only_ct_logs` workflow_dispatch input
-  # above — useful for iterating on CT-logs specifically without waiting
-  # on/paying for the rest of the matrix. NOTE: archive_i.source's CHECK
-  # constraint must include 'ct_logs' before this job's Supabase upsert
-  # will succeed — see this repo's own migration history/chat log for the
-  # exact ALTER TABLE statement; it has to be run manually in the Supabase
-  # SQL editor.
+  # ct_logs DISABLED 2026-09 at the user's request — takes NO matrix job
+  # slots/shards here anymore (was 4 platform-sharded jobs; see git history
+  # for the exact matrix entries if restoring). discovery.py's own
+  # fetch_ct_log_slugs()/CT_LOG_SUFFIXES/crt.sh-querying code is left fully
+  # intact and unused (same "commented out of the matrix, function still
+  # defined" treatment this file already gives Y Combinator/Zalize H.F/
+  # Aramente H.F — see discovery.py's module docstring and main()'s
+  # "Source 6"/"Source 13"/"Source 14" comments for that precedent), and
+  # discovery.py's CLI dispatcher still accepts `--source ct_logs`
+  # explicitly (just no longer swept in by `--source all`) for exactly the
+  # "run it yourself occasionally" manual use this source's own code
+  # comments always described it as. To re-enable in CI: restore the 4
+  # `ct_logs` matrix entries (platform-sharded via --ct-shard/
+  # --ct-total-shards, same scheme as commoncrawl/wayback), the
+  # `only_ct_logs` workflow_dispatch input above, and change
+  # discovery.py main()'s `if args.source == "ct_logs":` back to
+  # `if args.source in ("ct_logs", "all"):`. NOTE: archive_i.source's
+  # CHECK constraint already includes 'ct_logs' (added when this source
+  # was first built) so no migration is needed to turn it back on.
   #
   # 2026-09: added github (single job, unsharded — a short,
   # manually-curated list of known public GitHub repos, currently just
@@ -213,18 +213,6 @@ jobs:
           - source: wayback
             name: wayback 3
             extra_args: "--wayback-shard 2 --wayback-total-shards 3"
-          - source: ct_logs
-            name: CT logs 1 (crt.sh)
-            extra_args: "--ct-shard 0 --ct-total-shards 4"
-          - source: ct_logs
-            name: CT logs 2 (crt.sh)
-            extra_args: "--ct-shard 1 --ct-total-shards 4"
-          - source: ct_logs
-            name: CT logs 3 (crt.sh)
-            extra_args: "--ct-shard 2 --ct-total-shards 4"
-          - source: ct_logs
-            name: CT logs 4 (crt.sh)
-            extra_args: "--ct-shard 3 --ct-total-shards 4"
           - source: latmay
             name: Latmay H.F
           - source: icims_hrjobs
@@ -261,20 +249,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 2026-09: only_ct_logs (workflow_dispatch input) lets a manual run
-      # cover JUST the ct_logs shards, skipping every other matrix job's
-      # real work. `matrix`/`inputs` aren't valid in a job-level `if`
-      # (confirmed live — GitHub rejected it: "Unrecognized named-value:
-      # 'matrix'"; job-level `if` only sees github/needs/vars/inputs-at-
-      # workflow-dispatch-time, not the per-matrix-combination context),
-      # so the skip lives on the steps that do the actual work instead —
-      # checkout/setup-python still run for a skipped job (cheap), but
-      # dependency install and the real discovery run are skipped
-      # outright. On the schedule trigger (no workflow_dispatch inputs)
-      # `inputs.only_ct_logs` is unset/falsy, so `!inputs.only_ct_logs` is
-      # true and every job's steps run normally.
+      # only_ct_logs (workflow_dispatch input) REMOVED 2026-09 alongside
+      # disabling ct_logs itself — see the matrix comment above. These
+      # steps ran unconditionally before only_ct_logs existed and do again
+      # now.
       - name: Install dependencies
-        if: ${{ !inputs.only_ct_logs || matrix.source == 'ct_logs' }}
         # pyarrow: needed by the Latmay/Edward/Open Jobs Daily H.F sources
         # to read Hugging Face's auto-converted Parquet dataset exports.
         # psycopg2-binary: needed by the ct_logs source, which queries
@@ -312,11 +291,10 @@ jobs:
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        if: ${{ env.GCP_SA_KEY != '' && matrix.source == 'httparchive' && !inputs.only_ct_logs }}
+        if: ${{ env.GCP_SA_KEY != '' && matrix.source == 'httparchive' }}
         run: echo "$GCP_SA_KEY" > "${{ runner.temp }}/gcp-key.json"
 
       - name: "Run discovery (source: ${{ matrix.source }})"
-        if: ${{ !inputs.only_ct_logs || matrix.source == 'ct_logs' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
