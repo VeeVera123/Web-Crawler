@@ -199,7 +199,7 @@ jobs:
       matrix:
         include:
           - source: github_combined
-            name: Github (Feashliaa+Kalil+OpenPostings+Registries)
+            name: Github
           - source: commoncrawl
             name: common crawl 1
             extra_args: "--cc-shard 0 --cc-total-shards 3"
@@ -274,22 +274,29 @@ jobs:
         # level, and a guarded, optional `import aiodns` a few call sites
         # deep — see node.py's own comments on that one degrading
         # gracefully if absent, unlike the other three), and
-        # `from ats_scrapers import scrape_board` (which needs
-        # `bs4`/beautifulsoup4). NONE of these were ever installed here
-        # because, until a separate 2026-09 fix to the bridge's own
-        # directory-resolution math, the whole import silently failed for
-        # an UNRELATED reason (couldn't even locate the file) before ever
-        # reaching any of these — so this missing-dependency gap was
-        # masked the entire time. Confirmed live: fixing the path bug
-        # immediately surfaced "No module named 'aiohttp'" instead, on
-        # this exact step. verification.yml (which runs verification.py
-        # directly, never through this bridge) already installs
-        # `aiohttp aiodns selectolax requests beautifulsoup4
-        # python-dotenv` for exactly this reason — this brings
-        # Discovery.yml's INDIRECT use of the same module up to the same
-        # requirement (aiodns included for parity/DNS-resolver
-        # performance even though node.py degrades fine without it).
-        run: pip install requests python-dotenv google-cloud-bigquery pyarrow psycopg2-binary aiohttp aiodns selectolax beautifulsoup4
+        # `from ats_scrapers import scrape_board` — which itself needs
+        # `httpx[http2]` (its async transport, since 2026-09) on top of
+        # `bs4`/beautifulsoup4.
+        #
+        # 2026-09 ROUND 2: this file's own hand-picked package list (kept
+        # in sync with verification.py's imports "by hand," the same
+        # anti-pattern verification.yml's own comment above already
+        # documents fixing for ITSELF) drifted the same way again —
+        # confirmed live via a real Discovery run's own log:
+        # "Could not load Verification/verification.py for the CC/Wayback
+        # live pre-check (No module named 'httpx') — falling back to this
+        # file's own local checks for every platform this run." Every
+        # platform _via_verification() is supposed to check through the
+        # REAL verification.py functions (~25 of them) was silently
+        # running discovery.py's own lesser fallback checks instead, for
+        # every Discovery run, since whenever httpx was added to
+        # ats_scrapers.py's dependencies. Fixed the same way
+        # verification.yml already fixed this for itself: install from
+        # requirements.txt directly so this can't drift out of sync again
+        # — plus google-cloud-bigquery, the one genuinely Discovery-only
+        # dependency (HTTP Archive/BigQuery source) that isn't a shared
+        # project dependency at all.
+        run: pip install -r requirements.txt google-cloud-bigquery
 
       - name: Write GCP service account key (for HTTP Archive/BigQuery source)
         env:
