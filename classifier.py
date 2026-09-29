@@ -1204,6 +1204,124 @@ GLOBAL_KEYWORDS = [
     r"\bacross\s*the\s*globe\b",
     r"\btalent,?\s*not\s*(?:location|geography)\b",
     r"\bgeography\s*is\s*not\s*a\s*barrier\b",
+
+    # 2026-09 ROUND 6 (explicit user-provided global hiring lingo list,
+    # this time cross-checked by the user directly against this file's own
+    # ~130-pattern vocabulary rather than a generic list — only genuinely
+    # missing phrasing families are added here; see the user's own message
+    # for the full family-by-family comparison this is drawn from).
+    #
+    # "hire/recruit/employ ... anywhere/from anywhere" — the existing
+    # "\bhire\s*(globally|worldwide|anywhere)\b" (ROUND-1-era, above) only
+    # matches when the qualifier IMMEDIATELY follows the verb (\s* is
+    # whitespace-only) — "hire FROM anywhere" or "hire PEOPLE/TALENT
+    # anywhere" both have an extra word in between and were real gaps.
+    r"\b(?:hire|hiring|recruit|recruiting|employ|employment)\s*"
+    r"(?:people|talent)?\s*(?:from\s*)?(?:anywhere|everywhere)\b",
+    r"\bopen\s*to\s*talent\s*(?:everywhere|globally|worldwide|from\s*anywhere)\b",
+    r"\b(?:candidates?|applicants?)\s*from\s*everywhere\b",
+    r"\b(?:employees?|team\s*members?)\s*(?:can|may)\s*be\s*anywhere\b",
+    r"\byou\s*(?:can|may)\s*(?:live|be\s*based)\s*anywhere\b",
+    # "wherever" family — the existing bare "\bwherever\s*(?:you|they)\s*
+    # (?:are|live)\b" doesn't match the "you're" contraction, and "work
+    # from wherever" (no "you are/live" tail at all) wasn't covered either.
+    r"\bwherever\s*you'?re\s*(?:located|based)\b",
+    r"\bwork\s*from\s*wherever\b",
+    # "no matter where" / "regardless where" / "irrespective where" (the
+    # existing regardless-of/irrespective-of patterns above require "of" —
+    # real postings drop it) family.
+    r"\bno\s*matter\s*where\s*you\s*(?:live|are)\b",
+    r"\bno\s*matter\s*where\s*you'?re\s*(?:located|based)\b",
+    r"\b(?:regardless|irrespective)\s*where\s*you\s*(?:live|are)\b",
+    # "X is irrelevant" / "X doesn't matter" family, broadened from the
+    # existing location-only "doesn't matter" pattern to geography/country,
+    # plus the "irrelevant" synonym the existing vocabulary had no coverage
+    # for at all.
+    r"\b(?:location|geography|country)\s*(?:doesn'?t|does\s*not)\s*matter\b",
+    r"\b(?:your\s*)?(?:location|geography|country)\s*is\s*irrelevant\b",
+    r"\bwhere\s*you\s*(?:live|are\s*based|are\s*located)\s*is\s*irrelevant\b",
+    # geography/location/country -neutral/-independent/-free (existing
+    # vocabulary only had location-agnostic/location-independent/geo-
+    # agnostic/geo-flexible/location-free — not the "-neutral" spelling, not
+    # "geography"/"country" as the noun, and not "geographically
+    # independent").
+    r"\b(?:geography|location|country)[\s\-]*neutral\b",
+    r"\b(?:geograph(?:y|ically)|country)[\s\-]*independent\b",
+    r"\b(?:geography|country)[\s\-]*free\b",
+    # "no barrier(s)" / "will not be a barrier" — existing vocabulary only
+    # had the single fixed phrase "geography is not a barrier".
+    r"\bno\s*(?:geographic|geographical|location|country)\s*barriers?\b",
+    r"\b(?:geography|location)\s*is\s*no\s*barrier\b",
+    r"\b(?:location|geography)\s*will\s*not\s*be\s*a\s*barrier\b",
+    # "no/without geographic limits/boundaries" — existing vocabulary only
+    # had the plural "limitations", not "limits", and no "boundaries" form.
+    r"\bno\s*(?:geographic|geographical|location|country)\s*limits?\b",
+    r"\bno\s*(?:geographic|geographical|location|country)\s*boundaries\b",
+    r"\bwithout\s*(?:geographic|geographical|location)\s*"
+    r"(?:limits?|boundaries|borders?|restrictions?)\b",
+    # "across/throughout the (entire) world/globe", "every/all countries" —
+    # existing vocabulary only had "around the world/globe" and "across the
+    # globe", not the bare "across the world" or any "throughout" form.
+    r"\bacross\s*the\s*(?:entire\s*)?world\b",
+    r"\bthroughout\s*the\s*(?:entire\s*)?(?:world|globe)\b",
+    r"\bacross\s*every\s*country\b",
+    r"\bacross\s*all\s*countries\b",
+    r"\bin\s*every\s*country\b",
+    r"\bfrom\s*every\s*country\b",
+    # "internationally distributed" (existing only had "globally
+    # distributed") and "distributed across countries/continents".
+    r"\binternationally\s*distributed\b",
+    r"\bdistributed\s*across\s*(?:countries|continents)\b",
+    # "global talent base/network/community", "international/worldwide
+    # talent pool" — existing only had "global talent"/"global talent
+    # pool". Also excluded from the free-text safety net below, same
+    # treatment as their existing siblings (company-description marketing
+    # language, not an explicit per-role hiring-scope statement).
+    r"\bglobal\s*talent\s*(?:base|network|community)\b",
+    r"\b(?:international|worldwide)\s*talent\s*pool\b",
+    r"\btalent\s*pool\s*without\s*borders\b",
+    # "anywhere on earth/the planet", "any corner of the world", "any
+    # location in the world/globally" — existing only had "any part of the
+    # world".
+    r"\banywhere\s*on\s*(?:earth|the\s*planet)\b",
+    r"\bany\s*corner\s*of\s*the\s*world\b",
+    r"\bany\s*location\s*(?:in\s*the\s*world|globally)\b",
+    # "remote globally" (adverb form — the existing remote+qualifier
+    # patterns above require "global" the adjective, immediately after
+    # "remote", and \b fails right before "-ly"), "remote from
+    # anywhere/any country/around the world" (an intervening "from" the
+    # existing remote+qualifier patterns' bare \s* can't match), "remote in
+    # every country".
+    r"\bremote\s*[\-–—/,()]?\s*globally\b",
+    r"\b(?:fully\s*|100%\s*)?remote\s*from\s*"
+    r"(?:anywhere|any\s*country|around\s*the\s*world)\b",
+    r"\bremote\s*in\s*every\s*country\b",
+    # "hiring/recruiting/employment WITHOUT geographic restrictions" — the
+    # existing "no geographic/country restrictions" patterns above require
+    # "no", not "without".
+    r"\b(?:hiring|recruiting|employment)\s*without\s*"
+    r"(?:geographic|geographical|location|country)\s*restrictions?\b",
+    # "geographically/location/country unrestricted" (reversed word order
+    # from the existing "unrestricted location") and "geographically/
+    # location open", "open internationally", "open to the world".
+    r"\b(?:geographically|location|country)\s*unrestricted\b",
+    r"\b(?:geographically|location)\s*open\b",
+    r"\bopen\s*internationally\b",
+    r"\bopen\s*to\s*the\s*world\b",
+    # "eligibility"/"eligible" family — not covered at all before.
+    r"\b(?:global|worldwide|international)\s*eligibility\b",
+    r"\bglobally\s*eligible\b",
+    r"\beligible\s*(?:worldwide|globally|anywhere)\b",
+    r"\beligible\s*in\s*any\s*country\b",
+    # "no boundaries"/"without borders" family, broader than the existing
+    # "hire without borders"/"borderless hiring" fixed phrases.
+    r"\bwithout\s*borders\b",
+    r"\bno\s*borders\b",
+    r"\bbeyond\s*borders\b",
+    r"\bacross\s*(?:national\s*)?borders\b",
+    r"\bcross[\-\s]*border\s*hiring\b",
+    r"\bborder[\-\s]*free\s*hiring\b",
+    r"\bborderless\s*employment\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -1310,6 +1428,10 @@ _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS = {
     r"\bremote\s*by\s*design\b",
     r"\bborn\s*remote\b",
     r"\bacross\s*the\s*globe\b",
+    # 2026-09 ROUND 6 additions: same reasoning — company/talent-pool
+    # marketing language, not an explicit per-role hiring-scope statement.
+    r"\bglobal\s*talent\s*(?:base|network|community)\b",
+    r"\b(?:international|worldwide)\s*talent\s*pool\b",
 }
 _SAFETY_NET_GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS
                          if kw not in _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS]
