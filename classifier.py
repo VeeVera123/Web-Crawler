@@ -3726,12 +3726,50 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
                 # Strip the structural words and inspect the place portion.
                 tail = re.split(r"\b(?:based|located|reside|residing|living|live)\s+(?:in|from|at)\s+", value, flags=re.I)[-1].strip(" .,:;()")
                 if tail and not _BROAD_REGION_VALUE_RE.fullmatch(tail):
-                    # If the captured tail contains a broad region plus a
-                    # concrete place, the concrete place still wins.
-                    words = [w for w in re.split(r"[,\s]+", tail) if w]
-                    if not any(_BROAD_REGION_VALUE_RE.fullmatch(w) for w in words):
-                        return True
-                    if len(words) > 1:
+                    # 2026-09 BUG FIX (verified live, real gap: "This role
+                    # is based in APAC and LATAM." — and "...in EMEA and
+                    # Africa." — were both hard-rejected). Both regexes
+                    # above are compiled with re.I, so their [A-Z] capture
+                    # classes ALSO match lowercase letters under case-
+                    # insensitive folding — the capture does NOT stop at a
+                    # lowercase connector like "and" the way it looks like
+                    # it would from the pattern alone; "based in APAC and
+                    # LATAM" captures the full "APAC and LATAM" as tail,
+                    # same as "based in EMEA and Africa" captures "EMEA and
+                    # Africa".
+                    #
+                    # The bug was in what happened next: the OLD code split
+                    # the tail on whitespace/commas, confirmed SOME word
+                    # was a recognized broad region, then did
+                    # `if len(words) > 1: return True` unconditionally —
+                    # which fires even when EVERY word is a broad region
+                    # ("APAC and LATAM" -> ["APAC","and","LATAM"], 3 words,
+                    # always returns True regardless of what those words
+                    # actually were). The comment above that line ("if the
+                    # tail contains a broad region PLUS a concrete place,
+                    # the concrete place still wins") describes the
+                    # intended behavior, but the code never actually
+                    # checked for a genuine concrete place among the
+                    # remaining words.
+                    #
+                    # Fixed by removing every recognized broad-region SPAN
+                    # (via .sub(), not a naive whitespace split — a
+                    # whitespace split breaks a multi-word region name like
+                    # "Western Europe" into ["Western","Europe"], neither
+                    # of which fullmatches the 2-word pattern on its own)
+                    # and every connector word from the tail; whatever's
+                    # left over is inspected. Nothing left over means the
+                    # tail was ENTIRELY recognized region names + connectors
+                    # ("APAC and LATAM", "EMEA and Africa", "Western Europe
+                    # and Gulf") — accepted multi-region evidence, not a
+                    # restriction. Real text left over ("APAC and Austin"
+                    # leaves "Austin"; "New York and Boston" leaves "New
+                    # York Boston") means a genuine concrete place is
+                    # mixed in — still correctly restrictive.
+                    remainder = _BROAD_REGION_VALUE_RE.sub(" ", tail)
+                    remainder = re.sub(r"\b(?:and|or)\b|&", " ", remainder, flags=re.I)
+                    remainder = re.sub(r"[,\s]+", " ", remainder).strip()
+                    if remainder:
                         return True
     return False
 
@@ -3821,6 +3859,20 @@ def has_extra_restrictive_geography_signal(job: dict) -> bool:
         # qualify a region list; don't treat "remote for EMEA candidates,
         # including UK/Germany" as a single-country restriction.
         if _text_has_global_evidence(sentence) or _text_has_africa_or_emea_evidence(sentence):
+            continue
+        # 2026-09 BUG FIX (verified live, real gap: "This role is based in
+        # APAC and LATAM." was hard-rejected). _EXTRA_RESTRICTIVE_RE's
+        # "based in .../only in ..." patterns capture the place as a
+        # generic [^.;,\n]{1,80} span — "APAC and LATAM" matches that span
+        # whole, with no check for whether it's actually naming 2+
+        # distinct business regions rather than one place. The guard above
+        # only catches an explicit global/EMEA/Africa phrase in the same
+        # sentence, not general multi-region breadth (e.g. two non-EMEA/
+        # Africa regions named together) — add that guard too, same as
+        # has_hard_country_based_restriction_signal/has_hard_country_
+        # specific_auth_signal/has_role_specific_place_restriction_signal
+        # already do.
+        if _has_multi_region_breadth(sentence):
             continue
         if any(rx.search(sentence) for rx in _EXTRA_RESTRICTIVE_RE):
             return True
