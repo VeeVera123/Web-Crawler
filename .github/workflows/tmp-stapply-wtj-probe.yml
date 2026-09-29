@@ -1,0 +1,90 @@
+name: TEMP - stapply.ai welcometothejungle probe
+
+# Temporary, throwaway diagnostic workflow — answers one question: does
+# stapply.ai's manifest carry a welcometothejungle source, and if so, do
+# its rows link directly to the underlying ATS (extractable slug) or only
+# to the welcometothejungle.com application page? Delete this file once
+# that's answered (see chat/commit history for the decision this fed).
+#
+# Triggered via `push` (not `workflow_dispatch`) because the token running
+# this session doesn't have Actions:write to dispatch a workflow_dispatch
+# run directly — pushing a change to this exact path is what fires it.
+on:
+  push:
+    paths:
+      - ".github/workflows/tmp-stapply-wtj-probe.yml"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe stapply.ai manifest + welcometothejungle rows
+        run: |
+          python3 - <<'PYEOF'
+          import json, urllib.request, csv, io
+
+          manifest_url = "https://storage.stapply.ai/jobhive/v1/manifest.json"
+          print(f"Fetching {manifest_url}")
+          with urllib.request.urlopen(manifest_url, timeout=60) as r:
+              manifest = json.loads(r.read().decode())
+
+          print("=== MANIFEST TOP-LEVEL TYPE ===")
+          print(type(manifest))
+          print(json.dumps(manifest, indent=2)[:6000])
+
+          # Try to find every source key the manifest actually advertises
+          def find_sources(obj):
+              if isinstance(obj, dict):
+                  return list(obj.keys())
+              if isinstance(obj, list):
+                  keys = []
+                  for item in obj:
+                      if isinstance(item, dict):
+                          for k in ("source", "name", "id", "slug"):
+                              if k in item:
+                                  keys.append(item[k])
+                  return keys
+              return []
+
+          candidate_keys = find_sources(manifest)
+          print("\n=== CANDIDATE SOURCE KEYS ===")
+          print(candidate_keys)
+
+          wtj_candidates = [k for k in candidate_keys if isinstance(k, str) and
+                             ("jungle" in k.lower() or "wtj" in k.lower())]
+          print("\n=== WTJ-LIKE CANDIDATES ===")
+          print(wtj_candidates)
+
+          # Try the obvious direct guesses regardless of manifest shape
+          guesses = ["welcometothejungle", "welcome_to_the_jungle", "wtj",
+                      "weltothejungle", "welcome-to-the-jungle"]
+          for g in set(guesses + wtj_candidates):
+              url = f"https://storage.stapply.ai/jobhive/v1/{g}/jobs.csv"
+              try:
+                  req = urllib.request.Request(url, method="HEAD")
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      print(f"\n[{g}] HEAD -> {r.status}  url={url}")
+                      found = True
+              except Exception as e:
+                  print(f"\n[{g}] HEAD -> FAILED ({e})  url={url}")
+                  continue
+
+              # If HEAD succeeded, pull a small sample of real rows
+              try:
+                  req = urllib.request.Request(url)
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      text = r.read(500_000).decode(errors="replace")
+                  reader = csv.DictReader(io.StringIO(text))
+                  print(f"[{g}] CSV columns: {reader.fieldnames}")
+                  for i, row in enumerate(reader):
+                      if i >= 8:
+                          break
+                      print(f"[{g}] row {i}: url={row.get('url')!r} "
+                            f"apply_url={row.get('apply_url')!r} "
+                            f"ats_type={row.get('ats_type')!r} "
+                            f"ats_id={row.get('ats_id')!r} "
+                            f"company={row.get('company')!r}")
+              except Exception as e:
+                  print(f"[{g}] CSV sample fetch FAILED: {e}")
+          PYEOF
