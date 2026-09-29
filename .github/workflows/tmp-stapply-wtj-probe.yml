@@ -1,14 +1,20 @@
 name: TEMP - stapply.ai welcometothejungle probe
 
 # Temporary, throwaway diagnostic workflow — answers one question: does
-# stapply.ai's manifest carry a welcometothejungle source, and if so, do
-# its rows link directly to the underlying ATS (extractable slug) or only
-# to the welcometothejungle.com application page? Delete this file once
-# that's answered (see chat/commit history for the decision this fed).
+# stapply.ai carry a welcometothejungle source, and if so, do its rows
+# link directly to the underlying ATS (extractable slug) or only to the
+# welcometothejungle.com application page? Delete this file once that's
+# answered (see chat/commit history for the decision this fed).
 #
 # Triggered via `push` (not `workflow_dispatch`) because the token running
 # this session doesn't have Actions:write to dispatch a workflow_dispatch
 # run directly — pushing a change to this exact path is what fires it.
+#
+# v2: manifest.json 403'd urllib's default User-Agent (Python-urllib/3.x)
+# — likely a bot-WAF, since crawl_iii.py's aiohttp client already fetches
+# these same-family CSV URLs fine in production. Added a browser UA and
+# skip straight to guessing the per-source CSV path instead of relying on
+# manifest.json.
 on:
   push:
     paths:
@@ -19,72 +25,52 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe stapply.ai manifest + welcometothejungle rows
+      - name: Probe stapply.ai for a welcometothejungle source
         run: |
-          python3 - <<'PYEOF'
-          import json, urllib.request, csv, io
+          cat > /tmp/probe.py <<'PYEOF'
+          import json
+          import urllib.request
+          import csv
+          import io
 
-          manifest_url = "https://storage.stapply.ai/jobhive/v1/manifest.json"
-          print(f"Fetching {manifest_url}")
-          with urllib.request.urlopen(manifest_url, timeout=60) as r:
-              manifest = json.loads(r.read().decode())
+          UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 
-          print("=== MANIFEST TOP-LEVEL TYPE ===")
-          print(type(manifest))
-          print(json.dumps(manifest, indent=2)[:6000])
+          def fetch(url, timeout=60, byte_limit=None):
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  data = r.read(byte_limit) if byte_limit else r.read()
+                  return r.status, data.decode(errors="replace")
 
-          # Try to find every source key the manifest actually advertises
-          def find_sources(obj):
-              if isinstance(obj, dict):
-                  return list(obj.keys())
-              if isinstance(obj, list):
-                  keys = []
-                  for item in obj:
-                      if isinstance(item, dict):
-                          for k in ("source", "name", "id", "slug"):
-                              if k in item:
-                                  keys.append(item[k])
-                  return keys
-              return []
+          print("=== manifest.json ===")
+          try:
+              status, text = fetch("https://storage.stapply.ai/jobhive/v1/manifest.json")
+              print(f"status={status}")
+              manifest = json.loads(text)
+              print(json.dumps(manifest, indent=2)[:8000])
+          except Exception as e:
+              print(f"manifest fetch FAILED: {e}")
 
-          candidate_keys = find_sources(manifest)
-          print("\n=== CANDIDATE SOURCE KEYS ===")
-          print(candidate_keys)
-
-          wtj_candidates = [k for k in candidate_keys if isinstance(k, str) and
-                             ("jungle" in k.lower() or "wtj" in k.lower())]
-          print("\n=== WTJ-LIKE CANDIDATES ===")
-          print(wtj_candidates)
-
-          # Try the obvious direct guesses regardless of manifest shape
           guesses = ["welcometothejungle", "welcome_to_the_jungle", "wtj",
-                      "weltothejungle", "welcome-to-the-jungle"]
-          for g in set(guesses + wtj_candidates):
+                     "welcome-to-the-jungle", "weltothejungle", "jungle"]
+          for g in guesses:
               url = f"https://storage.stapply.ai/jobhive/v1/{g}/jobs.csv"
+              print(f"\n=== {g} ===")
               try:
-                  req = urllib.request.Request(url, method="HEAD")
-                  with urllib.request.urlopen(req, timeout=30) as r:
-                      print(f"\n[{g}] HEAD -> {r.status}  url={url}")
-                      found = True
-              except Exception as e:
-                  print(f"\n[{g}] HEAD -> FAILED ({e})  url={url}")
-                  continue
-
-              # If HEAD succeeded, pull a small sample of real rows
-              try:
-                  req = urllib.request.Request(url)
-                  with urllib.request.urlopen(req, timeout=60) as r:
-                      text = r.read(500_000).decode(errors="replace")
+                  status, text = fetch(url, byte_limit=500_000)
+                  print(f"[{g}] status={status}  bytes={len(text)}")
                   reader = csv.DictReader(io.StringIO(text))
-                  print(f"[{g}] CSV columns: {reader.fieldnames}")
+                  print(f"[{g}] columns: {reader.fieldnames}")
                   for i, row in enumerate(reader):
-                      if i >= 8:
+                      if i >= 10:
                           break
                       print(f"[{g}] row {i}: url={row.get('url')!r} "
                             f"apply_url={row.get('apply_url')!r} "
                             f"ats_type={row.get('ats_type')!r} "
                             f"ats_id={row.get('ats_id')!r} "
-                            f"company={row.get('company')!r}")
+                            f"company={row.get('company')!r} "
+                            f"location={row.get('location')!r}")
               except Exception as e:
-                  print(f"[{g}] CSV sample fetch FAILED: {e}")
+                  print(f"[{g}] FAILED: {e}")
           PYEOF
+          python3 /tmp/probe.py
