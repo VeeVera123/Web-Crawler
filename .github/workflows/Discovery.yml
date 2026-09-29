@@ -199,7 +199,7 @@ jobs:
       matrix:
         include:
           - source: github_combined
-            name: Github (Feashliaa+Kalil+OpenPostings+Registries)
+            name: Github 
           - source: commoncrawl
             name: common crawl 1
             extra_args: "--cc-shard 0 --cc-total-shards 3"
