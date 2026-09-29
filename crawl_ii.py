@@ -96,12 +96,14 @@ import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_
 # (2026-08: this file used to do all its HTML parsing inline on the event
 # loop with no pool at all — see extract_postings_from_page's docstring —
 # it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
+import config  # noqa: E402
 import location_diagnostics  # noqa: E402
 from classifier import (  # noqa: E402
     keyword_classify_role, ai_classify_roles,
     _keyword_classify_location_detail, ai_classify_locations,
     detect_visa_sponsorship, PLACEHOLDER_LOC_RE,
     classify_role_category,
+    classify_rank4, RANK4_ELIGIBLE_ATS,
     PRIORITY_GLOBAL, PRIORITY_AFRICA,
     PRIORITY_UNSURE_BLANK, PRIORITY_UNSURE_SILENT,
 )
@@ -1283,6 +1285,37 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     # filter_locations for the full reasoning on why these are treated
     # differently below.
     unsure_reasons = []
+
+    rank4_enabled = getattr(config, "ENABLE_RANK4_COUNTRY_SPECIFIC", False)
+
+    def _try_rank4(job: dict) -> bool:
+        # Same Rank 4 gate as crawl_i.py's filter_locations — see that
+        # function's docstring. 2026-09 (explicit user correction): Crawl
+        # II is NOT excluded from Rank 4 the way Crawl III is — it runs
+        # the same enrich_application_questions_async() as Crawl I (see
+        # this file's imports), so a Crawl II job CAN carry a real
+        # "Application Question:" marker. In practice every Crawl II row
+        # is currently tagged source_ats=DEFAULT_ATS_LABEL ("in_house"),
+        # never one of RANK4_ELIGIBLE_ATS's real platform names, so this
+        # gate is correct-but-currently-inert here — kept for consistency
+        # and in case that ever changes, not a guess that it fires today.
+        if not rank4_enabled:
+            return False
+        if job.get("role_category") not in ("CS", "AM"):
+            return False
+        if job.get("source_ats") not in RANK4_ELIGIBLE_ATS:
+            return False
+        if "Application Question:" not in (job.get("description_snippet") or ""):
+            return False
+        priority, reason = classify_rank4(job)
+        if not priority:
+            return False
+        job["clearance"] = "rank4"
+        job["location_priority"] = priority
+        matched.append(job)
+        confidences.append(f"rank4_{reason}")
+        return True
+
     for job in jobs:
         # 2026-09 BUG FIX (this investigation, crawl_ii's own bug — separate
         # from both of today's earlier fixes): classifier.py is shared by
@@ -1342,6 +1375,10 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
         elif result == "unsure":
             unsure_jobs.append(job)
             unsure_reasons.append(unsure_reason)
+        else:
+            # Keyword-stage "no_match" — Rank 4 gets one last look before
+            # this job is dropped for good (see crawl_i.py's equivalent).
+            _try_rank4(job)
 
     # 2026-09 (Phase 2, "Do all 3") — see crawl_i.py's filter_locations for
     # the full reasoning. Diagnostics now live in the shared
@@ -1415,11 +1452,14 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 confidences.append("uncertain")
-            # "no_match" → drop. "uncertain" with unsure_reason == "blank"
-            # → also drop (see above), REGARDLESS of provider_name — a
-            # blank location field only survives via a real match_global/
-            # match_africa AI verdict, never on genuine (or missing) AI
-            # uncertainty alone.
+            else:
+                # "no_match" → drop. "uncertain" with unsure_reason ==
+                # "blank" → also drop (see above), REGARDLESS of
+                # provider_name — a blank location field only survives
+                # via a real match_global/match_africa AI verdict, never
+                # on genuine (or missing) AI uncertainty alone. Rank 4
+                # gets one last look before the drop is final.
+                _try_rank4(job)
 
     return matched, confidences
 
