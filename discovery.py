@@ -6230,6 +6230,17 @@ GITHUB_REGISTRY_REPOS = [
     # when an explicit ATS column is absent.
     {"repo": "ethancha0/ats-scraper", "branch": "main",
      "path": "data/companies.csv", "format": "csv_file"},
+    # elliottdehn/open-jobs (2026-09, explicit user request): a real,
+    # maintained fleet-crawler project whose repo root ships slugs.json —
+    # "rebuilt from the fleet itself... so the file and the running fleet
+    # cannot drift apart" (its own backend/DOCS.md) — 75k+ live slugs
+    # across 36 providers, split into "ats" (fetchable) vs "gone" (dead),
+    # confirmed live this session (fetched via jsDelivr, same as every
+    # other entry here). See _parse_openjobs_slugmap's docstring for
+    # exactly which of those 36 platforms are safe to take as-is and
+    # which were deliberately left out.
+    {"repo": "elliottdehn/open-jobs", "branch": "main",
+     "path": "slugs.json", "format": "openjobs_slugmap"},
 ]
 
 # openroles filename (their "ats" field) -> our SUPPORTED_ATS key. Every
@@ -6503,6 +6514,11 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "brassring": "brassring", "folkshr": "folkshr", "csod": "csod",
     "cornerstone": "csod", "cornerstoneondemand": "csod", "recruiterbox": "recruiterbox",
     "trakstar": "recruiterbox", "flatchr": "flatchr", "jobylon": "jobylon",
+    # 2026-09: softgarden was missing entirely — confirmed live this
+    # session while wiring elliottdehn/open-jobs (a real, already-scraped
+    # SUPPORTED_ATS platform with zero alias here, so every prior source
+    # that might have seen a "softgarden" label had it silently dropped).
+    "softgarden": "softgarden",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -6700,6 +6716,103 @@ def _parse_generic_github_json(text: str, repo: str) -> dict[str, dict[str, str]
     return out
 
 
+# elliottdehn/open-jobs' slugs.json shape: {"ats": {"<platform>": ["<slug>",
+# ...], ...}, "gone": {...}}. Every value in "ats" is a BARE STRING (the
+# fleet's own pre-verified-live crawl target for that board), not a record
+# with separate metadata — a materially different shape from job-radar's/
+# ats-scraper's per-record schema, hence its own dedicated parser rather
+# than forcing it through _parse_generic_github_json.
+#
+# Confirmed live (2026-09) which of its 36 platforms are safe to take
+# as-is:
+#   - Direct bare-slug match, no transform needed (confirmed against this
+#     project's own existing scraper/URL_TO_SLUG slug shape for each):
+#     ashby, bamboohr, breezy, greenhouse, jazzhr, jobvite, lever, paycom
+#     (32-hex clientkey, exact match), personio, pinpoint, recruitee,
+#     smartrecruiters, taleo, workable.
+#   - Hostname values needing one fixed suffix stripped to recover our
+#     bare-subdomain slug format (matches _cc_check_subdomain_tenant's
+#     own {slug}.<suffix> reconstruction): softgarden
+#     ("x.softgarden.io" -> "x"), teamtailor ("x.teamtailor.com" -> "x",
+#     keeping any internal dots, e.g. a real "x.na" region prefix, intact).
+# Deliberately EXCLUDED (seen in this source, not wired — no guessing):
+#   - workday, oraclecloud: this repo only gives the bare hostname
+#     ("2020companies.wd1.myworkdayjobs.com" /
+#     "cbdt.fa.us2.oraclecloud.com"); our slug format additionally needs a
+#     site_id (Workday's `site`, Oracle's `CX_n`) that isn't recoverable
+#     from the hostname alone and isn't safely guessable (see
+#     _assemble_workday_slug/_assemble_oracle_cloud_slug's own docstrings
+#     for the real dead-slug bug this exact guess produced before).
+#   - cornerstone (csod): bare tenant slugs only, same as openroles' own
+#     csod.json — needs the identical live per-tenant career-site-id
+#     resolve _resolve_csod_career_site_id already does for that source;
+#     not duplicated here to avoid doubling that live-resolve cost for a
+#     second source in the same run (362 live entries — a real
+#     candidate for later, not a guess-worth-avoiding one).
+#   - icims, successfactors, paylocity: real values seen, but this
+#     project has no independently-confirmed evidence the exact string
+#     shape here (icims: values already carry a baked-in prefix like
+#     "allcareers-quanta"; successfactors: full branded domains;
+#     paylocity: bare UUIDs) is what our own scraper/verifier expects —
+#     left unmapped rather than risk contaminating archive_i with a
+#     plausible-looking but wrong slug (this project's own "Feashliaa/
+#     Rippling contamination" precedent is exactly this failure mode).
+#   - dark, dayforce, eightfold, gohire, governmentjobs, jibe, jobscore,
+#     phenom, recruiterbox, ukg, usajobs, crelate, comeet: not in
+#     SUPPORTED_ATS at all (several deliberately blacklisted — see
+#     GREYLIST_ATS.md), or need per-tenant metadata this repo doesn't
+#     provide either.
+_OPENJOBS_DIRECT_ATS = {
+    "ashby", "bamboohr", "breezy", "greenhouse", "jazzhr", "jobvite",
+    "lever", "paycom", "personio", "pinpoint", "recruitee",
+    "smartrecruiters", "taleo", "workable",
+}
+_OPENJOBS_SUFFIX_STRIP_ATS = {
+    "softgarden": ".softgarden.io",
+    "teamtailor": ".teamtailor.com",
+}
+
+
+def _parse_openjobs_slugmap(text: str, repo: str) -> dict[str, dict[str, str]]:
+    try:
+        data = json.loads(text)
+    except Exception as e:
+        log.error(f"  {repo}: invalid JSON registry: {e}")
+        return {}
+    raw_ats = (data.get("ats") or {}) if isinstance(data, dict) else {}
+    if not isinstance(raw_ats, dict):
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for raw_platform, raw_slugs in raw_ats.items():
+        if not isinstance(raw_slugs, list):
+            continue
+        key = str(raw_platform).strip().lower()
+        suffix = _OPENJOBS_SUFFIX_STRIP_ATS.get(key)
+        if key not in _OPENJOBS_DIRECT_ATS and not suffix:
+            continue
+        ats = _normalize_github_ats(key)
+        if not ats:
+            continue
+        for raw_slug in raw_slugs:
+            slug = str(raw_slug or "").strip()
+            if suffix:
+                if not slug.lower().endswith(suffix):
+                    continue
+                slug = slug[: -len(suffix)]
+            if not slug or slug.lower() in SKIP_SLUGS:
+                continue
+            # _looks_like_real_slug's heuristics reject hash/hex-shaped
+            # strings as junk — paycom's real slug format IS a 32-hex
+            # clientkey (see _GITHUB_REGISTRY_ATS_MAP's own "verified
+            # live" comment on this exact shape), so it's the one
+            # deliberate exception to that filter here.
+            if ats != "paycom" and not _looks_like_real_slug(slug):
+                continue
+            out.setdefault(ats, {})[slug] = ""
+    return out
+
+
 def _parse_generic_github_csv(text: str, repo: str) -> dict[str, dict[str, str]]:
     import csv
     try:
@@ -6793,6 +6906,14 @@ def fetch_github_registries_slugs(csod_resolve_time_budget_minutes: int = CSOD_R
                 parsed = _parse_generic_github_csv(text, repo)
                 added = _merge_github_registry_result(slugs_by_ats, parsed)
                 log.info(f"  {repo}: {added} CSV registry slugs normalized")
+            continue
+        if reg.get("format") == "openjobs_slugmap":
+            text = _github_registry_fetch(reg)
+            if text is not None:
+                parsed = _parse_openjobs_slugmap(text, repo)
+                added = _merge_github_registry_result(slugs_by_ats, parsed)
+                log.info(f"  {repo}: {added} live registry slugs normalized "
+                         f"(see _parse_openjobs_slugmap for what's excluded and why)")
             continue
 
         prefix = reg["path_prefix"]
