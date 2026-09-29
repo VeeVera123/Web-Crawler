@@ -1,0 +1,22 @@
+name: tmp-diag-probe2
+
+on:
+  push:
+    paths:
+      - "diag_probe2.py"
+      - ".github/workflows/tmp-diag-probe2.yml"
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python diag_probe2.py all
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
