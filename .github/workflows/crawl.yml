@@ -127,10 +127,14 @@ on:
       # 2026-09 (explicit user request — classification revamp Phase 2):
       # opt-in checkbox for Rank 4 (CS/AM-only bare country/region
       # admission, no restrictive tie confirmed — see classifier.py's
-      # classify_rank4()). Crawl I only (see that function's module
-      # comment for why Crawl II/III aren't wired to it). Default
-      # unchecked — this is a new tier and shouldn't silently start
-      # writing rows until explicitly turned on for a run.
+      # classify_rank4()). Wired into Crawl I and Crawl II (both run the
+      # same application-question enrichment, so both can genuinely carry
+      # the "Application Question:" marker Rank 4 requires) — NOT Crawl
+      # III, whose stapply.ai CSVs never carry application questions at
+      # all, so its shared filter_locations() call can never satisfy the
+      # gate regardless of this flag. Default unchecked — this is a new
+      # tier and shouldn't silently start writing rows until explicitly
+      # turned on for a run.
       enable_rank4_country_specific:
         description: "Enable Rank 4 (CS/AM)"
         required: false
@@ -299,6 +303,7 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           USE_OPENAI: ${{ inputs.use_openai }}
           USE_NVIDIA: ${{ inputs.use_nvidia }}
+          ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ inputs.enable_rank4_country_specific }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
