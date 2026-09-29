@@ -82,6 +82,19 @@ Sources:
      file/dataset needed. Covers 18 subdomain-per-tenant platforms — see
      fetch_ct_log_slugs docstring and the CT_LOG_SUFFIXES comment above it
      for exactly which platforms this can/can't help and why.)
+  16. welcometothejungle.com (--source welcometothejungle; 2026-09, new,
+     explicit user request after investigating whether the site's
+     Algolia-backed company search was directly scrapable — confirmed
+     live it's server-rendered with no client-callable Algolia key ever
+     observed, but the site's OWN public sitemap
+     (/sitemaps/company-profiles.N.xml.gz, from robots.txt's sitemap
+     index) enumerates every live company profile URL directly — simpler
+     and more authoritative than an API. ~27,000 slugs as of 2026-09. Not
+     yet in SUPPORTED_ATS/ats_scrapers.SCRAPERS — no Crawl I scraper
+     exists for this platform yet, so these rows sit in archive_i
+     unscraped (load_slugs() already skips unsupported-ATS rows
+     harmlessly) until one is built. See fetch_welcometothejungle_slugs
+     docstring for the full evidence trail.)
 
   2026-09 CONSOLIDATION (explicit user request): sources 1 (Feashliaa), 2
   (kalil0321), 3 (OpenPostings), and 11 (GitHub repo registries) are 4
@@ -166,6 +179,7 @@ Usage:
 """
 
 import argparse
+import gzip
 import json
 import logging
 import os
@@ -2522,6 +2536,87 @@ def fetch_icims_hrjobs_slugs(max_pages: int = 500) -> dict[str, dict[str, str]]:
 
     log.info(f"iCIMS HR Jobs: {len(found)} slugs across {page - 1} page(s)")
     return {"icims": found}
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE 16: welcometothejungle.com (direct company sitemap)
+# ══════════════════════════════════════════════════════════
+
+_WTTJ_SITEMAP_INDEX = "https://www.welcometothejungle.com/sitemaps/index.xml.gz"
+_WTTJ_COMPANY_SLUG_RE = re.compile(r"/companies/([a-z0-9][a-z0-9-]*)(?:[\"</?]|$)", re.I)
+
+
+def fetch_welcometothejungle_slugs() -> dict[str, dict[str, str]]:
+    """welcometothejungle.com's own public sitemap — NOT an Algolia
+    scrape. This session confirmed live (headless-browser network
+    capture, several attempts) that the /en/companies listing page's
+    Algolia-backed grid is entirely SERVER-side rendered: the page's CSP
+    allows *.algolianet.com/*.algolia.net/*.algolia.io under connect-src
+    and the SSR hydration payload embeds real Algolia response shapes
+    (nbHits/nbPages/refinementList/attributesToRetrieve), but no
+    client-callable app-id/search-key ever fired from the browser for
+    this page across multiple page-load/scroll/type interactions — the
+    query is built and executed on WTTJ's own Express backend, not
+    exposed to the client.
+
+    Rather than keep reverse-engineering a private server-side call, this
+    uses the site's own public sitemap instead (found via its
+    robots.txt): /sitemaps/index.xml.gz lists per-content-type sitemaps,
+    3 of which (company-profiles.0/1/2.xml.gz) between them enumerate
+    EVERY live company profile URL directly — ~27,000 as of 2026-09.
+    Simpler and more authoritative than an API: a sitemap only lists
+    pages the site itself currently considers real (each entry carries
+    its own <lastmod>), so this needs no separate live-check the way a
+    guessed/scraped slug normally would.
+
+    Returns {"welcometothejungle": {slug: ""}} — no company name is
+    available from the sitemap alone (just the URL). "welcometothejungle"
+    is deliberately NOT in SUPPORTED_ATS/ats_scrapers.SCRAPERS yet — no
+    Crawl I scraper exists for this platform, so load_slugs() will
+    harmlessly skip these rows (its own "Skipping N archive_i rows for
+    unsupported ATS" summary line) until one is built. Crawl III already
+    covers welcometothejungle via a completely separate path (stapply.ai's
+    own CSV mirror, ats_type="welcometothejungle") — this is an
+    independent discovery of the full company set straight from the
+    source, not a replacement for that."""
+    def _fetch_xml(url: str) -> str | None:
+        # requests transparently decompresses a gzip Content-Encoding
+        # response (common for these .xml.gz files served over HTTP), in
+        # which case r.content is already plain XML bytes — only fall
+        # back to manual gzip.decompress when the raw bytes are still
+        # gzip-framed (some CDNs don't set Content-Encoding and just
+        # serve the .gz file's bytes as-is).
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+        if resp.content[:2] == b"\x1f\x8b":
+            return gzip.decompress(resp.content).decode("utf-8", "ignore")
+        return resp.content.decode("utf-8", "ignore")
+
+    found: dict[str, str] = {}
+    try:
+        index_xml = _fetch_xml(_WTTJ_SITEMAP_INDEX)
+    except Exception as e:
+        log.warning(f"welcometothejungle: sitemap index fetch failed: {e}")
+        return {"welcometothejungle": found}
+
+    sitemap_urls = [m for m in re.findall(r"<loc>([^<]+)</loc>", index_xml)
+                    if "company-profiles" in m]
+    if not sitemap_urls:
+        log.warning("welcometothejungle: no company-profiles sitemap found in index")
+        return {"welcometothejungle": found}
+
+    for sm_url in sitemap_urls:
+        try:
+            xml = _fetch_xml(sm_url)
+        except Exception as e:
+            log.warning(f"welcometothejungle: {sm_url} failed: {e}")
+            continue
+        for m in _WTTJ_COMPANY_SLUG_RE.finditer(xml):
+            found[m.group(1)] = ""
+
+    log.info(f"welcometothejungle: {len(found)} company slugs across "
+             f"{len(sitemap_urls)} sitemap file(s)")
+    return {"welcometothejungle": found}
 
 
 # ══════════════════════════════════════════════════════════
@@ -6990,7 +7085,7 @@ def main():
         choices=["feashliaa", "kalil", "openpostings", "github_combined",
                  "commoncrawl", "wayback", "ct_logs", "theirstack",
                  "httparchive", "latmay", "edwarddgao", "openjobsdaily",
-                 "icims_hrjobs", "github", "all"],
+                 "icims_hrjobs", "github", "welcometothejungle", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -7370,6 +7465,19 @@ def main():
             grand_total += upserted
         else:
             grand_total += ihr_total
+
+    # Source 16: welcometothejungle.com (direct company sitemap — see
+    # fetch_welcometothejungle_slugs docstring for why this, not Algolia)
+    if args.source in ("welcometothejungle", "all"):
+        log.info("\n--- WELCOMETOTHEJUNGLE (company sitemap) ---")
+        wttj_slugs = fetch_welcometothejungle_slugs()
+        wttj_total = sum(len(s) for s in wttj_slugs.values())
+        if not args.dry_run:
+            upserted = upsert_to_supabase(wttj_slugs, source="Welcometothejungle",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += wttj_total
 
     # Source 11: GitHub repo registries (pre-built ATS slug files from
     # known public repos, e.g. datascry/openroles — see
