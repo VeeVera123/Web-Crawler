@@ -82,6 +82,17 @@ Sources:
      file/dataset needed. Covers 18 subdomain-per-tenant platforms — see
      fetch_ct_log_slugs docstring and the CT_LOG_SUFFIXES comment above it
      for exactly which platforms this can/can't help and why.)
+  16. welcometothejungle.com (--source welcometothejungle; 2026-09, new —
+     see fetch_welcometothejungle_slugs docstring). WTTJ is a job-board
+     AGGREGATOR, not an ATS: its own per-company slug is never written to
+     archive_i directly (an earlier version of this source did exactly
+     that and was reverted). Instead, this follows each company's WTTJ
+     job-detail page (found via the site's public
+     /sitemaps/job-listings.N.xml.gz sitemaps) to its embedded outbound
+     "apply_url" and resolves THAT through the existing URL_TO_SLUG
+     converters — recovering the company's real underlying ATS
+     (Greenhouse, Lever, SmartRecruiters, etc.) and writing a genuine
+     (ats, slug) pair, same shape every other source here produces.
 
   2026-09 CONSOLIDATION (explicit user request): sources 1 (Feashliaa), 2
   (kalil0321), 3 (OpenPostings), and 11 (GitHub repo registries) are 4
@@ -2522,6 +2533,164 @@ def fetch_icims_hrjobs_slugs(max_pages: int = 500) -> dict[str, dict[str, str]]:
 
     log.info(f"iCIMS HR Jobs: {len(found)} slugs across {page - 1} page(s)")
     return {"icims": found}
+
+
+# ══════════════════════════════════════════════════════════
+# SOURCE 16: welcometothejungle.com (real ATS resolved via each job's
+# outbound apply_url — WTTJ is a job-board AGGREGATOR, not an ATS: its
+# own "slug" is just a profile id on welcometothejungle.com and is never
+# written to archive_i on its own. This source only ever writes a REAL
+# (ats, slug) pair for a platform already in URL_TO_SLUG/SUPPORTED_ATS,
+# same shape every other source in this file produces.)
+# ══════════════════════════════════════════════════════════
+
+_WTTJ_SITEMAP_INDEX = "https://www.welcometothejungle.com/sitemaps/index.xml.gz"
+_WTTJ_JOB_URL_COMPANY_RE = re.compile(
+    r"<loc>(https://www\.welcometothejungle\.com/[a-z]{2}/companies/"
+    r"([a-z0-9][a-z0-9-]*)/jobs/[^<]+)</loc>"
+)
+# WTTJ's own job-detail page embeds the posting's outbound application
+# link as a JSON-escaped "apply_url" field in its server-rendered
+# hydration payload (confirmed live, 2026-09: a real Groupement Les
+# Mousquetaires posting's apply_url was
+# "https://jobs.smartrecruiters.com/GroupementMousquetaires/..."
+# — a genuine SmartRecruiters URL, resolved correctly by the existing
+# URL_TO_SLUG["smartrecruiters"] converter with zero new parsing code).
+_WTTJ_APPLY_URL_RE = re.compile(r'"apply_url":"([^"]+)"')
+_WTTJ_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+
+
+def _wttj_fetch_xml(url: str) -> str:
+    # requests transparently decompresses a gzip Content-Encoding
+    # response, in which case r.content is already plain XML bytes —
+    # only fall back to manual gzip.decompress when the raw bytes are
+    # still gzip-framed (some CDNs don't set Content-Encoding and just
+    # serve the .gz file's bytes as-is).
+    resp = requests.get(url, timeout=60, headers={"User-Agent": _WTTJ_UA})
+    resp.raise_for_status()
+    if resp.content[:2] == b"\x1f\x8b":
+        return gzip.decompress(resp.content).decode("utf-8", "ignore")
+    return resp.content.decode("utf-8", "ignore")
+
+
+def _wttj_resolve_job_url(company_slug: str, job_url: str) -> tuple[str, str] | None:
+    try:
+        r = requests.get(job_url, timeout=20, headers={"User-Agent": _WTTJ_UA})
+        r.raise_for_status()
+    except Exception:
+        return None
+    m = _WTTJ_APPLY_URL_RE.search(r.text)
+    if not m:
+        return None
+    apply_url = m.group(1).replace("\\u002F", "/").replace("\\/", "/")
+    for ats, resolver in URL_TO_SLUG.items():
+        slug = resolver(apply_url)
+        if slug:
+            return ats, slug
+    return None
+
+
+def fetch_welcometothejungle_slugs(max_companies: int | None = None, workers: int = 20,
+                                     time_budget_minutes: int = 25) -> dict[str, dict[str, str]]:
+    """welcometothejungle.com is a job-board AGGREGATOR, not an ATS — its
+    own per-company "slug" (e.g. "back-market") only identifies a profile
+    on welcometothejungle.com and means nothing to any real ATS scraper,
+    so it is NEVER written to archive_i directly (a prior version of this
+    function did exactly that; reverted — see git history).
+
+    What actually IS valuable here: WTTJ's own job-DETAIL pages (found via
+    its public /sitemaps/job-listings.N.xml.gz sitemaps, listed in the
+    site's sitemap index) embed the posting's real outbound application
+    link as a structured "apply_url" field in their server-rendered
+    hydration payload — confirmed live, 2026-09, on a real posting
+    (Groupement Les Mousquetaires) whose apply_url was a genuine
+    jobs.smartrecruiters.com/{company}/... URL. Many companies that list
+    on WTTJ for visibility still run their actual application process on
+    a real ATS (Greenhouse, Lever, SmartRecruiters, etc.) — this recovers
+    that real (ats, slug) pair by following the link, exactly the same
+    "read a URL a source points at, resolve it through URL_TO_SLUG"
+    pattern fetch_icims_hrjobs_slugs and the retired YC prospector already
+    use elsewhere in this file, just with WTTJ's job sitemap as the seed
+    list instead of a centralized board or a company-website crawl.
+
+    Only ONE job page is fetched per company (first one found in the
+    sitemaps) — every posting from the same company points at the same
+    underlying ATS, so there is no reason to fetch more than one. A
+    company whose only application path is WTTJ's own built-in form (no
+    real external ATS at all) or an unrecognized platform simply resolves
+    to nothing and is skipped, same as any other source's non-matches.
+
+    `max_companies` (for a quick smoke-test run) and `time_budget_minutes`
+    (self-stops gracefully like every other bulk source in this file,
+    keeping whatever was resolved so far) bound the ~thousands of live
+    per-company HTTP fetches this makes."""
+    try:
+        index_xml = _wttj_fetch_xml(_WTTJ_SITEMAP_INDEX)
+    except Exception as e:
+        log.warning(f"welcometothejungle: sitemap index fetch failed: {e}")
+        return {}
+
+    job_sitemap_urls = [m for m in re.findall(r"<loc>([^<]+)</loc>", index_xml)
+                        if "job-listings" in m]
+    if not job_sitemap_urls:
+        log.warning("welcometothejungle: no job-listings sitemap found in index")
+        return {}
+
+    # One job URL per company (first-seen wins) — see docstring.
+    company_job_url: dict[str, str] = {}
+    for sm_url in job_sitemap_urls:
+        try:
+            xml = _wttj_fetch_xml(sm_url)
+        except Exception as e:
+            log.warning(f"welcometothejungle: {sm_url} failed: {e}")
+            continue
+        for full_url, company_slug in _WTTJ_JOB_URL_COMPANY_RE.findall(xml):
+            company_job_url.setdefault(company_slug, full_url)
+
+    log.info(f"welcometothejungle: {len(company_job_url)} companies with >=1 job "
+             f"listing across {len(job_sitemap_urls)} sitemap file(s)")
+
+    items = list(company_job_url.items())
+    if max_companies:
+        items = items[:max_companies]
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    found: dict[str, dict[str, str]] = {}
+    processed = 0
+    resolved = 0
+    start = time.monotonic()
+    budget_seconds = time_budget_minutes * 60
+    stopped_early = False
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {pool.submit(_wttj_resolve_job_url, cs, url): cs for cs, url in items}
+        for fut in as_completed(futures):
+            if time.monotonic() - start >= budget_seconds:
+                stopped_early = True
+                log.info(f"welcometothejungle: time budget reached after "
+                         f"{processed}/{len(items)} companies — stopping "
+                         f"gracefully, keeping {resolved} resolved so far.")
+                break
+            processed += 1
+            result = fut.result()
+            if result:
+                ats, slug = result
+                found.setdefault(ats, {})[slug] = ""
+                resolved += 1
+            if processed % 500 == 0:
+                log.info(f"welcometothejungle: {processed}/{len(items)} processed, "
+                         f"{resolved} resolved so far")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    log.info(f"welcometothejungle: {resolved}/{processed} companies resolved to a "
+             f"real ATS" + (" (stopped early on time budget)" if stopped_early else ""))
+    for ats, slugs in found.items():
+        log.info(f"  {ats}: {len(slugs)} slugs discovered via welcometothejungle")
+    return found
 
 
 # ══════════════════════════════════════════════════════════
@@ -6990,7 +7159,7 @@ def main():
         choices=["feashliaa", "kalil", "openpostings", "github_combined",
                  "commoncrawl", "wayback", "ct_logs", "theirstack",
                  "httparchive", "latmay", "edwarddgao", "openjobsdaily",
-                 "icims_hrjobs", "github", "all"],
+                 "icims_hrjobs", "github", "welcometothejungle", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -7370,6 +7539,22 @@ def main():
             grand_total += upserted
         else:
             grand_total += ihr_total
+
+    # Source 16: welcometothejungle.com (real ATS resolved via each job's
+    # outbound apply_url — see fetch_welcometothejungle_slugs docstring)
+    if args.source in ("welcometothejungle", "all"):
+        log.info("\n--- WELCOMETOTHEJUNGLE (apply_url resolved to real ATS) ---")
+        wttj_slugs = fetch_welcometothejungle_slugs()
+        wttj_total = sum(len(s) for s in wttj_slugs.values())
+        if wttj_total:
+            log.info(f"welcometothejungle total: {wttj_total} slugs across "
+                     f"{sum(1 for s in wttj_slugs.values() if s)} real ATS platforms")
+        if not args.dry_run:
+            upserted = upsert_to_supabase(wttj_slugs, source="welcometothejungle",
+                                           dry_run=args.dry_run)
+            grand_total += upserted
+        else:
+            grand_total += wttj_total
 
     # Source 11: GitHub repo registries (pre-built ATS slug files from
     # known public repos, e.g. datascry/openroles — see
