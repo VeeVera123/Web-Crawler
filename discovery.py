@@ -80,6 +80,21 @@ Sources:
      fetch_ct_log_slugs docstring and the CT_LOG_SUFFIXES comment above it
      for exactly which platforms this can/can't help and why.)
 
+  2026-09 CONSOLIDATION (explicit user request): sources 1 (Feashliaa), 2
+  (kalil0321), 3 (OpenPostings), and 11 (GitHub repo registries) are 4
+  distinct fetch mechanisms that all pull from a plain GitHub-hosted repo
+  — from Supabase's point of view they're all "things we got from a
+  GitHub repo," so they now all upsert under ONE archive_i.source value,
+  "Github", instead of 4 separate labels ('feashliaa'/'kalil'/
+  'openpostings'/'github'). Historical rows were migrated too (see the
+  Supabase migration consolidate_github_sources). The --source CLI flags
+  below (feashliaa/kalil/openpostings/github) are UNCHANGED — each still
+  runs its own independent fetch — only the Supabase label each one
+  writes changed. main()'s github_repo_summary dict prints the per-repo
+  slug/new-slug breakdown at the end of a run that these labels used to
+  give for free (see main()'s "GITHUB (consolidated source) BREAKDOWN"
+  log block).
+
   RETIRED 2026-08 — Web Data Commons (schema.org JobPosting bulk extract):
   built as a 9th source, but its URLs turned out to almost never be
   ATS-hosted directly (they're the company's OWN careers page), so it
@@ -7131,13 +7146,29 @@ def main():
 
     log.info("=" * 60)
     log.info("DISCOVERY — Supabase as single source of truth")
-    log.info("  Sources: Feashliaa + kalil0321 + OpenPostings + Common Crawl")
+    log.info("  Sources: Github (Feashliaa + kalil0321 + OpenPostings +")
+    log.info("           GitHub repo registries, consolidated — see")
+    log.info("           GITHUB_REPO_SUMMARY below) + Common Crawl")
     log.info("           + Wayback CDX (all ATS) + Latmay H.F + Edward H.F")
     log.info("           + Open Jobs Daily H.F")
     log.info("           + TheirStack + HTTP Archive (BigQuery)")
     log.info("=" * 60)
 
     grand_total = 0
+
+    # 2026-09 (explicit user request): Feashliaa/kalil0321/OpenPostings/
+    # GitHub-registries are 4 distinct fetch mechanisms that all pull from
+    # a plain GitHub-hosted repo (raw.githubusercontent.com dumps or
+    # jsDelivr-mirrored registry files) — they're consolidated under one
+    # archive_i.source value, "Github", instead of 4 separate labels, since
+    # from Supabase's point of view they're all "things we got from a
+    # GitHub repo." Each fetch function/log block below is UNCHANGED (still
+    # its own request, its own count) — only the upsert_to_supabase(source=)
+    # value changed, plus this per-repo summary dict so the run-end log
+    # still shows the breakdown the separate source labels used to give for
+    # free. See github_repo_summary below and its printout at the end of
+    # main().
+    github_repo_summary: dict[str, tuple[int, int | None]] = {}
 
     # Source 1: Feashliaa (50k+ slugs for 6 platforms)
     if args.source in ("feashliaa", "all"):
@@ -7146,11 +7177,13 @@ def main():
         fa_total = sum(len(s) for s in fa_slugs.values())
 
         if not args.dry_run:
-            upserted = upsert_to_supabase(fa_slugs, source="feashliaa",
+            upserted = upsert_to_supabase(fa_slugs, source="Github",
                                            dry_run=args.dry_run)
             grand_total += upserted
+            github_repo_summary["Feashliaa"] = (fa_total, upserted)
         else:
             grand_total += fa_total
+            github_repo_summary["Feashliaa"] = (fa_total, None)
 
     # Source 2: kalil0321/ats-scrapers (26 platforms, CSV inventories)
     if args.source in ("kalil", "all"):
@@ -7159,11 +7192,13 @@ def main():
         ka_total = sum(len(s) for s in ka_slugs.values())
 
         if not args.dry_run:
-            upserted = upsert_to_supabase(ka_slugs, source="kalil",
+            upserted = upsert_to_supabase(ka_slugs, source="Github",
                                            dry_run=args.dry_run)
             grand_total += upserted
+            github_repo_summary["Kalil"] = (ka_total, upserted)
         else:
             grand_total += ka_total
+            github_repo_summary["Kalil"] = (ka_total, None)
 
     # Source 3: OpenPostings (110k+ companies across 80+ ATSs)
     if args.source in ("openpostings", "all"):
@@ -7174,11 +7209,13 @@ def main():
                  f"{sum(1 for s in op_slugs.values() if s)} platforms")
 
         if not args.dry_run:
-            upserted = upsert_to_supabase(op_slugs, source="openpostings",
+            upserted = upsert_to_supabase(op_slugs, source="Github",
                                            dry_run=args.dry_run)
             grand_total += upserted
+            github_repo_summary["OpenPostings"] = (op_total, upserted)
         else:
             grand_total += op_total
+            github_repo_summary["OpenPostings"] = (op_total, None)
 
     # Source 4: Common Crawl (ongoing discovery for 27 platforms — run as
     # 2 shards in discovery.yml, see fetch_commoncrawl_slugs docstring)
@@ -7311,11 +7348,13 @@ def main():
             csod_resolve_time_budget_minutes=args.csod_resolve_budget_minutes)
         gr_total = sum(len(s) for s in gr_slugs.values())
         if not args.dry_run:
-            upserted = upsert_to_supabase(gr_slugs, source="github",
+            upserted = upsert_to_supabase(gr_slugs, source="Github",
                                            dry_run=args.dry_run)
             grand_total += upserted
+            github_repo_summary["GitHub registries"] = (gr_total, upserted)
         else:
             grand_total += gr_total
+            github_repo_summary["GitHub registries"] = (gr_total, None)
 
     # Source 8: Edward H.F (huggingface.co/datasets/edwarddgao/open-apply-jobs
     # — 31M+ individual job postings, apply_url resolved through URL_TO_SLUG)
@@ -7401,6 +7440,17 @@ def main():
             grand_total += upserted
         else:
             grand_total += ha_total
+
+    # 2026-09 (explicit user request): "at the end of the run, it details
+    # how many slugs from each repo" — the per-repo breakdown that used to
+    # be implicit in separate source labels, now printed explicitly since
+    # Feashliaa/Kalil/OpenPostings/GitHub registries all upsert under the
+    # single consolidated "Github" archive_i.source value.
+    if github_repo_summary:
+        log.info("\n--- GITHUB (consolidated source) BREAKDOWN ---")
+        for label, (total, new) in github_repo_summary.items():
+            new_str = f"{new} new" if new is not None else "new: n/a (dry run)"
+            log.info(f"  {label} — {total} slugs, {new_str}")
 
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")
