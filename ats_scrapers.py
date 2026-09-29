@@ -2284,7 +2284,15 @@ async def scrape_brassring(slug: str) -> list[dict]:
         "xjobs.brassring.com",      # US production, Akamai
         "krb-sjobs.brassring.com",  # EU production, non-Akamai
         "krb-xjobs.brassring.com",  # EU production, Akamai
-        "krbcn-sjobs.brassring.com",# China production
+        # 2026-09 BUG FIX (live-confirmed via ats_capability_probe audit,
+        # socket.gethostbyname from a real runner): "krbcn-sjobs.brassring.com"
+        # (China production) does not resolve at all — every one of its 66
+        # failures in that audit was this exact DNS error. Since it was
+        # last in the list, its ConnectError also silently overwrote
+        # last_reason from every earlier host that DID resolve, masking the
+        # real reason those hosts found no jobs. Dropped entirely: it never
+        # contributed a single successful scrape and only degraded error
+        # messages for the other 4 hosts, which all resolve fine.
     ]
     hosts = []
     if supplied_host:
@@ -4844,8 +4852,30 @@ async def scrape_jobylon(slug: str) -> list[dict]:
     non-ASCII characters differently than this project's own stored
     slug (e.g. an umlaut spelled out one way vs. another) won't prefix-
     match and will read as zero postings — same class of limitation the
-    old sitemap-scan approach had, just via a different mechanism."""
+    old sitemap-scan approach had, just via a different mechanism.
+
+    2026-09 BUG FIX (live-confirmed via ats_capability_probe audit): 27
+    of 90 sampled archive_i Jobylon rows were bare numeric IDs with no
+    company-slug suffix at all ("invalid slug '3002'" etc.) — a
+    discovery-side data-quality gap, not a scraper defect (whatever
+    source populated these rows only ever captured the numeric ID).
+    Confirmed live that this is cheaply recoverable: GETting
+    emp.jobylon.com/companies/{id}/ for a bare ID 301/302-redirects to
+    the real .../companies/{id}-{slug}/ URL (verified against 4 real
+    IDs — 3002->etteplan, 2160->varner, 500->tendereasy, 1000->clio).
+    So a bare-numeric slug now does one extra resolve request instead of
+    raising immediately."""
     company_id, sep, company_slug = slug.partition("-")
+    if company_id.isdigit() and not company_slug:
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        r = await _get(f"https://emp.jobylon.com/companies/{company_id}/", headers=headers)
+        m = re.search(r"/companies/(\d+)-([^/]+)/?", str(r.url)) if r else None
+        if not m:
+            raise RuntimeError(
+                f"Jobylon: invalid slug {slug!r}; expected '<numeric_id>-<company-slug>' "
+                f"and the bare numeric ID did not resolve to a real company"
+            )
+        company_id, company_slug = m.group(1), m.group(2)
     if not company_id.isdigit() or not company_slug:
         raise RuntimeError(f"Jobylon: invalid slug {slug!r}; expected '<numeric_id>-<company-slug>'")
     company_name = company_slug.replace("-", " ").title()
@@ -6485,7 +6515,31 @@ def _fetch_brassring_description(job: dict) -> str:
     QuestionType is "textarea" (real prose) — not "text"/"select"/"date"
     (short metadata like autoreq/department/hotjob), which is what tells
     apart a real JD section from an unrelated short field regardless of
-    what that tenant happens to have named it."""
+    what that tenant happens to have named it.
+
+    2026-09 BUG FIX (live-confirmed via ats_capability_probe audit):
+    scrape_brassring's working scrape path is the embedded-JSON-ID-only
+    branch, which never had a real title or location to begin with (it
+    builds every job as _job_dict(host, jid) with no other args) — 100%
+    of a 24-sample live batch came through with location empty and
+    title stuck at the "BrassRing job {jid}" placeholder. Since this
+    function already fetches and parses the exact same JobDetails page
+    that DOES carry both (title's zone name is given by
+    JobDetailFieldsToDisplay.JobTitle, same tenant-configurable pattern
+    as Summary above), it now also recovers them as side effects — same
+    established pattern as _fetch_generic_description's location
+    side-effect elsewhere in this file. Location has no equivalent fixed
+    "Location" key in JobDetailFieldsToDisplay (confirmed live against
+    two real tenants — it's just tenant-configurable Position1/Position3
+    badge fields with no reserved name for what they mean), so this
+    picks the Position1/Position3 field whose value best looks like a
+    place: first preference geo.extract_countries() recognizing a real
+    country in it, second preference containing a " - " segment
+    separator (BrassRing's own convention for "Country - State - City",
+    confirmed live). Best-effort, same confidence level as this file's
+    other "no single reliable pattern across tenants" scrapers
+    (Avature/FolksHR) — better than the previous 100%-empty status quo,
+    not guaranteed on every tenant's own field layout."""
     url = job.get("url", "")
     if not url:
         return job.get("description_snippet", "")
@@ -6510,16 +6564,43 @@ def _fetch_brassring_description(job: dict) -> str:
             by_zone[f["zone"]] = f
 
     summary_zone = None
+    title_zone = None
+    section1: list[str] = []
     section2: list[str] = []
+    section3: list[str] = []
     disp_match = _BRASSRING_FIELDS_TO_DISPLAY_RE.search(html)
     if disp_match:
         block = disp_match.group("block")
         sm = re.search(r'"Summary"\s*:\s*"([^"]*)"', block)
         if sm:
             summary_zone = sm.group(1)
-        s2m = re.search(r'"Section2Fields"\s*:\s*\[(.*?)\]', block, re.DOTALL)
-        if s2m:
-            section2 = re.findall(r'"([^"]*)"', s2m.group(1))
+        tm = re.search(r'"JobTitle"\s*:\s*"([^"]*)"', block)
+        if tm:
+            title_zone = tm.group(1)
+        for key, out in (("Position1", section1), ("Position3", section3), ("Section2Fields", section2)):
+            m = re.search(rf'"{key}"\s*:\s*\[(.*?)\]', block, re.DOTALL)
+            if m:
+                out.extend(re.findall(r'"([^"]*)"', m.group(1)))
+
+    # Title side-effect: only override the "BrassRing job {jid}" placeholder.
+    if title_zone and str(job.get("title", "")).startswith("BrassRing job "):
+        tf = by_zone.get(title_zone)
+        if tf and tf["value"]:
+            job["title"] = tf["value"]
+
+    # Location side-effect: see docstring for the picking heuristic.
+    if not job.get("location"):
+        loc_candidates = [by_zone[z]["value"] for z in (section1 + section3)
+                           if z in by_zone and by_zone[z]["value"]]
+        loc_value = next((v for v in loc_candidates if geo.extract_countries(v)), None)
+        if not loc_value:
+            loc_value = next((v for v in loc_candidates if " - " in v), None)
+        if loc_value:
+            job["location"] = _text(loc_value)
+            if not job.get("country"):
+                countries = geo.extract_countries(loc_value)
+                if countries:
+                    job["country"] = ", ".join(sorted(countries))
 
     candidate_zones = ([summary_zone] if summary_zone else []) + section2
     parts = []
@@ -6934,6 +7015,104 @@ def _fetch_teamtailor_location(job: dict) -> str:
     return existing_desc
 
 
+_ORACLE_JOB_URL_RE = re.compile(r"^(https://[^/]+)/hcmUI/CandidateExperience/en/sites/([^/]+)/job/([^/?#]+)")
+
+
+def _fetch_oracle_cloud_hcm_description(job: dict) -> str:
+    """Fetch the full description from the recruitingCEJobRequisitionDetails
+    endpoint _fetch_oracle_cloud_hcm_questions also calls (see that
+    function, later in this file, for the same endpoint's URL pattern).
+
+    2026-09 BUG FIX (live-confirmed via ats_capability_probe audit):
+    Oracle Cloud HCM was registered with the generic HTML fetcher, which
+    hits the Angular/JET CandidateExperience UI page directly — a
+    JS-rendered shell with no server-rendered description in its raw
+    HTML (7/30 live samples had a completely empty JD; scrape_oracle_
+    cloud_hcm's own list-endpoint ExternalDescriptionStr is usually
+    present, so this only mattered for jobs enrichment re-fetched). This
+    detail endpoint is confirmed live to carry the identical field
+    (ExternalDescriptionStr) with real content (450+ chars in the
+    sampled response) — falls back to CorporateDescriptionStr/
+    ShortDescriptionStr if that specific field is ever empty, same
+    tenant-variability reasoning as the rest of this API."""
+    url = job.get("url", "")
+    m = _ORACLE_JOB_URL_RE.match(url)
+    if not m:
+        return ""
+    host, _site_number, job_id = m.groups()
+    api_url = f"{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails/{job_id}"
+    try:
+        import uuid as _uuid
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "application/json",
+            "ora-irc-cx-userid": str(_uuid.uuid4()),
+            "ora-irc-language": "en",
+        }
+        r = _get_requests_sync(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
+        if not r:
+            return ""
+        data = r.json()
+    except Exception:
+        return ""
+    for key in ("ExternalDescriptionStr", "CorporateDescriptionStr", "ShortDescriptionStr"):
+        desc = data.get(key)
+        if desc:
+            return _snippet(desc)
+    return ""
+
+
+_RIPPLING_JOB_URL_RE = re.compile(r"ats\.rippling\.com/([^/]+)/jobs/([a-zA-Z0-9-]+)")
+_NEXT_BUILD_ID_RE = re.compile(r'"buildId"\s*:\s*"([^"]+)"')
+
+
+def _fetch_rippling_description(job: dict) -> str:
+    """Fetch the full description from Rippling's own Next.js data route
+    (see _fetch_rippling_questions, later in this file, for the
+    apply-step counterpart this mirrors).
+
+    2026-09 BUG FIX (live-confirmed via ats_capability_probe audit):
+    Rippling was not registered in DESCRIPTION_FETCHERS at all (and
+    scrape_rippling's own list-API item.get("description") is
+    consistently empty on the list endpoint), so 30/30 live samples had
+    a completely empty JD despite Rippling's other fields (location,
+    questions) working well. Confirmed live that the SAME plain
+    (non-apply) data route _fetch_rippling_questions already uses for
+    the /apply step also exists one level up, at .../jobs/{jobId}.json
+    (no "/apply" suffix, no query params), and its
+    pageProps.apiData.jobPost carries a "description" object with
+    HTML-fragment string values keyed by section (seen live: "company",
+    "role", and other org-defined sections) — joined here and run
+    through _snippet() the same as every other HTML-fragment description
+    in this file."""
+    url = job.get("url", "")
+    m = _RIPPLING_JOB_URL_RE.search(url)
+    if not m:
+        return ""
+    slug, job_id = m.group(1), m.group(2)
+    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    build_id_match = _NEXT_BUILD_ID_RE.search(r.text) if r else None
+    if not build_id_match:
+        return ""
+    build_id = build_id_match.group(1)
+    data_url = f"https://ats.rippling.com/_next/data/{build_id}/en-US/{slug}/jobs/{job_id}.json"
+    r2 = _get_requests_sync(data_url, headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+    if not r2:
+        return ""
+    try:
+        data = r2.json()
+    except Exception:
+        return ""
+    job_post = (((data.get("pageProps") or {}).get("apiData") or {}).get("jobPost")) or {}
+    desc = job_post.get("description")
+    if isinstance(desc, dict):
+        parts = [v for v in desc.values() if isinstance(v, str) and v.strip()]
+        return _snippet(" ".join(parts)) if parts else ""
+    if isinstance(desc, str) and desc.strip():
+        return _snippet(desc)
+    return ""
+
+
 # Platforms that need description enrichment
 DESCRIPTION_FETCHERS = {
     "iCIMS": _fetch_icims_description,
@@ -6944,7 +7123,10 @@ DESCRIPTION_FETCHERS = {
     "JazzHR": _fetch_generic_description,  # REVIVED 2026-09 — see scrape_jazzhr's module notes
     "HRMDirect": _fetch_generic_description,
     "Paylocity": _fetch_generic_description,
-    "Oracle Cloud HCM": _fetch_generic_description,
+    # 2026-09 BUG FIX: was _fetch_generic_description (hits the JS-rendered
+    # UI shell, not the real data) — see _fetch_oracle_cloud_hcm_description
+    # above.
+    "Oracle Cloud HCM": _fetch_oracle_cloud_hcm_description,
     "JOIN": _fetch_joincom_description,
     "Teamtailor": _fetch_teamtailor_location,
     # ── New (2026-08) — none of these expose full descriptions on their
@@ -7030,6 +7212,21 @@ DESCRIPTION_FETCHERS = {
     # trail, including why the legacy AJAX endpoint that WOULD have had a
     # clean description field is confirmed dead server-side).
     "BrassRing": _fetch_brassring_description,
+    # 2026-09 BUG FIX: Rippling — see _fetch_rippling_description's
+    # docstring. Not registered here before, so it never got a Stage 1
+    # attempt at all (Stage 2 only fires on a COMPLETELY empty
+    # description, which every Rippling job already had from
+    # scrape_rippling's own always-empty list-API field).
+    "Rippling": _fetch_rippling_description,
+    # 2026-09 BUG FIX: Personio — live-confirmed via ats_capability_probe
+    # that _fetch_generic_description DOES recover a real description
+    # from a bare (non-/apply) Personio job page when scrape_personio's
+    # own XML feed has an empty <jobDescriptions> block for that
+    # posting (a real, observed feed gap, not a parsing bug — some
+    # positions' feed entries genuinely carry no jobDescription content).
+    # Not registered here before, so Stage 1 never ran for Personio at
+    # all and this only ever got best-effort Stage 2 coverage.
+    "Personio": _fetch_generic_description,
 }
 
 
@@ -8093,6 +8290,18 @@ def _fetch_zoho_questions(job: dict) -> str:
 # used successfully for job listings (see scrape_oracle_cloud_hcm) with
 # expand=all, then generically recurse the response for question-shaped
 # data. Falls back to the generic DOM parser if that comes up empty.
+#
+# 2026-09: live-confirmed via ats_capability_probe audit — a real
+# recruitingCEJobRequisitionDetails response (2 live tenants) has ~60
+# top-level keys and NONE of them are question/screening/knockout-shaped;
+# this endpoint genuinely carries no questionnaire data for the tenants
+# checked, so the 0/30 live result matches this being architecturally
+# unavailable here (not a bug in _walk_for_questions or a wrong URL) —
+# left as documented best-effort, same as Workday/iCIMS's real auth
+# walls elsewhere in this file. The SAME response, however, does carry a
+# real, populated ExternalDescriptionStr — see
+# _fetch_oracle_cloud_hcm_description (defined earlier, alongside the
+# other DESCRIPTION_FETCHERS entries), a genuine, fixed bug.
 
 _ORACLE_JOB_URL_RE = re.compile(r"^(https://[^/]+)/hcmUI/CandidateExperience/en/sites/([^/]+)/job/([^/?#]+)")
 
@@ -8155,7 +8364,15 @@ def _fetch_hrmdirect_questions(job: dict) -> str:
 # populated requisition nests things slightly differently than the empty
 # ones checked here.
 def _fetch_adp_questions(job: dict) -> str:
-    url = job.get("url", "")
+    # 2026-09 BUG FIX (live-confirmed via ats_capability_probe audit):
+    # job["url"] is the human-facing recruitment.html SPA page (see
+    # scrape_adp's 2026-09 note) — fetching it here always returned real
+    # HTML, so r.json() always raised and this silently returned "" for
+    # every ADP job. The real requisition-detail JSON API (which DOES
+    # carry screeningRequirements) is stashed in the internal
+    # '_adp_api_detail_url' key, exactly as _fetch_adp_description
+    # already uses it.
+    url = job.get("_adp_api_detail_url", "")
     if not url:
         return ""
     r = _get_requests_sync(url, headers={
@@ -8197,6 +8414,11 @@ def _fetch_adp_questions(job: dict) -> str:
 # embedded in the job posting page's own __NEXT_DATA__ script tag, which
 # is a single extra plain-HTTP GET of a page this codebase already fetches
 # the URL for (job["url"], Rippling's listing API's own posting link).
+#
+# _fetch_rippling_description (the JD counterpart to the questions
+# fetcher below) is defined earlier, alongside the other
+# DESCRIPTION_FETCHERS entries — Python needs it bound before that
+# dict literal runs at module load.
 _RIPPLING_JOB_URL_RE = re.compile(r"ats\.rippling\.com/([^/]+)/jobs/([a-zA-Z0-9-]+)")
 _NEXT_BUILD_ID_RE = re.compile(r'"buildId"\s*:\s*"([^"]+)"')
 
