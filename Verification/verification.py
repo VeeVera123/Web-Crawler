@@ -287,13 +287,28 @@ async def _verify_softgarden(session: aiohttp.ClientSession, slug: str) -> bool:
 
 
 async def _verify_zoho(session: aiohttp.ClientSession, slug: str) -> bool:
-    url = f"https://{slug}.zohorecruit.com/"
+    """2026-09 BUG FIX (live-confirmed via ats_capability_probe audit): a
+    deleted/nonexistent Zoho Recruit tenant does NOT 404 and does NOT
+    redirect off the subdomain — it 200s on that same subdomain with a
+    small (~2.6KB) "cl-error-block"/"cl-error-content" branded error
+    template ("Recruit-logo-lockup" / "zr-copy-right-logo" in the CSS).
+    The old version of this check only looked at status code + final
+    host, so every one of these dead tenants passed as "live" — live-
+    confirmed against 5 fresh random archive_i zoho rows, 3 of which
+    were exactly this dead-tenant page despite a clean 200. Checks the
+    real /jobs/Careers path (the one ats_scrapers.scrape_zoho actually
+    uses, not the bare subdomain root) and treats the error template as
+    dead."""
+    url = f"https://{slug}.zohorecruit.com/jobs/Careers"
     async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                             headers={"User-Agent": USER_AGENT}) as r:
         final_host = urlparse(str(r.url)).hostname or ""
         if final_host != f"{slug}.zohorecruit.com":
             return False
-        return r.status == 200
+        if r.status != 200:
+            return False
+        text = await r.text()
+        return "cl-error-block" not in text and "cl-error-content" not in text
 
 
 async def _verify_hrmdirect(session: aiohttp.ClientSession, slug: str) -> bool:
