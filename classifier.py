@@ -1671,6 +1671,37 @@ PRIORITY_UNSURE = "3"   # allowed fallback tier, but a NARROW one: only when
                        # after reading the whole posting. A job naming 2+
                        # distinct business regions is PRIORITY_AFRICA (2),
                        # never this tier — see PRIORITY_AFRICA's comment.
+                       #
+                       # 2026-09 (classification revamp Phase 2, explicit
+                       # user request): split into two sub-tiers below.
+                       # PRIORITY_UNSURE itself is kept defined (unused by
+                       # new code, nothing else in this file relies on
+                       # removing it) only so any stale caller/DB row still
+                       # referencing plain "3" doesn't break.
+PRIORITY_UNSURE_BLANK = "3a"  # sent to the AI stage for MISSING/INCOMPLETE
+                       # data — no location field at all (the AI is asked to
+                       # find global/EMEA/Africa language spread across the
+                       # JD instead), or an ATS/pipeline (e.g. Crawl III's
+                       # stapply.ai CSVs) that has no application-question
+                       # data to inspect in the first place. Per explicit
+                       # user policy: the AI's verdict here NEVER promotes a
+                       # job to PRIORITY_GLOBAL/PRIORITY_AFRICA — only the
+                       # regex stage above does that ("I trust regex
+                       # more... only regex passes makes this go into rank 1
+                       # or 2"). A job the AI reviews lands at 3a/3b
+                       # regardless of what it concludes, UNLESS the AI
+                       # finds a genuine NEGATIVE/restrictive signal regex
+                       # missed, in which case it's dropped instead (same as
+                       # a keyword no_match).
+PRIORITY_UNSURE_SILENT = "3b"  # location field, description, AND
+                       # application questions are ALL present on this job
+                       # — genuinely complete data — and ALL are silent on
+                       # geography (bare "Remote"/N/A location, nothing in
+                       # the JD or questions positively or negatively
+                       # signals global/EMEA/Africa/country-specific
+                       # hiring). Distinct from 3a: this tier means "we had
+                       # everything and it still doesn't say," not "we
+                       # don't have enough to know."
 
 
 # ── Africa-continent detection ────────────────────────────
@@ -4699,3 +4730,180 @@ def has_non_remote_workplace_type(job: dict) -> bool:
     if _REMOTE_WORKPLACE_RE.search(wt):
         return False
     return bool(_NON_REMOTE_WORKPLACE_RE.search(wt))
+
+
+# ── Rank 4 (2026-09, explicit user request — classification revamp
+# Phase 2): CS/AM-only admission for a BARE country/region/continent
+# location (or a title/JD naming one while the location field is some
+# other concrete place) that the pipeline above would otherwise reject
+# outright with no further look — as long as neither the description
+# nor the application questions confirm an actual country/continent-tied
+# restriction (work authorization, residence, permit, visa sponsorship
+# tied to a place, enumerated state list, hybrid/on-site, timezone/
+# relocation, entity/exclusion wording, etc.).
+#
+# Deliberately a SEPARATE, additive pass, not a change to any hard-
+# override function above: those are unconditional, all-role, all-ATS
+# checks proven over many real postings, and continue to apply exactly
+# as before for every job of every role/platform, Rank 4 candidates
+# included (see _RANK4_GENUINE_RESTRICTION_CHECKS below — the same
+# functions, reused as-is). Only the "location/title bare-names a single
+# specific place with nothing further" signal is treated differently
+# here, and only for CS/AM roles from a platform confirmed (2026-09 live
+# audit, ats_capability_probe-style: 25-30 real companies sampled per
+# platform through the actual production pipeline) to reliably return
+# BOTH a location and application-question value on the same job —
+# Workday/iCIMS/Ashby/ADP/BambooHR/Oracle Cloud HCM/SmartRecruiters/
+# Zoho/HRMDirect/Taleo/Paylocity/JOIN/BreezyHR/Jobvite all either have a
+# confirmed-broken/auth-walled question fetcher or too high a missing-
+# questions rate to trust for a tier whose entire admission logic
+# depends on application questions being genuinely ABSENT, not merely
+# unfetched. Per explicit user instruction, this tier is Crawl I only —
+# Crawl II's heuristic in-house scraper and Crawl III's stapply.ai CSV
+# consumer have no reliable application-question signal at all, so
+# neither can ever satisfy this tier's own admission requirement.
+RANK4_ELIGIBLE_ATS = {
+    "Greenhouse", "Workable", "Personio", "JazzHR", "Teamtailor",
+    "Recruitee", "Lever", "Eploy", "PageUp", "isolvedhire", "Pinpoint",
+    "Rippling",
+}
+
+PRIORITY_MIXED_COUNTRY = "4a"  # bare country/region/continent location,
+                       # no restrictive tie confirmed
+PRIORITY_MIXED_SIGNAL = "4b"   # title/description names a region/country
+                       # while the location field itself is a different,
+                       # more specific place (e.g. a city) — no
+                       # restrictive tie confirmed
+
+# Rank-4-specific guard (2026-09, explicit user instruction: "you should
+# expand these restrictive class of questions"). None of the existing hard
+# overrides above catch a sponsorship/work-permit/residency question or
+# statement that ties itself to a SPECIFIC named country —
+# has_hard_country_specific_auth_signal's _COUNTRY_AUTH_RE only matches
+# "authorized/eligible/permitted TO WORK in <country>" and citizenship
+# phrasing, not sponsorship/permit/residency phrasing. This is exactly the
+# distinction the user's own Rank-4b example turns on (Notabene: "Will you
+# now or in the future require sponsorship for a work visa?" is fine
+# ONLY because it names no country — the identical question naming a
+# country is a genuine restriction and must exclude the job).
+_RANK4_COUNTRY_TIED_RESTRICTION_RE = re.compile(
+    r"\b(?:visa\s*)?sponsorship\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:"
+    + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b[^.!?\n]{0,60}\b(?:visa\s*)?sponsorship\b"
+    r"|\bsponsor\w*\s+(?:a\s+|your\s+)?(?:work\s+)?visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:"
+    + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwork\s+permit\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bresidenc(?:e|y)\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    re.I,
+)
+
+
+def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
+    """Rank-4-only guard — see _RANK4_COUNTRY_TIED_RESTRICTION_RE's module
+    comment. Checked sentence-by-sentence with the same multi-region-
+    breadth exception every other hard override uses (a sentence naming
+    2+ distinct business regions together is broad reach, not a
+    single-country tie)."""
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        if not sentence.strip():
+            continue
+        if _has_multi_region_breadth(sentence):
+            continue
+        if _RANK4_COUNTRY_TIED_RESTRICTION_RE.search(sentence):
+            return True
+    return False
+
+
+_RANK4_GENUINE_RESTRICTION_CHECKS = (
+    has_hard_no_sponsorship_signal,
+    has_non_remote_workplace_type,
+    has_non_remote_title_signal,
+    has_hard_country_specific_auth_signal,
+    has_state_list_restriction_signal,
+    has_hard_country_based_restriction_signal,
+    has_hard_metadata_location_signal,
+    has_hard_location_symbol_signal,
+    has_office_attendance_signal,
+    has_entity_or_exclusion_restriction_signal,
+    has_timezone_relocation_or_hyphenated_restriction_signal,
+    has_extra_restrictive_geography_signal,
+    _rank4_has_country_tied_restrictive_question,
+)
+
+# Same country universe already trusted project-wide for "names a
+# specific, non-global place" (_COUNTRY_AUTH_NAMES_RE_FRAGMENT), plus
+# every non-EMEA/non-Africa business region and continent this file
+# already recognizes elsewhere (_REGION_ONLY_WORDS_RE's vocabulary,
+# minus EMEA/Africa — those are already PRIORITY_AFRICA, handled long
+# before this tier is ever reached). US-state/Canadian-province names
+# are deliberately NOT included — per explicit user instruction ("states
+# do not qualify here"), a bare state alone never matches this allowlist
+# and so never reaches 4a/4b.
+_RANK4_PLACE_RE = re.compile(
+    r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|"
+    r"european\s+union|\beu\b|apac|latam|amers?|americas|mena|middle\s+east|"
+    r"anz|dach|benelux|nordics?|"
+    r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
+    r"northern\s+europe|"
+    r"gulf\s+cooperation\s+council|gcc|gulf|"
+    r"south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|asia|"
+    r"oceania|pacific|north\s+america|central\s+america|south\s+america|"
+    r"caribbean|cee|cis|japac|apj|europe)\b", re.I,
+)
+
+
+def classify_rank4(job: dict) -> tuple[str | None, str | None]:
+    """Returns (priority, reason) — priority is PRIORITY_MIXED_COUNTRY,
+    PRIORITY_MIXED_SIGNAL, or None (not eligible for this tier).
+
+    Caller is responsible for the eligibility gate — role_category in
+    ("CS", "AM"), job["source_ats"] in RANK4_ELIGIBLE_ATS, the
+    ENABLE_RANK4_COUNTRY_SPECIFIC config toggle, and location AND
+    application-question text both genuinely present on THIS job — this
+    function only decides the location-shape/restriction question once
+    that gate has already passed, and assumes the job already failed the
+    main _keyword_classify_location_detail pipeline above (i.e. is NOT
+    already a Rank 1/2/3 match)."""
+    for check in _RANK4_GENUINE_RESTRICTION_CHECKS:
+        if check(job):
+            return None, None
+
+    raw_loc = job.get("location") or ""
+    raw_country = job.get("country") or ""
+    if isinstance(raw_loc, list):
+        raw_loc = ", ".join(str(x) for x in raw_loc)
+    if isinstance(raw_country, list):
+        raw_country = ", ".join(str(x) for x in raw_country)
+    loc = (raw_loc + " " + raw_country).strip()
+    title = job.get("title", "")
+    loc = _enrich_location_from_title(loc, title)
+    if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
+        return None, None
+
+    # 4a: the location field, once every recognized place-name span is
+    # removed, has nothing left over — it's ENTIRELY made of one or more
+    # allowed country/region/continent names (+ connectors). Same
+    # "remainder" technique has_role_specific_place_restriction_signal's
+    # body-text check already uses (see that function's docstring for
+    # the real bug this shape of check fixed there).
+    remainder = _RANK4_PLACE_RE.sub(" ", loc)
+    remainder = re.sub(r"\b(?:and|or)\b|&", " ", remainder, flags=re.I)
+    remainder = re.sub(r"[,\s/|()\-–—]+", " ", remainder).strip()
+    if not remainder and _RANK4_PLACE_RE.search(loc):
+        return PRIORITY_MIXED_COUNTRY, "bare_country_or_region"
+
+    # 4b: the location field is something ELSE (a city, e.g.) but the
+    # title/description independently name an allowed region/country — a
+    # real signal pointing a different, more specific direction, not a
+    # contradiction (the genuine-restriction checks above already ruled
+    # out an actual confirmed tie, e.g. a country-specific work-auth
+    # question).
+    full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
+    if _RANK4_PLACE_RE.search(full_text):
+        return PRIORITY_MIXED_SIGNAL, "mixed_title_or_jd_signal"
+
+    return None, None

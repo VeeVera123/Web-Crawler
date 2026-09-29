@@ -124,6 +124,18 @@ on:
         required: false
         type: boolean
         default: false
+      # 2026-09 (explicit user request — classification revamp Phase 2):
+      # opt-in checkbox for Rank 4 (CS/AM-only bare country/region
+      # admission, no restrictive tie confirmed — see classifier.py's
+      # classify_rank4()). Crawl I only (see that function's module
+      # comment for why Crawl II/III aren't wired to it). Default
+      # unchecked — this is a new tier and shouldn't silently start
+      # writing rows until explicitly turned on for a run.
+      enable_rank4_country_specific:
+        description: "Enable Rank 4 (CS/AM)"
+        required: false
+        type: boolean
+        default: false
 
 # Belt-and-suspenders: GitHub already serializes runs of the same workflow+ref
 # by default for `schedule`/`workflow_dispatch` unless you opt into concurrent
@@ -233,6 +245,7 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           USE_OPENAI: ${{ inputs.use_openai }}
           USE_NVIDIA: ${{ inputs.use_nvidia }}
+          ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ inputs.enable_rank4_country_specific }}
           LLM_PROVIDER: cerebras
           # Every AI-classifying job in this workflow shares Groq-O's/
           # Groq-C's free-tier per-key quotas — see config.py. Sized

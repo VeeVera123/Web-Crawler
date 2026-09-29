@@ -102,7 +102,8 @@ from classifier import (  # noqa: E402
     _keyword_classify_location_detail, ai_classify_locations,
     detect_visa_sponsorship, PLACEHOLDER_LOC_RE,
     classify_role_category,
-    PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
+    PRIORITY_GLOBAL, PRIORITY_AFRICA,
+    PRIORITY_UNSURE_BLANK, PRIORITY_UNSURE_SILENT,
 )
 # 2026-09 ROUND 2 (explicit user instruction: "Make sure that all jobs have
 # their application questions fetched. All of them. ... everything under
@@ -1359,16 +1360,23 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             # Gemini, OpenAI, or NVIDIA made the call. Matches
             # crawl_i.py's filter_locations, which already did this right.
             clearance = provider_name or "ai"
-            if label == "match_global":
+            # 2026-09 Phase 2 (explicit user request — see crawl_i.py's
+            # filter_locations for the full "regex pass: rank 1 or 2, LLM
+            # pass: Rank 3b" policy writeup): the AI is no longer
+            # authoritative for PRIORITY_GLOBAL/PRIORITY_AFRICA here
+            # either — only a keyword match sets those. An AI match_global/
+            # match_africa verdict is kept, but demoted to Rank 3
+            # (3a/blank or 3b/bare_remote, same split as crawl_i.py).
+            if label in ("match_global", "match_africa") and unsure_reason == "blank":
                 job["clearance"] = clearance
-                job["location_priority"] = PRIORITY_GLOBAL
+                job["location_priority"] = PRIORITY_UNSURE_BLANK
                 matched.append(job)
-                confidences.append("match")
-            elif label == "match_africa":
+                confidences.append("uncertain")
+            elif label in ("match_global", "match_africa") and unsure_reason == "bare_remote":
                 job["clearance"] = clearance
-                job["location_priority"] = PRIORITY_AFRICA
+                job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
-                confidences.append("match")
+                confidences.append("uncertain")
             elif label == "uncertain" and unsure_reason == "bare_remote":
                 # 2026-09 policy, refined per explicit user follow-up —
                 # see crawl_i.py's filter_locations for the full
@@ -1404,7 +1412,7 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # in a run, every later bare-remote job in that shard gets
                 # provider_name=None and was being silently rejected.
                 job["clearance"] = clearance if provider_name else "ai_unreviewed"
-                job["location_priority"] = PRIORITY_UNSURE
+                job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 confidences.append("uncertain")
             # "no_match" → drop. "uncertain" with unsure_reason == "blank"

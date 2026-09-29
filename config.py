@@ -126,6 +126,14 @@ AI_RATE_SHARDS = max(1, int(os.environ.get("AI_RATE_SHARDS", "1")))
 # right after each list is assembled.
 _USE_OPENAI = os.environ.get("USE_OPENAI", "").strip().lower() == "true"
 _USE_NVIDIA = os.environ.get("USE_NVIDIA", "").strip().lower() == "true"
+
+# 2026-09 (explicit user request — classification revamp Phase 2, Rank 4):
+# opt-in checkbox for the CS/AM-only "bare country/region, no restrictive
+# tie confirmed" admission tier — see classifier.py's classify_rank4().
+# Defaults OFF: Rank 4 is a new, deliberately narrower-trust tier and
+# should not silently start writing rows until explicitly enabled (crawl.yml
+# exposes this as a workflow_dispatch checkbox, default unchecked).
+ENABLE_RANK4_COUNTRY_SPECIFIC = os.environ.get("ENABLE_RANK4_COUNTRY_SPECIFIC", "").strip().lower() == "true"
 _PROVIDER_FILTER: set[str] = set()
 if _USE_OPENAI:
     _PROVIDER_FILTER.add("openai")

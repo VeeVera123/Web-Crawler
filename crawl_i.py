@@ -44,6 +44,7 @@ import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import config
 import location_diagnostics
 from ats_scrapers import (scrape_board, enrich_descriptions, enrich_application_questions,
                           SCRAPERS, log_scrape_failure_summary, aclose_http_client)
@@ -53,7 +54,9 @@ from classifier import (
     detect_visa_sponsorship,
     _keyword_classify_location_detail,
     classify_role_category,
-    PRIORITY_GLOBAL, PRIORITY_AFRICA, PRIORITY_UNSURE,
+    classify_rank4, RANK4_ELIGIBLE_ATS,
+    PRIORITY_GLOBAL, PRIORITY_AFRICA,
+    PRIORITY_UNSURE_BLANK, PRIORITY_UNSURE_SILENT,
 )
 from supabase_handler import (
     add_jobs_batch, bump_scan_report, finish_scan_report_for_pipeline,
@@ -483,6 +486,36 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     Environmental, a local Indianapolis, IN role with zero location text
     captured at all) that got kept under the old policy and shouldn't
     have been.
+
+    2026-09 Phase 2 (explicit user request — classification revamp,
+    verbatim: "only regex passes makes this go into rank 1 or 2. if it
+    goes to the LLM then it must mean no known hiring language we know
+    was used... So regex pass: rank 1 or 2. And LLM pass: Rank 3b"): the
+    AI stage is no longer authoritative for PRIORITY_GLOBAL/PRIORITY_AFRICA
+    — only a keyword (_keyword_classify_location_detail) match sets those
+    now. An AI match_global/match_africa verdict on an unsure job is kept,
+    but only at the Rank 3 tier: a blank-location job (unsure_reason ==
+    "blank") the AI backs with real match_global/match_africa evidence
+    lands at PRIORITY_UNSURE_BLANK ("3a" — "the unsure ones sent to the
+    LLM... they don't have a location field"); a bare-Remote job
+    (unsure_reason == "bare_remote") — whether AI-confirmed or genuinely
+    AI-uncertain — lands at PRIORITY_UNSURE_SILENT ("3b" — "just dead
+    location silence... bare remote in the location field"), same
+    protective bar as before (a blank-location job the AI can't back with
+    real evidence is still dropped, unchanged — see the "blank" docstring
+    in classifier.py's _keyword_classify_location_detail for the real
+    scraper bugs this guards against).
+
+    2026-09 Phase 2, Rank 4 (explicit user request, opt-in via
+    config.ENABLE_RANK4_COUNTRY_SPECIFIC / crawl.yml's
+    enable_rank4_country_specific checkbox, Crawl I only): a CS/AM-only
+    job from a RANK4_ELIGIBLE_ATS platform that this filter would
+    otherwise drop outright (keyword-stage "no_match", or an AI-stage
+    drop) gets one more look from classify_rank4() before being dropped —
+    a bare country/region/continent location (or a title/JD naming one)
+    admitted at 4a/4b as long as neither the description nor the
+    application questions confirm an actual country-tied restriction. See
+    _try_rank4() below and classify_rank4()'s own docstring.
     """
     matched = []
     matched_confidences = []
@@ -494,6 +527,34 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     # specific). See _keyword_classify_location_detail's docstring.
     unsure_reasons = []
 
+    rank4_enabled = getattr(config, "ENABLE_RANK4_COUNTRY_SPECIFIC", False)
+
+    def _try_rank4(job: dict) -> bool:
+        """Last-chance Rank 4 look at a job this filter would otherwise
+        drop. Returns True (and appends to matched) if classify_rank4()
+        admits it. See the module docstring above for the eligibility
+        gate this enforces before ever calling classify_rank4() — role,
+        ATS platform, the config toggle, and a genuine "Application
+        Question:" line actually present (Rank 4's admission logic
+        depends on questions being confirmed ABSENT, not merely
+        unfetched)."""
+        if not rank4_enabled:
+            return False
+        if job.get("role_category") not in ("CS", "AM"):
+            return False
+        if job.get("source_ats") not in RANK4_ELIGIBLE_ATS:
+            return False
+        if "Application Question:" not in (job.get("description_snippet") or ""):
+            return False
+        priority, reason = classify_rank4(job)
+        if not priority:
+            return False
+        job["clearance"] = "rank4"
+        job["location_priority"] = priority
+        matched.append(job)
+        matched_confidences.append(f"rank4_{reason}")
+        return True
+
     for job in jobs:
         result, priority, unsure_reason = _keyword_classify_location_detail(job)
         if result == "match":
@@ -504,6 +565,11 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
         elif result == "unsure":
             unsure_jobs.append(job)
             unsure_reasons.append(unsure_reason)
+        else:
+            # Keyword-stage "no_match" — never reaches the AI stage at
+            # all under the existing policy; Rank 4 gets one last look
+            # before this job is dropped for good.
+            _try_rank4(job)
 
     log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
 
@@ -528,21 +594,30 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             # (2026-09: was re-derived here via a separate i%len(LOCATION_PROVIDERS)
             # round-robin that could silently drift out of sync with the one
             # ai_classify_locations does internally; see that function's docstring).
-            if label == "match_global":
-                # AI found genuinely worldwide-hiring evidence in the title/
-                # description that the location field itself never stated.
+            if label in ("match_global", "match_africa") and unsure_reason == "blank":
+                # 2026-09 Phase 2 (explicit user request — see the module
+                # docstring's "regex pass: rank 1 or 2, LLM pass: Rank 3b"
+                # policy): the AI is no longer authoritative for
+                # PRIORITY_GLOBAL/PRIORITY_AFRICA — only a keyword match
+                # sets those. This job had NO location field at all, and
+                # the AI found real global/Africa evidence elsewhere in
+                # the title/description — exactly Rank 3a's own
+                # definition ("the unsure ones sent to the LLM... they
+                # don't have a location field"). Kept, not promoted.
                 job["clearance"] = provider_name or "ai"
-                job["location_priority"] = PRIORITY_GLOBAL
+                job["location_priority"] = PRIORITY_UNSURE_BLANK
                 matched.append(job)
-                matched_confidences.append("match")
-            elif label == "match_africa":
-                # AI found Africa-continent or bare-EMEA evidence in the
-                # title/description — same tier as a keyword-level Africa
-                # match, just discovered via the AI stage instead.
+                matched_confidences.append("uncertain")
+            elif label in ("match_global", "match_africa") and unsure_reason == "bare_remote":
+                # Same demotion, for a bare-"Remote" location the AI backed
+                # with real evidence — Rank 3b's own worked example is
+                # literally "bare remote in the location field", so this
+                # lands there too, same tier as a genuinely AI-uncertain
+                # bare-remote job just below.
                 job["clearance"] = provider_name or "ai"
-                job["location_priority"] = PRIORITY_AFRICA
+                job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
-                matched_confidences.append("match")
+                matched_confidences.append("uncertain")
             elif label == "uncertain" and unsure_reason == "bare_remote":
                 # 2026-09 policy change (refined per explicit user
                 # follow-up): a GENUINE AI-reviewed uncertainty — the AI
@@ -624,22 +699,26 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # SuccessFactors — see history above), which bare_remote
                 # was never meant to be conflated with.
                 job["clearance"] = provider_name or "ai_unreviewed"
-                job["location_priority"] = PRIORITY_UNSURE
+                job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            # "no_match" → drop. "uncertain" with unsure_reason == "blank"
-            # (a blank location field the AI still couldn't back with real
-            # evidence, REGARDLESS of whether a provider actually reviewed
-            # it) → also drop — a blank field only survives via the
-            # match_global/match_africa branches above, i.e. the AI found
-            # real textual evidence for it — never on "we looked and still
-            # can't tell" (or "never got looked at") alone, since a blank
-            # field can't be told apart from the location simply never
-            # having been captured in the first place (see the bare_remote
-            # branch above for why that reasoning does NOT extend to a
-            # genuine "Remote" signal from the company).
+            else:
+                # "no_match" → drop. "uncertain" with unsure_reason ==
+                # "blank" (a blank location field the AI still couldn't
+                # back with real evidence, REGARDLESS of whether a
+                # provider actually reviewed it) → also drop — a blank
+                # field only survives via the match_global/match_africa
+                # branches above, i.e. the AI found real textual evidence
+                # for it — never on "we looked and still can't tell" (or
+                # "never got looked at") alone, since a blank field can't
+                # be told apart from the location simply never having been
+                # captured in the first place (see the bare_remote branch
+                # above for why that reasoning does NOT extend to a
+                # genuine "Remote" signal from the company). Rank 4 gets
+                # one last look before the drop is final.
+                _try_rank4(job)
 
-    log.info(f"After location filter: {len(matched)} global/Africa jobs")
+    log.info(f"After location filter: {len(matched)} global/Africa/Rank3/Rank4 jobs")
     return matched, matched_confidences
 
 
