@@ -4798,12 +4798,38 @@ _RANK4_COUNTRY_TIED_RESTRICTION_RE = re.compile(
 )
 
 
+_RANK4_BENEFIT_FRAMING_RE = re.compile(
+    r"\bwe\s+(?:can\s+|will\s+|would\s+)?(?:offer|provide|help|assist|support)\b"
+    r"|\b(?:relocation|visa|sponsorship|residency|immigration)\s+(?:assistance|support|help)\b"
+    r"|\bhelp(?:ing)?\s+(?:you\s+|candidates?\s+)?(?:secur\w*|obtain\w*|get\w*)\b",
+    re.I,
+)
+_RANK4_REQUIREMENT_FRAMING_RE = re.compile(
+    r"\bmust\b|\brequire[sd]?\b|\bneed(?:s|ed)?\s+to\b|\bcurrently\s+(?:hold|have)\b"
+    r"|\bdo\s+you\s+(?:have|hold|currently)\b|\bare\s+you\b|\bwill\s+you\b"
+    r"|\bable\s+to\s+provide\b|\bvalid\b",
+    re.I,
+)
+
+
 def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     """Rank-4-only guard — see _RANK4_COUNTRY_TIED_RESTRICTION_RE's module
     comment. Checked sentence-by-sentence with the same multi-region-
     breadth exception every other hard override uses (a sentence naming
     2+ distinct business regions together is broad reach, not a
-    single-country tie)."""
+    single-country tie).
+
+    2026-09 false-positive fix (caught by this session's own adversarial
+    test pass, not a guess): "We offer full relocation assistance and
+    help securing residency permits for candidates moving to Germany"
+    matched the residency+country pattern even though it's a BENEFIT the
+    company is offering, not a requirement the candidate must already
+    meet — the exact same "topic-adjacent word standing in for the thing
+    that's actually disqualifying" bug class this file's other checks
+    (has_hard_no_sponsorship_signal's negation requirement,
+    _sponsorship_sentence_has_negative_signal's non-visa-sense guard)
+    already fixed once each. A sentence with benefit/assistance framing
+    and no actual requirement/question framing is not a restriction."""
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
     if not text.strip():
@@ -4813,8 +4839,12 @@ def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
             continue
         if _has_multi_region_breadth(sentence):
             continue
-        if _RANK4_COUNTRY_TIED_RESTRICTION_RE.search(sentence):
-            return True
+        if not _RANK4_COUNTRY_TIED_RESTRICTION_RE.search(sentence):
+            continue
+        if (_RANK4_BENEFIT_FRAMING_RE.search(sentence)
+                and not _RANK4_REQUIREMENT_FRAMING_RE.search(sentence)):
+            continue
+        return True
     return False
 
 
