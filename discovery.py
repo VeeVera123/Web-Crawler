@@ -1143,6 +1143,25 @@ def _looks_like_real_slug(candidate: str) -> bool:
     own page rather than a company/tenant slug."""
     if not candidate:
         return False
+    # 2026-09 FIX (real archive_i row: ats="workday", slug=
+    # "integralife/careers" — sourced from one of the generic upstream
+    # registries' own "slug"/"token" field, which apparently held a raw
+    # URL PATH fragment rather than a clean identifier; the real, correct
+    # row for this exact company already existed separately as
+    # "integralife|wd1|Careers"). No ATS this project supports ever uses
+    # a literal "/" inside its own slug format — every compound format
+    # here (workday, brassring, oracle_cloud_hcm, paylocity, pageup) uses
+    # "|" as its separator instead — so a "/" is an unconditional sign
+    # the candidate is a URL/path fragment, not a real slug, regardless
+    # of which upstream source or ATS it came from. It also silently slid
+    # past _cc_check_workday's own live check: splitting on "|" against a
+    # slash-only string returns 1 part, not 3, so the checker's own
+    # `len(parts) != 3` guard reports "ambiguous" rather than "dead" —
+    # this project's checkers only ever reject a CONFIRMED-dead slug,
+    # never a merely-malformed one, so the real fix belongs here, at
+    # insertion time, not in the (deliberately conservative) verifier.
+    if "/" in candidate:
+        return False
     if candidate.lower() in _NON_SLUG_PATH_SEGMENTS:
         return False
     if _ASSET_FILENAME_RE.search(candidate):
@@ -3736,8 +3755,47 @@ _CC_LIVE_CHECK = {
 
 _DROP_DEAD_PROGRESS_EVERY = 100  # see _drop_dead_cc_slugs's log line
 
+# 2026-09 (explicit user request — "verification is slow AF... increase
+# concurrency, and whatever else needs increasing too"): confirmed live
+# via a real Discovery run's own log — only 8 workers checking 50,092
+# candidates ("Github: live pre-check progress: 100/50092 checked" after
+# ~12 seconds, i.e. ~100+ minutes projected for that one run alone).
+#
+# Most of the ~28 platforms _CC_LIVE_CHECK covers hit a genuinely
+# DIFFERENT host per company (a subdomain-per-tenant shape — teamtailor,
+# recruitee, softgarden, zoho, hrmdirect, icims, personio, bamboohr,
+# avature, eploy, taleo, workday, isolvedhire, jazzhr, breezyhr, csod,
+# flatchr, getro) — no shared endpoint for high concurrency to overload,
+# same reasoning this function's own docstring already gives. But a real
+# minority share ONE central host across every company, differentiated
+# only by URL path or POST body, not subdomain: greenhouse
+# (boards-api.greenhouse.io), ashby (api.ashbyhq.com), workable
+# (apply.workable.com), rippling (ats.rippling.com), joincom (join.com),
+# lever (api.lever.co/api.eu.lever.co), jobvite (jobs.jobvite.com),
+# paylocity (recruiting.paylocity.com), hireology (api.hireology.com),
+# pageup (careers.pageuppeople.com), gem (jobs.gem.com). THESE are
+# exactly the shape of load that caused the real production incident
+# _check_one's own docstring below describes (max_workers=20, no
+# per-host pacing, one host hammered → spurious failures misread as
+# false "alive, keep" verdicts) — raising the GLOBAL pool ceiling alone,
+# with no per-host awareness, would reintroduce that same bug at an even
+# larger scale. So the fix is two-part: raise the global ceiling a lot
+# (the vast majority of any real batch is the safe, per-tenant-host
+# majority above), but keep each shared-host platform separately capped
+# to a modest, host-considerate concurrency of its own via
+# _CC_SHARED_HOST_SEMAPHORES, acquired only around that platform's own
+# checker call — every other platform is gated by the global pool alone.
+_CC_SHARED_HOST_CONCURRENCY = 20
+_CC_SHARED_HOST_ATS = {
+    "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
+    "jobvite", "paylocity", "hireology", "pageup", "gem",
+}
+_CC_SHARED_HOST_SEMAPHORES = {
+    ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
+}
 
-def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 8) -> dict:
+
+def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 200) -> dict:
     """Applied to a CC/Wayback fetch_*_slugs() result right before it's
     returned — see the module comment above _CC_LIVE_CHECK for why only
     these two sources need this. `slugs_by_ats` values may be a set[str]
@@ -3760,6 +3818,14 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 8) ->
     endpoint here that concurrency would overload. Runs all checks across
     every ATS at once via a bounded thread pool instead of one ATS-then-
     the-next serial pass.
+
+    2026-09 ROUND 2 (explicit user request): max_workers raised 8->200 —
+    see _CC_SHARED_HOST_ATS's own module comment above for why this is
+    now safe to do without reintroducing the exact one-host-hammered bug
+    that originally motivated a LOWER ceiling: the handful of platforms
+    that genuinely share one host are separately semaphore-capped now,
+    so the global ceiling only ever governs the safe, per-tenant-host
+    majority.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -3813,10 +3879,15 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 8) ->
         # would only risk flipping a correct verdict into an incorrect
         # one from a later transient hiccup, which is not this fix's job.
         checker = _CC_LIVE_CHECK[ats]
+        sem = _CC_SHARED_HOST_SEMAPHORES.get(ats)
         result = None
         for attempt in range(2):
             try:
-                result = checker(slug)
+                if sem is not None:
+                    with sem:
+                        result = checker(slug)
+                else:
+                    result = checker(slug)
             except Exception:
                 result = None
             if result is not None:
@@ -6961,11 +7032,16 @@ def fetch_github_registries_slugs(csod_resolve_time_budget_minutes: int = CSOD_R
                 # Live per-tenant resolve, bounded by time budget — see
                 # docstring. Each entry's bare portal slug ("a-talent")
                 # becomes our 'tenant|careerSiteId' format only if the
-                # resolve succeeds.
+                # resolve succeeds. 2026-09 (explicit user request, "verification
+                # is slow AF, increase concurrency"): raised 30->100 — each
+                # resolve hits {slug}.csod.com, a genuinely distinct host
+                # per company (same per-tenant-subdomain safety profile as
+                # _drop_dead_cc_slugs's own majority case), so no shared
+                # endpoint here for higher concurrency to overload.
                 added = 0
                 deadline = time.monotonic() + csod_resolve_time_budget_minutes * 60
                 budget_hit = False
-                with ThreadPoolExecutor(max_workers=30) as pool:
+                with ThreadPoolExecutor(max_workers=100) as pool:
                     futures = {}
                     for entry in live_entries:
                         if time.monotonic() >= deadline:
