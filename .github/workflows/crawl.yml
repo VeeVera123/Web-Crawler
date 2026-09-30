@@ -149,6 +149,15 @@ concurrency:
   group: crawl-${{ github.ref }}
   cancel-in-progress: false
 
+# 2026-09 (explicit user request — excluded-jobs cache, see
+# excluded_cache.py's module docstring): every crawl shard downloads/
+# uploads Release assets (its own per-shard newly-excluded partial file,
+# and the existing canonical cache) via `gh release`, and postfix-notion
+# publishes the merged canonical file back — same "shard-partials Release"
+# pattern workable.yml already uses for its own per-shard partial CSVs.
+permissions:
+  contents: write
+
 jobs:
   prepare-matrix:
     # workflow_dispatch inputs can't be referenced directly inside a
@@ -237,6 +246,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 2026-09 (explicit user request — excluded-jobs cache, see
+      # excluded_cache.py's module docstring): download the existing
+      # canonical "known excluded, don't re-send to the LLM" cache before
+      # classifying anything this shard. A missing Release/asset (first
+      # run ever, or nothing cached yet) is expected and harmless —
+      # crawl_i.py's own load_excluded_cache() already treats a missing
+      # local file as "start empty".
+      - name: "Download excluded-jobs cache (excluded_1.json)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download excluded-jobs-cache --pattern "excluded_1.json" --dir . --clobber 2>/dev/null || echo "no excluded-jobs cache yet for Crawl I — starting empty"
+
       - name: "Crawl I — shard ${{ matrix.shard }}/${{ github.event.inputs.archive_i_shard_count || '10' }}"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -261,6 +282,25 @@ jobs:
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
+
+      # 2026-09 (explicit user request): uploads THIS shard's own
+      # newly-excluded URLs (if any — crawl_i.py's save_new_exclusions()
+      # writes nothing when there's nothing new, so the hashFiles() check
+      # below skips the upload entirely on an empty shard) to the internal
+      # shard-partials Release, for postfix-notion's finalize step to
+      # merge. `always()` so a shard that failed partway still uploads
+      # whatever it had already decided before the failure — same
+      # "upload whatever's there" policy workable.yml's own shard-partials
+      # step uses.
+      - name: "Upload this shard's newly-excluded URLs"
+        if: ${{ always() && hashFiles(format('excluded_1_shard_{0}.json', matrix.shard)) != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view excluded-jobs-shards >/dev/null 2>&1 || gh release create excluded-jobs-shards \
+            --title "Excluded jobs — per-shard partials (internal)" \
+            --notes "Not the final cache — see the 'excluded-jobs-cache' Release for the merged excluded_1.json/excluded_2.json/excluded_3.json files. One file per crawl shard, re-uploaded every run."
+          gh release upload excluded-jobs-shards "excluded_1_shard_${{ matrix.shard }}.json" --clobber
 
   # ── Crawl II — in-house/unsupported career pages (archive_ii) ──────────
   # Runs on the scheduled cron trigger OR on a manual dispatch with
@@ -291,6 +331,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 2026-09 (explicit user request — see crawl-i's matching step above
+      # for the full comment).
+      - name: "Download excluded-jobs cache (excluded_2.json)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download excluded-jobs-cache --pattern "excluded_2.json" --dir . --clobber 2>/dev/null || echo "no excluded-jobs cache yet for Crawl II — starting empty"
+
       - name: "Crawl II — shard ${{ matrix.shard }}/${{ github.event.inputs.archive_ii_shard_count || '10' }}"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -308,6 +355,18 @@ jobs:
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
+
+      # 2026-09 (explicit user request — see crawl-i's matching step above
+      # for the full comment).
+      - name: "Upload this shard's newly-excluded URLs"
+        if: ${{ always() && hashFiles(format('excluded_2_shard_{0}.json', matrix.shard)) != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view excluded-jobs-shards >/dev/null 2>&1 || gh release create excluded-jobs-shards \
+            --title "Excluded jobs — per-shard partials (internal)" \
+            --notes "Not the final cache — see the 'excluded-jobs-cache' Release for the merged excluded_1.json/excluded_2.json/excluded_3.json files. One file per crawl shard, re-uploaded every run."
+          gh release upload excluded-jobs-shards "excluded_2_shard_${{ matrix.shard }}.json" --clobber
 
   # ── Crawl III — stapply.ai direct job-board CSVs ────────────────────────
   # Runs on the scheduled cron trigger OR on a manual dispatch with
@@ -336,6 +395,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 2026-09 (explicit user request — see crawl-i's matching step above
+      # for the full comment).
+      - name: "Download excluded-jobs cache (excluded_3.json)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download excluded-jobs-cache --pattern "excluded_3.json" --dir . --clobber 2>/dev/null || echo "no excluded-jobs cache yet for Crawl III — starting empty"
+
       - name: "Crawl III — shard ${{ matrix.shard }}/${{ github.event.inputs.crawl_iii_shard_count || '10' }}"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -352,6 +418,18 @@ jobs:
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_iii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.crawl_iii_shard_count || '10' }}
+
+      # 2026-09 (explicit user request — see crawl-i's matching step above
+      # for the full comment).
+      - name: "Upload this shard's newly-excluded URLs"
+        if: ${{ always() && hashFiles(format('excluded_3_shard_{0}.json', matrix.shard)) != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view excluded-jobs-shards >/dev/null 2>&1 || gh release create excluded-jobs-shards \
+            --title "Excluded jobs — per-shard partials (internal)" \
+            --notes "Not the final cache — see the 'excluded-jobs-cache' Release for the merged excluded_1.json/excluded_2.json/excluded_3.json files. One file per crawl shard, re-uploaded every run."
+          gh release upload excluded-jobs-shards "excluded_3_shard_${{ matrix.shard }}.json" --clobber
 
   # ── Postfix - Notion — new Supabase jobs -> Notion, then cleanup ────────
   # 2026-09 (explicit user instruction): one job that runs once crawl-i,
@@ -384,6 +462,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 2026-09 (explicit user request — excluded-jobs cache, see
+      # excluded_cache.py's module docstring): pull in everything
+      # postfix_notion.py's merge_excluded_cache() calls need — every
+      # shard's newly-excluded partial file from THIS run, and each
+      # crawl's existing canonical cache (if any). A missing Release/
+      # pattern match (first run ever, or a crawl that produced zero new
+      # exclusions this run) is expected and harmless — excluded_cache.py's
+      # merge_excluded_caches() already treats missing files as "nothing
+      # there".
+      - name: "Download this run's excluded-jobs shard partials"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download excluded-jobs-shards --pattern "excluded_*_shard_*.json" --dir . --clobber 2>/dev/null || echo "no shard partials to download this run"
+
+      - name: "Download existing excluded-jobs canonical caches"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download excluded-jobs-cache --pattern "excluded_*.json" --dir . --clobber 2>/dev/null || echo "no existing excluded-jobs cache yet"
+
       - name: "Postfix - Notion"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -405,3 +502,24 @@ jobs:
             ARGS="$ARGS --run-crawl-iii-cleanup"
           fi
           exec python postfix_notion.py $ARGS
+
+      # 2026-09 (explicit user request): publishes the merged canonical
+      # excluded_1.json (always — Crawl I's merge always runs above) and
+      # excluded_2.json/excluded_3.json (only when that crawl's cleanup —
+      # and so its merge_excluded_cache() call — actually ran this cycle,
+      # same gating the Postfix step above already uses) back to the
+      # excluded-jobs-cache Release for every future run to download.
+      - name: "Publish merged excluded-jobs caches"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view excluded-jobs-cache >/dev/null 2>&1 || gh release create excluded-jobs-cache \
+            --title "Excluded jobs cache" \
+            --notes "Per-crawl {url: excluded_at} caches (excluded_1.json = Crawl I, excluded_2.json = Crawl II, excluded_3.json = Crawl III) of jobs already sent to the LLM and confirmed excluded, so a future run skips reclassifying them. See excluded_cache.py's module docstring. Regenerated $(date -u +%Y-%m-%d)."
+          gh release upload excluded-jobs-cache excluded_1.json --clobber
+          if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_1_2 }}" = "true" ] && [ -f excluded_2.json ]; then
+            gh release upload excluded-jobs-cache excluded_2.json --clobber
+          fi
+          if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_iii }}" = "true" ] && [ -f excluded_3.json ]; then
+            gh release upload excluded-jobs-cache excluded_3.json --clobber
+          fi

@@ -99,6 +99,7 @@ import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_
 # it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
 import config  # noqa: E402
 import location_diagnostics  # noqa: E402
+import excluded_cache  # noqa: E402
 from classifier import (  # noqa: E402
     keyword_classify_role, ai_classify_roles,
     _keyword_classify_location_detail, ai_classify_locations,
@@ -138,6 +139,19 @@ logging.basicConfig(
 log = logging.getLogger("crawl_ii")
 
 SOURCE_PIPELINE = "crawl_ii"
+
+# 2026-09 (explicit user request — see excluded_cache.py's module docstring
+# and crawl_i.py's matching constants for the full design). "Excluded 2" is
+# this crawl's own separate file, per explicit user instruction to keep
+# Crawl I/II/III's caches separate rather than merged into one.
+EXCLUDED_CACHE_PATH = "excluded_2.json"
+EXCLUDED_CACHE_SHARD_GLOB = "excluded_2_shard_*.json"
+
+
+def _excluded_cache_shard_path(shard: int) -> str:
+    return f"excluded_2_shard_{shard}.json"
+
+
 DEFAULT_ATS_LABEL = "in_house"  # jobs.ats value for every Crawl II row — free-text column, no CHECK
 
 CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "300"))
@@ -1339,7 +1353,23 @@ def _filter_roles(jobs: list[dict]) -> list[dict]:
     return included
 
 
-def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
+def _filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
+                       new_exclusions: set | None = None) -> tuple[list[dict], list[str]]:
+    """2026-09 (explicit user request — see excluded_cache.py's module
+    docstring and crawl_i.py's filter_locations for the full design):
+    `excluded_urls` is an optional {url: excluded_at_iso} mapping of jobs a
+    past run already sent to the LLM and confirmed excluded — a job whose
+    keyword-stage result is "unsure" and whose URL is in this mapping skips
+    the LLM call (still gets a fresh, cheap Rank 4 attempt regardless).
+    `new_exclusions` is an optional set this function ADDS TO with the URL
+    of every job genuinely dropped this run, for the caller to persist as
+    this shard's own newly-excluded partial file. Both default to
+    None/disabled for any caller that doesn't need the cache."""
+    if excluded_urls is None:
+        excluded_urls = {}
+    if new_exclusions is None:
+        new_exclusions = set()
+
     matched, confidences, unsure_jobs = [], [], []
     # Parallel to unsure_jobs — 'blank' or 'bare_remote', see
     # _keyword_classify_location_detail's docstring and crawl_i.py's
@@ -1434,11 +1464,20 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             matched.append(job)
             confidences.append("match")
         elif result == "unsure":
-            unsure_jobs.append(job)
-            unsure_reasons.append(unsure_reason)
+            url = job.get("url") or ""
+            if url and url in excluded_urls:
+                # Already sent to the LLM and confirmed excluded by a past
+                # run (still within the TTL window) — see crawl_i.py's
+                # filter_locations for the full reasoning.
+                _try_rank4(job)
+            else:
+                unsure_jobs.append(job)
+                unsure_reasons.append(unsure_reason)
         else:
             # Keyword-stage "no_match" — Rank 4 gets one last look before
             # this job is dropped for good (see crawl_i.py's equivalent).
+            # Not recorded into new_exclusions — never going to the LLM
+            # regardless of caching.
             _try_rank4(job)
 
     # 2026-09 (Phase 2, "Do all 3") — see crawl_i.py's filter_locations for
@@ -1534,7 +1573,12 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # 4 requires the same "Application Question:" marker
                 # anyway, so this is the correct final drop for it either
                 # way. Rank 4 gets one last look before the drop is final.
+                before = len(matched)
                 _try_rank4(job)
+                if len(matched) == before:
+                    url = job.get("url")
+                    if url:
+                        new_exclusions.add(url)
 
     return matched, confidences
 
@@ -1544,7 +1588,9 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
 async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                           stats: dict, crawl_start: float, time_budget_seconds: float,
                           time_budget_minutes: int, parse_pool: concurrent.futures.Executor,
-                          batch_size: int = BATCH_SIZE) -> tuple[int, int, bool, dict]:
+                          batch_size: int = BATCH_SIZE,
+                          excluded_urls: dict | None = None,
+                          new_exclusions: set | None = None) -> tuple[int, int, bool, dict]:
     """Crawls archive_ii pages, then classifies and writes everything ONCE
     at the end. Returns (pages_done, jobs_added, time_budget_hit,
     report_stats) — report_stats is {total_jobs_raw, csm_roles,
@@ -1660,7 +1706,8 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     # directly is the fix; see that function's own BUG FIX note.
     role_matched = await enrich_application_questions_async(role_matched)
 
-    global_jobs, confidences = _filter_locations(role_matched)
+    global_jobs, confidences = _filter_locations(role_matched, excluded_urls=excluded_urls,
+                                                  new_exclusions=new_exclusions)
     report_stats["global_jobs"] = len(global_jobs)
     log.info(f"  {len(role_matched)} roles checked → {len(global_jobs)} are eligible")
     if not global_jobs:
@@ -1722,6 +1769,20 @@ def run_finalize() -> None:
     finish_scan_report_for_pipeline(SOURCE_PIPELINE)
 
 
+def merge_excluded_cache() -> None:
+    """Excluded-jobs cache finalize pass for Crawl II — call ONCE, after
+    every Crawl II shard has finished (same timing as run_finalize() above,
+    called right alongside it from postfix_notion.py). See crawl_i.py's
+    merge_excluded_cache for the full design — identical logic, just this
+    crawl's own separate "Excluded 2" file."""
+    count = excluded_cache.merge_excluded_caches(
+        existing_path=EXCLUDED_CACHE_PATH,
+        shard_glob=EXCLUDED_CACHE_SHARD_GLOB,
+        output_path=EXCLUDED_CACHE_PATH,
+    )
+    log.info(f"Crawl II excluded-cache finalize: {count} URLs cached as known-excluded")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────
 
 async def _run_shard(shard: int, total_shards: int) -> None:
@@ -1764,14 +1825,21 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     # still gets unchanged.
     parse_pool = node.new_parse_pool(max_workers=PARSE_POOL_WORKERS)
 
+    # 2026-09 (explicit user request — see excluded_cache.py's module
+    # docstring and crawl_i.py's _run_pipeline for the full design).
+    excluded_urls = excluded_cache.load_excluded_cache(EXCLUDED_CACHE_PATH)
+    new_exclusions: set = set()
+
     try:
         try:
             async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar()) as session:
                 done, added, time_budget_hit, report_stats = await crawl_batch_ii(
                     pages, session, sem, stats, crawl_start, time_budget_seconds,
-                    TIME_BUDGET_MINUTES, parse_pool)
+                    TIME_BUDGET_MINUTES, parse_pool,
+                    excluded_urls=excluded_urls, new_exclusions=new_exclusions)
         finally:
             parse_pool.shutdown(wait=False)
+            excluded_cache.save_new_exclusions(_excluded_cache_shard_path(shard), new_exclusions)
     except Exception as e:
         # 2026-09: crawl_i.py's/crawl_iii.py's _run_pipeline() have always
         # had this outer try/except to mark a shard's contribution
@@ -1827,6 +1895,7 @@ def main():
 
     if args.finalize:
         run_finalize()
+        merge_excluded_cache()
         return
 
     asyncio.run(_run_shard(args.shard, args.total_shards))

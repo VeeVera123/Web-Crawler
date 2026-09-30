@@ -146,6 +146,7 @@ import sys
 
 import aiohttp
 
+import excluded_cache
 import notion_sync
 from ats_scrapers import _snippet
 from classifier import detect_visa_sponsorship
@@ -165,6 +166,17 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 SOURCE_PIPELINE = "crawl_iii"
+
+# 2026-09 (explicit user request — see excluded_cache.py's module docstring
+# and crawl_i.py's matching constants for the full design). "Excluded 3" is
+# this crawl's own separate file, per explicit user instruction.
+EXCLUDED_CACHE_PATH = "excluded_3.json"
+EXCLUDED_CACHE_SHARD_GLOB = "excluded_3_shard_*.json"
+
+
+def _excluded_cache_shard_path(shard: int) -> str:
+    return f"excluded_3_shard_{shard}.json"
+
 
 # Same-day staleness policy — see module docstring's "AGGRESSIVE STALENESS
 # POLICY" section for why these are both 1, not staggered like Crawl I/II's
@@ -332,7 +344,16 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
     ...) rather than a per-shard start_scan_report()/finish_scan_report()
     row — see supabase_handler.bump_scan_report()'s docstring for why (one
     new Supabase row per shard made the table useless as a daily
-    summary)."""
+    summary).
+
+    2026-09 (explicit user request — see excluded_cache.py's module
+    docstring and crawl_i.py's _run_pipeline for the full design): loads
+    this crawl's own canonical excluded-jobs cache and passes it into the
+    shared filter_locations() so an already-known-excluded job's URL never
+    triggers another LLM call. Wrapped in try/finally so this shard's own
+    newly-excluded findings are always written out, on every exit path."""
+    excluded_urls = excluded_cache.load_excluded_cache(EXCLUDED_CACHE_PATH)
+    new_exclusions: set = set()
     try:
         mode_note = f" (shard {shard}/{total_shards})" if total_shards > 1 else ""
         log.info(f"── Fetching stapply.ai CSVs ({len(STAPPLY_SOURCES)} sources){mode_note} ──")
@@ -390,7 +411,8 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
         # module docstring). This is the entire reason Crawl III is faster
         # per job than Crawl I/II: zero extra network round-trips here.
         log.info("── Location check (open to global/Africa hires?) ──")
-        global_jobs, confidences = filter_locations(csm_jobs)
+        global_jobs, confidences = filter_locations(csm_jobs, excluded_urls=excluded_urls,
+                                                      new_exclusions=new_exclusions)
         if not global_jobs:
             log.info("No global/Africa-eligible CSM/AM/PM/OM roles found.")
             bump_scan_report(SOURCE_PIPELINE, total_jobs_raw=raw_count, csm_roles=len(csm_jobs))
@@ -425,6 +447,8 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
         log.error(f"Crawl III failed: {e}")
         bump_scan_report(SOURCE_PIPELINE, status="failed")
         raise
+    finally:
+        excluded_cache.save_new_exclusions(_excluded_cache_shard_path(shard), new_exclusions)
 
 
 def run_finalize() -> None:
@@ -466,6 +490,20 @@ def run_finalize() -> None:
     finish_scan_report_for_pipeline(SOURCE_PIPELINE)
 
 
+def merge_excluded_cache() -> None:
+    """Excluded-jobs cache finalize pass for Crawl III — call ONCE, after
+    every Crawl III shard has finished (same timing as run_finalize()
+    above, called right alongside it from postfix_notion.py). See
+    crawl_i.py's merge_excluded_cache for the full design — identical
+    logic, just this crawl's own separate "Excluded 3" file."""
+    count = excluded_cache.merge_excluded_caches(
+        existing_path=EXCLUDED_CACHE_PATH,
+        shard_glob=EXCLUDED_CACHE_SHARD_GLOB,
+        output_path=EXCLUDED_CACHE_PATH,
+    )
+    log.info(f"Crawl III excluded-cache finalize: {count} URLs cached as known-excluded")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Crawl III — stapply.ai direct job-board consumer")
     parser.add_argument("--shard", type=int, default=0,
@@ -489,6 +527,7 @@ def main():
 
     if args.finalize:
         run_finalize()
+        merge_excluded_cache()
         return
 
     _run_pipeline(args.shard, args.total_shards)
@@ -498,6 +537,7 @@ def main():
     # step instead (see run_finalize() docstring).
     if args.total_shards == 1:
         run_finalize()
+        merge_excluded_cache()
 
     log_egress_summary(label=f"crawl_iii shard {args.shard}/{args.total_shards}")
 

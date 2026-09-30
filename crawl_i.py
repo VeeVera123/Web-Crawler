@@ -46,6 +46,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 import location_diagnostics
+import excluded_cache
 from ats_scrapers import (scrape_board, enrich_descriptions, enrich_application_questions,
                           SCRAPERS, log_scrape_failure_summary, aclose_http_client)
 from classifier import (
@@ -93,6 +94,24 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 # below have one obvious source of truth for the pipeline name, same
 # style as crawl_ii.py's/crawl_iii.py's own SOURCE_PIPELINE constants.
 SOURCE_PIPELINE = "crawl_i"
+
+# 2026-09 (explicit user request — "excluded roles that did not make it
+# stored as a json file on github ... so they dont send the same roles to
+# the LLM over"): this crawl's own local paths for the excluded-jobs cache
+# (see excluded_cache.py's module docstring for the full design). The
+# canonical file is downloaded here by the CI workflow BEFORE this shard's
+# classify step runs (a no-op/empty-cache if it doesn't exist yet — first
+# run, or nothing cached), and this shard's own newly-excluded findings get
+# written to its own uniquely-named partial file for the workflow to
+# upload — never written to/read from the canonical path directly, to
+# avoid the git/Release-asset write race ~10 concurrent shards would cause.
+EXCLUDED_CACHE_PATH = "excluded_1.json"
+EXCLUDED_CACHE_SHARD_GLOB = "excluded_1_shard_*.json"
+
+
+def _excluded_cache_shard_path(shard: int) -> str:
+    return f"excluded_1_shard_{shard}.json"
+
 
 # ── Per-platform concurrency limits ──────────────────────
 # Two categories, tuned differently:
@@ -466,7 +485,8 @@ def filter_roles(jobs: list[dict]) -> list[dict]:
     return included
 
 
-def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
+def filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
+                      new_exclusions: set | None = None) -> tuple[list[dict], list[str]]:
     """
     Stage 3+4: Keep only global/Africa-eligible jobs.
 
@@ -516,7 +536,32 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     admitted at 4a/4b as long as neither the description nor the
     application questions confirm an actual country-tied restriction. See
     _try_rank4() below and classify_rank4()'s own docstring.
+
+    2026-09 (explicit user request — see excluded_cache.py's module
+    docstring for the full design): `excluded_urls` is an optional
+    {url: excluded_at_iso} mapping — already TTL-filtered by the caller via
+    excluded_cache.load_excluded_cache() — of jobs a PAST run already sent
+    to the LLM and confirmed excluded. A job whose keyword-stage result is
+    "unsure" and whose URL is in this mapping skips the LLM call entirely.
+    It still gets a fresh Rank 4 attempt regardless (that's cheap,
+    regex-only, and Rank 4's own config/logic can change independently of
+    this cache — only the expensive AI step is ever skipped).
+    `new_exclusions` is an optional set this function ADDS TO (never
+    replaces) with the URL of every job that ends up genuinely dropped
+    this run — AI-excluded or keyword-stage no_match, in both cases only
+    after Rank 4 also declined it — for the caller to persist as this
+    shard's own newly-excluded partial file. Deliberately narrow: only
+    jobs that actually reached (or would have reached, if not cache-
+    skipped) the LLM are ever recorded here — a hard keyword-stage
+    no_match was never going to the LLM either way, so caching it would
+    save nothing and only bloat the file. Both params default to
+    None/disabled for any caller (or test) that doesn't need the cache.
     """
+    if excluded_urls is None:
+        excluded_urls = {}
+    if new_exclusions is None:
+        new_exclusions = set()
+
     matched = []
     matched_confidences = []
     unsure_jobs = []
@@ -555,6 +600,7 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
         matched_confidences.append(f"rank4_{reason}")
         return True
 
+    cache_skipped = 0
     for job in jobs:
         result, priority, unsure_reason = _keyword_classify_location_detail(job)
         if result == "match":
@@ -563,13 +609,27 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             matched.append(job)
             matched_confidences.append("match")
         elif result == "unsure":
-            unsure_jobs.append(job)
-            unsure_reasons.append(unsure_reason)
+            url = job.get("url") or ""
+            if url and url in excluded_urls:
+                # A past run already sent this exact job to the LLM and
+                # confirmed it excluded (still within the TTL window) — skip
+                # the LLM call, but still give it a fresh, cheap Rank 4 look
+                # (see docstring above for why that's always safe to do).
+                cache_skipped += 1
+                _try_rank4(job)
+            else:
+                unsure_jobs.append(job)
+                unsure_reasons.append(unsure_reason)
         else:
             # Keyword-stage "no_match" — never reaches the AI stage at
             # all under the existing policy; Rank 4 gets one last look
-            # before this job is dropped for good.
+            # before this job is dropped for good. Not recorded into
+            # new_exclusions — it was never going to the LLM regardless of
+            # caching, so there's nothing to save by caching it.
             _try_rank4(job)
+
+    if cache_skipped:
+        log.info(f"  {cache_skipped} unsure jobs already known-excluded (cached, not yet expired) — skipped LLM reclassification")
 
     log.info(f"Location filter: {len(matched)} keyword match, {len(unsure_jobs)} unsure → sending to AI")
 
@@ -744,13 +804,21 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # same "Application Question:" marker anyway, so this is
                 # the correct final drop for it either way. Rank 4 gets
                 # one last look before the drop is final.
+                before = len(matched)
                 _try_rank4(job)
+                if len(matched) == before:
+                    # Genuinely excluded this run (AI didn't confirm it,
+                    # and Rank 4 didn't rescue it either) — record it so a
+                    # future run with the same URL skips the LLM call.
+                    url = job.get("url")
+                    if url:
+                        new_exclusions.add(url)
 
     log.info(f"After location filter: {len(matched)} global/Africa/Rank3/Rank4 jobs")
     return matched, matched_confidences
 
 
-def _run_pipeline(boards: list[tuple[str, str]]) -> None:
+def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
     """Shared core: scrape → filter → enrich → push. Does NOT run
     cleanup_stale_jobs() — see run_finalize() for why that's split out.
 
@@ -764,7 +832,20 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
     summary) to bump_scan_report(SOURCE_PIPELINE, ...) — this shard
     reports only its OWN contribution, and Postgres atomically adds it
     into the single (run_date, source_pipeline) row every shard shares.
-    See supabase_handler.bump_scan_report()'s docstring."""
+    See supabase_handler.bump_scan_report()'s docstring.
+
+    2026-09 (explicit user request — see excluded_cache.py's module
+    docstring): loads this crawl's canonical excluded-jobs cache (already
+    downloaded by the CI workflow to EXCLUDED_CACHE_PATH, or simply absent)
+    and passes it into filter_locations() so an already-known-excluded
+    job's URL never triggers another LLM call. Wrapped in try/finally so
+    this shard's own newly-excluded findings are always written out to its
+    per-shard partial file — via save_new_exclusions(), itself a no-op on
+    an empty set — on EVERY exit path (an early "nothing found" return, a
+    genuine "no global jobs this run" return, or even an exception after
+    filter_locations already ran), not just the happy path at the bottom."""
+    excluded_urls = excluded_cache.load_excluded_cache(EXCLUDED_CACHE_PATH)
+    new_exclusions: set = set()
     try:
         all_jobs: list[dict] = []
         boards_ok = boards_failed = 0
@@ -857,7 +938,8 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         log.info("  enriching application questions across all ATS platforms...")
         csm_jobs = enrich_application_questions(csm_jobs)
 
-        global_jobs, confidences = filter_locations(csm_jobs)
+        global_jobs, confidences = filter_locations(csm_jobs, excluded_urls=excluded_urls,
+                                                      new_exclusions=new_exclusions)
         if not global_jobs:
             log.info("No global/Africa-eligible CSM/AM roles found.")
             bump_scan_report(
@@ -905,6 +987,8 @@ def _run_pipeline(boards: list[tuple[str, str]]) -> None:
         log.error(f"Scanner failed: {e}")
         bump_scan_report(SOURCE_PIPELINE, status="failed")
         raise
+    finally:
+        excluded_cache.save_new_exclusions(_excluded_cache_shard_path(shard), new_exclusions)
 
 
 def run_finalize() -> None:
@@ -951,6 +1035,27 @@ def run_finalize() -> None:
     finish_scan_report_for_pipeline(SOURCE_PIPELINE)
 
 
+def merge_excluded_cache() -> None:
+    """Excluded-jobs cache finalize pass — call this ONCE, after every
+    Crawl I shard has finished (same `needs`-gated timing as run_finalize()
+    above, called right alongside it from postfix_notion.py). By the time
+    this runs, the CI workflow has already downloaded every shard's own
+    newly-excluded partial file (EXCLUDED_CACHE_SHARD_GLOB) AND the
+    existing canonical cache (EXCLUDED_CACHE_PATH, or nothing if this is
+    the first run ever) into the current working directory — this function
+    only does the actual Python merge, writing the result back to
+    EXCLUDED_CACHE_PATH for the workflow to publish as the new canonical
+    Release asset. See excluded_cache.py's module docstring for the full
+    design and the merge semantics (TTL filtering, first-entry-wins on a
+    same-run duplicate)."""
+    count = excluded_cache.merge_excluded_caches(
+        existing_path=EXCLUDED_CACHE_PATH,
+        shard_glob=EXCLUDED_CACHE_SHARD_GLOB,
+        output_path=EXCLUDED_CACHE_PATH,
+    )
+    log.info(f"Crawl I excluded-cache finalize: {count} URLs cached as known-excluded")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Crawl I — ATS Global Scanner")
     parser.add_argument("--shard", type=int, default=0,
@@ -992,6 +1097,7 @@ def main():
 
     if args.finalize:
         run_finalize()
+        merge_excluded_cache()
         return
 
     log.info("── Getting entries ──")
@@ -1033,13 +1139,14 @@ def main():
         # nothing for this shard to do.
         log.warning(f"Shard {args.shard}/{args.total_shards}: no boards assigned, skipping ATS scrape.")
 
-    _run_pipeline(boards)
+    _run_pipeline(boards, shard=args.shard)
 
     # Only the unsharded, manual/local full run does cleanup inline.
     # Sharded CI runs call `--finalize` as their own separate, `needs`-gated
     # step instead (see run_finalize() docstring for why that matters).
     if args.total_shards == 1:
         run_finalize()
+        merge_excluded_cache()
 
     log_egress_summary(label=f"crawl_i shard {args.shard}/{args.total_shards}")
 

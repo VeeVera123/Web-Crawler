@@ -34,6 +34,15 @@ log:
      rows — see that function's docstring), so this file just calls it;
      no separate Notion-archiving step is needed here.
 
+  4. Excluded-jobs cache finalize (2026-09, explicit user request — see
+     excluded_cache.py's module docstring): each crawl's own
+     merge_excluded_cache(), gated identically to its run_finalize() call
+     above — by the time this runs, the CI workflow has already downloaded
+     every shard's newly-excluded partial file (per crawl) AND the
+     existing canonical cache into the working directory; this just does
+     the actual merge, and the workflow uploads the result back as the new
+     canonical Release asset afterward.
+
 Usage: python postfix_notion.py [--run-crawl-ii-cleanup] [--run-crawl-iii-cleanup]
 """
 
@@ -75,16 +84,19 @@ def main() -> None:
 
     log.info("── Step 2: Crawl I cleanup ──")
     crawl_i.run_finalize()
+    crawl_i.merge_excluded_cache()
 
     if args.run_crawl_ii_cleanup:
         log.info("── Step 3: Crawl II cleanup ──")
         crawl_ii.run_finalize()
+        crawl_ii.merge_excluded_cache()
     else:
         log.info("── Step 3: Crawl II cleanup — skipped (Crawl II did not run this cycle) ──")
 
     if args.run_crawl_iii_cleanup:
         log.info("── Step 4: Crawl III cleanup ──")
         crawl_iii.run_finalize()
+        crawl_iii.merge_excluded_cache()
     else:
         log.info("── Step 4: Crawl III cleanup — skipped (Crawl III did not run this cycle) ──")
 
