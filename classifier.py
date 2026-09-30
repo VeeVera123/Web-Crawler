@@ -3781,7 +3781,31 @@ _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     r"|\bmust\s+be\s+a\s+tax\s+resident\s+of\s+(?:the\s+)?"
     r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     r"|\bmust\s+maintain\s+tax\s+residency\s+(?:in|within)\s+(?:the\s+)?"
-    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
+    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    # 2026-09 BUG FIX (explicit user report, real posting: CentralReach's
+    # Greenhouse "Customer Success Lead" — "We prefer candidates who can
+    # work in a hybrid capacity from one of our corporate offices in
+    # Holmdel, New Jersey or Fort Lauderdale, Florida. However, we will
+    # consider remote candidates located in other U.S. states for the
+    # right individual." Confirmed live via WebFetch that this posting's
+    # location field ALSO names those two specific cities directly, so
+    # the main location-field pipeline already correctly rejects it — but
+    # classify_rank4's 4b check, which naively scans title+description
+    # for ANY mention of an eligible country/region as automatic positive
+    # evidence, was reading the bare "U.S." inside this sentence as a
+    # "mixed signal, saving grace" and wrongly admitting it. The real
+    # problem: "located in OTHER U.S. states" is itself a genuine,
+    # unambiguous country-wide restriction (any US state still means
+    # "must be in the US," not "open beyond the US") that the residence-
+    # verb pattern above never caught, because "other" sits between the
+    # verb and the place name where only "the" was ever allowed, and the
+    # place itself is a generic "some US state" reference rather than one
+    # specific named state. Fixing the ROOT restriction-detection gap
+    # here (rather than special-casing Rank 4's own logic) means this
+    # posting is now correctly rejected everywhere, not just at Rank 4.
+    r"|\b(?:reside|residing|resides|live|living|lives|located|based)\s+"
+    r"(?:anywhere\s+)?in\s+(?:any\s+|another\s+|other\s+)?"
+    r"(?:us|u\.s\.a?\.?|american)\s+states?\b",
     re.I,
 )
 
@@ -3810,6 +3834,40 @@ _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
     r"organisations?|orgs?|departments?|divisions?|studios?|founders?)\b",
     re.I,
 )
+
+# 2026-09 BUG FIX (explicit user report, real posting: CentralReach's
+# Greenhouse "Customer Success Lead" — "...we will consider remote
+# candidates located in other U.S. states for the right individual." The
+# naive `re.split(r"(?<=[.!?])\s+|\n+", text)` idiom every sentence-level
+# hard-override check below uses treats the period INSIDE "U.S." as a
+# sentence end, silently splitting this into "...located in other U.S."
+# + "states for the right individual." — cutting the actual restrictive
+# phrase in half, so neither fragment matched any restriction regex and
+# this US-only posting sailed through every check undetected (confirmed
+# live: has_hard_country_based_restriction_signal returned False on the
+# real text). Same risk for "U.K.", "U.A.E.", or any other short
+# dot-separated abbreviation appearing mid-sentence. Shared by every
+# sentence-splitting call site in this file (all now use this instead of
+# the raw re.split) so the fix applies everywhere at once, not just the
+# one check that surfaced it.
+_ABBREVIATION_SUFFIX_RE = re.compile(r"\b[A-Za-z]\.[A-Za-z]?\.?$")
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    """Splits `text` into sentences on '.', '!', '?', or a newline, then
+    re-joins a split that landed right after a short (1-2 letter,
+    dot-separated) ALL-CAPS-style abbreviation shape (U.S., U.K., U.A.E.,
+    ...) — a real sentence essentially never ends with a bare 1-2-letter
+    abbreviation immediately before a LOWERCASE continuation, so that
+    combination is treated as a false split and merged back together."""
+    raw_parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    parts: list[str] = []
+    for part in raw_parts:
+        if parts and part[:1].islower() and _ABBREVIATION_SUFFIX_RE.search(parts[-1]):
+            parts[-1] = parts[-1] + " " + part
+        else:
+            parts.append(part)
+    return parts
 
 # 2026-09 NEW (cross-LLM review, real posting: Prolific's Montreal listing —
 # job-boards.eu.greenhouse.io/prolificacademicltd — "currently based in,
@@ -3953,8 +4011,7 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
                 return True
             return True
 
-    for sentence in re.split(r"(?<=[.!?])\s+|\
-+", text):
+    for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
         # Never treat company/HQ/team/office descriptions as candidate
@@ -4093,7 +4150,7 @@ def _apply_location_ai_authority_gate(jobs: list[dict], results: list[tuple[str,
 
 def has_extra_restrictive_geography_signal(job: dict) -> bool:
     text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+    for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
         # Broad accepted geography in the same sentence can legitimately
@@ -4189,7 +4246,7 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
         return False
     if _COUNTRY_WHITELIST_PHRASE_RE.search(text):
         return True
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+    for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
         if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
@@ -4762,7 +4819,7 @@ def has_entity_or_exclusion_restriction_signal(job: dict) -> bool:
         return False
     if _ENTITY_PAYROLL_RESTRICTION_RE.search(text) or _COUNTRY_LIST_ONLY_RE.search(text):
         return True
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+    for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
         if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
@@ -4882,7 +4939,7 @@ def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
     text = desc + " " + (job.get("title") or "")
     if not text.strip():
         return False
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+    for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
         if "overlap" in sentence.lower():
@@ -5061,7 +5118,16 @@ _STANDALONE_NON_REMOTE_PHRASE_RE = re.compile(
     r"|\bon[\s\-]?site\s+at\s+(?:the\s+|our\s+|your\s+|customer\s+|client\s+)?"
     r"[\w\s]{0,20}?\bpremises\b"
     r"|\b(?:carried\s+out|performed|conducted)\s+(?:either\s+)?(?:in|at)\s+"
-    r"(?:the\s+|our\s+)?(?:company'?s?\s+)?premises\b",
+    r"(?:the\s+|our\s+)?(?:company'?s?\s+)?premises\b"
+    # 2026-09 NEW (explicit user report, real posting: CentralReach's
+    # Greenhouse "Customer Success Lead" — "We prefer candidates who can
+    # work in a hybrid capacity from one of our corporate offices..." —
+    # a genuinely new phrasing variant, "hybrid CAPACITY" instead of
+    # "hybrid working"/"hybrid work model". Defense-in-depth: this exact
+    # posting is already excluded via has_hard_country_based_restriction_
+    # signal (see _COUNTRY_BASED_RESTRICTION_RE's "other U.S. states" fix)
+    # regardless, but the phrase itself is worth recognizing on its own.
+    r"|\bhybrid\s+capacity\b",
     re.I,
 )
 
@@ -5207,7 +5273,7 @@ def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     # referential question is automatically tied to that known place.
     if _REFERENTIAL_AUTH_QUESTION_RE.search(text):
         return True
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+    for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
         if _has_multi_region_breadth(sentence):
@@ -5365,5 +5431,43 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
     if _RANK4_PLACE_RE.search(full_text):
         return PRIORITY_MIXED_SIGNAL, "mixed_title_or_jd_signal"
+
+    # 2026-09 NEW (explicit user instruction, verbatim: "if the title is:
+    # CSM, EMEA or global or Africa or variations of these, and location
+    # is London, its let in because we allow EMEA, global/Africa are
+    # things we accept... the same applies vice versa where title is CSM
+    # London and location says EMEA/Global/Africa... to be let into 4b you
+    # must have a mixed signal, something saying yes and no"): the SAME 4b
+    # admission, for the Global/EMEA/Africa keyword family specifically.
+    # Deliberately NOT folded into _RANK4_PLACE_RE itself — that family
+    # already has its own dedicated, stricter Rank 1/2 handling upstream
+    # in _keyword_classify_location_detail, and a job only ever reaches
+    # this point because a BARE, unqualified "EMEA"/"Global"/"Africa"
+    # location field would already have been Rank 1/2 before Rank 4 is
+    # ever attempted — so a hit here always means the signal was
+    # qualified/mixed with something else (a city, e.g. "EMEA, London"),
+    # never a clean standalone claim.
+    #
+    # Checks three places, matching each half of the user's example:
+    #   - `loc` (the location field itself, post-enrichment) — the "vice
+    #     versa" case: location says something like "EMEA, London" that
+    #     failed the strict bare-EMEA residue check upstream, but the
+    #     EMEA half is still real, independent evidence sitting right
+    #     there in the same field.
+    #   - `title` via _TITLE_MULTI_REGION_WORDS_RE — the same regex
+    #     _enrich_location_from_title already uses to spot "CSM - EMEA"-
+    #     style suffixes; a short, curated field where a bare region/
+    #     global word ("CSM - Global", "CSM (Africa)") is safe to trust
+    #     without needing the fuller phrase body text requires.
+    #   - `description_snippet` via the main pipeline's own (deliberately
+    #     more conservative, phrase-requiring) JD-evidence functions, to
+    #     avoid marketing-copy false positives like "our global network"
+    #     that a bare-word scan of free body text would catch.
+    if (_text_has_global_evidence(loc) or _text_has_africa_or_emea_evidence(loc)
+            or _has_multi_region_breadth(loc)
+            or _TITLE_MULTI_REGION_WORDS_RE.search(title)
+            or _text_has_global_evidence(full_text) or _text_has_africa_or_emea_evidence(full_text)
+            or _has_multi_region_breadth(full_text)):
+        return PRIORITY_MIXED_SIGNAL, "mixed_global_emea_africa_signal"
 
     return None, None

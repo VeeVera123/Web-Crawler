@@ -169,6 +169,26 @@ Two call sites, same underlying `_REFERENTIAL_AUTH_QUESTION_RE`:
   Africa, or 2+ business regions together) — the question then ties to
   that broad scope, not a single country.
 
+### Sentence-splitting bug (fixed, affected every sentence-level check)
+
+2026-09 BUG FIX (explicit user report, real posting: CentralReach's
+Greenhouse "Customer Success Lead" — "...we will consider remote
+candidates located in other U.S. states..." was silently passing every
+restriction check). Six separate hard-override functions (`has_hard_
+country_based_restriction_signal`, `has_extra_restrictive_geography_
+signal`, `has_role_specific_place_restriction_signal`,
+`_rank4_has_country_tied_restrictive_question`, and others) split JD text
+into sentences via a naive `re.split(r"(?<=[.!?])\s+|\n+", text)` before
+checking each one — and that naive split treats the period INSIDE "U.S."
+as a sentence end, silently cutting "...located in other U.S." away from
+"states for the right individual...", so neither half matched anything.
+Same risk for "U.K.", "U.A.E.", or any short dot-separated abbreviation
+appearing mid-sentence. Fixed once, centrally: `_split_into_sentences()`
+does the same split, then re-joins a fragment that ends in a short
+ALL-CAPS-style abbreviation shape immediately followed by a lowercase
+continuation (a real sentence essentially never does this) — used by all
+six call sites now, so the fix applies everywhere at once.
+
 ## Rank 4 — Mixed signals (CS/AM only, Crawl I & II only)
 
 The newest tier. Admits a **bare country/region/continent** location (or a
@@ -245,6 +265,28 @@ own region tag is real, unaddressed-elsewhere evidence. Note: since the
 region/continent portion of `_RANK4_PLACE_RE` is unchanged, a posting
 naming "European Union"/"EU" (still recognized, distinct from the 15-
 country allowlist above) can still admit at 4b through that path.
+
+2026-09 EXPANSION (explicit user correction, verbatim: "if the title is:
+CSM, EMEA or global or Africa or variations of these, and location is
+London, its let in because we allow EMEA, global/Africa are things we
+accept... the same applies vice versa... to be let into 4b you must have a
+mixed signal, something saying yes and no"): 4b's "independently names an
+allowed region/country" test now ALSO recognizes the Rank 1/2 accepted
+broad-signal family — Global (~80 GLOBAL_KEYWORDS variants), EMEA, Africa,
+2+ business regions together — not just Rank 4's own 15-country/region
+list. This is checked in THREE places, matching each half of the user's
+worked example: the location field itself (`loc`, post-enrichment — the
+"location says EMEA [but qualified with a city]" direction), the title
+(via `_TITLE_MULTI_REGION_WORDS_RE`, the same regex `_enrich_location_
+from_title` already uses for "CSM - EMEA"-style suffixes — a bare word is
+safe to trust in a short, curated field), and the description
+(`_text_has_global_evidence`/`_text_has_africa_or_emea_evidence`/
+`_has_multi_region_breadth`, deliberately more conservative — requires an
+explicit phrase like "we hire globally," not just the bare word "global,"
+to avoid marketing-copy false positives like "our global network" in
+free body text). A CLEAN, unqualified Global/EMEA/Africa location field
+never reaches this code at all — it's already Rank 1/2 upstream — so
+a hit here always means the signal was mixed with something else.
 
 **The exclusion gate** (any one of these forces `None` — job stays
 dropped): 13 existing hard-override functions, reused unchanged from the
