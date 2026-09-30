@@ -233,15 +233,24 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
 
     2026-09 ROUND 7: for Groq (both accounts), this call only actually
     proceeds while this process holds the cross-shard Groq lock (see
-    groq_coordination.py) — if it can't be claimed within that module's
-    wait budget, this returns None immediately, exactly like any other
-    provider failure, so the EXISTING cross-provider failover picks up the
-    work on OpenAI/NVIDIA (or a later cascade round) without any special
-    casing needed at the call sites. This replaces AI_RATE_SHARDS' static
-    guess with real coordination: at most one shard fires at Groq at a
-    time, so config.py's Groq min_call_interval is now a single-shard-safe
-    value on its own, not something that needs dividing by an assumed
-    shard count anymore.
+    groq_coordination.py). This replaces AI_RATE_SHARDS' static guess with
+    real coordination: at most one shard fires at Groq at a time, so
+    config.py's Groq min_call_interval is now a single-shard-safe value on
+    its own, not something that needs dividing by an assumed shard count
+    anymore.
+
+    2026-09 ROUND 10 (explicit user design: "it does nothing else till its
+    turn when it starts sending requests again"): a Groq call no longer
+    gives up after a short wait and falls back to cross-provider failover
+    just because another shard currently holds the slot — it blocks until
+    it's this shard's turn (see groq_coordination.enter_critical_section
+    and _MAX_WAIT_SECONDS' comment for the now-last-resort safety valve).
+    A single "Waiting for groq." line is logged once per call that
+    actually has to wait, not on every poll — this replaces the old
+    "AI ... classification failed (groq-o)... rerouting to another
+    provider" WARNING that used to repeat every ~75-85s in production
+    logs purely from this lock-timeout case, which was never a real API
+    failure and shouldn't have been logged or treated like one.
     """
     name = provider["name"]
     is_groq = name in _GROQ_NAMES
@@ -250,10 +259,15 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
     if _provider_is_exhausted(name):
         return None
 
-    if is_groq and not groq_coordination.enter_critical_section():
-        log.debug(f"{name}: couldn't claim the cross-shard Groq slot in time — "
-                  f"skipping this call (existing failover will retry it on another provider)")
-        return None
+    if is_groq:
+        def _log_waiting_for_groq():
+            log.info(f"{name}: Waiting for groq.")
+        if not groq_coordination.enter_critical_section(on_wait=_log_waiting_for_groq):
+            log.warning(f"{name}: Groq coordination unavailable for an extended period — "
+                        f"rerouting this call to another provider (see groq_coordination.py's "
+                        f"_MAX_WAIT_SECONDS — this is not ordinary lock contention, something is "
+                        f"actually wrong with the shared lock table/RPCs)")
+            return None
 
     try:
         # SECOND GUARD: this closes the critical race that the old code had:

@@ -19,9 +19,18 @@ requests at BOTH Groq-O and Groq-C together (they're independent accounts
 with independent budgets, so one shard using both concurrently is a
 deliberate feature, not a bug — the account owner confirmed this is
 intentional: "one shard has both accounts at that time"). Every other
-shard's Groq-eligible work for that round is skipped by _ai_call() and
-falls through classifier.py's EXISTING cross-provider failover (still
-routes to OpenAI/NVIDIA or a later cascade round) rather than blocking.
+shard's Groq-eligible work for that round WAITS for its turn (2026-09
+ROUND 10, explicit user design: "it does nothing else till its turn when
+it starts sending requests again") — it polls every ~20s
+(_POLL_MIN/_POLL_MAX below) and logs a single "Waiting for groq." line for
+the whole wait, rather than repeatedly giving up and falling through to
+classifier.py's cross-provider failover the way it used to (see
+_MAX_WAIT_SECONDS' comment for the real production log pattern that
+caused). Falling through to OpenAI/NVIDIA failover is now reserved for a
+genuine API failure on Groq itself (exhausted retries, a daily quota, a
+hard error) or the _MAX_WAIT_SECONDS safety valve for a broken
+coordination path — not for ordinary "someone else has the slot right
+now" contention.
 
 Per-account math backing the pacing this unlocks (config.py's
 _GROQ_BASE_INTERVAL): worst case every batch is a full 6,000 chars (~1,500
@@ -136,33 +145,55 @@ def _fast_rpc_void(fn: str, params: dict) -> None:
     except Exception:
         pass
 
-# 2026-09 ROUND 8 (explicit user design): shortened from 180s. The holder
-# renews on EVERY Groq call it makes (see enter_critical_section below),
-# and at Groq's own worst-case pacing (12s/call, 5/min at a full 6,000-char
-# batch) a genuinely active holder logs a fresh renewal at least once a
-# minute even in the slowest realistic case — so "no renewal in over a
-# minute" is a real, meaningful signal that the holder is gone (crashed,
-# killed runner), not just between calls. A dead holder now only blocks
-# everyone else for about a minute instead of three.
-_STALE_SECONDS = 60
+# 2026-09 ROUND 10 (explicit user request: "should a shard last longer
+# than 1.5 minutes without updating its logs, the other shards assume
+# its dead"): raised from 60s. ROUND 8's 60s reasoning (renewal at least
+# once/minute even at the slowest realistic single-call pace) undercounted
+# LOCATION classification's own real worst-case pacing — a full Groq
+# location batch call (min_call_interval=_GROQ_LOCATION_INTERVAL=60s, see
+# config.py) plus real network latency can legitimately run close to 60s
+# between renewals on its own, leaving almost no margin before a still-
+# genuinely-active holder started looking stale to another shard's
+# staleness check. 90s keeps the "a dead holder only blocks everyone else
+# briefly" property (still under 2 minutes) while giving a real, busy
+# holder enough slack that its own pacing never accidentally triggers a
+# takeover out from under it.
+_STALE_SECONDS = 90
 
-# 2026-09 ROUND 8: how long a shard will queue for the lock before giving
-# up THIS ROUND and falling back to classifier.py's existing
-# cross-provider failover instead — never blocks forever. Long enough to
-# reliably span one full staleness cycle (a shard that starts waiting just
-# after a stale takeover check still gets another shot once the NEXT
-# staleness window closes) without waiting indefinitely.
-_MAX_WAIT_SECONDS = 70
+# 2026-09 ROUND 10 (explicit user design: "It does nothing else till its
+# turn when it starts sending requests again" — a waiting shard no longer
+# gives up after a short timeout and falls back to cross-provider
+# failover; it just waits for its turn). This replaces ROUND 8's 70s
+# give-up-and-reroute ceiling, which was directly responsible for the
+# misleading "AI location classification failed... rerouting to another
+# provider" WARNING repeating every ~75-85s in production logs — that
+# cadence IS _MAX_WAIT_SECONDS (70s) plus per-cycle overhead: the shard
+# was never actually failing, it was giving up on a wait that had barely
+# started and immediately trying again.
+#
+# This is NOT a normal-operation timeout any more — under normal
+# contention the lock always changes hands well within _STALE_SECONDS
+# (either the holder finishes and releases, or a dead holder is reclaimed
+# once the staleness window elapses), so a real wait should never come
+# close to this value. It's a last-resort safety valve for a genuinely
+# broken coordination path (e.g. the Supabase project itself unreachable
+# for an extended stretch) so a shard doesn't sit doing nothing for the
+# rest of a multi-hour run if something is fundamentally wrong rather
+# than just "someone else's turn" — at which point falling back to
+# existing cross-provider failover is the right call again.
+_MAX_WAIT_SECONDS = 1200.0
 
 # 2026-09 ROUND 8 (explicit user design: "maybe every 20 seconds, it comes
 # and asks: is this still in use"): a waiting shard doesn't need to poll
 # tightly — the lock only ever frees up either when the holder finishes
-# (unpredictable) or the staleness window elapses (a known ~60s cadence),
-# so checking every ~20s catches both without hammering Supabase with
-# pointless polls from every waiting shard. Jittered (not a fixed offset)
-# so many shards waiting on the same lock don't all check in the same
-# instant.
-_POLL_MIN, _POLL_MAX = 15.0, 25.0
+# (unpredictable) or the staleness window elapses (a known ~90s cadence,
+# see _STALE_SECONDS above), so checking every ~20s catches both without
+# hammering Supabase with pointless polls from every waiting shard.
+# Jittered (not a fixed offset) so many shards waiting on the same lock
+# don't all check in the same instant. 2026-09 ROUND 10: tightened from
+# 15-25s to 18-22s (explicit user request: "internally checks every 20
+# seconds") — still jittered, just centered more precisely on 20s.
+_POLL_MIN, _POLL_MAX = 18.0, 22.0
 
 _warned_unreachable = False
 
@@ -243,12 +274,24 @@ def release(shard_id: str = None) -> None:
     _fast_rpc_void("release_groq_lock", {"p_shard": shard_id or SHARD_ID})
 
 
-def acquire_blocking(shard_id: str = None, max_wait: float = _MAX_WAIT_SECONDS) -> bool:
-    """Poll for the slot with jittered backoff, giving up (returning
-    False) after max_wait seconds rather than blocking forever."""
+def acquire_blocking(shard_id: str = None, max_wait: float = _MAX_WAIT_SECONDS, on_wait=None) -> bool:
+    """Poll for the slot with ~20s jittered spacing, giving up (returning
+    False) only after max_wait seconds — see _MAX_WAIT_SECONDS' comment
+    above for why that's now a last-resort safety valve rather than a
+    normal-operation timeout.
+
+    2026-09 ROUND 10: `on_wait`, if given, is called ONCE — right when
+    this call actually has to start waiting (i.e. the slot wasn't free on
+    the very first check) — with no arguments. It exists so the caller
+    (classifier.py's _ai_call) can log a single "Waiting for groq." line
+    for the whole wait instead of once per poll, which is what produced
+    the repeating misleading WARNING this round fixes (see
+    _MAX_WAIT_SECONDS' comment). The poll loop itself stays silent."""
     shard_id = shard_id or SHARD_ID
     if try_acquire(shard_id):
         return True
+    if on_wait is not None:
+        on_wait()
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
         time.sleep(random.uniform(_POLL_MIN, _POLL_MAX))
@@ -257,14 +300,19 @@ def acquire_blocking(shard_id: str = None, max_wait: float = _MAX_WAIT_SECONDS) 
     return False
 
 
-def enter_critical_section() -> bool:
+def enter_critical_section(on_wait=None) -> bool:
     """Enter this process's Groq critical section — acquires the
     cross-shard slot on the FIRST concurrent caller and just increments a
     refcount for any sibling calls already inside it (e.g. groq-o and
-    groq-c batches running at once in the same shard). Returns False if
-    the slot couldn't be claimed within the wait budget — caller should
-    treat that exactly like any other "this provider isn't available right
-    now" failure and let the existing failover pick up the work.
+    groq-c batches running at once in the same shard). Returns False only
+    if the slot still couldn't be claimed after the _MAX_WAIT_SECONDS
+    safety valve — see that constant's comment; under normal contention
+    this call simply blocks until it's this shard's turn (2026-09 ROUND
+    10 — see module docstring update below) rather than giving up and
+    falling back to cross-provider failover after a short timeout.
+
+    `on_wait`, if given, is passed through to acquire_blocking() and
+    fires once if/when this call actually has to wait its turn.
 
     2026-09 ROUND 7 HOTFIX: also renews the lock on every entry, including
     the "already held, just incrementing" path. This was a real gap —
@@ -282,7 +330,7 @@ def enter_critical_section() -> bool:
             _refcount += 1
             renew()
             return True
-        acquired = acquire_blocking()
+        acquired = acquire_blocking(on_wait=on_wait)
         if acquired:
             _refcount = 1
         return acquired
