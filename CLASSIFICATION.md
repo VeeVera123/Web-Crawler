@@ -18,6 +18,71 @@ policy decision: regex is trusted; anything that needed the LLM to find is,
 by definition, missing the explicit keyword vocabulary regex looks for, so
 it can never outrank a real keyword hit.
 
+### Hard overrides run before ANY rank is assigned — Rank 1/2/3a/3b included
+
+`_keyword_classify_location_detail()` starts with a long chain of
+deterministic "hard override" checks (`has_non_remote_workplace_type`,
+`has_non_remote_title_signal`, `has_non_remote_labeled_text_signal`,
+`has_hard_country_specific_auth_signal`, `has_office_attendance_signal`,
+and others) — any one of them returning true immediately forces `no_match`,
+before the location field or the AI ever gets a say. These are NOT
+Rank-4-only: they gate every job, at every rank, since a job that is
+genuinely Hybrid/On-site/country-restricted must never survive just because
+its location field (or unrelated boilerplate elsewhere in the JD) also
+happens to say something global/EMEA-sounding.
+
+2026-09 (explicit user report, real postings: Fresha's "Account Manager
+(Amsterdam) — Danish Speaking", leva-eu.com's Amsterdam listing, Kraft
+Heinz's Eightfold "Hybrid Working" listing, viaquestinc.com's Paycor
+"Remote Status: On-Site" listing — all four wrongly survived at Rank
+1/2/3a): two systemic gaps let these through, both now fixed:
+
+1. **The "JD text can rescue a bare field" step used to run unconditionally.**
+   `_keyword_classify_location_detail`'s step 5 — "positive evidence in the
+   JD can rescue a bare Remote field" — used to fire whenever the LOCATION
+   FIELD itself didn't match Global/EMEA/Africa, regardless of whether that
+   field was genuinely ambiguous or already named a real, specific place
+   (a city pulled in from the title via `_enrich_location_from_title`, or a
+   place the structured field itself named). A company's JD commonly
+   carries loose "EMEA"/"global" language elsewhere (department tags,
+   About-Us boilerplate) that has nothing to do with THIS specific
+   posting's actual place. Now gated: step 5 only runs when the location
+   value is genuinely bare (blank, a placeholder, or plain "Remote" with
+   nothing attached) — the same `_is_bare_location()` test
+   `_enrich_location_from_title` already used. A location that names a
+   real place is trusted over unrelated text elsewhere in the JD.
+2. **No check caught a workplace-type LABEL sitting in free description
+   text.** `has_non_remote_workplace_type` only ever reads a scraper-
+   populated `workplace_type` FIELD; `has_non_remote_title_signal` only
+   reads the TITLE; `has_office_attendance_signal` only matches "N
+   days/week in office"-shaped attendance phrasing. None of them caught a
+   bare labeled line like `"Remote Status: On-Site"` or an unambiguous
+   standalone phrase like `"Hybrid Working"` sitting in the JD body as
+   plain text — which is exactly what a page shows when this project's own
+   scraper never mapped that label into a structured field.
+   `has_non_remote_labeled_text_signal()` closes this: it scans
+   `description_snippet`/title for a broad label vocabulary ("Remote
+   status:", "Workplace setting:", "Workplace type:", "Location status:",
+   "Work from:", "Work mode:", "Working arrangement:") paired with a
+   disqualifying value (Hybrid/On-site/In-office/In-person/Office), plus a
+   short list of unambiguous standalone phrases ("Hybrid Working", "On-site
+   working", …) — deliberately NOT a bare `\bhybrid\b` scan, since that
+   word alone is too overloaded ("hybrid cloud", "hybrid event") to trust
+   without a label or role-model pairing.
+
+A companion function, `_enrich_location_from_description()`, mirrors
+`_enrich_location_from_title()` but recovers a REAL place name from a
+labeled line in the description body ("Location:", "Primary Location:",
+"Work location:", "Based in:", …) whenever the field is still bare after
+title enrichment — this is what lets a scraper's missed "Location: Bowling
+Green, OH" still get correctly rejected as a specific US city instead of
+falling through to the LLM with nothing to go on. It only ever recovers a
+value to re-test through the normal Africa/EMEA/Global keyword path; it
+never decides match/no-match itself. This is the main lever for Crawl
+III/stapply.ai postings too, where there is no structured location field
+at all — a labeled mention in the raw JD text is the only way to recover
+it.
+
 ## Rank 1 — Global (`location_priority = "1"`)
 
 Explicit worldwide/anywhere/global-hiring language in the location field

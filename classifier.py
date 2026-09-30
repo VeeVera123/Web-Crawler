@@ -1524,6 +1524,26 @@ PLACEHOLDER_LOC_RE = re.compile(
     re.I,
 )
 
+# A location field that says nothing but "Remote" (no place attached) —
+# shared by _enrich_location_from_title and _keyword_classify_location_
+# detail's step-5 gate below, both of which need the identical "is this
+# genuinely bare" test.
+_BARE_REMOTE_LOC_VALUES = ("remote", "remote worker", "remote job", "fully remote")
+
+
+def _is_bare_location(loc: str) -> bool:
+    """True when `loc` (already .strip()ped by the caller, or not — this
+    strips again defensively) carries no real place information at all:
+    blank, a recognized placeholder, or bare "Remote" with nothing else
+    attached."""
+    stripped = (loc or "").strip()
+    stripped_lower = stripped.lower()
+    return (
+        not stripped_lower
+        or stripped_lower in _BARE_REMOTE_LOC_VALUES
+        or bool(PLACEHOLDER_LOC_RE.match(stripped))
+    )
+
 
 # ── Title-based location enrichment ───────────────────
 # Country/region codes AND global-hiring words, recognized only when
@@ -1614,13 +1634,7 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
     if not title:
         return loc
 
-    loc_stripped = loc.strip().lower()
-    is_bare = (
-        not loc_stripped
-        or loc_stripped in ("remote", "remote worker", "remote job", "fully remote")
-        or PLACEHOLDER_LOC_RE.match(loc)
-    )
-    if not is_bare:
+    if not _is_bare_location(loc):
         return loc
 
     # 2026-09 ROUND 3 (explicit user correction): a title naming 2+
@@ -1641,11 +1655,68 @@ def _enrich_location_from_title(loc: str, title: str) -> str:
         geo = next((g for g in match.groups() if g), None)
         if geo:
             geo = geo.strip()
-            if loc_stripped and "remote" in loc_stripped:
+            if "remote" in loc.strip().lower():
                 return f"Remote, {geo}"
             return geo
 
     return loc
+
+
+# ── Description-body location enrichment (2026-09, explicit user report)──
+# Real postings that motivated this: viaquestinc.com's Paycor/Gnewton
+# listing, whose page reads "Location: Bowling Green, OH" as plain
+# table-cell text — a genuine labeled location this project's Crawl II
+# scraper simply never captured into job["location"] at all (see
+# crawl_ii.py's _strip_html/_HEURISTIC_LOCATION_RE fix for the scraper-
+# level half of this — an unescaped "&nbsp;" sitting between the label and
+# the value broke that regex). This is the classifier-level half: even
+# where a scraper never gets it right (Crawl III's stapply.ai source has
+# no structured location field AT ALL for some postings — explicit user
+# report: "for some of them, the location is in the JD and for some
+# reason we don't seem to be seeing that"), a labeled location mention
+# sitting in the raw description body text is still real, recoverable
+# evidence. Deliberately broader label vocabulary than
+# crawl_ii.py's own heuristic-page-only version (this runs for EVERY job
+# in EVERY pipeline via _keyword_classify_location_detail/classify_rank4,
+# not just Crawl II's heuristic-extraction path) — "location status",
+# "workplace setting", "work from", "based in", explicit user-requested
+# additions, alongside the existing "primary/job/work location" set.
+_DESC_LOCATION_LABEL_RE = re.compile(
+    r"\b(?:primary\s*location|job\s*location|work\s*location|office\s*location|"
+    r"location\s*(?:status|type)?|workplace\s*(?:setting|type|location)|"
+    r"work\s*(?:from|site)|based\s*in)\s*[:\-]\s*"
+    r"(?:&nbsp;|\s)*"
+    r"([A-Za-z][^\n|]{1,60}?)"
+    r"(?=\s+(?:Apply|Department|Job\s*Type|Employment|Requirements|Responsibilities|"
+    r"Qualifications|About|Benefits|Salary|Schedule|Description|Overview|Summary|"
+    r"Remote\s*Status|Workplace\s*(?:Setting|Type)|Job\s*Id|#\s*of\s*Openings|"
+    r"Who\s|What\s|We\s|Click|View|Full[- ]?Time|Part[- ]?Time|Posted|Date|Category)\b"
+    r"|[.;|]\s|\n|$)",
+    re.I,
+)
+
+
+def _enrich_location_from_description(loc: str, description_snippet: str) -> str:
+    """Mirrors _enrich_location_from_title, but pulls from a location/
+    workplace LABEL sitting in the raw description body text instead of
+    the title — see _DESC_LOCATION_LABEL_RE's module comment above for the
+    real postings this closes. Same bare-only gate as the title version
+    (and runs strictly AFTER it — title enrichment already had first
+    chance): only fires when `loc` is still genuinely bare, so a real
+    field or title-derived value is never overridden by description
+    text. The extracted value still has to survive the normal Africa/
+    EMEA/Global/bare-Remote classification below like any other location
+    text — this only recovers a value to test, it never decides
+    match/no-match itself."""
+    if not description_snippet or not _is_bare_location(loc):
+        return loc
+    m = _DESC_LOCATION_LABEL_RE.search(description_snippet)
+    if not m:
+        return loc
+    value = re.sub(r"&nbsp;|\s+", " ", m.group(1)).strip(" ,.-|")
+    if not value or len(value) > 60:
+        return loc
+    return value
 
 
 # ── Location priority tiers (for sort order on upsert) ────
@@ -1806,6 +1877,26 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_non_remote_workplace_type(job):
         return "no_match", None, None
 
+    # ── 0.55. HARD OVERRIDE (2026-09, explicit user report, real postings:
+    # Kraft Heinz's Eightfold listing — page explicitly said "Hybrid
+    # Working" nowhere near a structured workplace_type field or a title
+    # suffix — and viaquestinc.com's Paycor/Gnewton listing, whose page
+    # literally reads "Remote Status: On-Site" as body text, not a field
+    # this project's scrapers were reading into workplace_type at all).
+    # has_non_remote_workplace_type (0.5, above) only ever sees a
+    # scraper-populated `workplace_type` FIELD; has_non_remote_title_signal
+    # (0.6, below) only ever sees the TITLE. Neither one, nor
+    # has_office_attendance_signal (0.88, below — narrowly scoped to
+    # "N days/week in office" attendance-frequency phrasing), catches a
+    # bare workplace-type LABEL sitting in the free-text description
+    # itself ("Remote Status:", "Workplace setting:", "Location status:",
+    # "Work from:", ... followed by Hybrid/On-site/In-office/In-person),
+    # or an unambiguous standalone phrase like "Hybrid Working". See
+    # has_non_remote_labeled_text_signal's docstring for the full label
+    # vocabulary and the false-positive guards. ──
+    if has_non_remote_labeled_text_signal(job):
+        return "no_match", None, None
+
     # ── 0.6. HARD OVERRIDE (2026-09, explicit user request): the TITLE
     # itself carries a physical-presence qualifier ("... (Hybrid)",
     # "... - Onsite"), independent of the workplace_type field above. See
@@ -1942,6 +2033,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
 
     title = job.get("title", "")
     loc = _enrich_location_from_title(loc, title)
+    loc = _enrich_location_from_description(loc, job.get("description_snippet") or "")
     loc_lower = loc.lower()
 
     # ── 1. Empty / placeholder → UNSURE (send to AI) ──────
@@ -2059,18 +2151,45 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # The location field itself is ambiguous, but the description/title may
     # contain a concrete hiring-scope statement. Evaluate that evidence
     # BEFORE treating bare Remote as merely uncertain.
-    full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
-    if _text_has_global_evidence(full_text):
-        return "match", PRIORITY_GLOBAL, None
-    if _text_has_africa_or_emea_evidence(full_text):
-        return "match", PRIORITY_AFRICA, None
-    # 2026-09 BUG FIX: see the identical fix + rationale on the
-    # location-FIELD multi-region check above (step 2.5) — same policy
-    # correction applies here for multi-region evidence found in the JD
-    # TEXT instead of the location field: PRIORITY_AFRICA (2), not
-    # PRIORITY_UNSURE (3).
-    if _has_multi_region_breadth(full_text):
-        return "match", PRIORITY_AFRICA, None
+    #
+    # 2026-09 BUG FIX (explicit user report, two real postings: Fresha's
+    # "Account Manager (Amsterdam) - Danish Speaking" and leva-eu.com's
+    # "Projectmanager, OEMbikes - Amsterdam, North Holland (NL)" — both
+    # landed at PRIORITY_AFRICA via THIS step, clearance="regex", even
+    # though the title itself names a specific city and (for the Fresha
+    # posting) the role explicitly wants a Danish speaker for one
+    # location): this step used to run unconditionally whenever the
+    # location-FIELD checks (steps 2-4) didn't match — including when
+    # `loc` was NOT ambiguous at all, but a real, specific, already-
+    # extracted place (here, "Amsterdam" — pulled in by
+    # _enrich_location_from_title from the title text, since both
+    # postings' own `location` field was blank). A company's JD commonly
+    # carries loose "EMEA"/"global" language elsewhere in the page
+    # (department tags, About-Us boilerplate, benefits copy) that has
+    # nothing to do with THIS specific posting's actual place — step 5's
+    # own docstring already says "the location field itself is
+    # ambiguous", but nothing enforced that before firing. Gated now to
+    # only run when `loc` is genuinely bare (blank, a placeholder, or a
+    # plain "Remote" with nothing else attached) — the exact same test
+    # _enrich_location_from_title uses to decide whether title text was
+    # even worth blending in. A `loc` that already names a real place
+    # (from the location field OR the title) is a real, specific signal
+    # that must be trusted over unrelated free text elsewhere in the JD —
+    # it falls through to the "REJECT everything else" step below instead
+    # of getting a second, looser chance here.
+    if _is_bare_location(loc):
+        full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
+        if _text_has_global_evidence(full_text):
+            return "match", PRIORITY_GLOBAL, None
+        if _text_has_africa_or_emea_evidence(full_text):
+            return "match", PRIORITY_AFRICA, None
+        # 2026-09 BUG FIX: see the identical fix + rationale on the
+        # location-FIELD multi-region check above (step 2.5) — same policy
+        # correction applies here for multi-region evidence found in the JD
+        # TEXT instead of the location field: PRIORITY_AFRICA (2), not
+        # PRIORITY_UNSURE (3).
+        if _has_multi_region_breadth(full_text):
+            return "match", PRIORITY_AFRICA, None
 
     # ── 5. Bare "Remote" with nothing else qualifying it → UNSURE
     # (send to AI). Any OTHER text attached to "remote" (a city, a
@@ -2280,6 +2399,28 @@ NO_MATCH — evidence of a country- or narrow-region-specific restriction:
   through as globally open because no sentence anywhere used the exact \
   words "must be located in" — the bare state tag itself IS the \
   restriction; don't wait for boilerplate phrasing to confirm it.
+- ANY mention that this specific posting is Hybrid, On-site/Onsite, \
+  In-office, or In-person — a labeled field or line ("Remote Status: \
+  On-Site", "Workplace type: Hybrid", "Workplace setting: On-site", \
+  "Work from: Office"), a plain sentence ("This is a Hybrid Working \
+  role", "This position is on-site"), or a screening question about \
+  in-office attendance. This OVERRIDES any global/EMEA/Africa/worldwide \
+  language found ELSEWHERE in the same posting — a company can genuinely \
+  be a global, distributed employer while THIS SPECIFIC role still \
+  requires physical presence at one location; the per-role workplace-type \
+  statement is what governs THIS job, not the company's general reach. \
+  The only exception: a value that names Hybrid/On-site alongside \
+  "Remote" together (e.g. "Hybrid or Remote", "Remote/On-site options \
+  available") describes a genuine remote OPTION existing alongside \
+  on-site ones, not a hybrid-only requirement — that is not disqualifying \
+  by itself.
+  A REAL EXAMPLE THAT WAS MISSED BEFORE (do not repeat this mistake): a \
+  posting's location field said bare "Remote" and the description \
+  contained generic "we operate globally" company language, but the same \
+  page separately and explicitly said "Hybrid Working" with a specific \
+  country named as the office location — this is NO_MATCH regardless of \
+  the "global" boilerplate; the per-role workplace-type statement is the \
+  real, governing signal here, not the company-wide language.
 
 UNCERTAIN (priority 3) — ALLOWED, but the NARROWEST tier: use this ONLY \
 when the posting is truly, truly without ANY geographic restriction \
@@ -4746,6 +4887,85 @@ def has_non_remote_workplace_type(job: dict) -> bool:
     return bool(_NON_REMOTE_WORKPLACE_RE.search(wt))
 
 
+# 2026-09 (explicit user report, two real postings): neither
+# has_non_remote_workplace_type (structured workplace_type FIELD only) nor
+# has_non_remote_title_signal (TITLE only) nor has_office_attendance_signal
+# (narrowly scoped to "N days/week in office" attendance-frequency
+# phrasing) catches a workplace-type LABEL sitting as plain body text in
+# the description itself:
+#   - Kraft Heinz's Eightfold posting (kraftheinz.eightfold.ai/careers/
+#     job/1970324837481684): the page explicitly said "Hybrid Working"
+#     with a map-pin location of "Australia" — location field this
+#     project stored was bare "Remote", no workplace_type at all.
+#   - viaquestinc.com's Paycor/Gnewton posting: the page reads "Remote
+#     Status: On-Site" as plain table-cell text (`<td id="gnewtonJob
+#     RemoteStatus"><b>Remote Status:</b> On-Site</td>`, verified live)
+#     that this project's Crawl II scraper never mapped to a
+#     workplace_type field at all.
+# Explicit user request: "expand location wording to include: location
+# status, workplace setting:, location:, work from:, and many more."
+# Label vocabulary here intentionally excludes a bare "location:" (that
+# one's for _DESC_LOCATION_LABEL_RE's PLACE-recovering job above, not a
+# disqualifying-VALUE check — "Location: Bowling Green, OH" isn't itself
+# hybrid/onsite evidence, the city name is what disqualifies it, via the
+# normal keyword path once _enrich_location_from_description recovers it).
+_WORKPLACE_LABEL_RE = re.compile(
+    r"\b(?:remote\s*status|workplace\s*(?:setting|type)|location\s*(?:status|type)|"
+    r"work\s*(?:from|mode|arrangement|style|site)|working\s*(?:arrangement|style|model))"
+    r"\s*[:\-]\s*(?:&nbsp;|\s)*([^\n.;|]{1,40})",
+    re.I,
+)
+# Broader than _NON_REMOTE_WORKPLACE_RE by one token ("office" bare) —
+# deliberately scoped to ONLY the short captured label-VALUE text above
+# (never the full description), where a terse one-word answer like "Work
+# from: Office" is common and unambiguous in that narrow context, unlike
+# scanning the whole JD for the bare word "office" (which would false-
+# positive on "our office culture", "back-office support", etc.).
+_WORKPLACE_LABEL_VALUE_RE = re.compile(
+    r"\b(hybrid|on[\s\-]?site|in[\s\-]?office|in[\s\-]?person|office)\b", re.I
+)
+# A small set of unambiguous standalone phrases — deliberately NOT a bare
+# "\bhybrid\b" scan (too overloaded: "hybrid cloud", "hybrid event",
+# "hybrid car" are all common, unrelated JD boilerplate) — only a
+# workplace-descriptor word directly paired with "working"/a role-model
+# word, which has no plausible non-workplace reading.
+_STANDALONE_NON_REMOTE_PHRASE_RE = re.compile(
+    r"\bhybrid\s*working\b|\bworking\s*hybrid\b|\bon[\s\-]?site\s*working\b|"
+    r"\bin[\s\-]?office\s*working\b|\bin[\s\-]?person\s*working\b|"
+    r"\bhybrid\s*work\s*(?:model|arrangement|environment|policy|schedule)\b",
+    re.I,
+)
+
+
+def has_non_remote_labeled_text_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does the job's raw description
+    or title carry a workplace-type LABEL (see _WORKPLACE_LABEL_RE) whose
+    value is disqualifying (Hybrid/On-site/In-office/In-person/Office),
+    or an unambiguous standalone phrase like "Hybrid Working"
+    (_STANDALONE_NON_REMOTE_PHRASE_RE)? See this function's module
+    comment above for the two real postings this closes. Same "remote
+    alongside it" exception as has_non_remote_workplace_type/
+    has_non_remote_title_signal: a labeled value that also mentions
+    "remote" (e.g. "Work mode: Hybrid or Remote") is NOT excluded here —
+    that's a genuine remote option, not a hybrid-only requirement."""
+    desc = job.get("description_snippet") or ""
+    title = job.get("title") or ""
+    text = f"{desc} {title}" if isinstance(desc, str) and isinstance(title, str) else ""
+    if not text.strip():
+        return False
+
+    if _STANDALONE_NON_REMOTE_PHRASE_RE.search(text):
+        return True
+
+    for m in _WORKPLACE_LABEL_RE.finditer(text):
+        value = m.group(1)
+        if _REMOTE_WORKPLACE_RE.search(value):
+            continue
+        if _WORKPLACE_LABEL_VALUE_RE.search(value):
+            return True
+    return False
+
+
 # ── Rank 4 (2026-09, explicit user request — classification revamp
 # Phase 2): CS/AM-only admission for a BARE country/region/continent
 # location (or a title/JD naming one while the location field is some
@@ -4866,6 +5086,7 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
     has_hard_no_sponsorship_signal,
     has_non_remote_workplace_type,
     has_non_remote_title_signal,
+    has_non_remote_labeled_text_signal,
     has_hard_country_specific_auth_signal,
     has_state_list_restriction_signal,
     has_hard_country_based_restriction_signal,
@@ -4925,6 +5146,7 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     loc = (raw_loc + " " + raw_country).strip()
     title = job.get("title", "")
     loc = _enrich_location_from_title(loc, title)
+    loc = _enrich_location_from_description(loc, job.get("description_snippet") or "")
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
         return None, None
 

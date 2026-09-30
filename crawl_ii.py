@@ -73,6 +73,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import hashlib
+import html as html_lib
 import json
 import logging
 import os
@@ -300,6 +301,20 @@ def _strip_html(text, max_len: int = 30_000) -> str:
         return ""
     text = _SCRIPT_STYLE_RE.sub(" ", text)
     text = _TAG_RE.sub(" ", text)
+    # 2026-09 BUG FIX (explicit user report, real posting: viaquestinc.com's
+    # Paycor/Gnewton-hosted "Day Program Coordinator" listing): this never
+    # decoded HTML entities, so a raw "<b>Location:</b>&nbsp;" immediately
+    # followed by a sibling <td>'s "Bowling Green, OH" collapsed, after tag
+    # stripping, into the literal text "Location: &nbsp; Bowling Green, OH"
+    # — the UNDECODED "&nbsp;" entity sat between the label and its value
+    # as literal non-whitespace text, which _HEURISTIC_LOCATION_RE's
+    # `\s*` (whitespace only) couldn't skip over, so the regex never
+    # matched at all and this job's location stayed blank. Confirmed live
+    # against the real page's fetched HTML. html.unescape() here fixes
+    # every entity (&nbsp;, &amp;, &#038;, ...) project-wide, not just this
+    # one page — any other heuristic-page label/value pair sitting either
+    # side of an entity had the identical silent failure mode.
+    text = html_lib.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_len]
 
@@ -610,6 +625,17 @@ _HEURISTIC_LOCATION_RE = re.compile(
     r"([A-Z][^:\n]{1,80}?)"
     r"(?=\s+(?:Apply|Department|Job\s*Type|Employment|Requirements|Responsibilities|"
     r"Qualifications|About|Benefits|Salary|Schedule|Description|Overview|Summary|"
+    # 2026-09 BUG FIX (explicit user report, real posting: viaquestinc.com's
+    # Paycor/Gnewton "Day Program Coordinator" listing): the page's own
+    # table layout puts "Remote Status: On-Site", "Job Id: 42921", and
+    # "# of Openings: 1" immediately after the location value with no
+    # period between them ("Location: Bowling Green, OH Remote Status:
+    # On-Site Job Id: ..."), none of which this boundary list recognized —
+    # so even after the &nbsp;-decoding fix above, the non-greedy capture
+    # kept expanding past the real location looking for a stop word it
+    # would never find, most often exceeding the 80-char cap and getting
+    # discarded entirely (see _extract_heuristic_location's len<=80 guard).
+    r"Remote\s*Status|Workplace\s*(?:Setting|Type)|Job\s*Id|#\s*of\s*Openings|"
     r"Who\s|What\s|We\s|Click|View|Full[- ]?Time|Part[- ]?Time|Posted|Date|Category)\b"
     r"|[.]\s|\n|$)",
     re.I,
@@ -661,6 +687,40 @@ def _extract_heuristic_location(text: str) -> str:
     return ""
 
 
+# 2026-09 (explicit user report, real posting: viaquestinc.com's
+# Paycor/Gnewton "Day Program Coordinator" listing — page text reads
+# "Remote Status: On-Site" as a labeled value, same table-layout shape as
+# the location label _HEURISTIC_LOCATION_RE already reads). This project
+# never populated a workplace_type field for ANY Crawl II job before now
+# — classifier.py's has_non_remote_workplace_type existed but had nothing
+# to read here. Mirrors _extract_heuristic_location's approach exactly.
+_HEURISTIC_WORKPLACE_TYPE_RE = re.compile(
+    r"(?:remote\s*status|workplace\s*(?:setting|type)|work\s*(?:mode|arrangement|style))"
+    r"\s*[:\-]\s*([A-Za-z][^:\n]{1,40}?)"
+    r"(?=\s+(?:Apply|Department|Job\s*Type|Employment|Requirements|Responsibilities|"
+    r"Qualifications|About|Benefits|Salary|Schedule|Description|Overview|Summary|"
+    r"Job\s*Id|#\s*of\s*Openings|"
+    r"Who\s|What\s|We\s|Click|View|Full[- ]?Time|Part[- ]?Time|Posted|Date|Category)\b"
+    r"|[.]\s|\n|$)",
+    re.I,
+)
+
+
+def _extract_heuristic_workplace_type(text: str) -> str:
+    """Best-effort "Remote Status:"/"Workplace setting:"/"Workplace type:"
+    label scan, mirroring _extract_heuristic_location above. Populates a
+    real workplace_type field so classifier.py's has_non_remote_
+    workplace_type (structured-field check) catches a Hybrid/On-site
+    posting too, not only the freeform description-text scan
+    (has_non_remote_labeled_text_signal) that has to run for every OTHER
+    pipeline that never gets a structured field at all."""
+    m = _HEURISTIC_WORKPLACE_TYPE_RE.search(text)
+    if not m:
+        return ""
+    value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+    return value if value and len(value) <= 40 else ""
+
+
 def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) -> dict | None:
     """A candidate link alone is never trusted — this is the gate that
     keeps a heuristic hit from becoming a written job. Requires BOTH a
@@ -683,6 +743,7 @@ def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) 
         # label at all. classifier.py's "blank → unsure, let the AI stage
         # look at it" path still handles that case unchanged.
         "location": _extract_heuristic_location(text),
+        "workplace_type": _extract_heuristic_workplace_type(text),
         "description": text,
         "company": company,
         "source_ats": DEFAULT_ATS_LABEL,
