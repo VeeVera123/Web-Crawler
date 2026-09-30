@@ -374,6 +374,40 @@ free body text). A CLEAN, unqualified Global/EMEA/Africa location field
 never reaches this code at all — it's already Rank 1/2 upstream — so
 a hit here always means the signal was mixed with something else.
 
+2026-09 BUG FIX (explicit user report, real production data: bare
+DISALLOWED locations — `"India"`, `"Shanghai"`, `"South Africa"`,
+`"Bengaluru, India Office"` — were being admitted at 4b, and separately,
+`"Germany Remote"` was landing in 4b/being dropped instead of the clean 4a
+signal it should be):
+
+- **Unscoped boilerplate leak (both 4b paths).** Both of 4b's "does the
+  title/JD independently name an allowed place" checks — the country/
+  region-list path (`_RANK4_PLACE_RE.search(full_text)`) and the Global/
+  EMEA/Africa path described above — used to scan the ENTIRE title+
+  description blob with no requirement that the match have anything to do
+  with *this role's own* hiring scope. Routine "About us" company
+  boilerplate ("we have teams across EMEA, APAC, and the Americas") was
+  enough to admit an otherwise-disallowed location at 4b, since it isn't
+  covered by the Global/EMEA path's own (narrower) marketing-boilerplate
+  exclusion list. Fixed by requiring a hiring-context word (work/hire/
+  recruit/employ/candidate/applicant/based/located/available/open/role/
+  position) within 80 characters of the matched place — same proximity-
+  guard shape `_STRICT_BROAD_REGION_RE` already used for EMEA/Africa
+  elsewhere in this file, generalized to Rank 4's own vocabulary
+  (`_RANK4_STRICT_PLACE_RE`) and to the Global/EMEA/Africa full-text scan
+  (now sentence-scoped via `_split_into_sentences`, same idea). Genuine
+  evidence ("we hire globally," "hiring across LATAM for this role") still
+  admits; generic company description no longer does.
+- **"Germany Remote" wrongly excluded from 4a.** 4a's "remainder must be
+  empty once every place name is stripped" check didn't strip generic
+  non-geographic filler ("remote," "office," "role," …) the way the main
+  pipeline's own EMEA/Global residue checks already do via
+  `NON_GEO_WORDS_RE` — so "remote" survived as leftover residue and made
+  an otherwise-clean single-country signal look like a second, unrecognized
+  place. Now applies the same `NON_GEO_WORDS_RE` strip Rank 1/2's residue
+  checks already use, so "Germany Remote"/"Remote - Germany" correctly
+  land at 4a alongside bare "Germany".
+
 **The exclusion gate** (any one of these forces `None` — job stays
 dropped): 13 existing hard-override functions, reused unchanged from the
 main pipeline (`has_hard_no_sponsorship_signal`,

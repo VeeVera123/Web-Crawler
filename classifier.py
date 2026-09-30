@@ -5511,8 +5511,8 @@ _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT = (
 # included — per explicit user instruction ("states do not qualify
 # here"), a bare state alone never matches this allowlist and so never
 # reaches 4a/4b.
-_RANK4_PLACE_RE = re.compile(
-    r"\b(?:" + _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r"|"
+_RANK4_PLACE_INNER_FRAGMENT = (
+    _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r"|"
     r"european\s+union|\beu\b|apac|latam|amers?|americas|mena|middle\s+east|"
     r"anz|dach|benelux|nordics?|"
     r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
@@ -5520,7 +5520,36 @@ _RANK4_PLACE_RE = re.compile(
     r"gulf\s+cooperation\s+council|gcc|gulf|"
     r"south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|asia|"
     r"oceania|pacific|north\s+america|central\s+america|south\s+america|"
-    r"caribbean|cee|cis|japac|apj|europe)\b", re.I,
+    r"caribbean|cee|cis|japac|apj|europe"
+)
+_RANK4_PLACE_RE = re.compile(r"\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b", re.I)
+
+# 2026-09 BUG FIX (explicit user report, real production data: bare-city
+# locations naming a DISALLOWED country/city — "India", "Shanghai", "South
+# Africa", "Bengaluru, India Office" — were being admitted at 4b). Root
+# cause: classify_rank4's 4b "title/description independently name an
+# allowed region" check ran a bare, unscoped _RANK4_PLACE_RE.search(
+# full_text) over the ENTIRE title+description blob — so ANY mention of a
+# recognized region word anywhere (routine "About us" company boilerplate
+# like "we have teams across EMEA, APAC, and the Americas", totally
+# unrelated to what region THIS specific role is hired for) counted as a
+# "mixed signal" and admitted an otherwise-disallowed location. This is the
+# exact same failure mode already fixed for the main pipeline's Rank 1/2/3
+# JD-rescue step and for _STRICT_BROAD_REGION_RE's EMEA/Africa-only
+# version — generalized here to Rank 4's full country/region vocabulary:
+# require a hiring-context verb within 80 chars of the matched place, so
+# generic company-description mentions no longer count as evidence.
+_RANK4_HIRING_CONTEXT_WORDS_FRAGMENT = (
+    r"remote|work|working|hire|hiring|recruit|recruiting|employment|employ|"
+    r"candidates?|applicants?|based|located|available|open|role|position"
+)
+_RANK4_HIRING_CONTEXT_WORDS_RE = re.compile(r"\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b", re.I)
+_RANK4_STRICT_PLACE_RE = re.compile(
+    r"\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b"
+    r".{0,80}\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b"
+    r"|\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b"
+    r".{0,80}\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b",
+    re.I,
 )
 
 # 2026-09 NEW (explicit user instruction, verbatim examples: "locations
@@ -5582,8 +5611,18 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # "remainder" technique has_role_specific_place_restriction_signal's
     # body-text check already uses (see that function's docstring for
     # the real bug this shape of check fixed there).
+    # 2026-09 BUG FIX (explicit user report, real production data:
+    # "Germany Remote" — an eligible bare country plus a generic
+    # work-modality qualifier, not a second competing place — was landing
+    # in 4b/being dropped instead of 4a). NON_GEO_WORDS_RE (already used
+    # by the main pipeline's own EMEA/Global residue checks) strips
+    # "remote", "office"-adjacent generic qualifiers, and other non-place
+    # filler; without it, "remote" survived as leftover residue and made
+    # this look like a second, un-recognized place rather than the single
+    # clean country signal it actually is.
     remainder = _RANK4_PLACE_RE.sub(" ", loc)
     remainder = re.sub(r"\b(?:and|or)\b|&", " ", remainder, flags=re.I)
+    remainder = NON_GEO_WORDS_RE.sub(" ", remainder)
     remainder = re.sub(r"[,\s/|()\-–—]+", " ", remainder).strip()
     if not remainder and _RANK4_PLACE_RE.search(loc):
         return PRIORITY_MIXED_COUNTRY, "bare_country_or_region"
@@ -5603,8 +5642,22 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # contradiction (the genuine-restriction checks above already ruled
     # out an actual confirmed tie, e.g. a country-specific work-auth
     # question).
+    #
+    # 2026-09 BUG FIX (explicit user report, real production data: bare
+    # DISALLOWED locations -- "India", "Shanghai", "South Africa",
+    # "Bengaluru, India Office" -- were being admitted at 4b). This used to
+    # be a bare _RANK4_PLACE_RE.search(full_text) over the WHOLE title+
+    # description blob, with no requirement that the matched place have
+    # anything to do with THIS role's own hiring scope -- routine "About
+    # us" company boilerplate ("we have teams across EMEA, APAC, and the
+    # Americas") was enough to admit a location that isn't even on Rank
+    # 4's own allowlist. _RANK4_STRICT_PLACE_RE requires a hiring-context
+    # verb within 80 chars of the matched place (same proximity-guard
+    # pattern _STRICT_BROAD_REGION_RE already uses for EMEA/Africa
+    # elsewhere in this file), so generic company-description mentions no
+    # longer count as evidence.
     full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
-    if _RANK4_PLACE_RE.search(full_text):
+    if _RANK4_STRICT_PLACE_RE.search(full_text):
         return PRIORITY_MIXED_SIGNAL, "mixed_title_or_jd_signal"
 
     # 2026-09 NEW (explicit user instruction, verbatim: "if the title is:
@@ -5638,11 +5691,34 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     #     more conservative, phrase-requiring) JD-evidence functions, to
     #     avoid marketing-copy false positives like "our global network"
     #     that a bare-word scan of free body text would catch.
+    #
+    # 2026-09 BUG FIX (explicit user report, same production data as the
+    # _RANK4_STRICT_PLACE_RE fix above): the full_text half of this check
+    # had the identical unscoped-boilerplate flaw -- generic "About us"
+    # copy like "we have teams across EMEA, APAC, and the Americas" isn't
+    # excluded by _text_has_global_evidence/_has_multi_region_breadth's
+    # own marketing-boilerplate guard (that guard only excludes a curated
+    # set of specific phrases like "global network", not named-region
+    # company-wide claims), so it was still admitting disallowed locations
+    # (India, Shanghai, South Africa) at 4b even after the fix above closed
+    # the _RANK4_PLACE_RE path. Scoped the full_text half to sentences that
+    # also contain a hiring-context word, same proximity-guard idea as
+    # _RANK4_STRICT_PLACE_RE -- "we hire globally across every continent"
+    # still counts (has "hire"), but "we have teams across EMEA, APAC, and
+    # the Americas" as pure company description no longer does.
+    full_text_has_scoped_broad_evidence = False
+    for sentence in _split_into_sentences(full_text):
+        if not sentence.strip() or not _RANK4_HIRING_CONTEXT_WORDS_RE.search(sentence):
+            continue
+        if (_text_has_global_evidence(sentence) or _text_has_africa_or_emea_evidence(sentence)
+                or _has_multi_region_breadth(sentence)):
+            full_text_has_scoped_broad_evidence = True
+            break
+
     if (_text_has_global_evidence(loc) or _text_has_africa_or_emea_evidence(loc)
             or _has_multi_region_breadth(loc)
             or _TITLE_MULTI_REGION_WORDS_RE.search(title)
-            or _text_has_global_evidence(full_text) or _text_has_africa_or_emea_evidence(full_text)
-            or _has_multi_region_breadth(full_text)):
+            or full_text_has_scoped_broad_evidence):
         return PRIORITY_MIXED_SIGNAL, "mixed_global_emea_africa_signal"
 
     return None, None

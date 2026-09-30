@@ -102,6 +102,14 @@ the LLM's verdict is what actually decides the outcome.**
 | Business regions (broader, unrestricted list) | APAC, LATAM, MENA, AMER/Americas, ANZ, DACH, Benelux, Nordics, Gulf/GCC, EU, Asia + sub-regions, Oceania, Caribbean, CEE, CIS, and more |
 | **Never accepted** | US states/Canadian provinces, alone or paired with a country (`"California"`, `"California, United States"`) |
 
+A title/description mention of an eligible country/region only counts as
+4b evidence when a hiring-context word (work/hire/recruit/employ/
+candidate/applicant/based/located/available/open/role/position) sits
+within 80 characters of it. Generic "About us" company boilerplate
+("we have teams across EMEA, APAC, and the Americas") no longer admits a
+disallowed location (`"India"`, `"Shanghai"`) just because it mentions a
+region somewhere in the text — 2026-09 bug fix, real production data.
+
 ### 4d. `4a` vs `4b` — the actual rule
 
 **Everything in this section only ever runs after the 17 universal checks
