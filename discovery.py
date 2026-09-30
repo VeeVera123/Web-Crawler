@@ -3816,7 +3816,7 @@ _CC_SHARED_HOST_SEMAPHORES = {
 }
 
 
-def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 200) -> dict:
+def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 50) -> dict:
     """Applied to a CC/Wayback fetch_*_slugs() result right before it's
     returned — see the module comment above _CC_LIVE_CHECK for why only
     these two sources need this. `slugs_by_ats` values may be a set[str]
@@ -3847,6 +3847,25 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 200) 
     that genuinely share one host are separately semaphore-capped now,
     so the global ceiling only ever governs the safe, per-tenant-host
     majority.
+
+    2026-09 ROUND 3 (real production regression, confirmed live): 200
+    actually hung a real "Github" Discovery job — the run stalled after
+    logging "Failed to create DNS resolver channel... ran out of inotify
+    watches... Failed to initialize c-ares channel" and had to be
+    cancelled by hand. The per-host semaphore fix above was correct (no
+    single ATS host was being hammered), but 200 concurrent threads each
+    opening their own DNS resolution + TCP + TLS is real load against
+    the whole process/container regardless of host diversity — a GitHub
+    Actions runner's default file-descriptor/inotify-watch ceiling is a
+    real, shared, process-wide resource this function doesn't otherwise
+    account for, and 200 pushed it over on a runner already juggling
+    node.py's own aiohttp/aiodns connections earlier in the same
+    "github_combined" sequential pipeline. Dropped 200->50 — the
+    concurrency win over the original 8 is still large (6x), well clear
+    of both the original "slow AF" complaint and this runner-resource
+    ceiling. Raise again only with real evidence a GH Actions runner can
+    sustain it (e.g. explicit ulimit/ANY inotify-watch-limit tuning in
+    the workflow itself), not by guessing a bigger number.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7054,15 +7073,20 @@ def fetch_github_registries_slugs(csod_resolve_time_budget_minutes: int = CSOD_R
                 # docstring. Each entry's bare portal slug ("a-talent")
                 # becomes our 'tenant|careerSiteId' format only if the
                 # resolve succeeds. 2026-09 (explicit user request, "verification
-                # is slow AF, increase concurrency"): raised 30->100 — each
-                # resolve hits {slug}.csod.com, a genuinely distinct host
-                # per company (same per-tenant-subdomain safety profile as
-                # _drop_dead_cc_slugs's own majority case), so no shared
-                # endpoint here for higher concurrency to overload.
+                # is slow AF, increase concurrency"): raised 30->100, then
+                # dropped back to 40 after 200 in _drop_dead_cc_slugs (same
+                # kind of pool, same process) hung a real Discovery run on
+                # a GitHub Actions runner's file-descriptor/inotify ceiling
+                # — see that function's own "ROUND 3" docstring for the
+                # confirmed live incident. Each resolve hits {slug}.csod.com,
+                # a genuinely distinct host per company, so this was never
+                # about one host being overloaded — it's the same
+                # whole-process resource ceiling, just a smaller pool here
+                # since CSOD's own candidate volume is much smaller too.
                 added = 0
                 deadline = time.monotonic() + csod_resolve_time_budget_minutes * 60
                 budget_hit = False
-                with ThreadPoolExecutor(max_workers=100) as pool:
+                with ThreadPoolExecutor(max_workers=40) as pool:
                     futures = {}
                     for entry in live_entries:
                         if time.monotonic() >= deadline:
