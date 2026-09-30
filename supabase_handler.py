@@ -1097,6 +1097,39 @@ def mark_notion_synced(ids: list[int]) -> int:
     return touched
 
 
+def get_location_priorities_by_ids(ids: list[int]) -> dict[int, str]:
+    """2026-09 (explicit user request — Notion "Rank" backfill): bulk
+    read of {id: location_priority} for a given list of Supabase job ids,
+    the lookup notion_sync.backfill_rank_property() needs to know what
+    Rank value each EXISTING Notion page should have. Chunked GET by id,
+    same `id=in.(...)` pattern mark_notion_synced()/
+    update_application_statuses_bulk() already use for the write side — a
+    read needs the same chunking since the same URL-length ceiling applies
+    either direction. A row with no location_priority (shouldn't happen —
+    every row gets one at insert, see _build_row_raw — but defensively
+    skipped rather than trusted) is simply absent from the returned dict,
+    same as an id that no longer exists in `jobs` at all (row deleted
+    since the Notion page was created)."""
+    if not ids:
+        return {}
+    result: dict[int, str] = {}
+    CHUNK = 200
+    for i in range(0, len(ids), CHUNK):
+        chunk = ids[i:i + CHUNK]
+        try:
+            rows = _get("jobs", f"select=id,location_priority&id=in.({','.join(str(x) for x in chunk)})",
+                        limit=len(chunk))
+        except SupabaseFetchError as e:
+            log.warning(f"get_location_priorities_by_ids: fetch failed for chunk of {len(chunk)}: {e}")
+            continue
+        for row in rows:
+            job_id = row.get("id")
+            priority = row.get("location_priority")
+            if job_id is not None and priority:
+                result[job_id] = priority
+    return result
+
+
 def update_application_statuses_bulk(updates: list[dict]) -> int:
     """Write Notion-driven status changes back into `jobs`, matched by
     Supabase `id` (the same id notion_sync.push_new_jobs_to_notion()

@@ -35,13 +35,20 @@ cleanup).
      means this is correct no matter how many times a day the whole
      pipeline runs — a row is only ever offered here once, however many
      runs it takes postfix to actually catch it (see that function's
-     docstring). Eight fields are ever written to a page, by explicit
+     docstring). Nine fields are ever written to a page, by explicit
      instruction (Company Name and Globally Hiring both added 2026-09 at
-     explicit request): title, company_name, job_url, date_added, salary,
-     role_category, globally_hiring (derived from location_priority —
-     see _LOCATION_PRIORITY_TO_NOTION below), and the Supabase id (the
-     join key step 1 reads back). ATS/location/etc. are deliberately left
-     alone.
+     explicit request, Rank added 2026-09 after that): title, company_name,
+     job_url, date_added, salary, role_category, globally_hiring (a broad
+     label derived from location_priority — see _LOCATION_PRIORITY_TO_NOTION
+     below), rank (the RAW location_priority value itself — "1"/"2"/"3a"/
+     "3b"/"4a"/"4b" — see PROP_RANK), and the Supabase id (the join key
+     step 1 reads back). ATS/location/etc. are deliberately left alone.
+
+  3. backfill_rank_property() — a SEPARATE, one-off maintenance operation
+     (not part of the daily crawl.yml schedule at all), for setting Rank
+     on pages created before that property existed. Run manually via
+     `python notion_sync.py --backfill-rank` (dry run by default — add
+     --apply to actually write). See that function's own docstring.
 
      NOTE ON NOTION PROPERTY NAMES: Notion treats property names as exact,
      case-sensitive strings — "Status" and "status" are two different
@@ -111,6 +118,7 @@ PROP_ROLE_CATEGORY = "Role Category"
 PROP_SUPABASE_ID = "Supabase ID"
 PROP_STATUS = "Status"
 PROP_GLOBALLY_HIRING = "Globally Hiring"
+PROP_RANK = "Rank"
 
 STATUS_NOT_APPLIED = "Not Applied"
 
@@ -129,6 +137,15 @@ _LOCATION_PRIORITY_TO_NOTION = {
     "2": "EMEA",
     "3": "Uncertain",
 }
+
+# 2026-09 (explicit user request, Phase 2's own TODO above finally acted
+# on): a separate, plain "Rank" Select property, distinct from "Globally
+# Hiring" — that field collapses several priority values into broad
+# labels ("Global"/"EMEA"/"Uncertain"); this one is the raw
+# jobs.location_priority value itself ("1"/"2"/"3a"/"3b"/"4a"/"4b"),
+# unmapped, so the six Notion Select options the user added match exactly
+# what classifier.py's PRIORITY_* constants already produce — no
+# translation table needed, unlike _LOCATION_PRIORITY_TO_NOTION above.
 
 # Notion Status select label -> Supabase jobs.application_status value
 # (the CHECK constraint on that column only allows these five).
@@ -339,6 +356,10 @@ def _build_page_properties(row: dict, schema: dict) -> dict:
     if globally_hiring:
         _add(PROP_GLOBALLY_HIRING, "select", {"select": {"name": globally_hiring}})
 
+    location_priority = row.get("location_priority")
+    if location_priority:
+        _add(PROP_RANK, "select", {"select": {"name": location_priority}})
+
     return props
 
 
@@ -438,3 +459,132 @@ def push_pending_jobs_to_notion() -> dict:
     if created_ids:
         mark_notion_synced(created_ids)
     return summary
+
+
+# ── One-off maintenance: backfill "Rank" onto existing pages ────────────
+
+def backfill_rank_property(dry_run: bool = True) -> dict:
+    """2026-09 (explicit user request): push_pending_jobs_to_notion()
+    already sets PROP_RANK on every NEW page going forward (see
+    _build_page_properties above) — this is the one-time catch-up for
+    pages created BEFORE that property existed. Not part of the daily
+    crawl.yml schedule: jobs.location_priority is set once at insert time
+    and never changes for an existing Supabase row afterward (a row
+    already in `jobs` is never reclassified — see get_existing_urls'
+    dedup), so once this has actually been run for real, there's nothing
+    left to backfill.
+
+    Idempotent and safe to re-run any number of times: reads every page's
+    CURRENT live Rank value first, and only PATCHes a page whose value is
+    missing or doesn't match what Supabase says — a page that's already
+    correct (including everything created after this feature shipped) is
+    left untouched.
+
+    dry_run=True (the default — and what `python notion_sync.py
+    --backfill-rank` runs without also passing --apply) only LOGS what
+    would change, never writes anything. Deliberately defaults to safe:
+    this walks and patches the person's entire live Notion database, and
+    should be reviewed once via the dry-run log before actually applying."""
+    summary = {"pages_read": 0, "already_correct": 0, "updated": 0, "skipped_no_supabase_id": 0}
+    if not _configured():
+        return summary
+
+    schema = _get_schema()
+    if schema:
+        meta = schema.get(PROP_RANK)
+        if meta is None:
+            log.warning(f"Notion property {PROP_RANK!r} not found in database schema — "
+                         f"add a Select property named exactly {PROP_RANK!r} in Notion first")
+            return summary
+        if meta.get("type") != "select":
+            log.warning(f"Notion property {PROP_RANK!r} is type {meta.get('type')!r}, "
+                         f"expected 'select'")
+            return summary
+
+    log.info(f"── Notion: backfilling {PROP_RANK!r} on existing pages "
+             f"({'DRY RUN — no writes' if dry_run else 'LIVE — will write'}) ──")
+
+    # Pass 1: read every page in the database, collect (page_id,
+    # supabase_id, current Rank value or None) — same full-scan pagination
+    # sync_notion_statuses_to_supabase() already uses.
+    pages: list[tuple[str, int, str | None]] = []
+    cursor = None
+    while True:
+        body = {"page_size": 100}
+        if cursor:
+            body["start_cursor"] = cursor
+        data = _request("POST", f"/databases/{NOTION_DATABASE_ID}/query", body)
+        if data is None:
+            break
+        results = data.get("results", [])
+        summary["pages_read"] += len(results)
+        for page in results:
+            props = page.get("properties", {})
+            supabase_id = (props.get(PROP_SUPABASE_ID) or {}).get("number")
+            if supabase_id is None:
+                summary["skipped_no_supabase_id"] += 1
+                continue
+            current_rank = ((props.get(PROP_RANK) or {}).get("select") or {}).get("name")
+            pages.append((page["id"], supabase_id, current_rank))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    if not pages:
+        log.info("  no pages with a Supabase ID found — nothing to backfill")
+        return summary
+
+    # Pass 2: one bulk Supabase read for every page's correct Rank value,
+    # then PATCH (or just log, in dry-run) whichever pages disagree.
+    from supabase_handler import get_location_priorities_by_ids
+    priorities = get_location_priorities_by_ids([p[1] for p in pages])
+
+    for page_id, supabase_id, current_rank in pages:
+        correct_rank = priorities.get(supabase_id)
+        if not correct_rank:
+            # Row deleted from Supabase since this page was created, or
+            # (shouldn't happen) never got a location_priority at all —
+            # nothing this function can correct it to.
+            continue
+        if correct_rank == current_rank:
+            summary["already_correct"] += 1
+            continue
+        if dry_run:
+            log.info(f"  [DRY RUN] page {page_id} (Supabase id {supabase_id}): "
+                     f"Rank {current_rank!r} -> {correct_rank!r}")
+            summary["updated"] += 1
+            continue
+        result = _request("PATCH", f"/pages/{page_id}", {
+            "properties": {PROP_RANK: {"select": {"name": correct_rank}}}
+        })
+        if result is not None:
+            summary["updated"] += 1
+
+    log.info(f"  {summary['pages_read']} pages read, {summary['already_correct']} already correct, "
+             f"{summary['updated']} {'would be updated (dry run)' if dry_run else 'updated'}, "
+             f"{summary['skipped_no_supabase_id']} skipped (no Supabase ID)")
+    return summary
+
+
+if __name__ == "__main__":
+    import argparse
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    _parser = argparse.ArgumentParser(description="Notion sync — one-off maintenance operations")
+    _parser.add_argument("--backfill-rank", action="store_true",
+                          help="Set/update the Rank select property on every existing Notion page "
+                               "from its Supabase location_priority. Defaults to a dry run (logs "
+                               "only) — pass --apply too to actually write.")
+    _parser.add_argument("--apply", action="store_true",
+                          help="Actually write changes for --backfill-rank, instead of just "
+                               "logging what would change.")
+    _args = _parser.parse_args()
+
+    if _args.backfill_rank:
+        backfill_rank_property(dry_run=not _args.apply)
+    else:
+        _parser.print_help()
