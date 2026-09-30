@@ -205,18 +205,46 @@ called):
 
 **4a — bare country/region/continent.** The location field, once every
 recognized place name is stripped out, has nothing left over: it's
-*entirely* made of one or more allowed names (`_RANK4_PLACE_RE` — country
-names, non-EMEA/non-Africa regions like APAC/LATAM/MENA/AMER, continents
-like Europe/Asia/North America, sub-regions like DACH/Nordics/Gulf).
+*entirely* made of one or more allowed names (`_RANK4_PLACE_RE`).
 **US states and equivalents never qualify** — a bare "California" or
 "Ontario" alone never matches, by design.
+
+2026-09 (explicit user instruction, verbatim country list): the COUNTRY
+portion of `_RANK4_PLACE_RE` is a deliberately narrow, Rank-4-specific
+allowlist (`_RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT`) — **only** US, UK,
+Canada, Australia, Germany, Ireland, Singapore, Luxembourg, Norway,
+Switzerland, Denmark, Netherlands, Iceland, Sweden, and Italy (plus
+"variations of these," e.g. USA/U.S./United States all count as one).
+This is distinct from `_COUNTRY_AUTH_NAMES_RE_FRAGMENT`, the much broader
+country list used everywhere ELSE in this file for *exclusion* purposes
+("does this text name a specific, non-global place") — that one stays
+broad on purpose, since a JD naming e.g. Japan or Brazil as a restriction
+has to be caught regardless of whether Japan/Brazil is a market this
+project ever wants Rank 4 *admitting*. The region/continent portion is
+**unchanged** and stays broad: business regions (APAC/LATAM/MENA/AMER/
+ANZ/DACH/Benelux/Nordics/Gulf/EU/…) and continents (Europe/Asia/North
+America/…) all still qualify — explicit user confirmation ("regions are
+allowed too, like LATAM, AMER, etc.").
+
+**4a (city variant) — "City, Country."** A city named alongside one of
+the 15 eligible countries (`_RANK4_CITY_COMMA_COUNTRY_RE`) — e.g. "Sydney,
+Australia", "London, United Kingdom" — is admitted the same as the bare
+country, since it's at least as specific. Anchored to the whole location
+string (not a bare city name floating in a longer sentence) and excludes
+a US state in the city position ("California, United States" still never
+qualifies — same "states don't count" policy as 4a's bare-country case).
+A city paired with a country NOT on the 15-country list (e.g. "Lagos,
+Nigeria") is still rejected.
 
 **4b — mixed signal.** The location field is something else (a city, most
 often) but the title or JD independently names an allowed region/country —
 a real signal pointing a different direction, not a contradiction. Worked
 example that motivated this tier: a "Customer Success Manager, APAC" role
 with location "Tokyo" — the location is a specific city, but the title's
-own region tag is real, unaddressed-elsewhere evidence.
+own region tag is real, unaddressed-elsewhere evidence. Note: since the
+region/continent portion of `_RANK4_PLACE_RE` is unchanged, a posting
+naming "European Union"/"EU" (still recognized, distinct from the 15-
+country allowlist above) can still admit at 4b through that path.
 
 **The exclusion gate** (any one of these forces `None` — job stays
 dropped): 13 existing hard-override functions, reused unchanged from the

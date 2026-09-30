@@ -5044,7 +5044,24 @@ _WORKPLACE_LABEL_VALUE_RE = re.compile(
 _STANDALONE_NON_REMOTE_PHRASE_RE = re.compile(
     r"\bhybrid\s*working\b|\bworking\s*hybrid\b|\bon[\s\-]?site\s*working\b|"
     r"\bin[\s\-]?office\s*working\b|\bin[\s\-]?person\s*working\b|"
-    r"\bhybrid\s*work\s*(?:model|arrangement|environment|policy|schedule)\b",
+    r"\bhybrid\s*work\s*(?:model|arrangement|environment|policy|schedule)\b"
+    # 2026-09 NEW (explicit user report, real posting: European Dynamics'
+    # Workable "Customer relationship manager" listing, Brussels — the
+    # exact live text reads "The work will be carried out either in the
+    # company's premises or on site at customer premises," a physical-
+    # workplace descriptor with no "Hybrid"/"Onsite" label anywhere and no
+    # "...working" pairing either — confirmed via direct fetch of the real
+    # page, since this job was admitted at Rank 4b despite being fully
+    # onsite). "Premises" is a deliberately narrow anchor word here —
+    # formal, near-unambiguous for "a physical business location" (unlike
+    # bare "office", which risks "back-office support"-style false
+    # positives) — so pairing it with "on-site at" or "carried out
+    # in/at ... premises" is safe without the "...working" requirement
+    # the other alternatives above need.
+    r"|\bon[\s\-]?site\s+at\s+(?:the\s+|our\s+|your\s+|customer\s+|client\s+)?"
+    r"[\w\s]{0,20}?\bpremises\b"
+    r"|\b(?:carried\s+out|performed|conducted)\s+(?:either\s+)?(?:in|at)\s+"
+    r"(?:the\s+|our\s+)?(?:company'?s?\s+)?premises\b",
     re.I,
 )
 
@@ -5221,17 +5238,40 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
     _rank4_has_country_tied_restrictive_question,
 )
 
-# Same country universe already trusted project-wide for "names a
-# specific, non-global place" (_COUNTRY_AUTH_NAMES_RE_FRAGMENT), plus
-# every non-EMEA/non-Africa business region and continent this file
-# already recognizes elsewhere (_REGION_ONLY_WORDS_RE's vocabulary,
-# minus EMEA/Africa — those are already PRIORITY_AFRICA, handled long
-# before this tier is ever reached). US-state/Canadian-province names
-# are deliberately NOT included — per explicit user instruction ("states
-# do not qualify here"), a bare state alone never matches this allowlist
-# and so never reaches 4a/4b.
+# 2026-09 (explicit user instruction, verbatim list): Rank 4's OWN,
+# DELIBERATELY NARROWER country allowlist — distinct from the project-wide
+# _COUNTRY_AUTH_NAMES_RE_FRAGMENT above, which is used everywhere ELSE in
+# this file as "does this text name ANY specific place" for EXCLUSION
+# purposes (a JD naming Japan/Brazil/India as a restriction has to be
+# caught regardless of whether Japan/Brazil/India is a market this
+# project ever wants Rank 4 ADMITTING) and must stay broad — narrowing
+# THAT shared fragment would silently break every OTHER hard-override
+# check that reuses it. Rank 4 admission is the opposite direction: only
+# these specific countries are accepted as a bare Rank 4 location. "US,
+# UK, Canada, Australia, Germany, Ireland, Singapore, Luxembourg, Norway,
+# Switzerland, Denmark, Netherlands, Iceland, Sweden, Italy" — two of
+# these (Luxembourg, Iceland) aren't even in the shared fragment at all.
+# "Europe" and "North America" (continents/regions, not individual
+# countries) and the broader business-region set (LATAM, AMER, APAC,
+# etc.) are handled by _RANK4_PLACE_RE's OWN separate additions below,
+# unchanged — explicit user confirmation that regions stay as-is
+# ("regions are allowed too, like LATAM, AMER, etc.").
+_RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT = (
+    r"u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
+    r"canada|australia|germany|(?:republic\s+of\s+)?ireland|singapore|"
+    r"luxembourg|norway|switzerland|denmark|netherlands|iceland|sweden|italy"
+)
+
+# Every non-EMEA/non-Africa business region and continent this file
+# already recognizes elsewhere (_REGION_ONLY_WORDS_RE's vocabulary, minus
+# EMEA/Africa — those are already PRIORITY_AFRICA, handled long before
+# this tier is ever reached) — UNCHANGED from before the country-allowlist
+# narrowing above. US-state/Canadian-province names are deliberately NOT
+# included — per explicit user instruction ("states do not qualify
+# here"), a bare state alone never matches this allowlist and so never
+# reaches 4a/4b.
 _RANK4_PLACE_RE = re.compile(
-    r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|"
+    r"\b(?:" + _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r"|"
     r"european\s+union|\beu\b|apac|latam|amers?|americas|mena|middle\s+east|"
     r"anz|dach|benelux|nordics?|"
     r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
@@ -5240,6 +5280,29 @@ _RANK4_PLACE_RE = re.compile(
     r"south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|asia|"
     r"oceania|pacific|north\s+america|central\s+america|south\s+america|"
     r"caribbean|cee|cis|japac|apj|europe)\b", re.I,
+)
+
+# 2026-09 NEW (explicit user instruction, verbatim examples: "locations
+# like these too: Sydney, Australia and London, United Kingdom"): a CITY
+# named alongside one of Rank 4's eligible countries is at least as
+# specific/acceptable as the bare country alone — currently rejected
+# outright by the 4a "remainder must be empty" check above, since the
+# city name itself is never in _RANK4_PLACE_RE's vocabulary (cities
+# aren't recognized place names anywhere in this file; only countries/
+# regions/continents are). Deliberately anchored to the WHOLE location
+# string (^...$, not a bare .search) and requires the country to be the
+# LAST thing in the string — this only recognizes the clean "City,
+# Country" shape itself, not a country name merely appearing somewhere in
+# a longer, possibly-restrictive sentence (which the 12+ hard-override
+# checks already ran and cleared before classify_rank4 ever reaches this
+# point anyway). Excludes a US state name in the "city" position (e.g.
+# "California, United States") — same "states do not qualify" policy as
+# _RANK4_PLACE_RE above; a state is not a city.
+_RANK4_CITY_COMMA_COUNTRY_RE = re.compile(
+    r"^\s*(?!(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s*,)"
+    r"[A-Za-z][A-Za-z.'\-]*(?:\s+[A-Za-z][A-Za-z.'\-]*){0,2}\s*,\s*"
+    r"(?:" + _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r")\s*$",
+    re.I,
 )
 
 
@@ -5283,6 +5346,15 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     remainder = re.sub(r"[,\s/|()\-–—]+", " ", remainder).strip()
     if not remainder and _RANK4_PLACE_RE.search(loc):
         return PRIORITY_MIXED_COUNTRY, "bare_country_or_region"
+
+    # 4a (city variant): "City, Country" — e.g. "Sydney, Australia",
+    # "London, United Kingdom" — see _RANK4_CITY_COMMA_COUNTRY_RE's module
+    # comment. A city named alongside an eligible country is at least as
+    # specific/acceptable as the bare country alone, and would otherwise
+    # be rejected by the "remainder must be empty" check just above (the
+    # city name itself is never in _RANK4_PLACE_RE's vocabulary).
+    if _RANK4_CITY_COMMA_COUNTRY_RE.match(loc.strip()):
+        return PRIORITY_MIXED_COUNTRY, "city_in_eligible_country"
 
     # 4b: the location field is something ELSE (a city, e.g.) but the
     # title/description independently name an allowed region/country — a
