@@ -1680,9 +1680,29 @@ def scrape_recruitee(slug: str) -> list[dict]:
         country = offer.get("country", "")
         location = offer.get("location", "") or ", ".join(filter(None, [city, country]))
 
-        # Remote flag
+        # 2026-09 BUG FIX (explicit user report, real posting: Peripass'
+        # "Customer Success Manager Benelux" — the live page shows
+        # "Hybrid", but this scraper only ever read the `remote` flag, so
+        # workplace_type was always "" for a non-remote posting). Confirmed
+        # live via Recruitee's own API (peripass.recruitee.com/api/offers/
+        # customer-success-manager-benelux-4): the raw offer object has
+        # THREE separate booleans — remote/hybrid/on_site — not just
+        # `remote`; this job's real values were remote=False, hybrid=True,
+        # on_site=False. Reading only `remote` meant a Hybrid or fully
+        # on-site Recruitee posting always looked workplace-type-blank,
+        # letting it sail through classifier.py's has_non_remote_
+        # workplace_type check with nothing to catch.
         remote = offer.get("remote", False)
-        workplace = "Remote" if remote else ""
+        hybrid = offer.get("hybrid", False)
+        on_site = offer.get("on_site", False)
+        if hybrid:
+            workplace = "Hybrid"
+        elif on_site:
+            workplace = "On-site"
+        elif remote:
+            workplace = "Remote"
+        else:
+            workplace = ""
 
         # Description — try translations first, then direct field
         translations = offer.get("translations") or {}

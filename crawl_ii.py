@@ -1458,6 +1458,15 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
             # Gemini, OpenAI, or NVIDIA made the call. Matches
             # crawl_i.py's filter_locations, which already did this right.
             clearance = provider_name or "ai"
+            # 2026-09 (explicit user policy — see crawl_i.py's
+            # filter_locations for the full "application questions are a
+            # MUST for Rank 3b/4, not Rank 3a" writeup): Rank 3b now
+            # requires real "Application Question:" text in
+            # description_snippet, mirroring Rank 4's existing requirement
+            # — a bare "Remote" field alone proves nothing, and the only
+            # place a hidden Hybrid/On-site/country restriction usually
+            # surfaces is the application questions.
+            has_app_questions = "Application Question:" in (job.get("description_snippet") or "")
             # 2026-09 Phase 2 (explicit user request — see crawl_i.py's
             # filter_locations for the full "regex pass: rank 1 or 2, LLM
             # pass: Rank 3b" policy writeup): the AI is no longer
@@ -1470,12 +1479,13 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_UNSURE_BLANK
                 matched.append(job)
                 confidences.append("uncertain")
-            elif label in ("match_global", "match_africa") and unsure_reason == "bare_remote":
+            elif (label in ("match_global", "match_africa") and unsure_reason == "bare_remote"
+                    and has_app_questions):
                 job["clearance"] = clearance
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 confidences.append("uncertain")
-            elif label == "uncertain" and unsure_reason == "bare_remote":
+            elif label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions:
                 # 2026-09 policy, refined per explicit user follow-up —
                 # see crawl_i.py's filter_locations for the full
                 # reasoning. Short version: the location field explicitly
@@ -1518,8 +1528,12 @@ def _filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # "blank" → also drop (see above), REGARDLESS of
                 # provider_name — a blank location field only survives
                 # via a real match_global/match_africa AI verdict, never
-                # on genuine (or missing) AI uncertainty alone. Rank 4
-                # gets one last look before the drop is final.
+                # on genuine (or missing) AI uncertainty alone. A
+                # bare_remote job with no application questions at all
+                # also lands here now (see has_app_questions above) — Rank
+                # 4 requires the same "Application Question:" marker
+                # anyway, so this is the correct final drop for it either
+                # way. Rank 4 gets one last look before the drop is final.
                 _try_rank4(job)
 
     return matched, confidences

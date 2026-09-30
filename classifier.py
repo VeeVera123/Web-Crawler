@@ -1913,6 +1913,20 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_hard_country_specific_auth_signal(job):
         return "no_match", None, None
 
+    # ── 0.77. HARD OVERRIDE (2026-09, explicit user report, real posting:
+    # Twilio's Greenhouse "Senior Manager, Customer Success" — location
+    # named Australia, screening questions asked "the country in which
+    # this role is located"/"where this role is listed" without naming it
+    # directly). See has_referential_auth_question_with_named_place_
+    # signal's docstring — distinct from has_hard_country_specific_auth_
+    # signal just above, which requires the country to be named IN THE
+    # QUESTION TEXT ITSELF; this catches a question that instead refers to
+    # wherever the job's own location already says, which is only
+    # disqualifying when this job actually names a real, specific,
+    # non-broad place. ──
+    if has_referential_auth_question_with_named_place_signal(job):
+        return "no_match", None, None
+
     # ── 0.8. HARD OVERRIDE (2026-09, real posting: RethinkCare's "Senior
     # Client Success Manager", JazzHR/rethink.applytojob.com): location
     # field said bare "Remote" — a real, honest signal, not an extraction
@@ -3597,9 +3611,50 @@ _COUNTRY_AUTH_RE = re.compile(
     r"|\bauthoriz(?:ation|ations)\s+to\s+work\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    # 2026-09 NEW (explicit user report, real posting: Ofload's Workable
+    # screening question "Do you have full unrestricted work rights for
+    # Australia?"): every alternative above requires singular "right"
+    # (never plural "rights") and "in"/"within" (never "for") — this real,
+    # common phrasing uses BOTH the plural and "for", and matched nothing.
+    r"|\bwork\s+rights?\s+(?:in|for)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian|indian)\s+work\s+(?:visa|permit)\b"
     r"|\b(?:u\.?s\.?a?\.?|united\s+states|u\.?k\.?|united\s+kingdom|canadian|australian|irish|german|indian)\s+"
     r"citizen(?:ship)?\b",
+    re.I,
+)
+
+# 2026-09 NEW (explicit user report, real posting: Twilio's Greenhouse
+# listing, "Senior Manager, Customer Success" — location field named a
+# specific country, Australia, but the screening questions read "What is
+# the source of your right to work where this role is listed?" and "Are
+# you legally authorized to work in the country in which this role is
+# located?" — neither names a country IN THE QUESTION ITSELF, so
+# _COUNTRY_AUTH_RE above never matches either one). These are a distinct
+# phrasing family: instead of naming a country directly, they REFER to
+# wherever the role's own location/listing already says — which is every
+# bit as real a restriction as a directly-named country WHEN this job's
+# location is already known to be one specific, narrow place (that's the
+# whole point of a question phrased this way: "you already told us where
+# this role is, so tell us if you can legally work there"). Explicit user
+# instruction: "regex/classifier should ask if it already named a
+# location... if a location is named and it asks these kinds of
+# questions... then it should not be let in." See
+# _rank4_has_country_tied_restrictive_question (Rank 4 always has a known
+# place by definition) and has_referential_auth_question_with_named_place_
+# signal (the universal version, for Rank 1/2/3a/3b, which separately
+# checks whether a real place is already named) for the two call sites.
+_REFERENTIAL_AUTH_QUESTION_RE = re.compile(
+    r"\b(?:right|eligib\w*|authoriz(?:ed|ation)?|permitted?)\s+to\s+work\s+"
+    r"(?:where|wherever)\s+(?:this\s+)?(?:role|position|job)\s+(?:is\s+)?"
+    r"(?:listed|located|based)\b"
+    r"|\bauthoriz\w*\s+to\s+work\s+in\s+the\s+countr(?:y|ies)\s+(?:in\s+which|where)\s+"
+    r"(?:this\s+)?(?:role|position|job)\s+(?:is\s+)?(?:located|based|listed)\b"
+    r"|\bsource\s+of\s+your\s+right\s+to\s+work\s+where\s+(?:this\s+)?(?:role|position|job)\s+"
+    r"(?:is\s+)?(?:listed|located|based)\b"
+    r"|\bwork\s+(?:rights?|authoriz\w*)\s+for\s+(?:the\s+|this\s+)?(?:role|position|job)'?s?\s+"
+    r"(?:location|country)\b"
+    r"|\beligib(?:le|ility)\s+to\s+work\s+(?:in|at)\s+(?:the\s+)?(?:location|country)\s+"
+    r"(?:of|for)\s+(?:this\s+)?(?:role|position|job)\b",
     re.I,
 )
 
@@ -4422,6 +4477,53 @@ def has_hard_country_specific_auth_signal(job: dict) -> bool:
     return bool(_COUNTRY_AUTH_RE.search(text))
 
 
+def has_referential_auth_question_with_named_place_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter — the universal (Rank 1/2/3a/3b)
+    counterpart to _rank4_has_country_tied_restrictive_question's Rank-4-
+    only version. See _REFERENTIAL_AUTH_QUESTION_RE's module comment for
+    the real Twilio posting this closes.
+
+    Unlike Rank 4 (which by definition is only ever evaluating a job whose
+    location already resolved to one specific bare country/region), a job
+    reaching THIS check could have any location value at all — so this
+    function does its own "is a real, specific place already named"
+    check on the RAW location field before treating a referential question
+    as disqualifying. Explicit user instruction: "regex/classifier should
+    ask if it already named a location... if a location is named and it
+    asks these kinds of questions... then it should not be let in."
+
+    A referential question is NOT disqualifying when:
+    - No real place is named at all (blank, placeholder, or bare
+      "Remote") — "wherever this role is located" is uninformative when
+      the location field itself never says, same as the existing
+      country-agnostic-question policy for a job with no location signal.
+    - The named place is ALREADY a broad, accepted scope (an explicit
+      Global/Worldwide claim, EMEA, Africa, or 2+ business regions
+      together) — the referential question then ties to that broad scope,
+      not a single narrow country, which is exactly as acceptable as the
+      existing country-agnostic-question policy already treats it.
+    """
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not _REFERENTIAL_AUTH_QUESTION_RE.search(text):
+        return False
+
+    raw_loc = job.get("location") or ""
+    raw_country = job.get("country") or ""
+    if isinstance(raw_loc, list):
+        raw_loc = ", ".join(str(x) for x in raw_loc)
+    if isinstance(raw_country, list):
+        raw_country = ", ".join(str(x) for x in raw_country)
+    loc = (raw_loc + " " + raw_country).strip()
+    if _is_bare_location(loc):
+        return False
+    if STANDALONE_GLOBAL_RE.search(loc) or re.search(r"\bemea\b", loc, re.I) or re.search(r"\bafrica\b", loc, re.I):
+        return False
+    if _has_multi_region_breadth(loc):
+        return False
+    return True
+
+
 # 2026-09 NEW (explicit user instruction, real posting: Together AI's
 # Greenhouse listing, job 5070981007 — "Are you willing to work four days
 # per week in our San Francisco office?"). Distinct from
@@ -4441,8 +4543,18 @@ _OFFICE_ATTENDANCE_RE = re.compile(
     r"\b(?:\d+|one|two|three|four|five|six|seven)\s*(?:-|\s)?days?\s*"
     r"(?:a|per)\s*week\s*(?:in|at|from)\s*(?:our|the|this|your)?\s*"
     r"[\w\s]{0,30}?\boffice\b"
-    r"|\bwilling\s+to\s+(?:work|come|be)\s+(?:in|to|at)\s+(?:our|the|this|your)?\s*"
-    r"[\w\s]{0,30}?\boffice\b"
+    # 2026-09 BUG FIX (explicit user report, real posting: audyence's
+    # Rippling listing — "Are you willing and able to work at our Austin
+    # office 4 days a week?"): the interposed "and able"/"and available"
+    # between "willing" and "to" broke this alternative outright (it
+    # required "willing" directly followed by "to"); confirmed missed
+    # live via WebFetch. Also note the frequency ("4 days a week") comes
+    # AFTER "office" in this real phrasing, not before it the way the
+    # first alternative above expects — this alternative doesn't require
+    # a frequency at all, so it still matches regardless of where one
+    # sits.
+    r"|\bwilling\s+(?:and\s+(?:able|available)\s+)?to\s+(?:work|come|be)\s+"
+    r"(?:in|to|at)\s+(?:our|the|this|your)?\s*[\w\s]{0,30}?\boffice\b"
     r"|\brequired?\s+to\s+(?:be\s+)?(?:in|at)\s+(?:the|our|a)\s+office\b"
     r"|\bin[\s\-]office\s+\d+\s*days?\b",
     re.I,
@@ -5068,6 +5180,16 @@ def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     text = desc + " " + (job.get("title") or "")
     if not text.strip():
         return False
+    # 2026-09 NEW (explicit user report, real posting: Twilio's Greenhouse
+    # "Senior Manager, Customer Success" — see _REFERENTIAL_AUTH_QUESTION_RE's
+    # module comment): a question that REFERS to "wherever this role is
+    # located/listed" instead of naming a country directly. No extra
+    # "is a place already named" gate needed here — Rank 4 is only ever
+    # evaluating a job whose location already resolved to one specific
+    # bare country/region (that's this whole tier's premise), so a
+    # referential question is automatically tied to that known place.
+    if _REFERENTIAL_AUTH_QUESTION_RE.search(text):
+        return True
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
         if not sentence.strip():
             continue

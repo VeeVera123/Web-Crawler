@@ -589,6 +589,28 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
     if unsure_jobs:
         ai_results = ai_classify_locations(unsure_jobs)
         for job, (label, provider_name), unsure_reason in zip(unsure_jobs, ai_results, unsure_reasons):
+            # 2026-09 (explicit user policy, verbatim: "a rank 4 addition
+            # MUST have the applications questions field. That's its whole
+            # deal. Same with rank 3b, application questions are a MUST
+            # ... For rank 3a ... no application questions are seen [and
+            # that's fine/expected]"): Rank 3b (bare-"Remote" location) now
+            # requires real "Application Question:" text in
+            # description_snippet, exactly like Rank 4 already required —
+            # the real postings that motivated this (Kraft Heinz/Eightfold:
+            # location "Remote", description said "Hybrid Working" in body
+            # text; Ofload/Workable: location unclear, a screening question
+            # revealed a country-tied work-rights requirement) both show
+            # the SAME failure mode: a bare "Remote" field alone proves
+            # nothing, and the only place a hidden Hybrid/On-site/country
+            # restriction usually surfaces is the application questions —
+            # so a bare-Remote job with NO application questions at all
+            # gives this pipeline no way to rule that out and no longer
+            # gets the benefit of the doubt. Deliberately NOT applied to
+            # the "blank" (3a) branch just below — that tier explicitly
+            # exists to give Crawl II/III entries (which routinely have no
+            # application questions at all) a chance; see that branch's
+            # own comment.
+            has_app_questions = "Application Question:" in (job.get("description_snippet") or "")
             # provider_name is whichever of LOCATION_PROVIDERS actually
             # classified this job — returned directly by ai_classify_locations
             # (2026-09: was re-derived here via a separate i%len(LOCATION_PROVIDERS)
@@ -608,17 +630,19 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 job["location_priority"] = PRIORITY_UNSURE_BLANK
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            elif label in ("match_global", "match_africa") and unsure_reason == "bare_remote":
+            elif (label in ("match_global", "match_africa") and unsure_reason == "bare_remote"
+                    and has_app_questions):
                 # Same demotion, for a bare-"Remote" location the AI backed
                 # with real evidence — Rank 3b's own worked example is
                 # literally "bare remote in the location field", so this
                 # lands there too, same tier as a genuinely AI-uncertain
-                # bare-remote job just below.
+                # bare-remote job just below. Requires has_app_questions —
+                # see this loop's own comment above.
                 job["clearance"] = provider_name or "ai"
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            elif label == "uncertain" and unsure_reason == "bare_remote":
+            elif label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions:
                 # 2026-09 policy change (refined per explicit user
                 # follow-up): a GENUINE AI-reviewed uncertainty — the AI
                 # actually read the title/description and still couldn't
@@ -714,7 +738,11 @@ def filter_locations(jobs: list[dict]) -> tuple[list[dict], list[str]]:
                 # be told apart from the location simply never having been
                 # captured in the first place (see the bare_remote branch
                 # above for why that reasoning does NOT extend to a
-                # genuine "Remote" signal from the company). Rank 4 gets
+                # genuine "Remote" signal from the company). A bare_remote
+                # job with no application questions at all also lands here
+                # now (see has_app_questions above) — Rank 4 requires the
+                # same "Application Question:" marker anyway, so this is
+                # the correct final drop for it either way. Rank 4 gets
                 # one last look before the drop is final.
                 _try_rank4(job)
 

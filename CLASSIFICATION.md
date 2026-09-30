@@ -124,9 +124,50 @@ and the AI stage ran. Split by *why* the job was unsure, using
   with real evidence, was genuinely uncertain, or never got reviewed at all
   (every LOCATION_PROVIDERS entry exhausted) — a bare-Remote job never
   needs AI confirmation to survive, since the company itself said
-  something real.
+  something real. **2026-09 policy addition (explicit user instruction:
+  "application questions are a MUST" for 3b): also requires a real
+  `"Application Question:"` marker in `description_snippet`, same
+  requirement Rank 4 already had.** A bare "Remote" field alone proves
+  nothing — the real postings that motivated this (a job whose location
+  said "Remote" but the JD body separately said "Hybrid Working"; a job
+  whose ONLY restriction showed up in a screening question) both show
+  that the application questions are usually the only place a hidden
+  Hybrid/On-site/country restriction actually surfaces. A bare-Remote job
+  with zero application questions gives this pipeline no way to rule that
+  out, so it's dropped instead of kept. This does **not** apply to 3a
+  (blank location) — that tier explicitly exists to give Crawl II/III
+  entries, which routinely have no application questions at all, a
+  chance; see 3a above.
 
 Both sub-tiers are open to all roles.
+
+### A referential ("wherever this role is") work-authorization question
+
+Distinct from the direct kind ("authorized to work in the United
+States?", which names a country in the question itself — see
+`_COUNTRY_AUTH_RE`, a universal hard override for every rank). Some
+postings instead ask a question that REFERS to wherever the job's own
+location already says, without naming it directly — e.g. "Are you legally
+authorized to work in the country in which this role is located?" or
+"What is the source of your right to work where this role is listed?"
+(both real, from a Greenhouse posting whose location field named
+Australia). `_COUNTRY_AUTH_RE` never matches these since no country
+appears in the question text — but when this job's location already names
+one specific, narrow place, the question is exactly as real a restriction
+as if it had named that place directly.
+
+Two call sites, same underlying `_REFERENTIAL_AUTH_QUESTION_RE`:
+- `_rank4_has_country_tied_restrictive_question` (Rank 4 only) — no extra
+  "is a place named" gate needed, since Rank 4 by definition is only ever
+  evaluating a job whose location already resolved to one bare
+  country/region.
+- `has_referential_auth_question_with_named_place_signal` (universal,
+  Rank 1/2/3a/3b) — does its own check first: not disqualifying when no
+  real place is named at all (blank/placeholder/bare "Remote" — the
+  question is uninformative with nothing to refer to), or when the named
+  place is already a broad, accepted scope (Global/Worldwide, EMEA,
+  Africa, or 2+ business regions together) — the question then ties to
+  that broad scope, not a single country.
 
 ## Rank 4 — Mixed signals (CS/AM only, Crawl I & II only)
 
@@ -178,10 +219,11 @@ with location "Tokyo" — the location is a specific city, but the title's
 own region tag is real, unaddressed-elsewhere evidence.
 
 **The exclusion gate** (any one of these forces `None` — job stays
-dropped): 12 existing hard-override functions, reused unchanged from the
+dropped): 13 existing hard-override functions, reused unchanged from the
 main pipeline (`has_hard_no_sponsorship_signal`,
 `has_non_remote_workplace_type`, `has_non_remote_title_signal`,
-`has_hard_country_specific_auth_signal`, `has_state_list_restriction_signal`,
+`has_non_remote_labeled_text_signal`, `has_hard_country_specific_auth_signal`,
+`has_state_list_restriction_signal`,
 `has_hard_country_based_restriction_signal`,
 `has_hard_metadata_location_signal`, `has_hard_location_symbol_signal`,
 `has_office_attendance_signal`, `has_entity_or_exclusion_restriction_signal`,
@@ -190,10 +232,13 @@ main pipeline (`has_hard_no_sponsorship_signal`,
 addition: `_rank4_has_country_tied_restrictive_question` — catches a
 sponsorship/work-permit/residency **question or requirement** tied to a
 named country (e.g. "Will you require visa sponsorship to work in the
-United States?"), which none of the 12 reused checks caught on their own
+United States?"), which none of the 13 reused checks caught on their own
 (they only caught "authorized to work in `<country>`" phrasing, not
-sponsorship/permit/residency phrasing). It has its own benefit-language
-guard so a company *offering* relocation/residency help isn't misread as
+sponsorship/permit/residency phrasing), **plus** (2026-09) a *referential*
+work-authorization question that refers to "wherever this role is
+located/listed" instead of naming a country directly — see "A referential
+work-authorization question" above. It has its own benefit-language guard
+so a company *offering* relocation/residency help isn't misread as
 requiring it.
 
 A country-agnostic version of the same question (no country named) is
