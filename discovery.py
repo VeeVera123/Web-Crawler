@@ -1162,6 +1162,27 @@ def _looks_like_real_slug(candidate: str) -> bool:
     # insertion time, not in the (deliberately conservative) verifier.
     if "/" in candidate:
         return False
+    # 2026-09 FIX (real archive_i rows: ats="workday", slugs like
+    # "wd5|wd1|hypertherm-careers" and "wd503|wd1|hypertherm-careers" —
+    # 2,725 confirmed contaminated rows, all sharing this same shape,
+    # found alongside the "/" bug above). _assemble_workday_slug already
+    # guards against a bare wd-instance placeholder token (e.g. "wd5")
+    # standing in for the real company name — see _WD_INSTANCE_
+    # PLACEHOLDER_RE's own module comment for the real openroles rows
+    # that fix closed — but that guard only runs for slugs built THROUGH
+    # _assemble_workday_slug (datascry/openroles' own json_dir path).
+    # This exact shape reached archive_i anyway, meaning some other
+    # source (most likely Feashliaa's own raw workday_companies.json
+    # list, passed through fetch_feashliaa_slugs with no reshaping at
+    # all — the same "upstream data isn't immune just because it skips
+    # our own URL-parsing code" gap the "/" fix above closed) supplied an
+    # already-3-part-pipe-joined string with a wd-instance token doing
+    # the company's job. Applied here instead so every source gets the
+    # same protection _assemble_workday_slug already gives its own path,
+    # not just openroles'.
+    parts = candidate.split("|")
+    if len(parts) == 3 and _WD_INSTANCE_PLACEHOLDER_RE.match(parts[0]):
+        return False
     if candidate.lower() in _NON_SLUG_PATH_SEGMENTS:
         return False
     if _ASSET_FILENAME_RE.search(candidate):
