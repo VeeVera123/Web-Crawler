@@ -189,6 +189,92 @@ ALL-CAPS-style abbreviation shape immediately followed by a lowercase
 continuation (a real sentence essentially never does this) — used by all
 six call sites now, so the fix applies everywhere at once.
 
+### Adversarial fuzz-test round (2026-09, explicit user-commissioned test)
+
+An external LLM (OpenAI) ran ~4,820 generated restrictive phrasings directly
+against `_keyword_classify_location_detail` with a bare-`"Remote"` location,
+claiming 41.3% leaked to `"unsure"` instead of `no_match`. Per the user's own
+instruction ("verify and ignore where it is wrong, you have full context here
+so you know better what to and what not to let in"), every specific claimed
+leak was independently re-tested against the live code before any fix was
+written — the report's numbers were not trusted at face value, but its core
+finding held up: real, confirmed gaps across most of the categories it named.
+
+**The single largest contributor**, closing roughly a third of the leaked
+phrasings on its own: `_RANK4_COUNTRY_TIED_RESTRICTION_RE` (sponsorship/
+work-permit/residency tied to a named country — "require visa sponsorship to
+work in the United States," "need a work permit for Germany," "maintain
+residence in the UK") already existed and worked correctly, but was wired
+into **Rank 4's own exclusion check only**, never into the universal
+`_keyword_classify_location_detail` hard-override chain every other rank
+runs. Extracted into a new universal function,
+`has_country_tied_sponsorship_permit_residency_signal()`, added to the main
+override chain (right after `has_hard_country_specific_auth_signal`) so it
+now gates Rank 1/2/3a/3b too, not just Rank 4.
+`_rank4_has_country_tied_restrictive_question` is now a thin wrapper: it
+still checks the Rank-4-only referential-question case first, then delegates
+to the new universal function.
+
+**Remaining gaps, closed with targeted extensions to the existing, already-
+established regexes** (each verified as a real gap before writing the fix,
+not applied on the report's say-so alone):
+- Residence: "live AND work in X" (interposed verb broke the plain clause),
+  bare noun-phrase "resident of/in X", "work remotely (only) from X",
+  passive "worked from X", noun-phrase "citizen of X".
+- Employment infrastructure: "cannot employ ... where we LACK a legal
+  entity" (vs. the existing "don't have"), and — in both this new clause and
+  the pre-existing "can only employ ... where we have" clause — accepting
+  "local entity" as well as "legal entity". Also a vague "must be in a
+  supported/approved payroll country" family with no country actually named.
+- Country/region exclusivity: `_COUNTRY_AUTH_NAMES_RE_FRAGMENT` was missing
+  the bare abbreviation `"amer"` (only `"americas"` was present). A bare
+  `"<place> only."` end-anchored pattern was added to
+  `_HIRING_LIMITED_TO_PLACE_RE`, using the combined countries+US-states
+  fragment so it also catches `"California only."`.
+- Exclusion-outside: reversed sentence order, "outside X ... are not
+  eligible" (the existing pattern only covered the forward order).
+- Timezone: declarative (non-verb) phrasing — `"<region> business hours
+  only"`, `"<timezone> required"`.
+- Office attendance: "able to/must work from an/the office".
+- Workplace: `"on-site/in-office/in-person role/position/job"` (either word
+  order) added to `_STANDALONE_NON_REMOTE_PHRASE_RE`.
+
+**Deliberately NOT changed**: the report flagged `"Candidates must overlap
+9am-5pm Pacific Time"` as a leak. Left as-is — "overlap" scheduling language
+was already an established, evidence-based "safe" carve-out documented in
+`_TIMEZONE_LOCATION_RE`'s own comments (overlap hours describe a scheduling
+courtesy, not a hard location restriction), and that prior real-evidence
+decision was trusted over an unverified synthetic fuzz example, per the
+user's explicit instruction to ignore the report where it's wrong.
+
+**A genuine, separate bug the report also surfaced**: `_DESC_LOCATION_LABEL_RE`
+(the regex that recovers a labeled location value like `"Location: Bowling
+Green, OH"` from free JD text) required only optional whitespace around a
+hyphen separator — so the compound word `"Location-agnostic"` (itself a
+`GLOBAL_KEYWORDS` member) was misparsed as label `"Location"` + value
+`"agnostic role"`, silently overwriting the bare location field with
+nonsense text and permanently dropping an explicitly global-hiring job
+(`no_match`, before the LLM ever saw it) instead of matching it. Fixed by
+requiring a hyphen separator to have whitespace on both sides to count as a
+label (a colon may still abut the value directly, since `"Location:X"` is
+unambiguous) — confirmed the original motivating real case
+("Location: Bowling Green, OH") still parses correctly, and the job now
+correctly falls through to the LLM as `"unsure"` instead of being dropped.
+
+**Investigated and left alone**: the report also claimed the post-AI
+`_apply_location_ai_authority_gate()` only rechecks 2 of the ~17 hard-
+override functions (`has_role_specific_place_restriction_signal`,
+`has_extra_restrictive_geography_signal`), rather than the full set. This is
+accurate as a description of the code, but every job that reaches this gate
+already got `"unsure"` from `_keyword_classify_location_detail` first — which
+means all ~17 checks, including the new universal ones above, already ran
+clean against that exact job before the LLM was ever asked. Widening the
+gate to recheck more functions would be redundant under every current call
+path. Deliberately left as a pure LLM-authority veto scoped to the two
+checks it already has: once a job reaches the LLM, the LLM's verdict stands
+unless one of those two catches it — that's the explicit, single-source-of-
+truth review this pass confirmed, not a gap to close.
+
 ## Rank 4 — Mixed signals (CS/AM only, Crawl I & II only)
 
 The newest tier. Admits a **bare country/region/continent** location (or a

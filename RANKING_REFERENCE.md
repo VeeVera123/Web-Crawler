@@ -5,7 +5,7 @@ that motivated it), see `CLASSIFICATION.md`.
 
 ## 1. Common conditions — apply to EVERY job, before any rank is even considered
 
-### 1a. The 16 universal hard-exclusion checks (checked first, in this order)
+### 1a. The 17 universal hard-exclusion checks (checked first, in this order)
 
 Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 
@@ -14,19 +14,27 @@ Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 | 1 | `has_hard_no_sponsorship_signal` | "we cannot sponsor visas," any phrasing |
 | 2 | `has_role_specific_place_restriction_signal` | A concrete place named for this specific role/candidate |
 | 3 | `has_non_remote_workplace_type` | Structured `workplace_type` field = Hybrid/On-site/In-office/In-person |
-| 4 | `has_non_remote_labeled_text_signal` | Same, as free text: `"Remote status: On-site"`, standalone phrases (`"Hybrid Working"`, `"hybrid capacity"`, `"carried out...in the company's premises"`) |
+| 4 | `has_non_remote_labeled_text_signal` | Same, as free text: `"Remote status: On-site"`, standalone phrases (`"Hybrid Working"`, `"hybrid capacity"`, `"carried out...in the company's premises"`, `"on-site/in-office/in-person role"`) |
 | 5 | `has_non_remote_title_signal` | Title says `"(Hybrid)"`, `"- Onsite"` |
 | 6 | `has_hard_country_specific_auth_signal` | "Authorized to work in `<country>`," names the country directly |
-| 7 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does |
-| 8 | `has_state_list_restriction_signal` | Enumerated US state list |
-| 9 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states" |
-| 10 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families |
-| 11 | `has_hard_metadata_location_signal` | ATS metadata names a place the location field didn't |
-| 12 | `has_hard_location_symbol_signal` | Map-pin icon next to a specific place |
-| 13 | `has_title_region_restriction_signal` | Title names a single narrow region ("- LATAM") |
-| 14 | `has_office_attendance_signal` | "N days/week in office" |
-| 15 | `has_entity_or_exclusion_restriction_signal` | "No legal entity in your country," "not open to candidates outside the US" |
-| 16 | `has_timezone_relocation_or_hyphenated_restriction_signal` | "Must be in a US timezone," "`<place>`-based candidates only" |
+| 7 | `has_country_tied_sponsorship_permit_residency_signal` | Sponsorship/work-permit/residency phrasing tied to a named country — "require visa sponsorship to work in `<country>`," "need a work permit for `<country>`," "maintain residence in `<country>`" (distinct from #6: not an "authorized to work" statement) |
+| 8 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does |
+| 9 | `has_state_list_restriction_signal` | Enumerated US state list |
+| 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`" |
+| 11 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families |
+| 12 | `has_hard_metadata_location_signal` | ATS metadata names a place the location field didn't |
+| 13 | `has_hard_location_symbol_signal` | Map-pin icon next to a specific place |
+| 14 | `has_title_region_restriction_signal` | Title names a single narrow region ("- LATAM") |
+| 15 | `has_office_attendance_signal` | "N days/week in office," "able to/must work from the office" |
+| 16 | `has_entity_or_exclusion_restriction_signal` | "No legal/local entity in your country," "not open to candidates outside the US," "must be in a supported payroll country" |
+| 17 | `has_timezone_relocation_or_hyphenated_restriction_signal` | "Must be in a US timezone," "`<place>`-based candidates only," "`<place>` only.," "`<timezone>` business hours only" |
+
+Check 7 was added 2026-09 during an adversarial fuzz-test verification pass —
+the underlying logic already existed for Rank 4 only
+(`_rank4_has_country_tied_restrictive_question`) but was never wired into
+this universal chain. See `CLASSIFICATION.md`'s "Adversarial fuzz-test
+round" section for the full list of gaps closed in that pass, and which
+claims from the test were investigated and deliberately left unfixed.
 
 ### 1b. How the location value is determined, before any check runs
 
@@ -46,7 +54,7 @@ Enrichment order (each step only fires if the previous left the field bare — b
 
 | Step | What happens |
 |---|---|
-| 1 | Run the 16 universal checks (§1a). Any hit → reject, skip to step 5. |
+| 1 | Run the 17 universal checks (§1a). Any hit → reject, skip to step 5. |
 | 2 | Location field alone matches the accepted broad-signal family (§1c) → Rank `1` or `2`, done — regex only, no LLM. |
 | 3 | Location field is bare (blank/`"Remote"` only) → loose scan of title+description for the SAME broad-signal family → Rank `1`/`2` directly via regex. **A location field that already names a specific place does NOT get this second chance** — unrelated boilerplate elsewhere can't rescue it. |
 | 4 | Still bare → send to LLM. See §3 for what happens next. |
@@ -79,7 +87,7 @@ the LLM's verdict is what actually decides the outcome.**
 | 3 | `ENABLE_RANK4_COUNTRY_SPECIFIC` config flag is on |
 | 4 | `"Application Question:"` literally present in `description_snippet` |
 
-### 4b. Additional exclusion check, on top of the 16 universal ones
+### 4b. Additional exclusion check, on top of the 17 universal ones
 
 | Check | Catches |
 |---|---|
@@ -96,7 +104,7 @@ the LLM's verdict is what actually decides the outcome.**
 
 ### 4d. `4a` vs `4b` — the actual rule
 
-**Everything in this section only ever runs after the 16 universal checks
+**Everything in this section only ever runs after the 17 universal checks
 (§1a) and 4b's own extra check (§4b) have already passed — so "4b" never
 means "we found a restriction and let it slide," it means no restriction
 was found at all, just two signals that don't fully agree.**
