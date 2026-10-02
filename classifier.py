@@ -3664,8 +3664,21 @@ _COUNTRY_AUTH_RE = re.compile(
     # common phrasing uses BOTH the plural and "for", and matched nothing.
     r"|\bwork\s+rights?\s+(?:in|for)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian|indian)\s+work\s+(?:visa|permit)\b"
+    # 2026-09 BUG FIX (explicit user report, real posting: Weploy's
+    # Greenhouse application question "Please specify whether you are an
+    # AU or NZ citizen or Permanent Resident:"). Two gaps the existing
+    # demonym list below never covered: (1) bare 2-letter country CODES
+    # ("AU", "NZ") rather than full demonym words ("Australian"), and no
+    # "New Zealand(er)" demonym at all; (2) "Permanent Resident" as an
+    # equally-restrictive noun alongside "citizen" -- a residency-status
+    # question, not just a citizenship one. The regex is non-anchored, so
+    # "AU or NZ citizen" already matches once "nz" is in the list (the
+    # word "citizen" sits directly after "NZ"); still adding "au" for the
+    # same phrasing in the other order ("NZ or AU citizen").
+    r"|\b(?:au|nz|new\s+zealand(?:er)?)\s+(?:citizen(?:ship)?|permanent\s+resident)\b"
     r"|\b(?:u\.?s\.?a?\.?|united\s+states|u\.?k\.?|united\s+kingdom|canadian|australian|irish|german|indian)\s+"
-    r"citizen(?:ship)?\b",
+    r"(?:citizen(?:ship)?|permanent\s+resident)\b"
+    r"|\bpermanent\s+resident\s+of\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
 )
 
