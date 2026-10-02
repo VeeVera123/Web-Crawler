@@ -318,31 +318,85 @@ called):
    are auth-walled) despite looking like an obvious candidate.
 
    **2026-10 re-check (explicit user request — "expand the list... maybe
-   Ashby... top 5"):** re-verified live against real companies in
-   `archive_i` (see `ats_probe.py` / `.github/workflows/ats_probe.yml`,
-   a standalone diagnostic, not part of the crawl pipeline) rather than
-   trusting the 2026-09 note. Sampled Ashby, Workday, iCIMS, BambooHR,
-   SmartRecruiters, and ADP — ~72 companies total. Result: **0% of
-   checked jobs returned any application-question text, on every single
-   platform**, even though Ashby/Workday/BambooHR/ADP all reliably
-   returned real jobs with real locations. Confirmed directly for Ashby:
-   its `posting-api/posting/{slug}/{id}` endpoint (the only one that
-   would carry form questions) returns a hard `401 Unauthorized` for
-   every company tested (ramp, vesta, cambly, notion, linear), and the
-   public `/application` page is a pure client-rendered SPA with no form
-   schema anywhere in the static HTML or any embedded JSON — there is no
-   unauthenticated way to get Ashby's real screening questions short of
-   executing its client-side JS with a real session, which this project
-   doesn't do anywhere. iCIMS returned 0 jobs for all 12 sampled
-   companies (its scraper itself likely needs attention, separate from
-   this question); SmartRecruiters' `archive_i` rows were garbage slugs
-   (`--x3e`, `.well-known`, `%22https:`), a discovery-source data-quality
-   issue, not a finding about the platform. **Conclusion: `RANK4_ELIGIBLE_
-   ATS` stays unchanged.** None of the 6 candidates clears the bar —
-   adding any of them would make Rank 4 admit jobs on "no restrictive
-   question found" when the real reason is "no questions were ever
-   fetched," reopening the exact false-negative risk this gate exists to
-   prevent.
+   Ashby... top 5", then "increase company count"):** re-verified live
+   against real companies in `archive_i` (see `ats_probe.py` /
+   `.github/workflows/ats_probe.yml`, a standalone diagnostic, not part
+   of the crawl pipeline) rather than trusting the 2026-09 note at face
+   value. Two passes: 12 companies/platform, then 40 companies/platform
+   (240 companies total) once the first pass already looked decisive.
+   Final (40-per-platform) result:
+
+   | Platform | Companies w/ jobs | Location % | Description % | Questions % |
+   |---|---|---|---|---|
+   | Ashby | 31/40 | 100% | 100% | **0%** |
+   | Workday | 16/40 | 100% | 0% | **0%** |
+   | BambooHR | 26/40 | 96% | 0% | **0%** |
+   | SmartRecruiters | 8/40 | 100% | 0% | **0%** |
+   | ADP | 14/40 | 100% | 0% | **0%** |
+   | iCIMS | 2/40 | 0% | 0% | 50%¹ |
+
+   ¹ iCIMS's one "hit" (out of 40 real companies) turned out to be a
+   confirmed **false positive**, not a real question — see below.
+
+   Root cause confirmed per platform, not just observed as a number:
+   - **Ashby**: its only form-schema endpoint
+     (`posting-api/posting/{slug}/{id}`) returns a hard `401 Unauthorized`
+     for every company tested (ramp, vesta, cambly, notion, linear), and
+     the public `/application` page is a pure client-rendered SPA with no
+     form schema anywhere in the static HTML. The real candidate-facing
+     flow uses a *different*, non-staff GraphQL endpoint
+     (`jobs.ashbyhq.com/api/non-user-graphql`, operation
+     `ApiJobPostingForApplicationRequest`) — but `jobs.ashbyhq.com/robots.txt`
+     explicitly disallows `/api/`, so this path is closed on explicit
+     instruction, not just inconvenient. (Unrelated: this doesn't affect
+     the job-*listing* data every scraper already pulls from
+     `api.ashbyhq.com/posting-api/job-board/{slug}`, a different host
+     whose own robots.txt has no such rule.)
+   - **ADP**: has a genuine dedicated API (`_fetch_adp_questions` reads
+     `screeningRequirements` from a real per-requisition JSON endpoint) —
+     confirmed live across 5 companies / ~36 jobs that `screeningRequirements`
+     and `sponsoredVisaTypeCodes` are an empty array *every time*. Not a
+     parsing bug: ADP Workforce Now's custom-screening-question feature
+     appears to see near-zero real-world adoption among sampled customers.
+   - **iCIMS**: the dominant failure is an **adaptive bot-defense system**
+     (likely Akamai Bot Manager), not a scraper bug — direct requests to
+     real tenant sitemaps returned `"Your IP address is not on a trusted
+     network"` for most live tenants, and varying request headers changed
+     the block to a different wall (`"Human Verification"` CAPTCHA)
+     rather than removing it — the signature of an adaptive WAF, not a
+     static check a header tweak can satisfy. A smaller share of sampled
+     slugs were simply stale/deprovisioned tenants (`410 gone`), a
+     discovery-data-staleness issue, not a scraper fault. Redirects for
+     consolidated tenants (e.g. one tenant 301-redirecting to another)
+     already work correctly via `requests.Session`'s default behavior —
+     confirmed NOT a bug.
+   - **iCIMS's one "success"** (`academiccareers-udst`, a university career
+     site) traced to a real, separate, now-fixed bug: `_discover_real_apply_link`
+     found a generic "How to Apply" link elsewhere on the page that
+     actually led to the university's own *student admissions* page
+     (`udst.edu.qa/admissions/how-apply`), not a job form — that page's own
+     "Search by Keyword" field then got scraped and reported as
+     `"Application Question: Search by Keyword"`. Fixed with a new
+     negative-context guard (`_APPLY_LINK_NEGATIVE_CONTEXT_RE`) rejecting
+     admissions/financial-aid/scholarship-shaped links even when they
+     otherwise score as apply-shaped — see its own comment in
+     `ats_scrapers.py`. This affects every platform using the shared
+     Level-3 generic-form fallback, not just iCIMS, so it was a real,
+     previously-undetected false-positive risk for Rank 4 generally,
+     caught only because the larger sample happened to include a
+     university career site.
+   - **SmartRecruiters**: at 12 companies its `archive_i` rows were all
+     garbage slugs (`--x3e`, `.well-known`, `%22https:`); at 40 companies,
+     8 real ones turned up with real jobs and real locations — still 0%
+     questions.
+
+   **Conclusion: `RANK4_ELIGIBLE_ATS` stays unchanged.** None of the 6
+   candidates clears the bar at either sample size — adding any of them
+   would make Rank 4 admit jobs on "no restrictive question found" when
+   the real reason is "no questions were ever fetched," reopening the
+   exact false-negative risk this gate exists to prevent. The apply-link
+   false-positive bug found along the way, however, was real and is
+   fixed regardless of this conclusion.
 3. `config.ENABLE_RANK4_COUNTRY_SPECIFIC` is on — a `crawl.yml` checkbox,
    on by default (2026-10, explicit user instruction: "rank 4 included by
    default but can still be manually turned off"). Always on for the
