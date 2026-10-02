@@ -45,9 +45,9 @@ For every new job (URL not already in Supabase):
 
 ## The ranking system
 
-### Step 1: 17 restriction detectors, checked first, for every job
+### Step 1: 19 restriction detectors, checked first, for every job
 
-Before anything else, ~17 regex functions each look for one specific kind
+Before anything else, ~19 regex functions each look for one specific kind
 of *restrictive phrasing* — not a specific place name, a specific
 **sentence shape**: "authorized to work in `<country>`," "must be
 hybrid/on-site," "no legal entity in your country," "based anywhere in
@@ -116,7 +116,7 @@ Management roles only** one more look, under a strict gate:
    premise is "we confirmed the questions are silent on this," not "we
    never checked"
 
-A job that clears the gate is re-run through step 1's full 17-check chain
+A job that clears the gate is re-run through step 1's full 19-check chain
 again internally (defense in depth — nothing restrictive gets a free
 pass just for being CS/AM), plus one extra check specific to Rank 4
 (a sponsorship/work-permit question tied to a named country). Only then:

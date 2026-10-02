@@ -2076,6 +2076,23 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_timezone_relocation_or_hyphenated_restriction_signal(job):
         return "no_match", None, None
 
+    # ── 0.896. HARD OVERRIDE (2026-09, explicit user report, real posting:
+    # SideCar Health's Greenhouse application question "Do you have a
+    # Texas State Health and Life insurance license?"): a US-state-specific
+    # professional/occupational license question. See
+    # has_state_specific_license_signal's docstring. ──
+    if has_state_specific_license_signal(job):
+        return "no_match", None, None
+
+    # ── 0.897. HARD OVERRIDE (2026-09, explicit user instruction: "roles
+    # with say CSM - GERMAN speaking, French speaking should be excluded
+    # too"): a hard-requirement language-fluency qualifier, in the title or
+    # in a non-"nice to have" part of the description/application
+    # questions. See has_language_fluency_restriction_signal's docstring
+    # for the full title-vs-description and hard-vs-soft-section policy. ──
+    if has_language_fluency_restriction_signal(job):
+        return "no_match", None, None
+
     # 2026-09: use `or ""`, not `.get(key, "")` — a job dict sourced from
     # Supabase (a NULL column) or a scraper that found no location has the
     # key PRESENT with value None, not missing, so the "" default here
@@ -3815,6 +3832,22 @@ _US_STATE_FULL_NAMES_FRAGMENT = (
     r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
     r"west\s+virginia|wisconsin|wyoming"
 )
+# Real, full 50-state-plus-DC set (2-letter USPS abbreviations). Moved up
+# here (originally defined much further down, alongside
+# has_state_list_restriction_signal, which still uses it unchanged — a
+# function body only looks up a module global when it actually RUNS, not
+# at definition time, so that use was never affected by this move) so
+# _has_metro_area_state_abbr_signal below (see its own module comment,
+# right after _COUNTRY_BASED_RESTRICTION_RE) can validate against it; that
+# function is called from code compiled further down this same file and
+# needs this set to already exist by then.
+_US_STATE_ABBRS = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC",
+}
 # Countries/regions PLUS full US state names — used only by the residence-
 # verb regex below (a candidate can be told to "live in California" just
 # as validly as "live in Canada"), NOT by _COUNTRY_AUTH_RE's work-
@@ -3917,6 +3950,44 @@ _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     r"|\b(?:a\s+)?citizen\s+of\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
     re.I,
 )
+
+# 2026-09 BUG FIX (explicit user report, real posting: SideCar Health's
+# Greenhouse application question "Do you currently reside in the
+# Dallas/Fort Worth, TX area?"): a residence-verb question naming a
+# CITY/METRO area immediately followed by a 2-letter US state abbreviation
+# — neither a full country name nor a full US state name
+# _RESIDENCE_PLACE_RE_FRAGMENT recognizes, so _COUNTRY_BASED_RESTRICTION_RE
+# above missed it. The city/metro text itself is deliberately unconstrained
+# (just "non-comma words", since metro names vary too much to enumerate —
+# "Dallas/Fort Worth", "the Bay Area", "Research Triangle").
+#
+# Kept as a SEPARATE regex + validation function, deliberately NOT folded
+# into _COUNTRY_BASED_RESTRICTION_RE's `re.I` alternatives: a bare 2-letter
+# token is only a trustworthy state signal when it's actually WRITTEN in
+# uppercase in the real text ("TX", not "tx") — real postings always
+# write it that way, but _US_STATE_FULL_NAMES_FRAGMENT's own module
+# comment already flagged the exact failure mode a case-INSENSITIVE 2-letter
+# match risks ("IN"/"OR"/"HI" as ordinary English words). Caught live in
+# this fix's own testing: "Please reside in a place that is calm, in order
+# to focus" case-insensitively matched "in" (after the comma) as the
+# abbreviation for Indiana. Fix: match case-insensitively (so the verb
+# itself can still be capitalized at a sentence start) but capture the
+# 2-letter token and check it against _US_STATE_ABBRS — a Python set of
+# literal uppercase strings — using the EXACT case the token was written
+# in (re.I affects what the engine matches, not what a captured group
+# preserves), so a lowercase/mixed-case incidental match like "in"/"Or"
+# fails that membership check while a real "TX"/"CA" passes.
+_METRO_AREA_STATE_ABBR_RE = re.compile(
+    r"\b(?:reside|residing|resides|live|living|lives|located|based)\s+"
+    r"(?:currently\s+)?(?:anywhere\s+)?(?:in|within)\s+(?:the\s+)?"
+    r"[A-Za-z][\w.'-]*(?:[\s/][A-Za-z][\w.'-]*){0,4}\s*,\s*([A-Za-z]{2})\b"
+    r"(?:\s+area)?",
+    re.I,
+)
+
+
+def _has_metro_area_state_abbr_signal(text: str) -> bool:
+    return any(m.group(1) in _US_STATE_ABBRS for m in _METRO_AREA_STATE_ABBR_RE.finditer(text))
 
 # 2026-09 NEW (2nd cross-LLM review, real postings: rePurpose Global's
 # "This position is remote-only for East Coast, US candidates."; Autopay's
@@ -4364,6 +4435,8 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
             continue
         if _COUNTRY_BASED_RESTRICTION_RE.search(sentence):
             return True
+        if _has_metro_area_state_abbr_signal(sentence):
+            return True
         if (_REMOTE_FOR_TRIGGER_RE.search(sentence) and _CANDIDATE_WORD_RE.search(sentence)
                 and _ANY_RESIDENCE_PLACE_RE.search(sentence)
                 and not _text_has_global_evidence(sentence)
@@ -4537,17 +4610,11 @@ def has_title_region_restriction_signal(job: dict) -> bool:
 # regardless of the exact wording used in that specific question.
 _APPLICATION_AUTH_QUESTION_MARKER = "Application Question:"
 
-# 2026-09: real, full 50-state-plus-DC set (2-letter USPS abbreviations)
-# used by has_state_list_restriction_signal below to validate a
-# comma-separated run of 2-letter tokens is genuinely a list of U.S.
-# states, not a coincidental run of unrelated 2-letter acronyms.
-_US_STATE_ABBRS = {
-    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
-    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
-    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
-    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
-    "WI", "WY", "DC",
-}
+# _US_STATE_ABBRS (used below to validate a comma-separated run of 2-letter
+# tokens is genuinely a list of U.S. states, not a coincidental run of
+# unrelated 2-letter acronyms) now lives up near _US_STATE_FULL_NAMES_FRAGMENT
+# — moved there so _has_metro_area_state_abbr_signal can validate against
+# it from code that compiles earlier in this file.
 # 3+ comma-separated 2-letter uppercase tokens, anywhere in the text.
 _STATE_ABBR_RUN_RE = re.compile(r"\b([A-Z]{2}(?:\s*,\s*[A-Z]{2}){2,})\b")
 
@@ -4586,6 +4653,43 @@ def has_state_list_restriction_signal(job: dict) -> bool:
         if len(valid) >= 3 and len(valid) / len(tokens) >= 0.8:
             return True
     return False
+
+
+# 2026-09 NEW (explicit user report, real posting: SideCar Health's
+# Greenhouse application question "Do you have a Texas State Health and
+# Life insurance license?"): a STATE-ISSUED PROFESSIONAL/OCCUPATIONAL
+# LICENSE question is, in practice, exactly as restrictive as naming the
+# state directly — insurance, nursing, real-estate, contractor, and
+# similar licenses are issued and valid per-state in the US, so a company
+# screening for one is screening for candidates who are either already
+# licensed there (overwhelmingly means they live/work in that state
+# today) or willing to become licensed there, either way a state-specific
+# eligibility bar no different in kind from "must reside in Texas." This
+# posting's own location field had nothing else flagging it — the
+# question was the ONLY restrictive signal anywhere.
+_STATE_PROFESSIONAL_LICENSE_RE = re.compile(
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+state\s+[\w\s/&-]{0,40}?"
+    r"licens[ei]\w*\b"
+    r"|\blicensed\s+in\s+(?:the\s+state\s+of\s+)?(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\b"
+    r"|\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+(?:insurance|real\s+estate|nursing|"
+    r"contractor|cosmetology|bar)\s+licens[ei]\w*\b",
+    re.I,
+)
+
+
+def has_state_specific_license_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter: does this job's description or
+    application-question text ask about a US-state-specific professional/
+    occupational license (e.g. "Texas State Health and Life insurance
+    license", "licensed in the state of California")? See
+    _STATE_PROFESSIONAL_LICENSE_RE's module comment above for why this is
+    treated as a hard state-tied restriction, same severity as naming the
+    state directly in a residence requirement."""
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    return bool(_STATE_PROFESSIONAL_LICENSE_RE.search(text))
 
 
 def has_hard_country_specific_auth_signal(job: dict) -> bool:
@@ -4729,7 +4833,20 @@ _OFFICE_ATTENDANCE_RE = re.compile(
     # above requires; "from an office" reads the same physical-presence
     # way but was missed entirely.
     r"|\bable\s+to\s+work\s+from\s+(?:an?\s+|our\s+|the\s+)?office\b"
-    r"|\bmust\s+work\s+from\s+(?:an?\s+|our\s+|the\s+)?office\b",
+    r"|\bmust\s+work\s+from\s+(?:an?\s+|our\s+|the\s+)?office\b"
+    # 2026-09 BUG FIX (explicit user report, real posting: Project A
+    # Services GmbH & Co KG's Greenhouse application question "Are you
+    # open to working fully onsite in Berlin?"): an INTERROGATIVE
+    # willingness question built around "onsite"/"in-office"/"in-person"/
+    # "hybrid" directly, with no "office" noun at all — every alternative
+    # above requires the literal word "office" to appear, so a question
+    # phrased around "onsite" instead (a one-word on/off-site qualifier,
+    # not "in our office") fell through untouched. Allows up to two filler
+    # words between "work(ing)" and the qualifier ("working FULLY onsite"),
+    # same reasoning as the "willing to work..." alternative above's
+    # `[\w\s]{0,30}?` slack before "office".
+    r"|\b(?:open|willing|able)\s+to\s+work(?:ing)?\s+(?:\w+\s+){0,2}"
+    r"(?:on[\s\-]?site|in[\s\-]?office|in[\s\-]?person|hybrid)\b",
     re.I,
 )
 
@@ -4746,6 +4863,102 @@ def has_office_attendance_signal(job: dict) -> bool:
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
     return bool(_OFFICE_ATTENDANCE_RE.search(text))
+
+
+# 2026-09 NEW (explicit user instruction: "roles with say CSM - GERMAN
+# speaking, French speaking should be excluded too. If its phrased as a
+# hard requirement in the requirements section it should not make it in.
+# [if] its added as something that would be nice/the bonus section, then
+# let it in."). A role that genuinely requires fluency in a specific
+# non-English language is, in practice, tied to that language's market/
+# region the same way a named-country residency requirement is — a
+# company screening CS/AM candidates for German fluency is screening for
+# people serving German-speaking customers, not actually open anywhere in
+# the world. A TITLE qualifier ("CSM - German Speaking") is always
+# definitional (titles don't carry a "nice to have" nuance) so it's a
+# hard reject unconditionally; a description/application-question mention
+# only rejects when it sits in a HARD-requirement context, not a nice-to-
+# have/bonus one, per the user's own explicit distinction above.
+_LANGUAGE_NAMES_FRAGMENT = (
+    r"german|french|spanish|italian|portuguese|dutch|flemish|polish|"
+    r"swedish|norwegian|danish|finnish|russian|ukrainian|czech|slovak|"
+    r"romanian|hungarian|greek|turkish|arabic|hebrew|japanese|korean|"
+    r"mandarin|cantonese|chinese|hindi|thai|vietnamese|indonesian|bahasa|"
+    r"tagalog|filipino|bulgarian|croatian|serbian|lithuanian|latvian|"
+    r"estonian|farsi|persian|urdu|bengali|malay|swahili|afrikaans"
+)
+_TITLE_LANGUAGE_SPEAKING_RE = re.compile(
+    r"\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")[\s\-]speak(?:ing|er)\b", re.I,
+)
+_LANGUAGE_FLUENCY_RE = re.compile(
+    r"\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")[\s\-]speak(?:ing|er)\b"
+    r"|\b(?:fluent|fluency|proficient|proficiency)\s+(?:in\s+|with\s+)?"
+    r"(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
+    r"|\bnative\s+(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s*(?:speaker)?\b"
+    r"|\bmust\s+(?:speak|be\s+fluent\s+in)\s+(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
+    r"|\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s+language\s+(?:skills?|proficiency|fluency)\b",
+    re.I,
+)
+# Section/line-level softeners — a standalone header line ("Nice to
+# Haves:", "Bonus:") flips every language mention AFTER it (until the next
+# hard-requirement header) from a reject into neutral; an inline qualifier
+# on the SAME line/sentence as the language mention ("German speaking is a
+# plus") softens just that one mention regardless of which section it's
+# physically under.
+_NICE_TO_HAVE_HEADER_RE = re.compile(
+    r"^(?:nice[\s\-]to[\s\-]haves?|bonus(?:\s+points?)?|"
+    r"preferred(?:\s+qualifications?|\s+skills?)?|a\s+plus|pluses|"
+    r"desirable(?:\s+skills?)?|good\s+to\s+have|optional(?:\s+skills?)?)\s*:?\s*$",
+    re.I,
+)
+_HARD_REQUIREMENT_HEADER_RE = re.compile(
+    r"^(?:requirements?|required\s+(?:skills?|qualifications?)|must[\s\-]haves?|"
+    r"minimum\s+qualifications?|basic\s+qualifications?|qualifications?|"
+    r"what\s+you(?:'ll|\s+will)?\s+(?:need|bring)|"
+    r"what\s+we(?:'re|\s+are)?\s+looking\s+for)\s*:?\s*$",
+    re.I,
+)
+_INLINE_LANGUAGE_SOFTENER_RE = re.compile(
+    r"\bis\s+a\s+plus\b|\ba\s+plus\b|\bbonus\b|\bpreferred\b|\bdesirable\b|"
+    r"\bnice\s+to\s+have\b|\boptional\b|\bnot\s+required\b|\bnot\s+mandatory\b",
+    re.I,
+)
+
+
+def has_language_fluency_restriction_signal(job: dict) -> bool:
+    """Deterministic, pre-AI hard filter — see the module comment above
+    _LANGUAGE_NAMES_FRAGMENT for the full policy. A title qualifier
+    ("CSM - German Speaking") is always a hard reject. A description/
+    application-question mention only rejects when it's a HARD
+    requirement, not a nice-to-have/bonus one — tracked by walking the
+    text clause-by-clause (reusing _split_into_sentences, which already
+    splits on newlines, so a standalone section-header line is its own
+    entry) and flipping an in-soft-section flag on a recognized nice-to-
+    have/hard-requirement header, plus checking each individual mention's
+    own clause for an inline softener regardless of section."""
+    title = job.get("title") or ""
+    if isinstance(title, str) and _TITLE_LANGUAGE_SPEAKING_RE.search(title):
+        return True
+    desc = job.get("description_snippet") or ""
+    if not isinstance(desc, str) or not desc.strip():
+        return False
+    in_soft_section = False
+    for clause in _split_into_sentences(desc):
+        stripped = clause.strip(" \t -*•#>")
+        if not stripped:
+            continue
+        if len(stripped) <= 60 and _NICE_TO_HAVE_HEADER_RE.match(stripped):
+            in_soft_section = True
+            continue
+        if len(stripped) <= 60 and _HARD_REQUIREMENT_HEADER_RE.match(stripped):
+            in_soft_section = False
+            continue
+        if not _LANGUAGE_FLUENCY_RE.search(stripped):
+            continue
+        if in_soft_section or _INLINE_LANGUAGE_SOFTENER_RE.search(stripped):
+            continue
+        return True
+    return False
 
 
 # 2026-09 NEW (explicit user-provided taxonomy of restrictive job-posting
@@ -5538,6 +5751,8 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
     has_timezone_relocation_or_hyphenated_restriction_signal,
     has_extra_restrictive_geography_signal,
     _rank4_has_country_tied_restrictive_question,
+    has_state_specific_license_signal,
+    has_language_fluency_restriction_signal,
 )
 
 # 2026-09 (explicit user instruction, verbatim list): Rank 4's OWN,

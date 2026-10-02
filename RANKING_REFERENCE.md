@@ -5,7 +5,7 @@ that motivated it), see `CLASSIFICATION.md`.
 
 ## 1. Common conditions — apply to EVERY job, before any rank is even considered
 
-### 1a. The 17 universal hard-exclusion checks (checked first, in this order)
+### 1a. The 19 universal hard-exclusion checks (checked first, in this order)
 
 Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 
@@ -20,14 +20,16 @@ Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 | 7 | `has_country_tied_sponsorship_permit_residency_signal` | Sponsorship/work-permit/residency phrasing tied to a named country — "require visa sponsorship to work in `<country>`," "need a work permit for `<country>`," "maintain residence in `<country>`" (distinct from #6: not an "authorized to work" statement) |
 | 8 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does. Also a genuinely **bare** citizenship/work-authorization/eligibility question with no place reference at all (not even "where this role is") — same gate, same reasoning. |
 | 9 | `has_state_list_restriction_signal` | Enumerated US state list |
-| 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`" |
+| 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`," **or a city/metro name + 2-letter US state abbreviation after a residence verb** ("reside in the Dallas/Fort Worth, TX area") |
 | 11 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families |
 | 12 | `has_hard_metadata_location_signal` | ATS metadata names a place the location field didn't |
 | 13 | `has_hard_location_symbol_signal` | Map-pin icon next to a specific place |
 | 14 | `has_title_region_restriction_signal` | Title names a single narrow region ("- LATAM") |
-| 15 | `has_office_attendance_signal` | "N days/week in office," "able to/must work from the office" |
+| 15 | `has_office_attendance_signal` | "N days/week in office," "able to/must work from the office," **or an interrogative "are you open/willing/able to work(ing) onsite/in-office/in-person/hybrid?" with no "office" noun at all** |
 | 16 | `has_entity_or_exclusion_restriction_signal` | "No legal/local entity in your country," "not open to candidates outside the US," "must be in a supported payroll country" |
 | 17 | `has_timezone_relocation_or_hyphenated_restriction_signal` | "Must be in a US timezone," "`<place>`-based candidates only," "`<place>` only.," "`<timezone>` business hours only" |
+| 18 | `has_state_specific_license_signal` | A US-state-specific professional/occupational license question — "Texas State Health and Life insurance license," "licensed in the state of California" |
+| 19 | `has_language_fluency_restriction_signal` | A hard (not nice-to-have) language-fluency requirement — "CSM - German Speaking" (title, always hard), "Fluent in German" under a Requirements header |
 
 Check 7 was added 2026-09 during an adversarial fuzz-test verification pass —
 the underlying logic already existed for Rank 4 only
@@ -35,6 +37,15 @@ the underlying logic already existed for Rank 4 only
 this universal chain. See `CLASSIFICATION.md`'s "Adversarial fuzz-test
 round" section for the full list of gaps closed in that pass, and which
 claims from the test were investigated and deliberately left unfixed.
+
+Checks 18-19 were added 2026-09 for three real-posting leaks (a state
+license question, a city/metro + state-abbreviation residency question, an
+interrogative onsite question — folded into checks 10 and 15 above, not
+new numbered entries) plus a new language-fluency policy. See
+`CLASSIFICATION.md`'s "Application-question leaks: state licenses,
+metro-area residency, interrogative onsite, language fluency" section for
+the full detail, including a case-sensitivity bug caught and fixed during
+that round's own testing.
 
 ### 1b. How the location value is determined, before any check runs
 
@@ -87,7 +98,7 @@ the LLM's verdict is what actually decides the outcome.**
 | 3 | `ENABLE_RANK4_COUNTRY_SPECIFIC` config flag is on |
 | 4 | `"Application Question:"` literally present in `description_snippet` |
 
-### 4b. Additional exclusion checks, on top of the 17 universal ones
+### 4b. Additional exclusion checks, on top of the 19 universal ones
 
 | Check | Catches |
 |---|---|

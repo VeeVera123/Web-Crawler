@@ -515,6 +515,93 @@ Two follow-on fixes this required:
   general" distinction already used for marketing-boilerplate exclusions
   elsewhere in this file.
 
+### Application-question leaks: state licenses, metro-area residency, interrogative onsite, language fluency
+
+2026-09 (explicit user report, three real postings, plus a user-initiated
+policy mid-fix). First confirmed, directly against `ats_scrapers.py`'s
+Greenhouse question-fetching code (`_fetch_greenhouse_questions` /
+`_format_screening_questions`), that application questions genuinely were
+being scraped and appended into `description_snippet` for all of these —
+`_BOILERPLATE_QUESTION_RE` only filters pure PII/EEO fields (name, email,
+resume, race, gender, ...), and none of the three real questions below
+match it. This was a classifier-regex gap, not a scraper gap.
+
+1. **State-specific professional/occupational license** — SideCar
+   Health's Greenhouse posting asked "Do you have a Texas State Health
+   and Life insurance license?" No existing check anywhere in this file
+   looked for the word "license" at all. A US state licenses insurance,
+   nursing, real-estate, and similar professions per-state, so a company
+   screening for one is screening for someone already licensed there (or
+   willing to become so) — exactly as restrictive as naming the state
+   directly. New universal check: `has_state_specific_license_signal`
+   (`_STATE_PROFESSIONAL_LICENSE_RE`).
+
+2. **City/metro area + 2-letter state abbreviation** — the same SideCar
+   Health posting also asked "Do you currently reside in the Dallas/Fort
+   Worth, TX area?" Every existing residence-verb check
+   (`_COUNTRY_BASED_RESTRICTION_RE`) only recognized a full country name
+   or a full, spelled-out US state name (`_US_STATE_FULL_NAMES_FRAGMENT`)
+   — never a city/metro name paired with a 2-letter abbreviation. Added
+   as a **separate** function, `_has_metro_area_state_abbr_signal`,
+   deliberately NOT folded into `_COUNTRY_BASED_RESTRICTION_RE`'s
+   case-insensitive alternatives: a bug caught during this fix's own
+   testing showed that matching the 2-letter abbreviation
+   case-insensitively lets an ordinary lowercase word standing right
+   after a comma get misread as a state ("reside in a place that is
+   calm, **in** order to focus" matched "in" as Indiana). Fixed by
+   matching case-insensitively for the verb/city portion but validating
+   the captured 2-letter token's exact written case against
+   `_US_STATE_ABBRS` (a set of literal uppercase strings) — a lowercase
+   or mixed-case incidental match fails that membership check, while a
+   real "TX"/"CA" (always written uppercase in real postings) passes.
+   Reuses the existing team/office/company-context sentence guard (the
+   same one `_COUNTRY_BASED_RESTRICTION_RE` already gets), so "our
+   headquarters is located in Austin, TX" is correctly NOT treated as a
+   candidate residency requirement.
+
+3. **Interrogative onsite/hybrid question** — Project A Services GmbH &
+   Co KG's Greenhouse posting asked "Are you open to working fully onsite
+   in Berlin?" `has_office_attendance_signal`'s existing patterns all
+   required the literal word "office" ("willing to work **in our
+   office**"); a question built around "onsite"/"in-office"/"in-person"/
+   "hybrid" directly, with no "office" noun, fell through untouched.
+   Extended `_OFFICE_ATTENDANCE_RE` with an alternative for "open/
+   willing/able to work(ing) [up to 2 filler words] onsite/in-office/
+   in-person/hybrid".
+
+4. **Hard language-fluency requirement** — net-new policy, not a single
+   posting but an explicit user instruction given mid-session: "roles
+   with say CSM - GERMAN speaking, French speaking should be excluded
+   too. If its phrased as a hard requirement in the requirements section
+   it should not make it in. [if] its added as something that would be
+   nice/the bonus section, then let it in." A role that genuinely
+   requires fluency in a specific non-English language is, in practice,
+   tied to that language's market the same way a named-country residency
+   requirement is. New universal check,
+   `has_language_fluency_restriction_signal`:
+   - A **title** qualifier ("CSM - German Speaking", "French-Speaking
+     Customer Success Manager") is always a hard reject — titles are
+     definitional, there's no "nice to have" reading of a title.
+   - A **description/application-question** mention only rejects when it
+     sits in a hard-requirement context. Implemented by walking the text
+     clause-by-clause (reusing `_split_into_sentences`, which already
+     splits on newlines, so a standalone section-header line is its own
+     entry), tracking an "in a nice-to-have section" flag that flips on
+     recognizing a header like "Nice to Haves:"/"Bonus:"/"Preferred
+     Qualifications:" and flips back off on a hard-requirement header
+     like "Requirements:"/"Must Haves:"/"What You'll Need:". A mention
+     with no section markers at all defaults to hard (the common case —
+     most JDs stating a language requirement in plain prose mean it).
+     An inline softener on the SAME clause ("German speaking is a
+     plus") also neutralizes that one mention regardless of section.
+   - English is deliberately excluded from the recognized language list
+     — it's the global baseline for this project's postings, not a
+     restrictive differentiator the way German/French/etc. are.
+   - Both new checks are wired into `_RANK4_GENUINE_RESTRICTION_CHECKS`
+     too, so a CS/AM role reaching Rank 4 (where a "CSM - German
+     Speaking" title is actually most likely to show up) gets the same
+     treatment.
+
 ## Priority values at a glance
 
 | Value | Meaning | Set by | Roles |
