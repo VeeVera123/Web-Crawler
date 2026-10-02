@@ -125,21 +125,35 @@ on:
         type: boolean
         default: false
       # 2026-09 (explicit user request — classification revamp Phase 2):
-      # opt-in checkbox for Rank 4 (CS/AM-only bare country/region
-      # admission, no restrictive tie confirmed — see classifier.py's
-      # classify_rank4()). Wired into Crawl I and Crawl II (both run the
-      # same application-question enrichment, so both can genuinely carry
-      # the "Application Question:" marker Rank 4 requires) — NOT Crawl
-      # III, whose stapply.ai CSVs never carry application questions at
-      # all, so its shared filter_locations() call can never satisfy the
-      # gate regardless of this flag. Default unchecked — this is a new
-      # tier and shouldn't silently start writing rows until explicitly
-      # turned on for a run.
+      # checkbox for Rank 4 (CS/AM-only bare country/region admission, no
+      # restrictive tie confirmed — see classifier.py's classify_rank4()).
+      # Wired into Crawl I and Crawl II (both run the same application-
+      # question enrichment, so both can genuinely carry the "Application
+      # Question:" marker Rank 4 requires) — NOT Crawl III, whose
+      # stapply.ai CSVs never carry application questions at all, so its
+      # shared filter_locations() call can never satisfy the gate
+      # regardless of this flag.
+      #
+      # 2026-10 (explicit user instruction: "fix the cron so rank 4 is
+      # included by default but can still be manually turned off"): was
+      # opt-in (default unchecked, off on schedule since `inputs.*` is
+      # empty for non-dispatch events) while the tier was new and
+      # unproven. Now switched to the same opt-OUT model run_crawl_1_2/
+      # run_crawl_iii above already use — `default: true` so an untouched
+      # manual dispatch also gets it on, and each crawl-i/crawl-ii step's
+      # ENABLE_RANK4_COUNTRY_SPECIFIC value below is now
+      # `github.event_name == 'schedule' || inputs.enable_rank4_country_specific`
+      # instead of the bare input, so the unattended cron run always gets
+      # it (schedule events never populate `inputs.*` at all, which is why
+      # the bare input alone evaluated to empty/false on schedule before
+      # this change). Still a real opt-out: UNTICK the box on a manual
+      # dispatch and that explicit `false` is respected — the `||`
+      # fallback only ever kicks in on the schedule trigger itself.
       enable_rank4_country_specific:
         description: "Enable Rank 4 (CS/AM)"
         required: false
         type: boolean
-        default: false
+        default: true
 
 # Belt-and-suspenders: GitHub already serializes runs of the same workflow+ref
 # by default for `schedule`/`workflow_dispatch` unless you opt into concurrent
@@ -270,7 +284,7 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           USE_OPENAI: ${{ inputs.use_openai }}
           USE_NVIDIA: ${{ inputs.use_nvidia }}
-          ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ inputs.enable_rank4_country_specific }}
+          ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ github.event_name == 'schedule' || inputs.enable_rank4_country_specific }}
           LLM_PROVIDER: cerebras
           # Every AI-classifying job in this workflow shares Groq-O's/
           # Groq-C's free-tier per-key quotas — see config.py. Sized
@@ -350,7 +364,7 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           USE_OPENAI: ${{ inputs.use_openai }}
           USE_NVIDIA: ${{ inputs.use_nvidia }}
-          ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ inputs.enable_rank4_country_specific }}
+          ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ github.event_name == 'schedule' || inputs.enable_rank4_country_specific }}
           LLM_PROVIDER: cerebras
           AI_RATE_SHARDS: "12"
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.

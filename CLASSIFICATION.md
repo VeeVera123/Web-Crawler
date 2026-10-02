@@ -295,9 +295,15 @@ called):
    Teamtailor, Recruitee, Lever, Eploy, PageUp, isolvedhire, Pinpoint,
    Rippling**. Notably, Ashby did **not** qualify (application questions
    are auth-walled) despite looking like an obvious candidate.
-3. `config.ENABLE_RANK4_COUNTRY_SPECIFIC` is on (a workflow_dispatch
-   checkbox in `crawl.yml`, default unchecked — Rank 4 doesn't silently
-   start writing rows until a run explicitly opts in).
+3. `config.ENABLE_RANK4_COUNTRY_SPECIFIC` is on — a `crawl.yml` checkbox,
+   on by default (2026-10, explicit user instruction: "rank 4 included by
+   default but can still be manually turned off"). Always on for the
+   unattended cron schedule (`github.event_name == 'schedule' || inputs.
+   enable_rank4_country_specific` — schedule events never populate
+   `inputs.*` at all, so the bare input alone would otherwise evaluate to
+   off); a manual dispatch run still gets it unless the box is explicitly
+   unticked. Was opt-in/default-unchecked while the tier was new and
+   unproven; that caution is no longer needed.
 4. The job's `description_snippet` actually contains an `"Application
    Question:"` marker — Rank 4's whole premise is that questions were
    fetched and are genuinely silent on the topic, not that they were never

@@ -109,8 +109,9 @@ Management roles only** one more look, under a strict gate:
 2. ATS is one of 12 verified platforms — chosen because they reliably
    return *both* a location field *and* real application questions on the
    same job, not just one or the other
-3. `ENABLE_RANK4_COUNTRY_SPECIFIC` is turned on for this run (a manual
-   opt-in checkbox, off by default)
+3. `ENABLE_RANK4_COUNTRY_SPECIFIC` is turned on for this run — on by
+   default (both the unattended cron schedule and an untouched manual
+   dispatch), untick the checkbox on a manual dispatch to turn it off
 4. An `"Application Question:"` marker is actually present — Rank 4's
    premise is "we confirmed the questions are silent on this," not "we
    never checked"
