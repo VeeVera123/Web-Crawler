@@ -169,6 +169,27 @@ Two call sites, same underlying `_REFERENTIAL_AUTH_QUESTION_RE`:
   Africa, or 2+ business regions together) — the question then ties to
   that broad scope, not a single country.
 
+2026-09 BUG FIX (explicit user report, real posting: ShipBob's Greenhouse
+listing — location field "Sydney, New South Wales, Australia", screening
+question just "What's your citizenship / employment eligibility?"): every
+alternative above requires the question to explicitly SAY "where this
+role is located/based/listed" — a much terser question like this one,
+with no country named and no referential wording at all, matched
+nothing. But the underlying intent is identical: a company asking a
+Sydney applicant their "citizenship / employment eligibility" obviously
+means "eligible to work in Australia" — the verbose "where this role is
+located" phrasing was just one way some companies happen to phrase the
+same question, not a requirement of the intent itself. Added a genuinely
+BARE citizenship/work-authorization/eligibility-status question (no
+place named anywhere) as its own alternative, gated by the exact same
+"does the job already name one specific, narrow place" check the
+existing referential alternatives already use — so it's still safe on a
+genuinely location-agnostic job (blank/bare-Remote/broad location),
+and requires an interrogative/imperative framing ("what's your...",
+"please confirm...", "are you...", "do you have...") so it doesn't also
+match plain DEI/company-values prose that merely mentions "citizenship"
+in passing.
+
 ### Sentence-splitting bug (fixed, affected every sentence-level check)
 
 2026-09 BUG FIX (explicit user report, real posting: CentralReach's
@@ -445,6 +466,54 @@ no country attached is admitted, because nothing ties that question to a
 specific place. (In practice this exact EMEA case is already caught
 earlier, at Rank 2, by the base pipeline's own EMEA handling — true new
 Rank 4 territory is non-EMEA bare regions/countries.)
+
+### "Informational" region mentions vs. a residency enforcement
+
+2026-09 (explicit user policy, verbatim: "a JD saying based in one our
+(allowed country/region) offices should not be allowed. Regions are
+allowed... The aim of rank 4 is that maybe if they did not ask an app
+question they may be willing to allow you work from anywhere and don't
+really need u to work from there. So them asking you to be based there is
+a no. Just bare location field is what we are taking, an enforcement
+stating in the sentence/jd that they require you to stay/reside there is
+a no."): real posting, Hex Trust's Workable listing — title
+"Relationship Manager - Wealth Management (Middle East)", description
+tying the role to Dubai/Riyadh/Istanbul specifically. 4b's own "does the
+title/JD independently name an allowed region" check (above) was treating
+a sentence like "the successful candidate will be based in one of our
+Middle East offices" as supporting MIXED-SIGNAL evidence — the opposite
+of what it should do. Middle East/MENA/Gulf stay accepted regions (the
+user's explicit instruction: "regions are allowed") — the distinction
+isn't about WHICH region is named, it's about HOW it's mentioned:
+
+- **Informational** — a title suffix ("CSM - EMEA"), or a JD clause like
+  "we hire across LATAM for this role" — still legitimate 4b evidence,
+  unchanged.
+- **Enforcement** — a sentence that ties the CANDIDATE/ROLE to physically
+  being in that region: "this role is based in our Middle East offices,"
+  "must reside in APAC," "residency in EMEA is required." Exactly as
+  disqualifying as naming one specific country, even though the place
+  itself is an otherwise-accepted region — this is new, Rank-4-specific
+  logic (`has_rank4_region_residency_enforcement_signal`), since region
+  words were never part of any restriction vocabulary before (they were
+  only ever treated as ACCEPTED evidence elsewhere in this file).
+
+Two follow-on fixes this required:
+- `based`/`located` were removed from the hiring-context word list that
+  gates 4b's existing "is this region mention actually about hiring"
+  check (§ above) — those two words describe physical presence, not
+  merely "this text is about hiring" the way `hire`/`role`/`candidates`
+  do, so keeping them there would have let the exact enforcement
+  sentences this section exists to catch also count as supporting
+  evidence for admission.
+- A sentence describing the company's EXISTING workforce ("our globally
+  distributed team includes engineers based in Germany, India, and
+  Brazil") is NOT an enforcement on the candidate, just company
+  description — excluded via a workforce-noun guard (team/engineers/
+  employees/staff/workforce/colleagues/workers/people in the same
+  sentence), the same "is this about THIS role, or the company in
+  general" distinction already used for marketing-boilerplate exclusions
+  elsewhere in this file.
 
 ## Priority values at a glance
 

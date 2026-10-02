@@ -3713,7 +3713,35 @@ _REFERENTIAL_AUTH_QUESTION_RE = re.compile(
     r"|\bwork\s+(?:rights?|authoriz\w*)\s+for\s+(?:the\s+|this\s+)?(?:role|position|job)'?s?\s+"
     r"(?:location|country)\b"
     r"|\beligib(?:le|ility)\s+to\s+work\s+(?:in|at)\s+(?:the\s+)?(?:location|country)\s+"
-    r"(?:of|for)\s+(?:this\s+)?(?:role|position|job)\b",
+    r"(?:of|for)\s+(?:this\s+)?(?:role|position|job)\b"
+    # 2026-09 BUG FIX (explicit user report, real posting: ShipBob's
+    # Greenhouse listing, location "Sydney, New South Wales, Australia" —
+    # application question just "What's your citizenship / employment
+    # eligibility?", no "where this role is located" wording at all, so
+    # none of the alternatives above ever matched it). A question this
+    # terse never explicitly refers to the role's own location the way
+    # every pattern above requires -- but the underlying intent is
+    # identical: a company asking a Sydney applicant their "citizenship /
+    # employment eligibility" obviously means "eligible to work in
+    # Australia," same as if it had spelled that out. Added a genuinely
+    # BARE citizenship/work-authorization/eligibility status question
+    # (no place named anywhere, not even referentially) as its own
+    # alternative -- the SAME "is a real, specific, non-broad place
+    # already named" gate every caller of this regex already applies
+    # (has_referential_auth_question_with_named_place_signal /
+    # _rank4_has_country_tied_restrictive_question) is what keeps this
+    # from firing on a genuinely location-agnostic job; it only ever
+    # disqualifies when the job's OWN location field already resolved to
+    # one narrow place, exactly like the existing alternatives above.
+    # Requires an interrogative/imperative question framing (what's/what
+    # is/please specify/confirm/indicate/are you/do you have) so this
+    # doesn't also match plain DEI/company-values prose that merely
+    # mentions "citizenship" in passing.
+    r"|\b(?:what(?:'s|\s+is)|please\s+(?:specify|confirm|indicate|state))\s+your\s+"
+    r"citizenship\s*(?:[/,]|\s+(?:or|and)\s+)?\s*(?:work\s+)?(?:employment\s+)?"
+    r"(?:authoriz\w*|eligib\w*|status)\b"
+    r"|\b(?:are\s+you|do\s+you\s+have)\b[^.!?\n]{0,30}\b(?:citizenship|citizenship\s+status|"
+    r"work\s+authoriz\w*|employment\s+eligib\w*)\b",
     re.I,
 )
 
@@ -5572,9 +5600,22 @@ _RANK4_PLACE_RE = re.compile(r"\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b", re
 # version — generalized here to Rank 4's full country/region vocabulary:
 # require a hiring-context verb within 80 chars of the matched place, so
 # generic company-description mentions no longer count as evidence.
+#
+# 2026-09 (explicit user policy, verbatim: "a JD saying based in one our
+# (allowed country/region) offices should not be allowed... an enforcement
+# stating in the sentence/jd that they require you to stay/reside there is
+# a no"): "based" and "located" removed from this list. Those two words
+# don't just mean "this text happens to be about hiring" the way "hire"/
+# "role"/"candidates" do -- "based in <region>"/"located in <region>" is
+# itself a residency ENFORCEMENT, the opposite of supporting evidence for
+# admission. Keeping them here would have let "this role is based in our
+# EMEA offices" count as 4b's "mixed signal, let it in" evidence, when the
+# user's policy is the reverse: that exact phrasing should DISQUALIFY the
+# job. See has_rank4_region_residency_enforcement_signal below, which
+# catches "based in <region>" as its own dedicated rejection instead.
 _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT = (
     r"remote|work|working|hire|hiring|recruit|recruiting|employment|employ|"
-    r"candidates?|applicants?|based|located|available|open|role|position"
+    r"candidates?|applicants?|available|open|role|position"
 )
 _RANK4_HIRING_CONTEXT_WORDS_RE = re.compile(r"\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b", re.I)
 _RANK4_STRICT_PLACE_RE = re.compile(
@@ -5608,6 +5649,78 @@ _RANK4_CITY_COMMA_COUNTRY_RE = re.compile(
     re.I,
 )
 
+# 2026-09 NEW (explicit user policy, verbatim: "a JD saying based in one
+# our (allowed country/region) offices should not be allowed. Regions are
+# allowed. The aim of rank 4 is that maybe if they did not ask an app
+# question they may be willing to allow you work from anywhere and don't
+# really need u to work from there. So them asking you to be based there
+# is a no. Just bare location field is what we are taking, an enforcement
+# stating in the sentence/jd that they require you to stay/reside there is
+# a no."): a region/country named PASSIVELY in the title or JD ("CSM -
+# LATAM", "we hire across EMEA") is still legitimate 4b evidence — but a
+# sentence that ENFORCES physical presence ("this role is based in our
+# EMEA offices", "must reside in APAC") is a real residency requirement,
+# exactly as disqualifying as naming one specific country, even though the
+# place itself is otherwise an accepted broad region. Region/business-
+# family words were never part of any restriction vocabulary before this —
+# they were only ever treated as ACCEPTED evidence elsewhere in this file
+# (_RANK4_PLACE_RE, _has_multi_region_breadth) — so this is a genuinely new
+# check, not a tightened existing one. Rank-4-specific (not universal):
+# Rank 1/2 never let JD/title text override what the location field
+# itself already resolved to, so a new country-NAME exclusion wouldn't
+# apply there the same way; this is scoped to where the user described it
+# — Rank 4's own "is this JD text actually a mixed signal, or a real tie"
+# judgment call.
+_RANK4_REGION_RESIDENCY_ENFORCEMENT_PLACE_FRAGMENT = (
+    _RANK4_PLACE_INNER_FRAGMENT + r"|emea|africa"
+)
+_RANK4_REGION_RESIDENCY_ENFORCEMENT_RE = re.compile(
+    r"\bbased\s+in\s+(?:the\s+|one\s+of\s+our\s+|our\s+)?"
+    r"(?:" + _RANK4_REGION_RESIDENCY_ENFORCEMENT_PLACE_FRAGMENT + r")\b"
+    r"|\b(?:must|required\s+to|need(?:s)?\s+to|has\s+to)\s+(?:reside|stay|live)\s+in\s+"
+    r"(?:the\s+)?(?:" + _RANK4_REGION_RESIDENCY_ENFORCEMENT_PLACE_FRAGMENT + r")\b"
+    r"|\bresiden(?:ce|cy)\s+(?:in|within)\s+(?:the\s+)?"
+    r"(?:" + _RANK4_REGION_RESIDENCY_ENFORCEMENT_PLACE_FRAGMENT + r")\s+(?:is\s+)?required\b",
+    re.I,
+)
+
+
+# 2026-09 BUG FIX (found via this project's own existing adversarial
+# test suite, immediately after adding the check above): "our globally
+# distributed team includes engineers based in Germany, India, and
+# Brazil" also matches "based in Germany" -- but this is company-wide
+# boilerplate describing WHO ALREADY WORKS HERE, not a requirement for
+# THIS candidate/role. The user's own policy example ("a JD saying based
+# in one of our <region> offices should not be allowed") describes the
+# ROLE/POSITION itself, not the existing workforce. A sentence naming the
+# company's existing people (team/engineers/employees/staff/workforce/
+# colleagues/workers) in the same breath as "based in <place>" is that
+# company-description shape, not a residency enforcement on the
+# candidate, and is excluded here the same way "our global network"
+# marketing copy is excluded elsewhere in this file.
+_RANK4_WORKFORCE_DESCRIPTION_RE = re.compile(
+    r"\b(?:team|engineers?|employees?|staff|workforce|colleagues?|workers?|people)\b",
+    re.I,
+)
+
+
+def has_rank4_region_residency_enforcement_signal(job: dict) -> bool:
+    """Rank-4-only guard — see _RANK4_REGION_RESIDENCY_ENFORCEMENT_RE's
+    module comment above for the full policy this implements. Sentence-
+    scoped (same idea as has_extra_restrictive_geography_signal/the
+    boilerplate-guard sentence loop above) so a restrictive sentence in
+    one part of the JD doesn't get diluted by unrelated text elsewhere."""
+    text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
+    if not text.strip():
+        return False
+    for sentence in _split_into_sentences(text):
+        if not _RANK4_REGION_RESIDENCY_ENFORCEMENT_RE.search(sentence):
+            continue
+        if _RANK4_WORKFORCE_DESCRIPTION_RE.search(sentence):
+            continue
+        return True
+    return False
+
 
 def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     """Returns (priority, reason) — priority is PRIORITY_MIXED_COUNTRY,
@@ -5624,6 +5737,12 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     for check in _RANK4_GENUINE_RESTRICTION_CHECKS:
         if check(job):
             return None, None
+    # Defined later in this file (after _RANK4_GENUINE_RESTRICTION_CHECKS'
+    # own definition, which it can't be folded into without reordering a
+    # lot of code it depends on) — see has_rank4_region_residency_
+    # enforcement_signal's own docstring for the policy this implements.
+    if has_rank4_region_residency_enforcement_signal(job):
+        return None, None
 
     raw_loc = job.get("location") or ""
     raw_country = job.get("country") or ""

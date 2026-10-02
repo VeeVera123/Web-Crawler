@@ -18,7 +18,7 @@ Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 | 5 | `has_non_remote_title_signal` | Title says `"(Hybrid)"`, `"- Onsite"` |
 | 6 | `has_hard_country_specific_auth_signal` | "Authorized to work in `<country>`," names the country directly |
 | 7 | `has_country_tied_sponsorship_permit_residency_signal` | Sponsorship/work-permit/residency phrasing tied to a named country — "require visa sponsorship to work in `<country>`," "need a work permit for `<country>`," "maintain residence in `<country>`" (distinct from #6: not an "authorized to work" statement) |
-| 8 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does |
+| 8 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does. Also a genuinely **bare** citizenship/work-authorization/eligibility question with no place reference at all (not even "where this role is") — same gate, same reasoning. |
 | 9 | `has_state_list_restriction_signal` | Enumerated US state list |
 | 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`" |
 | 11 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families |
@@ -87,11 +87,21 @@ the LLM's verdict is what actually decides the outcome.**
 | 3 | `ENABLE_RANK4_COUNTRY_SPECIFIC` config flag is on |
 | 4 | `"Application Question:"` literally present in `description_snippet` |
 
-### 4b. Additional exclusion check, on top of the 17 universal ones
+### 4b. Additional exclusion checks, on top of the 17 universal ones
 
 | Check | Catches |
 |---|---|
 | `_rank4_has_country_tied_restrictive_question` | Sponsorship/work-permit/residency question tied to a named country, or a *referential* one ("authorized to work where this role is located") — no extra gate needed since Rank 4 already knows the specific place |
+| `has_rank4_region_residency_enforcement_signal` | A sentence that *enforces* physical presence in an otherwise-accepted broad region/country — "this role is based in our Middle East offices," "must reside in APAC," "residency in EMEA is required." Distinct from a merely *informational* region mention (title "CSM - EMEA," "we hire across LATAM") — informational stays acceptable 4b evidence; an enforcement sentence is a reject, same severity as naming one specific disallowed country. Excludes sentences describing the company's *existing* workforce ("our team includes engineers based in Germany...") rather than a requirement on the candidate. |
+
+The universal referential-question check (§1a #8) also got wider here: a
+genuinely **bare** citizenship/work-authorization/eligibility question —
+no country named, not even referentially ("where this role is located")
+— now also counts, under the exact same "does the job already name one
+specific, narrow place" gate every other referential check uses. Real
+posting: a question just asking "What's your citizenship / employment
+eligibility?" with no place reference at all, on a job whose location
+already said "Sydney, New South Wales, Australia."
 
 ### 4c. What "eligible" means here
 
@@ -104,11 +114,18 @@ the LLM's verdict is what actually decides the outcome.**
 
 A title/description mention of an eligible country/region only counts as
 4b evidence when a hiring-context word (work/hire/recruit/employ/
-candidate/applicant/based/located/available/open/role/position) sits
-within 80 characters of it. Generic "About us" company boilerplate
-("we have teams across EMEA, APAC, and the Americas") no longer admits a
-disallowed location (`"India"`, `"Shanghai"`) just because it mentions a
-region somewhere in the text — 2026-09 bug fix, real production data.
+candidate/applicant/available/open/role/position) sits within 80
+characters of it. Generic "About us" company boilerplate ("we have teams
+across EMEA, APAC, and the Americas") no longer admits a disallowed
+location (`"India"`, `"Shanghai"`) just because it mentions a region
+somewhere in the text — 2026-09 bug fix, real production data.
+
+`based`/`located` were deliberately **removed** from that hiring-context
+word list (2026-09, explicit user policy) — those two words don't just
+confirm "this text is about hiring" the way `hire`/`role`/`candidates`
+do, they describe physical presence, and "based in `<region>`" is now
+its own dedicated rejection (the table above) instead of counting toward
+admission.
 
 ### 4d. `4a` vs `4b` — the actual rule
 
