@@ -1,0 +1,43 @@
+name: ATS Rank-4 Eligibility Probe
+
+# One-off diagnostic, NOT part of the daily crawl — workflow_dispatch only,
+# never scheduled. Runs ats_probe.py (see its own module docstring) against
+# real companies already in Supabase's archive_i table to measure whether a
+# candidate ATS platform reliably returns a location, a description, and
+# real application questions on the same job — the exact bar
+# classifier.RANK4_ELIGIBLE_ATS's 12 current platforms were held to
+# (CLASSIFICATION.md's "Rank 4" section, eligibility gate condition 2).
+# Explicit user request: "see to it if we can expand the list of ATSs for
+# rank 4, maybe other ones like Ashby... definitely ashby... maybe just
+# the top 5." Results print to this workflow's own job log — no Supabase/
+# Notion writes happen here at all.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Space-separated ats keys (blank = ashby workday icims bamboohr smartrecruiters adp)"
+        required: false
+        default: ""
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ATS probe
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: exec python ats_probe.py ${{ github.event.inputs.platforms }}
