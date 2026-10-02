@@ -7851,6 +7851,28 @@ _APPLY_LINK_HREF_RE = re.compile(
     r"/appl(?:y|ication)(?:[-_/]|$)|application[-_]?form|apply[-_]?now",
     re.I,
 )
+# 2026-10 BUG FIX (live-confirmed: an iCIMS career page for a university,
+# academiccareers-udst.icims.com, had a generic "Apply" link elsewhere on
+# the page that led to the university's own STUDENT ADMISSIONS page,
+# udst.edu.qa/admissions/how-apply — a completely different site section
+# whose own "Search by Keyword" field then got parsed and reported as a
+# job "Application Question"). A bare "Apply" link text is a real,
+# necessary, common signal (most legitimate apply buttons say nothing
+# more than that), so the fix isn't to tighten the positive match — it's
+# to reject a candidate whose own text/href is clearly about a DIFFERENT
+# kind of application (school admissions, financial aid, a visa/permit,
+# a loan/grant) even if it otherwise scores as apply-shaped. Same
+# "topic-adjacent word standing in for the real signal" bug class as
+# _SPONSOR_NEGATION_RE's narrowing and the referential-question guards
+# elsewhere in this project.
+_APPLY_LINK_NEGATIVE_CONTEXT_RE = re.compile(
+    # [\s_-]* (not just \s*) so this matches equally inside a URL slug
+    # ("financial-aid") and inside free link text ("financial aid").
+    r"admission|enroll(?:ment)?|matriculat|scholarship|financial[\s_-]*aid|"
+    r"student[\s_-]+(?:loan|visa)|graduate[\s_-]+program|undergraduate|"
+    r"transcript|tuition",
+    re.I,
+)
 
 
 def _discover_real_apply_link(html_text: str, base_url: str) -> str | None:
@@ -7886,6 +7908,8 @@ def _discover_real_apply_link(html_text: str, base_url: str) -> str | None:
             a.get("aria-label") or "",
             a.get("title") or "",
         ])
+        if _APPLY_LINK_NEGATIVE_CONTEXT_RE.search(text_sources) or _APPLY_LINK_NEGATIVE_CONTEXT_RE.search(href):
+            continue
         score = 0
         if _APPLY_LINK_TEXT_RE.search(text_sources):
             score += 1
