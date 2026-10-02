@@ -673,6 +673,74 @@ trigger word and the place name could, in principle, silently defeat that
 check the same way. Left alone for now since fixing it everywhere is a
 much larger, separate change than the one reported bug asked for.
 
+### A city/subdivision name sitting between the preposition and the country
+
+2026-09 SYSTEMIC BUG FIX (explicit user report, real posting: International
+EOR's Greenhouse listing — job-boards.greenhouse.io/internationaleor/
+jobs/8771051002 — "Are you legally authorized to work in London, England,
+United Kingdom?"). The user's own framing: application questions that
+straight-up ask for employment eligibility and name the country are
+supposed to be a universal reject before anything else happens — so
+finding one that slipped through meant something structural was wrong,
+not a one-off phrasing gap.
+
+Root cause, confirmed via a systematic test sweep (not a guess): nearly
+every "(?:in|within) `<country>`"-shaped construction in this file —
+across the authorization family (`_COUNTRY_AUTH_RE`: authorized/eligible/
+entitled/permitted to work, work authorization, right to work, work
+rights, permanent resident), the sponsorship/permit/residency family
+(`_RANK4_COUNTRY_TIED_RESTRICTION_RE`), the residence-verb family
+(`_COUNTRY_BASED_RESTRICTION_RE`: reside/live/based/located, citizen of,
+resident of, worked from), the "hiring limited to" family
+(`_HIRING_LIMITED_TO_PLACE_RE`), a title `"(<place> Based)"` parenthetical
+(`_TITLE_COUNTRY_PAREN_RE`), and the entity/payroll and "`<place>`
+residents only" families — assumed the country name sits IMMEDIATELY
+after the preposition (give or take a bare "the"). That's true for "...in
+the United Kingdom" but false for the extremely common real-world shape
+where a city and/or subdivision name comes first and the country comes
+LAST: "London, England, United Kingdom", "Austin, Texas, United States",
+"Toronto, Ontario, Canada", "Sydney, New South Wales, Australia". None of
+these matched anywhere in the file before this fix — this wasn't one
+regex's gap, it was the same unstated assumption baked into roughly 30
+separate alternatives across five different regexes.
+
+Fixed with one shared, bounded fragment, `_PLACE_CHAIN_PREFIX_FRAGMENT`:
+0-2 "`<word(s)>`, " segments (each up to 4 words), inserted between every
+preposition and the country/region fragment it governs across all of the
+families above. Deliberately bounded on both word count and segment
+count, and requires each segment to end in a literal comma leading
+directly into the next segment or the country — a shape real, unrelated
+prose essentially never produces by coincidence (an ordinary sentence
+with two arbitrary comma-separated phrases immediately followed by a
+recognized country name, with nothing else in between, is specifically
+how a place is written, not how English prose incidentally reads) — so
+this doesn't meaningfully widen what these checks accept beyond genuine
+"city, subdivision, country" phrasing. Confirmed via an extensive
+adversarial test pass: a bare country still matches directly (unaffected,
+control case), a company-office or marketing mention of a city with no
+eligibility verb nearby stays unrejected (the existing team/office-context
+guard already in place for several of these families keeps working
+unmodified), the canonical country-free sponsorship boilerplate this
+project already deliberately treats as non-disqualifying is untouched,
+and a 4-segment chain exceeding the deliberate 2-segment cap correctly
+does NOT match (by design — real postings essentially never need more
+than "City, Subdivision, Country").
+
+Also fixed in the same pass, found during the same test sweep rather than
+reported separately: `_COUNTRY_AUTH_RE`'s "work authorization ... for
+`<country>`" alternative required "authorization" to be followed
+DIRECTLY by "in"/"for", missing the equally common "work authorization
+**status** for `<country>`" phrasing with "status" interposed.
+
+Left deliberately unfixed (lower realistic value, wrong grammatical
+direction for a city-chain): the "`<country>`-based candidates" compound-
+adjective family, where the country comes FIRST and a city/subdivision
+chain would need to sit awkwardly BEFORE it rather than after; and
+"employment through our `<country>` entity only," where a city-chain
+would read unnaturally ("through our London, United Kingdom entity" isn't
+how this phrasing actually appears in practice — it's almost always just
+"our UK entity").
+
 ## Priority values at a glance
 
 | Value | Meaning | Set by | Roles |

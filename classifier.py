@@ -3604,6 +3604,41 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
     r"uk\s*(?:&|and)\s*ireland|british\s+isles"
 )
 
+# 2026-09 BUG FIX (explicit user report, real posting: International EOR's
+# Greenhouse listing — "Are you legally authorized to work in London,
+# England, United Kingdom?"): every "(?:in|within) (?:the)? <country>"
+# construction built on _COUNTRY_AUTH_NAMES_RE_FRAGMENT throughout this
+# file assumed the country name sits IMMEDIATELY after the preposition
+# (modulo a bare "the"), which is true for "...in the United States" but
+# false for the extremely common real-world shape where a city and/or
+# subdivision name comes first and the country comes LAST: "London,
+# England, United Kingdom", "Austin, Texas, United States", "Toronto,
+# Ontario, Canada", "Sydney, New South Wales, Australia". Confirmed via a
+# systematic test sweep (not a guess) that this gap affected the
+# authorization/eligibility/work-rights family hardest — those
+# alternatives have ZERO gap tolerance at all between the preposition and
+# the country — while the sponsorship/permit/residency family
+# (_RANK4_COUNTRY_TIED_RESTRICTION_RE) only accidentally survives a SHORT
+# city name by sheer luck of its generic 30-character trailing window,
+# and still fails on anything longer (a 2-segment "City, Region, " chain,
+# or a long intervening aside).
+#
+# This fragment matches 0-2 "<word(s)>, " segments (each up to 4 words)
+# that can sit between a preposition and the country name it's actually
+# naming. Deliberately bounded on BOTH word count and segment count, and
+# REQUIRES each segment to end in a literal comma immediately followed by
+# either the next segment or the country itself — that's how a real place
+# chain is written in practice, and essentially never how unrelated prose
+# happens to read, so this doesn't meaningfully widen what these checks
+# accept beyond genuine "city, subdivision, country" phrasing. Applied to
+# the authorization (_COUNTRY_AUTH_RE), sponsorship/permit/residency
+# (_RANK4_COUNTRY_TIED_RESTRICTION_RE), and residence-verb
+# (_COUNTRY_BASED_RESTRICTION_RE) families — the three places a candidate-
+# facing eligibility question or JD sentence names a country this way.
+_PLACE_CHAIN_PREFIX_FRAGMENT = (
+    r"(?:[A-Za-z][\w'.\-]*(?:\s+[A-Za-z][\w'.\-]*){0,3}\s*,\s*){0,2}"
+)
+
 # 2026-09 ROUND 3 (explicit user correction, quoted directly: "if it has
 # multiple locations and africa thats good. Like say: MENA, AMER, Africa,
 # EMEA, Latam. thats acceptable too."): naming 2+ DISTINCT business regions
@@ -3663,23 +3698,23 @@ _COUNTRY_AUTH_RE = re.compile(
     r"\b(?:must\s+(?:be|have|currently\s+be)\s+)?(?:currently\s+)?"
     r"(?:legally\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+"
     r"(?:lawfully\s+)?(?:for\s+(?:any|an)\s+employer\s+)?(?:lawfully\s+)?(?:in|within)\s+"
-    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\b(?:us|u\.s\.|uk|u\.k\.|canadian|australian|british|indian|german|irish)\s+work\s+authoriz"
-    r"|\bwork\s+authoriz\w*\s+(?:in|for)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwork\s+authoriz\w*\s+(?:status\s+)?(?:in|for)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 NEW (real posting: Aptive's "Program Manager," iCIMS —
     # "Legal authorization to work in the U.S." — a NOUN-phrase statement,
     # not the "authorized to work in" VERB-phrase question every other
     # alternative above expects). Confirmed via a cross-LLM review of live
     # JD text; this exact phrasing never matched any prior alternative.
-    r"|\bauthoriz(?:ation|ations)\s+to\s+work\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bauthoriz(?:ation|ations)\s+to\s+work\s+(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 NEW (explicit user report, real posting: Ofload's Workable
     # screening question "Do you have full unrestricted work rights for
     # Australia?"): every alternative above requires singular "right"
     # (never plural "rights") and "in"/"within" (never "for") — this real,
     # common phrasing uses BOTH the plural and "for", and matched nothing.
-    r"|\bwork\s+rights?\s+(?:in|for)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwork\s+rights?\s+(?:in|for)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian|indian)\s+work\s+(?:visa|permit)\b"
     # 2026-09 BUG FIX (explicit user report, real posting: Weploy's
     # Greenhouse application question "Please specify whether you are an
@@ -3695,7 +3730,7 @@ _COUNTRY_AUTH_RE = re.compile(
     r"|\b(?:au|nz|new\s+zealand(?:er)?)\s+(?:citizen(?:ship)?|permanent\s+resident)\b"
     r"|\b(?:u\.?s\.?a?\.?|united\s+states|u\.?k\.?|united\s+kingdom|canadian|australian|irish|german|indian)\s+"
     r"(?:citizen(?:ship)?|permanent\s+resident)\b"
-    r"|\bpermanent\s+resident\s+of\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"|\bpermanent\s+resident\s+of\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
 )
 
@@ -3873,11 +3908,11 @@ _RESIDENCE_PLACE_RE_FRAGMENT = _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _US_STAT
 _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     r"\b(?:reside|residing|resides|live|living|lives|located|based)\s+"
     r"(?:anywhere\s+)?(?:permanently\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in|within)\s+"
-    r"(?:either\s+)?(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
-    r"|\bremote\s+(?:in|within|from)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
-    r"|\bremote\s*\(\s*(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s*\)"
+    r"(?:either\s+)?(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\bremote\s+(?:in|within|from)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\bremote\s*\(\s*" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s*\)"
     r"|\bwork(?:ing)?\s+from\s+"
-    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"(?:anywhere\s+)?(?:only\s+|solely\s+|primarily\s+)?(?:in\s+)?(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     # 2026-09 ROUND 6 (explicit user-provided restrictive-language
     # taxonomy): "physically" as a modal PREFIX before the residence verb —
     # the existing verb group above only allows optional words BETWEEN the
@@ -3885,23 +3920,23 @@ _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     # never a word before the verb itself, so "must be PHYSICALLY located
     # in X" / "physically reside in X" were both real gaps.
     r"|\b(?:must\s+(?:be\s+)?)?physically\s+(?:located|based|reside)\s+"
-    r"(?:in|within)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     # "must have/maintain a primary/permanent residence in X", "primary/
     # permanent residence in X required" — a distinct noun-phrase shape
     # ("residence", not the residence VERB the main clause above expects).
     r"|\bmust\s+(?:have|maintain)\s+(?:a\s+)?(?:permanent|primary)\s+residence\s+"
-    r"(?:in|within)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     r"|\b(?:permanent|primary)\s+residence\s+(?:in|within)\s+(?:the\s+)?"
-    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+(?:is\s+)?required\b"
+    r"" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+(?:is\s+)?required\b"
     # Tax/legal residence/residency — a distinct jurisdictional concept
     # from physical/permanent residence above, but phrased the same
     # restrictive way in real postings.
     r"|\b(?:legal|tax)\s+residen(?:ce|cy)\s+(?:in|within)\s+(?:the\s+)?"
-    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+(?:is\s+)?required\b"
+    r"" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+(?:is\s+)?required\b"
     r"|\bmust\s+be\s+a\s+tax\s+resident\s+of\s+(?:the\s+)?"
-    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     r"|\bmust\s+maintain\s+tax\s+residency\s+(?:in|within)\s+(?:the\s+)?"
-    r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (explicit user report, real posting: CentralReach's
     # Greenhouse "Customer Success Lead" — "We prefer candidates who can
     # work in a hybrid capacity from one of our corporate offices in
@@ -3936,9 +3971,9 @@ _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     # "tax resident of X" clause above, which requires the word "tax").
     # "Work REMOTELY FROM <country>" (the existing "remote (in|within|
     # from) X" clause requires bare "remote", not "work remotely from").
-    r"|\blive\s+and\s+work\s+in\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
-    r"|\b(?:a\s+)?resident\s+(?:of|in)\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
-    r"|\bwork\s+remotely\s+(?:only\s+)?from\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\blive\s+and\s+work\s+in\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\b(?:a\s+)?resident\s+(?:of|in)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\bwork\s+remotely\s+(?:only\s+)?from\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (same fuzz-test batch): passive-voice "worked from
     # <country>" (distinct from the active "work remotely from X" above --
     # no "remotely," and the verb is passive: "This role must be WORKED
@@ -3946,8 +3981,8 @@ _COUNTRY_BASED_RESTRICTION_RE = re.compile(
     # (distinct from the existing "<demonym> citizen" pattern elsewhere,
     # which requires a demonym like "U.S. citizen" rather than "citizen of
     # the United States").
-    r"|\bworked\s+from\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
-    r"|\b(?:a\s+)?citizen\s+of\s+(?:the\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
+    r"|\bworked\s+from\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b"
+    r"|\b(?:a\s+)?citizen\s+of\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b",
     re.I,
 )
 
@@ -4278,11 +4313,11 @@ _EXTRA_RESTRICTIVE_PATTERNS = [
     # Explicit candidate/resident-only constructions, including the common
     # "for US residents only" form which has no residence verb such as
     # "must reside in".
-    r"\b(?:for|to)\s+(?:the\s+)?(?:(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)|" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+(?:residents?|candidates?|applicants?)\s+only\b",
+    r"\b(?:for|to)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)|" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+(?:residents?|candidates?|applicants?)\s+only\b",
     r"\b(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)\s+(?:residents?|candidates?|applicants?)\s+only\b",
-    r"\bremote\s*[,;:/\-–—(]?\s*(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+only\b",
-    r"\b(?:remote|work\s+remotely)\s*[,;:/\-–—(]?\s*(?:the\s+)?(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+only\b",
-    r"\b(?:role|position|job|opportunity)\s+(?:is\s+)?(?:remote\s+)?(?:only|exclusively)\s+(?:for|in|from)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"\bremote\s*[,;:/\-–—(]?\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+only\b",
+    r"\b(?:remote|work\s+remotely)\s*[,;:/\-–—(]?\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+only\b",
+    r"\b(?:role|position|job|opportunity)\s+(?:is\s+)?(?:remote\s+)?(?:only|exclusively)\s+(?:for|in|from)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:be\s+)?(?:based|located|resident|residing|living)\s+(?:in|within)\s+[^.;,\n]{1,80}",
     r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:live|reside|work|be\s+located|be\s+based)\s+(?:in|within)\s+[^.;,\n]{1,80}",
     r"\b(?:only|exclusively)\s+(?:open|available)\s+to\s+(?:candidates?|applicants?|employees?|people)\s+(?:in|from|based\s+in)\s+[^.;,\n]{1,80}",
@@ -4572,7 +4607,7 @@ _TITLE_REGION_SUFFIX_RE = re.compile(
 # above never matched it. Checked anywhere in the title, not just at the
 # end, since a parenthetical qualifier can appear mid-title too.
 _TITLE_COUNTRY_PAREN_RE = re.compile(
-    r"\(\s*(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+based\s*\)", re.I,
+    r"\(\s*" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+based\s*\)", re.I,
 )
 
 
@@ -5008,7 +5043,7 @@ _ENTITY_PAYROLL_RESTRICTION_RE = re.compile(
     # "must be employed in/through our <place> entity" — the existing
     # EOR/PEO-only version above doesn't cover a named-country entity
     # phrasing.
-    r"|\bmust\s+be\s+employed\s+(?:in|within)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bmust\s+be\s+employed\s+(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bemployment\s+through\s+(?:our|a|an)\s+(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+entity\s+only\b"
     # Payroll-specific (distinct from the existing "EOR/PEO/payroll
     # partner/provider/entity/presence" clause above, which requires
@@ -5124,16 +5159,16 @@ _COUNTRY_LIST_ONLY_RE = re.compile(
 # "candidate must reside/be based in X" shape.
 _HIRING_LIMITED_TO_PLACE_RE = re.compile(
     r"\b(?:hiring|employment)\s+(?:is\s+)?(?:limited|restricted)\s+to\s+(?:the\s+)?"
-    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bwe\s+(?:hire|employ|recruit)\s+(?:only|exclusively)\s+in\s+(?:the\s+)?"
-    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bremote\s+(?:is\s+|positions?\s+are\s+|work\s+is\s+)?(?:available\s+only|"
     r"restricted\s+to|limited\s+to|only\s+available)\s+(?:in\s+)?(?:the\s+)?"
-    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bthis\s+remote\s+(?:role|position|opportunity)\s+is\s+only\s+available\s+in\s+"
-    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bavailable\s+(?:only|exclusively)\s+within\s+(?:the\s+)?"
-    r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # NOTE: deliberately NOT a bare "restricted/limited to <place>" with no
     # subject — real postings use that exact shape for things unrelated to
     # hiring eligibility (e.g. "international travel is limited to Germany
@@ -5143,14 +5178,14 @@ _HIRING_LIMITED_TO_PLACE_RE = re.compile(
     # restricted to X" and "employment is limited/restricted to X" above
     # already cover the other common real subjects.
     r"|\b(?:geographically\s+(?:restricted|limited)|(?:restricted|limited)\s+geographically)\s+to\s+"
-    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (explicit user-commissioned adversarial fuzz test):
     # "This position IS RESTRICTED TO candidates in <country>" — a real,
     # distinct subject shape ("this position/role IS restricted to
     # candidates in X") from "hiring/employment is limited/restricted to
     # X" above, which has no "candidates in" clause at all.
     r"|\b(?:this\s+)?(?:position|role|job)\s+is\s+restricted\s+to\s+candidates?\s+in\s+"
-    r"(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (explicit user-commissioned adversarial fuzz test,
     # ~4,820 generated restrictive phrasings): a bare, standalone "<place>
     # only." — "US only.", "APAC only.", "Germany only." — with NO subject
@@ -5168,7 +5203,7 @@ _HIRING_LIMITED_TO_PLACE_RE = re.compile(
     # already gets hard-rejected for (see _keyword_classify_location_
     # detail's own residue check), just appearing as JD body text instead
     # of the structured field.
-    r"|\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+only\s*(?=[.!?\n]|$)",
+    r"|\b" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\s+only\s*(?=[.!?\n]|$)",
     re.I,
 )
 
@@ -5617,18 +5652,20 @@ PRIORITY_MIXED_SIGNAL = "4b"   # title/description names a region/country
 # ONLY because it names no country — the identical question naming a
 # country is a genuine restriction and must exclude the job).
 _RANK4_COUNTRY_TIED_RESTRICTION_RE = re.compile(
-    r"\b(?:visa\s*)?sponsorship\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:"
+    r"\b(?:visa\s*)?sponsorship\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b"
+    + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:"
     + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b[^.!?\n]{0,60}\b(?:visa\s*)?sponsorship\b"
-    r"|\bsponsor\w*\s+(?:a\s+|your\s+)?(?:work\s+)?visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:"
+    r"|\b" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b[^.!?\n]{0,60}\b(?:visa\s*)?sponsorship\b"
+    r"|\bsponsor\w*\s+(?:a\s+|your\s+)?(?:work\s+)?visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b"
+    + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:"
     + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\bwork\s+permit\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
-    r"|\bresidenc(?:e|y)\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwork\s+permit\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bresidenc(?:e|y)\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (explicit user-commissioned adversarial fuzz test):
     # "Do you have a valid work visa for the United States?" -- bare
     # "work visa," no "sponsorship" word at all, which every alternative
     # above requires.
-    r"|\bwork\s+visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    r"|\bwork\s+visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (explicit user report, real posting: Pave's
     # Greenhouse "Account Manager" listing — "Do you now, or will you in
     # the future, require sponsorship for employment visa status (e.g.,
@@ -5659,7 +5696,7 @@ _RANK4_COUNTRY_TIED_RESTRICTION_RE = re.compile(
     # _RANK4_REQUIREMENT_FRAMING_RE guard unaffected, since that check
     # runs on the whole sentence after this regex already matches it.
     r"|\bsponsorship\b.{0,100}?\bto\s+work\s+(?:legally\s+)?(?:for\s+.{0,40}?)?"
-    r"\bin\b\s*(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"\bin\b\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
 )
 

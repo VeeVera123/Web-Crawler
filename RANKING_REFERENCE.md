@@ -16,11 +16,11 @@ Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 | 3 | `has_non_remote_workplace_type` | Structured `workplace_type` field = Hybrid/On-site/In-office/In-person |
 | 4 | `has_non_remote_labeled_text_signal` | Same, as free text: `"Remote status: On-site"`, standalone phrases (`"Hybrid Working"`, `"hybrid capacity"`, `"carried out...in the company's premises"`, `"on-site/in-office/in-person role"`) |
 | 5 | `has_non_remote_title_signal` | Title says `"(Hybrid)"`, `"- Onsite"` |
-| 6 | `has_hard_country_specific_auth_signal` | "Authorized to work in `<country>`," names the country directly |
-| 7 | `has_country_tied_sponsorship_permit_residency_signal` | Sponsorship/work-permit/residency phrasing tied to a named country — "require visa sponsorship to work in `<country>`," "need a work permit for `<country>`," "maintain residence in `<country>`," "require sponsorship ... to work legally for our Company in `<country>`" even past an "(e.g., H-1B, etc.)" aside (distinct from #6: not an "authorized to work" statement) |
+| 6 | `has_hard_country_specific_auth_signal` | "Authorized to work in `<country>`," names the country directly — **including past a city/subdivision name, "authorized to work in London, England, United Kingdom"** |
+| 7 | `has_country_tied_sponsorship_permit_residency_signal` | Sponsorship/work-permit/residency phrasing tied to a named country — "require visa sponsorship to work in `<country>`," "need a work permit for `<country>`," "maintain residence in `<country>`," "require sponsorship ... to work legally for our Company in `<country>`" even past an "(e.g., H-1B, etc.)" aside (distinct from #6: not an "authorized to work" statement), **including past a city/subdivision name, "sponsorship to work in Berlin, Germany"** |
 | 8 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does. Also a genuinely **bare** citizenship/work-authorization/eligibility question with no place reference at all (not even "where this role is") — same gate, same reasoning. |
 | 9 | `has_state_list_restriction_signal` | Enumerated US state list |
-| 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`," **or a city/metro name + 2-letter US state abbreviation after a residence verb** ("reside in the Dallas/Fort Worth, TX area") |
+| 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`," **or a city/metro name + 2-letter US state abbreviation after a residence verb** ("reside in the Dallas/Fort Worth, TX area"), **including a full city, subdivision, country chain** ("must reside in Austin, Texas, United States") |
 | 11 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families |
 | 12 | `has_hard_metadata_location_signal` | ATS metadata names a place the location field didn't |
 | 13 | `has_hard_location_symbol_signal` | Map-pin icon next to a specific place |
@@ -37,6 +37,17 @@ the underlying logic already existed for Rank 4 only
 this universal chain. See `CLASSIFICATION.md`'s "Adversarial fuzz-test
 round" section for the full list of gaps closed in that pass, and which
 claims from the test were investigated and deliberately left unfixed.
+
+Checks 6, 7, 10 (plus `_HIRING_LIMITED_TO_PLACE_RE`, a title `"(<place>
+Based)"` parenthetical, and the entity/payroll and "`<place>` residents
+only" families below) all got the SAME 2026-09 fix at once: a shared
+`_PLACE_CHAIN_PREFIX_FRAGMENT` that lets a city/subdivision name sit
+between a preposition and the country it governs ("in London, England,
+United Kingdom," not just "in the United Kingdom"). See
+`CLASSIFICATION.md`'s "A city/subdivision name sitting between the
+preposition and the country" section — this was a single systemic
+assumption baked into ~30 alternatives across five regexes, not a
+one-off phrasing gap.
 
 Checks 18-19 were added 2026-09 for three real-posting leaks (a state
 license question, a city/metro + state-abbreviation residency question, an
