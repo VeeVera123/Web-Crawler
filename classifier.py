@@ -5628,7 +5628,38 @@ _RANK4_COUNTRY_TIED_RESTRICTION_RE = re.compile(
     # "Do you have a valid work visa for the United States?" -- bare
     # "work visa," no "sponsorship" word at all, which every alternative
     # above requires.
-    r"|\bwork\s+visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
+    r"|\bwork\s+visa\b[^.!?\n]{0,60}\b(?:for|to|in|within)\b[^.!?\n]{0,30}\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    # 2026-09 BUG FIX (explicit user report, real posting: Pave's
+    # Greenhouse "Account Manager" listing — "Do you now, or will you in
+    # the future, require sponsorship for employment visa status (e.g.,
+    # H-1B visa status, etc.) to work legally for our Company in the
+    # United States?"): this is structurally the EXACT shape the module
+    # comment above already calls disqualifying ("the identical question
+    # naming a country is a genuine restriction") -- "sponsorship ... to
+    # work ... in <country>" -- but every alternative above measures the
+    # country's distance from "sponsorship" using a SINGLE preposition
+    # immediately after "sponsorship" itself, and here the real country-
+    # naming clause ("to work legally for our Company in the United
+    # States") sits 100+ characters later, past an intervening "(e.g.,
+    # H-1B visa status, etc.)" aside. Two distinct fixes bundled into one
+    # new alternative: (1) anchor on "to work ... in <country>" directly
+    # — the actual authorization-shaped clause — rather than a bare
+    # preposition, since that's reliably present close to the country name
+    # regardless of how verbose the preceding sponsorship clause is; (2)
+    # use a plain `.` gap instead of this regex's usual `[^.!?\n]` filler,
+    # since "e.g." and "etc." each contain a literal period that
+    # `[^.!?\n]` refuses to cross even though neither one is an actual
+    # SENTENCE boundary (_split_into_sentences's own split regex requires
+    # the period to be followed directly by whitespace, which "e.g.," and
+    # "etc.)" aren't) — this function already operates one already-split
+    # sentence at a time, so there's no cross-sentence-bleed risk from
+    # loosening the gap just here. A benefit-phrased equivalent ("we offer
+    # visa sponsorship to work in Canada") still correctly falls through
+    # to this same function's existing _RANK4_BENEFIT_FRAMING_RE/
+    # _RANK4_REQUIREMENT_FRAMING_RE guard unaffected, since that check
+    # runs on the whole sentence after this regex already matches it.
+    r"|\bsponsorship\b.{0,100}?\bto\s+work\s+(?:legally\s+)?(?:for\s+.{0,40}?)?"
+    r"\bin\b\s*(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
 )
 

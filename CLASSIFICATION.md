@@ -602,6 +602,77 @@ match it. This was a classifier-regex gap, not a scraper gap.
      Speaking" title is actually most likely to show up) gets the same
      treatment.
 
+### A sponsorship question naming a country past an "e.g./etc." aside
+
+2026-09 BUG FIX (explicit user report, real posting: Pave's Greenhouse
+"Account Manager" listing — job-boards.greenhouse.io/
+paveakatroveinformationtechnologies/jobs/4726158005). The posting itself
+was already correctly rejected for independent reasons (its location
+field names "San Francisco, California, United States" directly, plus a
+hybrid in-office schedule and a "which office are you applying to"
+question) — confirmed via fetching the live posting before concluding
+anything. But the sponsorship QUESTION itself, in isolation, revealed a
+real latent gap: "Do you now, or will you in the future, require
+sponsorship for employment visa status (e.g., H-1B visa status, etc.) to
+work legally for our Company in the United States?" was NOT recognized
+as a country-tied restriction by `has_country_tied_sponsorship_permit_
+residency_signal` at all — meaning on a DIFFERENT posting where the
+location field is bare/blank/Remote (and so can't independently kill the
+job the way Pave's did), this exact phrasing would have fallen through to
+the LLM stage instead of a deterministic reject.
+
+This is a real gap, not a judgment call — `_RANK4_COUNTRY_TIED_
+RESTRICTION_RE`'s own module comment already states the governing policy
+explicitly (the Notabene example): "Will you now or in the future require
+sponsorship for a work visa?" is fine ONLY because it names no country —
+the identical question naming a country is a genuine restriction and must
+exclude the job." Two separate things broke the existing alternatives on
+this specific phrasing:
+
+1. Every existing alternative measures the country's distance from
+   "sponsorship" via a single preposition (for/to/in/within) landing
+   within a tight ~60+30 character window. Here the real country-naming
+   clause ("to work legally for our Company in the United States") sits
+   100+ characters past the word "sponsorship", with a long intervening
+   "(e.g., H-1B visa status, etc.)" aside — fixed by anchoring a new
+   alternative on the actual authorization-shaped clause directly
+   ("sponsorship ... to work ... in `<country>`") instead of a bare
+   preposition, since that clause reliably sits close to the country name
+   regardless of how verbose the preceding sponsorship clause gets.
+2. Independently, "e.g." and "etc." each contain a literal period —
+   which the existing alternatives' `[^.!?\n]` filler character class
+   refuses to cross, even though neither one is an actual sentence
+   boundary (`_split_into_sentences`'s own split regex only splits at a
+   period directly followed by whitespace, which "e.g.," and "etc.)"
+   aren't). Fixed, for the new alternative only, by using a plain `.` gap
+   instead — safe here specifically because `has_country_tied_
+   sponsorship_permit_residency_signal` already operates one already-
+   split sentence at a time, so there's no risk of a loosened gap
+   bleeding across two unrelated sentences.
+
+Confirmed unaffected by this fix: the canonical country-FREE boilerplate
+("Will you now or in the future require sponsorship for employment visa
+status?") still does not reject on its own — that's deliberate,
+documented behavior from an earlier fix (see `has_hard_country_specific_
+auth_signal`'s own docstring: this exact question is "ubiquitous,
+industry-standard EEO/I-9 compliance screening language" the overwhelming
+majority of US-headquartered companies ask regardless of whether the role
+is actually globally open). A benefit-framed country mention ("we offer
+visa sponsorship to work in Canada") also still correctly falls through
+to this same function's existing benefit-vs-requirement framing guard
+(`_RANK4_BENEFIT_FRAMING_RE`/`_RANK4_REQUIREMENT_FRAMING_RE`), unaffected
+by this fix since that guard runs on the whole sentence after the new
+alternative matches it.
+
+Known, separate, NOT-yet-fixed finding from this investigation: the
+`[^.!?\n]` filler class used by essentially every OTHER gap-based regex
+in this file carries the same "e.g./etc. defeats the match" weakness —
+this fix only loosened it for the one new alternative added here. Any
+restrictive sentence elsewhere containing "e.g." or "etc." between the
+trigger word and the place name could, in principle, silently defeat that
+check the same way. Left alone for now since fixing it everywhere is a
+much larger, separate change than the one reported bug asked for.
+
 ## Priority values at a glance
 
 | Value | Meaning | Set by | Roles |
