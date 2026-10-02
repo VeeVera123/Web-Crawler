@@ -40,4 +40,10 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # config.py imports eagerly and hard-requires an LLM key at
+          # module load time (LLM_PROVIDER defaults to "cerebras") even
+          # though this probe never actually calls an LLM — ats_scrapers.py
+          # imports config for REQUEST_TIMEOUT/MAX_RETRIES, which is enough
+          # to trigger it.
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
         run: exec python ats_probe.py ${{ github.event.inputs.platforms }}
