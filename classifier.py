@@ -3470,7 +3470,24 @@ def has_hard_no_sponsorship_signal(job: dict) -> bool:
 # in India" had no country-list entry to match against at all — a
 # pre-existing miss, independent of the phrasing-rigidity bug below).
 _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
-    r"u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
+    # 2026-09 BUG FIX (explicit user report, real-world screening-question
+    # phrasing: "Would you require sponsorship to work with us?"): the
+    # original bare "u\.?s\.?a?\.?" made EVERY period and the "a" optional,
+    # so its minimal possible match was just the two bare letters "us" --
+    # which collided with the ordinary English pronoun "us" ("work with
+    # us", "join us", "work for us"). Confirmed live: this sentence has no
+    # country named anywhere, referentially or otherwise, yet several
+    # sponsorship/auth checks were reading "us" as the country code and
+    # hard-rejecting a job that should have stayed 'unsure' (benefit of
+    # the doubt) on a bare/Remote location, or been correctly admitted on
+    # a broad one. Fixed by requiring the bare, period-less 2-letter form
+    # to be written in EXACT UPPERCASE ("US", never "us"/"Us"/"uS") via a
+    # scoped case-sensitive sub-pattern -- real postings always write the
+    # country abbreviation in caps, so this loses no real coverage, while
+    # every period-containing variant ("U.S.", "U.S.A.") and the full
+    # "USA"/"United States" forms stay case-insensitive as before, since
+    # none of those collide with any ordinary English word in any casing.
+    r"\b(?-i:US)\b|u\.s\.?a?\.?|usa|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
     r"canada|australia|new\s+zealand|(?:republic\s+of\s+)?ireland|germany|"
     r"european\s+union|\beu\b|"
     r"india|philippines|nigeria|kenya|south\s+africa|singapore|mexico|brazil|"
@@ -3793,7 +3810,32 @@ _REFERENTIAL_AUTH_QUESTION_RE = re.compile(
     r"citizenship\s*(?:[/,]|\s+(?:or|and)\s+)?\s*(?:work\s+)?(?:employment\s+)?"
     r"(?:authoriz\w*|eligib\w*|status)\b"
     r"|\b(?:are\s+you|do\s+you\s+have)\b[^.!?\n]{0,30}\b(?:citizenship|citizenship\s+status|"
-    r"work\s+authoriz\w*|employment\s+eligib\w*)\b",
+    r"work\s+authoriz\w*|employment\s+eligib\w*)\b"
+    # 2026-09 BUG FIX (explicit user report: "would it accept a situation
+    # where a company says USA as location but then asks: would you
+    # require sponsorship to work with us. Here, USA is not mentioned in
+    # the application questions"). Same referential gap as the bare-
+    # citizenship alternative just above, but for a bare SPONSORSHIP
+    # question instead -- "Would you require sponsorship to work with
+    # us?" names no country anywhere, not even referentially ("where this
+    # role is located"), it just refers to "us"/"here"/"our team" (the
+    # employer itself). Confirmed via direct testing this was a real gap:
+    # has_country_tied_sponsorship_permit_residency_signal/
+    # _rank4_has_country_tied_restrictive_question both require the
+    # country NAMED in the question text itself, with no referential
+    # fallback at all -- so this question was falling through untouched
+    # on a job whose location field already said e.g. "United States".
+    # Same safety gate as every alternative above: both call sites
+    # (has_referential_auth_question_with_named_place_signal /
+    # _rank4_has_country_tied_restrictive_question) only treat a match
+    # here as disqualifying when the job's OWN location already resolved
+    # to one narrow, specific place -- a genuinely bare/blank/Remote/
+    # broad location is unaffected, same benefit-of-the-doubt policy as
+    # the bare citizenship question above.
+    r"|\b(?:would|will|do|does)\s+(?:you|the\s+candidate|the\s+applicant)\b[^.!?\n]{0,60}"
+    r"\b(?:require|need)\b[^.!?\n]{0,30}"
+    r"(?:visa\s+)?sponsorship\b[^.!?\n]{0,60}\bto\s+(?:work\s+(?:with|for)|join)\s+"
+    r"(?:us|here|this\s+(?:company|team|organization)|our\s+(?:company|team|organization))\b",
     re.I,
 )
 

@@ -741,6 +741,55 @@ would read unnaturally ("through our London, United Kingdom entity" isn't
 how this phrasing actually appears in practice — it's almost always just
 "our UK entity").
 
+### A bare sponsorship question, and the pronoun "us" vs. the country "US"
+
+2026-09 (explicit user question: "we delt with referential questions
+right? Like it won't accept situations where a company says USA as
+location but then asks: would you require sponsorship to work with us.
+Here, USA is not mentioned in the application questions so idk if it can
+tell this is referential"). Two separate bugs surfaced while answering
+this directly, confirmed by testing rather than assumed.
+
+**Bug 1 (a false positive, found while investigating — not what was
+reported):** `_COUNTRY_AUTH_NAMES_RE_FRAGMENT`'s US entry was
+`u\.?s\.?a?\.?` — every period AND the "a" were optional, so its minimal
+possible match was the bare two letters "us". That collides with the
+ordinary English pronoun "us" — "work with us," "join us," "tell us
+about..." Confirmed live: "Would you require sponsorship to work with
+us?" on a genuinely bare/Remote location (no country named at all) was
+being hard-rejected, because the word "us" in "with us" was being read as
+the country code. This would have caused real false-positive rejections
+in production — a genuinely open, global role dropped just because its
+sponsorship question happened to say "work with us" instead of "work for
+this role." Fixed by requiring the bare, period-less form to be written
+in **exact uppercase** ("US", never "us"/"Us"/"uS") via a scoped case-
+sensitive sub-pattern (`\b(?-i:US)\b`) — real postings always write the
+country abbreviation in caps, so this loses no real coverage. Every
+period-containing variant ("U.S.", "U.S.A.") and the full "USA"/"United
+States" forms stay case-insensitive as before, since none of those
+collide with any ordinary English word in any casing.
+
+**Bug 2 (the real gap the user asked about, confirmed once Bug 1 was
+fixed so it could be tested cleanly without the pronoun collision masking
+it):** a genuinely bare sponsorship question — no country named anywhere,
+not even referentially ("where this role is located") — was not being
+tied back to the job's own already-named location the way the bare
+CITIZENSHIP question already is (see the ShipBob fix above). Confirmed:
+`classify_rank4` admitted "Would you require sponsorship to work with
+us?" as `4a` on a job whose location field said "United States" outright.
+`has_country_tied_sponsorship_permit_residency_signal`/
+`_rank4_has_country_tied_restrictive_question` both require the country
+to be **named in the question text itself**, with no referential
+fallback — unlike the citizenship family, which already had one. Fixed
+by extending `_REFERENTIAL_AUTH_QUESTION_RE` with a bare-sponsorship
+alternative ("would/will/do/does you/the candidate/the applicant ...
+require/need ... sponsorship ... to work with/for us/here/this company"
+or "... to join us/our team"), gated by the exact same "is a real,
+specific, non-broad place already named" check both existing call sites
+already apply — so it stays safe on a genuinely blank/bare-Remote/broad
+location, benefit-of-the-doubt preserved, identical to the citizenship
+fix.
+
 ## Priority values at a glance
 
 | Value | Meaning | Set by | Roles |
