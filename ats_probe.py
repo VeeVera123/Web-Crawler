@@ -48,9 +48,9 @@ CANDIDATES = {
     "adp": "ADP",
 }
 
-SAMPLE_COMPANIES = 12
+SAMPLE_COMPANIES = 40
 JOBS_PER_COMPANY = 3
-PER_PLATFORM_CONCURRENCY = 8  # concurrent companies in flight, per platform
+PER_PLATFORM_CONCURRENCY = 10  # concurrent companies in flight, per platform
 
 
 def fetch_slugs(ats: str, limit: int) -> list[str]:
