@@ -316,6 +316,33 @@ called):
    Teamtailor, Recruitee, Lever, Eploy, PageUp, isolvedhire, Pinpoint,
    Rippling**. Notably, Ashby did **not** qualify (application questions
    are auth-walled) despite looking like an obvious candidate.
+
+   **2026-10 re-check (explicit user request — "expand the list... maybe
+   Ashby... top 5"):** re-verified live against real companies in
+   `archive_i` (see `ats_probe.py` / `.github/workflows/ats_probe.yml`,
+   a standalone diagnostic, not part of the crawl pipeline) rather than
+   trusting the 2026-09 note. Sampled Ashby, Workday, iCIMS, BambooHR,
+   SmartRecruiters, and ADP — ~72 companies total. Result: **0% of
+   checked jobs returned any application-question text, on every single
+   platform**, even though Ashby/Workday/BambooHR/ADP all reliably
+   returned real jobs with real locations. Confirmed directly for Ashby:
+   its `posting-api/posting/{slug}/{id}` endpoint (the only one that
+   would carry form questions) returns a hard `401 Unauthorized` for
+   every company tested (ramp, vesta, cambly, notion, linear), and the
+   public `/application` page is a pure client-rendered SPA with no form
+   schema anywhere in the static HTML or any embedded JSON — there is no
+   unauthenticated way to get Ashby's real screening questions short of
+   executing its client-side JS with a real session, which this project
+   doesn't do anywhere. iCIMS returned 0 jobs for all 12 sampled
+   companies (its scraper itself likely needs attention, separate from
+   this question); SmartRecruiters' `archive_i` rows were garbage slugs
+   (`--x3e`, `.well-known`, `%22https:`), a discovery-source data-quality
+   issue, not a finding about the platform. **Conclusion: `RANK4_ELIGIBLE_
+   ATS` stays unchanged.** None of the 6 candidates clears the bar —
+   adding any of them would make Rank 4 admit jobs on "no restrictive
+   question found" when the real reason is "no questions were ever
+   fetched," reopening the exact false-negative risk this gate exists to
+   prevent.
 3. `config.ENABLE_RANK4_COUNTRY_SPECIFIC` is on — a `crawl.yml` checkbox,
    on by default (2026-10, explicit user instruction: "rank 4 included by
    default but can still be manually turned off"). Always on for the
