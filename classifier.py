@@ -407,6 +407,26 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
                 )
 
                 if is_daily_limit:
+                    # 2026-10 BUG FIX (explicit user report: Groq getting
+                    # marked exhausted after only ~100 requests, nowhere
+                    # near the 1,000/day request cap this file tracks --
+                    # but a manual reset gets it working again the SAME
+                    # day, which a genuinely exhausted account couldn't
+                    # do). The generic "daily quota reached" reason this
+                    # used to log is useless for telling apart Groq's TWO
+                    # separate daily caps (1,000 requests/day vs 200,000
+                    # TOKENS/day -- the latter isn't tracked by this file's
+                    # own counter at all, and LOCATION_SYSTEM_PROMPT alone
+                    # is ~2,067 tokens per call, so ~100 location calls can
+                    # plausibly hit 200K tokens/day well before 1,000
+                    # requests) from a genuine false positive (an ordinary
+                    # per-minute rate-limit message that happens to contain
+                    # a substring like "daily"/"per day" and gets
+                    # misclassified by the loose checks above). Logging
+                    # Groq's own verbatim error text makes that
+                    # diagnosable from the run's log instead of requiring
+                    # a guess.
+                    log.error(f"{name} hit a daily-limit response: {error_str[:500]}")
                     _mark_exhausted(name, "daily quota reached")
                     return None
                 if is_rate_limit and attempt < MAX_RETRIES - 1:
