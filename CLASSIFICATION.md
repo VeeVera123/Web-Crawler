@@ -790,6 +790,122 @@ already apply — so it stays safe on a genuinely blank/bare-Remote/broad
 location, benefit-of-the-doubt preserved, identical to the citizenship
 fix.
 
+## Top-to-bottom audit (2026-09, explicit user-commissioned sweep)
+
+The user asked for a full top-to-bottom pass over this file — every check,
+hundreds of adversarial tests, no exceptions — rather than continuing to
+fix one reported leak at a time. This section documents what that sweep
+found. Every bug here was confirmed by direct testing before being fixed,
+not guessed, and every fix was re-verified against the genuine true-
+positive phrasing the check exists to catch, so no real coverage was lost.
+
+### The systemic bug: `re.I` also case-folds a bare `[A-Z]` character class
+
+This was, by far, the most consequential finding. Several patterns in this
+file use `[A-Z]` specifically to require "this must be a real place name"
+(proper nouns are capitalized) — but every one of those patterns is
+compiled with `re.I` for the OTHER words in the same pattern (keywords
+like "based"/"located"/"must"), and Python's `re.I` flag case-folds a
+character class too: `[A-Z]` under `re.I` matches a lowercase letter just
+as readily as an uppercase one. The "require a capital letter" guard was
+silently doing nothing.
+
+Confirmed, with real consequences, in:
+
+- **`_ROLE_SPECIFIC_PLACE_RE` / `_CANDIDATE_PLACE_RE`** — the regexes
+  behind `has_role_specific_place_restriction_signal`, **universal check
+  #2**, one of the very first checks every job passes through. "This role
+  is based in a hybrid of creativity and structure," "The candidate must
+  be based in a culture of excellence," "This position is located in a
+  world of endless possibility" — pure marketing language, naming no place
+  at all — were all captured as if they named a real, specific location,
+  and hard-rejected. Given how common this kind of "based in a culture
+  of X" marketing phrasing is in real job descriptions, this was likely
+  one of the single highest-volume sources of wrongly-dropped jobs in the
+  whole pipeline.
+- **`_EXTRA_RESTRICTIVE_PATTERNS`** (17 alternatives, feeding
+  `has_extra_restrictive_geography_signal`, **universal check #11**) — same
+  bug, same consequence: "must be based in a fast-paced, dynamic team
+  environment," "we can only hire in the most talented and driven
+  individuals" were both captured and rejected.
+- **`_RELOCATION_REQUIRED_RE`** — "willing to relocate to a new city for
+  this role," "...to wherever opportunity takes you," "...to pursue growth
+  opportunities," "...to advance your career" all matched, since none of
+  them actually need to name a real place for the old pattern to fire.
+- **`_EXCLUSION_OUTSIDE_RE`** — same root issue, slightly different shape:
+  one alternative's tail had no place-validation at all, so "not currently
+  open to candidates outside of standard business hours," "cannot accept
+  applications from outside of our normal review process," "cannot
+  consider applicants outside of business hours" were all rejected as
+  geographic exclusions despite not naming a place.
+
+All four fixed the same way: a scoped case-sensitive sub-pattern,
+`(?-i:[A-Z])`, at every "this must start a capitalized word" position —
+this turns off case-insensitivity for just that one character while the
+surrounding keywords stay governed by the outer `re.I` exactly as before.
+`_RELOCATION_REQUIRED_RE` additionally needed an `"our "` prefix allowance
+("relocation to our Austin office" doesn't start with a capital letter
+even though "Austin" — the actual place — is right there), added alongside
+the existing `"the "` allowance.
+
+Re-verified after the fix that the ORIGINAL bug this exact case-folding
+quirk was already half-noticed for — "This role is based in APAC and
+LATAM" correctly registering as multi-region breadth rather than a single
+restriction, because the old `[A-Z]` match didn't stop at the lowercase
+connector "and" — still works: `APAC`/`LATAM`/`EMEA`/`Africa` are written
+in genuine uppercase in real postings, so the new case-sensitive version
+still matches them correctly; only a genuinely-lowercase tail (marketing
+fluff) is now excluded.
+
+### Negation-shaped words standing in for actual negation
+
+Same root bug CLASS as the pre-existing `has_hard_country_specific_auth_signal`/`_sponsorship_sentence_has_negative_signal`
+fixes (a topic-adjacent word treated as the thing that's actually
+disqualifying) — found twice more in this sweep:
+
+- **`_SPONSOR_NEGATION_RE`'s blanket `"without"`** — "We offer visa
+  sponsorship **without** any restrictions," "...**without** hesitation,"
+  "...**without** exception," "Sponsorship is available **without** any
+  geographic limitation" are all POSITIVE sponsorship statements, but
+  "without" modifying "restrictions"/"hesitation"/"exception"/"limitation"
+  (not sponsorship itself) was read as negating the sponsorship that sits
+  nearby in the same clause. Fixed by removing the blanket trigger and
+  adding `_SPONSOR_WITHOUT_TOPIC_RE`, a narrow pattern requiring "without"
+  to be directly followed by the sponsorship/visa/work-permit noun itself
+  ("work without sponsorship," "without a visa") — which is how a genuine
+  negative statement actually reads, and which none of the four false
+  positives above ever do.
+- **The idiom "can't wait"** — "We **can't wait** to sponsor the right
+  candidate's visa!" contains "can't," a perfectly good negation trigger
+  everywhere else, but "can't wait" means "excited to," not a negation of
+  the sponsorship that follows. Fixed by stripping the idiom out of the
+  clause before the negation check runs, rather than adding it as a
+  standalone exception to the negation word list (which would have made
+  "can't" stop working as a real negation trigger everywhere else too).
+- **`_HYPHENATED_BASED_ONLY_RE`'s missing negation guard** — "This role is
+  **NOT restricted to** US-based candidates only" is an explicitly
+  INCLUSIVE statement (openly reassuring candidates the role isn't
+  US-only), but the hyphenated pattern matched "US-based candidates only"
+  inside it regardless, with no check for the negation sitting right
+  before it. Fixed with a new `_HYPHENATED_BASED_NEGATION_RE` guard
+  ("not restricted to," "isn't restricted to," "no longer restricted to,"
+  "not just for") checked before either hyphenated pattern runs.
+
+### What this sweep deliberately did NOT change
+
+Checked but found to be adequately safe already, or appropriately scoped,
+with no fix needed: `_WORKPLACE_LABEL_RE`'s captured-value validation (a
+second, narrow regex already validates the captured label value
+separately); `_TIMEZONE_LOCATION_RE`'s generic timezone-code catch-all
+(already bounded by requiring "time zone" to close the match); `GLOBAL_
+KEYWORDS`'s bare `"earth"` entry (already excluded from the loose free-text
+safety net via `_SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS`, and only usable
+unscoped against the narrow, structured location FIELD value, not free
+prose); common name/place-word collisions ("Chad"/"Jordan" as person
+names, "turkey" the food, "china" the homeware) — none of these false-
+positive, since none of the hard-reject checks fire on a bare place word
+with no restrictive verb/construction around it.
+
 ## Priority values at a glance
 
 | Value | Meaning | Set by | Roles |

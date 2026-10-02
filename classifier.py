@@ -3336,7 +3336,33 @@ _SPONSOR_NON_VISA_RE = re.compile(
 _SPONSOR_NEGATION_RE = re.compile(
     r"\b(no|not|cannot|can\'t|can’t|won\'t|won’t|will\s*not|unable|never|"
     r"doesn\'t|does\s*not|don\'t|do\s*not|isn\'t|is\s*not|aren\'t|are\s*not|"
-    r"without|n\'t)\b",
+    r"n\'t)\b",
+    re.I,
+)
+
+# 2026-09 BUG FIX (explicit user-commissioned top-to-bottom audit,
+# confirmed via direct testing, not a guess): bare "without" used to be
+# part of _SPONSOR_NEGATION_RE's blanket word list, treating ANY "without"
+# anywhere in the same clause as "sponsorship" as proof sponsorship is
+# being negated. But "without" overwhelmingly modifies something OTHER
+# than sponsorship in real postings — "visa sponsorship without any
+# restrictions," "we will sponsor your visa without hesitation," "full
+# visa sponsorship, without exception, to all qualified applicants,"
+# "sponsorship is available without any geographic limitation" — all of
+# these are POSITIVE sponsorship statements that were being hard-rejected
+# as if they said the opposite, purely because the clause also happened
+# to contain the word "without" modifying "restrictions"/"hesitation"/
+# "exception"/"limitation" instead. Fixed by removing the blanket
+# "without" trigger and adding this much narrower, CONTEXT-SPECIFIC
+# pattern instead: "without" only counts as a sponsorship negation when
+# it's directly followed by the sponsorship/visa/work-permit noun itself
+# (optionally through "a"/"any") -- "work without sponsorship," "without
+# a visa," "without any work permit" -- which is how a genuine negative
+# statement actually reads, and which the five false-positive phrasings
+# above never do.
+_SPONSOR_WITHOUT_TOPIC_RE = re.compile(
+    r"\bwithout\s+(?:a\s+|any\s+)?(?:visa\s+|work\s+)?"
+    r"(?:sponsorship|visa|work\s+permit|immigration\s+support)\b",
     re.I,
 )
 
@@ -3347,6 +3373,18 @@ _SPONSOR_UNAVAILABLE_RE = re.compile(
     r"something\s+(?:we|the\s+company)\s+(?:can\s+)?(?:offer|provide|do))\b",
     re.I,
 )
+
+# 2026-09 BUG FIX (same audit pass, same reasoning as the "without" fix
+# above — a negation-shaped WORD standing in for actual negation, instead
+# of checking what it's actually negating): "We CAN'T WAIT to sponsor the
+# right candidate's visa!" contains "can't," which _SPONSOR_NEGATION_RE
+# matches, but "can't wait" is an idiom meaning "excited to," not a
+# negation of the sponsorship that follows it. Stripped out of the clause
+# before the negation check runs (see _sponsorship_sentence_has_negative_
+# signal below) rather than added as yet another standalone word the
+# negation regex has to avoid, since "can't" by itself is still a perfectly
+# good, common, genuine negation word everywhere else.
+_SPONSOR_IDIOM_EXCEPTION_RE = re.compile(r"\bcan\W?t\s+wait\b", re.I)
 
 _VISA_YES_RE = re.compile(
     r"visa\s*sponsor|sponsor.*visa|relocation\s*(support|assist|package)"
@@ -3393,7 +3431,14 @@ def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
                 break
             if not has_genuine_topic:
                 continue
-            if _SPONSOR_NEGATION_RE.search(clause) or _SPONSOR_UNAVAILABLE_RE.search(clause):
+            # Strip idiom exceptions ("can't wait") before testing for a
+            # negation word — see _SPONSOR_IDIOM_EXCEPTION_RE's module
+            # comment: "can't" in "can't wait to sponsor your visa!" isn't
+            # negating the sponsorship that follows it.
+            negation_check_text = _SPONSOR_IDIOM_EXCEPTION_RE.sub(" ", clause)
+            if (_SPONSOR_NEGATION_RE.search(negation_check_text)
+                    or _SPONSOR_UNAVAILABLE_RE.search(clause)
+                    or _SPONSOR_WITHOUT_TOPIC_RE.search(clause)):
                 return True
     return False
 
@@ -4155,17 +4200,34 @@ _COUNTRY_WHITELIST_PHRASE_RE = re.compile(
 # such as "our HQ is based in Darmstadt" are not treated as candidate
 # restrictions.
 _ROLE_SPECIFIC_PLACE_RE = re.compile(
+    # 2026-09 BUG FIX (explicit user-commissioned top-to-bottom audit,
+    # confirmed via direct testing): this whole regex compiles with re.I,
+    # which ALSO case-folds a `[A-Z]` character class -- so the leading
+    # `[A-Z]` here, meant to require the captured place start with an
+    # actual capital letter (a proper noun), was silently matching a
+    # LOWERCASE letter too. "This role is based in a hybrid of creativity
+    # and structure" (pure marketing fluff, no place named at all) was
+    # being captured and hard-rejected as if "a hybrid of creativity and
+    # structure" were a real place. Fixed with a scoped case-sensitive
+    # sub-pattern, `(?-i:[A-Z])`, at every "must start a capitalized word"
+    # position -- this turns OFF case-insensitivity for just that one
+    # character while the rest of the pattern (keywords like "role"/
+    # "based"/"located") stays governed by the outer re.I as before.
     r"\b(?:this\s+)?(?:role|position|job|opening|opportunity|\"?role\"?)\b"
     r".{0,100}?\b(?:is\s+)?(?:based|located|situated)\s+(?:in|at)\s+"
-    r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*(?:\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*){0,4}"
-    r"(?:\s*,\s*[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*)?",
+    r"(?-i:[A-Z])[A-Za-zÀ-ÖØ-öø-ÿ.'-]*(?:\s+(?-i:[A-Z])[A-Za-zÀ-ÖØ-öø-ÿ.'-]*){0,4}"
+    r"(?:\s*,\s*(?-i:[A-Z])[A-Za-zÀ-ÖØ-öø-ÿ.'-]*)?",
     re.I,
 )
 
 _CANDIDATE_PLACE_RE = re.compile(
+    # 2026-09 BUG FIX — same re.I-vs-[A-Z] false positive as
+    # _ROLE_SPECIFIC_PLACE_RE just above (see its module comment): "The
+    # candidate must be based in a culture of excellence" was matching
+    # as if "a culture of excellence" were a real place name.
     r"\b(?:must\s+be|should\s+be|is|are|work|working|work\s+remotely|remote\s+role)"
     r".{0,80}?\b(?:based|located|reside|residing|living|live)\s+(?:in|from)\s+"
-    r"[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'-]*(?:\s+[A-Z][A-Za-zÀ-ÖØ-öøÿ.'-]*){0,4}",
+    r"(?-i:[A-Z])[A-Za-zÀ-ÖØ-öø-ÿ.'-]*(?:\s+(?-i:[A-Z])[A-Za-zÀ-ÖØ-öøÿ.'-]*){0,4}",
     re.I,
 )
 
@@ -4360,22 +4422,22 @@ _EXTRA_RESTRICTIVE_PATTERNS = [
     r"\bremote\s*[,;:/\-–—(]?\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+only\b",
     r"\b(?:remote|work\s+remotely)\s*[,;:/\-–—(]?\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+only\b",
     r"\b(?:role|position|job|opportunity)\s+(?:is\s+)?(?:remote\s+)?(?:only|exclusively)\s+(?:for|in|from)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
-    r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:be\s+)?(?:based|located|resident|residing|living)\s+(?:in|within)\s+[^.;,\n]{1,80}",
-    r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:live|reside|work|be\s+located|be\s+based)\s+(?:in|within)\s+[^.;,\n]{1,80}",
-    r"\b(?:only|exclusively)\s+(?:open|available)\s+to\s+(?:candidates?|applicants?|employees?|people)\s+(?:in|from|based\s+in)\s+[^.;,\n]{1,80}",
-    r"\b(?:open|available)\s+(?:only|exclusively)\s+(?:in|to\s+candidates?\s+in|for\s+candidates?\s+in)\s+[^.;,\n]{1,80}",
-    r"\b(?:remote|fully\s+remote)\s+(?:only\s+)?(?:in|within)\s+[^.;,\n]{1,80}",
-    r"\b(?:remote|work)\s+(?:is\s+)?(?:only|exclusively)\s+(?:available|permitted|allowed)\s+(?:in|from)\s+[^.;,\n]{1,80}",
-    r"\b(?:we|company|organization|organisation)\s+(?:can|may|will)\s+only\s+(?:hire|employ|recruit)\s+(?:in|from)\s+[^.;,\n]{1,80}",
-    r"\b(?:we|company|organization|organisation)\s+(?:only|exclusively)\s+(?:hire|employ|recruit)\s+(?:in|from)\s+[^.;,\n]{1,80}",
-    r"\b(?:role|position|job|opportunity)\s+(?:is|will be)\s+(?:based|located)\s+(?:in|within)\s+[^.;,\n]{1,80}",
-    r"\b(?:role|position|job|opportunity)\s+(?:is|will be)\s+(?:only|exclusively)\s+(?:available|open)\s+(?:in|to)\s+[^.;,\n]{1,80}",
-    r"\b(?:candidates?|applicants?)\s+must\s+(?:be\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+(?:in|from)\s+[^.;,\n]{1,80}",
-    r"\b(?:right|rights)\s+to\s+work\s+(?:in|from)\s+[^.;,\n]{1,80}",
-    r"\b(?:work|employment)\s+authorization\s+(?:in|for)\s+[^.;,\n]{1,80}",
-    r"\b(?:employment|work)\s+eligib(?:ility|le)\s+(?:in|for)\s+[^.;,\n]{1,80}",
-    r"\b(?:only|exclusively)\s+(?:hire|employ|recruit)\s+(?:people|talent|candidates?|applicants?)\s+(?:in|from)\s+[^.;,\n]{1,80}",
-    r"\b(?:candidates?|applicants?)\s+(?:must|need\s+to)\s+be\s+(?:within|inside)\s+[^.;,\n]{1,80}",
+    r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:be\s+)?(?:based|located|resident|residing|living)\s+(?:in|within)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:must|need(?:s)?|required|required\s+to)\s+(?:live|reside|work|be\s+located|be\s+based)\s+(?:in|within)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:only|exclusively)\s+(?:open|available)\s+to\s+(?:candidates?|applicants?|employees?|people)\s+(?:in|from|based\s+in)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:open|available)\s+(?:only|exclusively)\s+(?:in|to\s+candidates?\s+in|for\s+candidates?\s+in)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:remote|fully\s+remote)\s+(?:only\s+)?(?:in|within)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:remote|work)\s+(?:is\s+)?(?:only|exclusively)\s+(?:available|permitted|allowed)\s+(?:in|from)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:we|company|organization|organisation)\s+(?:can|may|will)\s+only\s+(?:hire|employ|recruit)\s+(?:in|from)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:we|company|organization|organisation)\s+(?:only|exclusively)\s+(?:hire|employ|recruit)\s+(?:in|from)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:role|position|job|opportunity)\s+(?:is|will be)\s+(?:based|located)\s+(?:in|within)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:role|position|job|opportunity)\s+(?:is|will be)\s+(?:only|exclusively)\s+(?:available|open)\s+(?:in|to)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:candidates?|applicants?)\s+must\s+(?:be\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+(?:in|from)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:right|rights)\s+to\s+work\s+(?:in|from)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:work|employment)\s+authorization\s+(?:in|for)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:employment|work)\s+eligib(?:ility|le)\s+(?:in|for)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:only|exclusively)\s+(?:hire|employ|recruit)\s+(?:people|talent|candidates?|applicants?)\s+(?:in|from)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
+    r"\b(?:candidates?|applicants?)\s+(?:must|need\s+to)\s+be\s+(?:within|inside)\s+(?:the\s+)?(?-i:[A-Z])[^.;,\n]{0,79}",
     r"\b(?:timezone|time\s+zone)\s+(?:requirement|restriction|limited|only)\b.{0,100}\b(?:US|U\.S\.|UK|Europe|EMEA|APAC|LATAM|AMER|Pacific|Eastern|Central|Mountain)\b",
     r"\b(?:candidates?|applicants?|employees?)\s+(?:must|need(?:\s+to)?|are\s+required\s+to)\s+(?:be\s+)?(?:in|within)\s+(?:a\s+)?(?:US|U\.S\.|UK|European|EMEA|APAC|LATAM|AMER|Pacific|Eastern|Central|Mountain)\s+(?:time\s+)?zones?\b",
     r"\b(?:must|need(?:\s+to)?|required\s+to)\s+(?:work|be\s+available)\s+(?:during|within)\s+(?:US|U\.S\.|UK|European|EMEA|APAC|LATAM|AMER|Pacific|Eastern|Central|Mountain)\s+(?:business\s+hours|hours|time\s+zone)\b",
@@ -5139,11 +5201,24 @@ _ENTITY_PAYROLL_RESTRICTION_RE = re.compile(
 # eligibility verb (open/available/accept/consider), not a bare "outside"
 # anywhere in the text.
 _EXCLUSION_OUTSIDE_RE = re.compile(
+    # 2026-09 BUG FIX (explicit user-commissioned top-to-bottom audit,
+    # confirmed via direct testing): both alternatives below never
+    # verified that anything resembling a PLACE actually follows "outside
+    # (of)?" — "We cannot accept applications from outside of our normal
+    # review process," "...outside of our interview timeline," "...not
+    # open to candidates outside of standard business hours," "...outside
+    # of a reasonable commute to our values" were all hard-rejected even
+    # though none of them name a geographic exclusion at all. Fixed the
+    # same way as _EXTRA_RESTRICTIVE_PATTERNS/_RELOCATION_REQUIRED_RE
+    # above: require the tail to start with an actual capitalized word, via
+    # a scoped case-sensitive sub-pattern since this whole regex compiles
+    # with re.I (which also case-folds a bare [A-Z] class).
     r"\b(?:not|isn'?t|is\s+not)\s+(?:currently\s+)?"
     r"(?:open|available|accepting\s+applications)\s+(?:to|for)\s+"
-    r"(?:candidates|applicants)?[\w\s]{0,20}?\boutside\s+(?:of\s+)?(?:the\s+)?[\w\s,&]{0,40}"
+    r"(?:candidates|applicants)?[\w\s]{0,20}?\boutside\s+(?:of\s+)?(?:the\s+)?(?-i:[A-Z])[\w\s,&]{0,39}"
     r"|\b(?:cannot|can'?t|do\s+not|don'?t)\s+(?:accept|consider)\s+"
     r"(?:applications|candidates|applicants)\s+(?:located\s+|based\s+)?(?:from\s+)?outside\s+(?:of\s+)?"
+    r"(?:the\s+)?(?-i:[A-Z])[\w\s,&]{0,39}"
     r"|\bunable\s+to\s+consider\s+(?:candidates|applicants)\s+(?:located\s+|based\s+)?outside\b"
     # 2026-09 BUG FIX (explicit user-commissioned adversarial fuzz test):
     # the REVERSED sentence order — "Applicants OUTSIDE the United States
@@ -5342,10 +5417,23 @@ _TIMEZONE_LOCATION_RE = re.compile(
 # assistance/packages exist (which says nothing about restricting who may
 # apply from where and is intentionally NOT matched here).
 _RELOCATION_REQUIRED_RE = re.compile(
+    # 2026-09 BUG FIX (explicit user-commissioned top-to-bottom audit,
+    # confirmed via direct testing): the generic "[\w\s,]{0,40}" tail
+    # never required the destination to actually look like a place —
+    # "willing to relocate to a new city for this role," "...to wherever
+    # opportunity takes you," "...to pursue growth opportunities," "...to
+    # advance your career" were all being hard-rejected as if a SPECIFIC
+    # place had been named, when none of them name one at all (relocating
+    # "to a new city" says nothing about WHICH city). Same fix family as
+    # _EXTRA_RESTRICTIVE_PATTERNS/_ROLE_SPECIFIC_PLACE_RE/_CANDIDATE_
+    # PLACE_RE above: require the tail to start with an actual capitalized
+    # word via a scoped case-sensitive sub-pattern (this whole regex
+    # compiles with re.I, which ALSO case-folds a bare [A-Z] class, so
+    # that scoping is load-bearing, not cosmetic).
     r"\b(?:willing|must\s+be\s+willing|required|willingness)\s+to\s+relocate\s+to\s+"
-    r"(?:the\s+)?[\w\s,]{0,40}"
-    r"|\bmust\s+relocate\s+to\s+(?:the\s+)?[\w\s,]{0,40}"
-    r"|\brequires?\s+relocation\s+to\s+(?:the\s+)?[\w\s,]{0,40}",
+    r"(?:the\s+|our\s+)?(?-i:[A-Z])[\w\s,]{0,39}"
+    r"|\bmust\s+relocate\s+to\s+(?:the\s+|our\s+)?(?-i:[A-Z])[\w\s,]{0,39}"
+    r"|\brequires?\s+relocation\s+to\s+(?:the\s+|our\s+)?(?-i:[A-Z])[\w\s,]{0,39}",
     re.I,
 )
 
@@ -5379,6 +5467,23 @@ _HYPHENATED_BASED_ONLY_RE = re.compile(
 _FOR_PLACE_BASED_RE = re.compile(
     r"\bfor\s+(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\s+"
     r"(?:candidates?|applicants?|employees?|team\s+members?)\b",
+    re.I,
+)
+
+# 2026-09 BUG FIX (explicit user-commissioned top-to-bottom audit,
+# confirmed via direct testing): "This role is NOT restricted to US-based
+# candidates only" is an explicitly INCLUSIVE statement (openly reassuring
+# applicants the role ISN'T US-only) but _HYPHENATED_BASED_ONLY_RE matches
+# "US-based candidates only" inside it regardless, with no check for a
+# preceding negation — hard-rejecting a job that was explicitly telling
+# candidates the opposite. Same bug class as the sponsorship "without"
+# fix above: a negation-shaped clause being read for its positive claim
+# instead of what it's actually negating.
+_HYPHENATED_BASED_NEGATION_RE = re.compile(
+    r"\bnot\s+(?:restricted|limited|exclusive(?:ly)?)\s+to\b"
+    r"|\bisn'?t\s+(?:restricted|limited)\s+to\b"
+    r"|\bno\s+longer\s+(?:restricted|limited)\s+to\b"
+    r"|\bnot\s+just\s+(?:open\s+)?(?:for|to)\b",
     re.I,
 )
 
@@ -5431,6 +5536,12 @@ def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
         # ("our HQ is in Austin") doesn't have.
         if _TIMEZONE_LOCATION_RE.search(sentence) or _RELOCATION_REQUIRED_RE.search(sentence):
             return True
+        # 2026-09 BUG FIX: skip a sentence that explicitly NEGATES the
+        # hyphenated restriction ("not restricted to US-based candidates
+        # only") before testing either hyphenated pattern — see
+        # _HYPHENATED_BASED_NEGATION_RE's own module comment.
+        if _HYPHENATED_BASED_NEGATION_RE.search(sentence):
+            continue
         # _HYPHENATED_BASED_ONLY_RE ("US-based candidates only") has no
         # office/team-referencing shape, so the team-context guard is kept
         # here to stay consistent with the rest of the file's pattern.

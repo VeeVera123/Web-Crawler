@@ -11,8 +11,8 @@ Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 
 | # | Check | Catches |
 |---|---|---|
-| 1 | `has_hard_no_sponsorship_signal` | "we cannot sponsor visas," any phrasing |
-| 2 | `has_role_specific_place_restriction_signal` | A concrete place named for this specific role/candidate |
+| 1 | `has_hard_no_sponsorship_signal` | "we cannot sponsor visas," any phrasing — **not** "sponsorship without restrictions"/"can't wait to sponsor your visa" (positive statements, see the audit section below) |
+| 2 | `has_role_specific_place_restriction_signal` | A concrete place named for this specific role/candidate — **not** "based in a culture of excellence" (marketing fluff; see the `re.I`-vs-`[A-Z]` audit section below) |
 | 3 | `has_non_remote_workplace_type` | Structured `workplace_type` field = Hybrid/On-site/In-office/In-person |
 | 4 | `has_non_remote_labeled_text_signal` | Same, as free text: `"Remote status: On-site"`, standalone phrases (`"Hybrid Working"`, `"hybrid capacity"`, `"carried out...in the company's premises"`, `"on-site/in-office/in-person role"`) |
 | 5 | `has_non_remote_title_signal` | Title says `"(Hybrid)"`, `"- Onsite"` |
@@ -21,13 +21,13 @@ Any single one firing = instant reject. No rank, no LLM, no Rank 4 fallback.
 | 8 | `has_referential_auth_question_with_named_place_signal` | "Authorized to work in the country **this role is located in**" — doesn't name a country, but the job's own location field already does. Also a genuinely **bare** citizenship/work-authorization/eligibility question with no place reference at all (not even "where this role is") — same gate, same reasoning. Also a **bare sponsorship question** referring only to "us"/"here"/"our team" — "Would you require sponsorship to work with us?" — same gate again. |
 | 9 | `has_state_list_restriction_signal` | Enumerated US state list |
 | 10 | `has_hard_country_based_restriction_signal` | "Based anywhere in `<country>`," "located in other U.S. states," "live and work in `<country>`," "resident of `<country>`," "citizen of `<country>`," "worked from `<country>`," **or a city/metro name + 2-letter US state abbreviation after a residence verb** ("reside in the Dallas/Fort Worth, TX area"), **including a full city, subdivision, country chain** ("must reside in Austin, Texas, United States") |
-| 11 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families |
+| 11 | `has_extra_restrictive_geography_signal` | Other geography-restriction phrasing families — **not** "we can only hire in the most talented and driven individuals" (same `re.I`-vs-`[A-Z]` bug, fixed) |
 | 12 | `has_hard_metadata_location_signal` | ATS metadata names a place the location field didn't |
 | 13 | `has_hard_location_symbol_signal` | Map-pin icon next to a specific place |
 | 14 | `has_title_region_restriction_signal` | Title names a single narrow region ("- LATAM") |
 | 15 | `has_office_attendance_signal` | "N days/week in office," "able to/must work from the office," **or an interrogative "are you open/willing/able to work(ing) onsite/in-office/in-person/hybrid?" with no "office" noun at all** |
-| 16 | `has_entity_or_exclusion_restriction_signal` | "No legal/local entity in your country," "not open to candidates outside the US," "must be in a supported payroll country" |
-| 17 | `has_timezone_relocation_or_hyphenated_restriction_signal` | "Must be in a US timezone," "`<place>`-based candidates only," "`<place>` only.," "`<timezone>` business hours only" |
+| 16 | `has_entity_or_exclusion_restriction_signal` | "No legal/local entity in your country," "not open to candidates outside the US," "must be in a supported payroll country" — **not** "not open to candidates outside of standard business hours" (no place named, fixed in the audit below) |
+| 17 | `has_timezone_relocation_or_hyphenated_restriction_signal` | "Must be in a US timezone," "`<place>`-based candidates only," "`<place>` only.," "`<timezone>` business hours only" — **not** "willing to relocate to a new city" (no place named) or "NOT restricted to US-based candidates only" (negated), both fixed in the audit below |
 | 18 | `has_state_specific_license_signal` | A US-state-specific professional/occupational license question — "Texas State Health and Life insurance license," "licensed in the state of California" |
 | 19 | `has_language_fluency_restriction_signal` | A hard (not nice-to-have) language-fluency requirement — "CSM - German Speaking" (title, always hard), "Fluent in German" under a Requirements header |
 
@@ -170,3 +170,24 @@ different signals present at once, one broader and one narrower, neither
 of which is actually restrictive = `4b`. A single restrictive signal alone
 (with or without a broad one nearby) was already caught in §1a/§4b and
 never reaches this table at all.**
+
+## 5. 2026-09 top-to-bottom audit
+
+A full, user-commissioned sweep of every check in this file, hundreds of
+adversarial true/false-positive tests. Found and fixed: a systemic bug
+where several patterns' `[A-Z]` (meant to require "this must be a real
+capitalized place name") was silently matching lowercase text too, because
+the whole pattern compiles with `re.I` and that flag case-folds character
+classes — affecting check #2 (one of the very first checks every job
+passes through) and check #11 most visibly, both now fixed with a scoped
+case-sensitive `(?-i:[A-Z])`. Also found and fixed: `_SPONSOR_NEGATION_
+RE`'s blanket `"without"` trigger misreading positive sponsorship
+statements ("sponsorship without restrictions") as negative; the idiom
+"can't wait" (as in "can't wait to sponsor your visa!") misread as
+negation; `_RELOCATION_REQUIRED_RE` and `_EXCLUSION_OUTSIDE_RE` both
+missing a "this must actually be a place" check on their captured tail;
+and the hyphenated `"<place>-based ... only"` pattern missing a negation
+guard ("NOT restricted to US-based candidates only" was rejected as if it
+said the opposite). Full narrative, every confirmed false positive and
+the true positive it was checked against, in `CLASSIFICATION.md`'s
+"Top-to-bottom audit" section.
