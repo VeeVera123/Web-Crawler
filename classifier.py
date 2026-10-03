@@ -3381,7 +3381,16 @@ _SPONSOR_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\r?\n+")
 _SPONSOR_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:,\s*(?:and|but|or)\s+|\s+(?:and|but)\s+|;\s*)\s*", re.I)
 
 _SPONSOR_TOPIC_RE = re.compile(
-    r"\bsponsor(?:ship|ed|ing|s)?\b|\bwork\s*permits?\b|\bimmigration\s*sponsorship\b",
+    # 2026-10 (adversarial-coverage pass, real failing cases: "No
+    # immigration support will be provided", "We cannot provide
+    # immigration support"): "immigration support" is a direct synonym
+    # for visa sponsorship in HR copy — real postings use it exactly
+    # that way. Also added bare "visa sponsorship" (two-word) as a
+    # topic — the single-word "sponsorship" alt below already covers
+    # most cases, but keeping it explicit guards against a future
+    # tightening of that alt accidentally dropping this phrasing.
+    r"\bsponsor(?:ship|ed|ing|s)?\b|\bwork\s*permits?\b"
+    r"|\bimmigration\s*(?:sponsorship|support)\b|\bvisa\s+sponsorship\b",
     re.I,
 )
 
@@ -3497,6 +3506,19 @@ def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
         for clause in _SPONSOR_CLAUSE_SPLIT_RE.split(sentence):
             if not clause or not clause.strip():
                 continue
+            # 2026-10 (adversarial-coverage pass, real failing case:
+            # "Must be able to work without a visa"): _SPONSOR_WITHOUT_
+            # TOPIC_RE is itself a complete negative-sponsorship pattern
+            # ("without a visa"/"without any work permit") — the "without
+            # X" phrasing carries both the negation AND the topic word in
+            # one go, so requiring _SPONSOR_TOPIC_RE to also match
+            # separately as a gate (which it doesn't for bare "visa" by
+            # design, to avoid matching generic visa discussion) was
+            # dropping legitimate "work without a visa" statements. A
+            # direct hit on the "without <topic>" pattern is enough on
+            # its own.
+            if _SPONSOR_WITHOUT_TOPIC_RE.search(clause):
+                return True
             has_genuine_topic = False
             for m in _SPONSOR_TOPIC_RE.finditer(clause):
                 window = clause[max(0, m.start() - 20):m.end() + 30]
@@ -3512,8 +3534,7 @@ def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
             # negating the sponsorship that follows it.
             negation_check_text = _SPONSOR_IDIOM_EXCEPTION_RE.sub(" ", clause)
             if (_SPONSOR_NEGATION_RE.search(negation_check_text)
-                    or _SPONSOR_UNAVAILABLE_RE.search(clause)
-                    or _SPONSOR_WITHOUT_TOPIC_RE.search(clause)):
+                    or _SPONSOR_UNAVAILABLE_RE.search(clause)):
                 return True
     return False
 
@@ -3832,8 +3853,25 @@ def _has_multi_region_breadth(text: str) -> bool:
 # between "authorized to work" and "in <country>", in either order, and
 # (2) adding a standalone "<country-adjective> citizen(ship)" pattern.
 _COUNTRY_AUTH_RE = re.compile(
+    # 2026-10 BUG FIX (explicit user report, real live posting:
+    # https://job-boards.greenhouse.io/insurityllc/jobs/4297878009 — Q1:
+    # "Are you legally eligible for employment in the United States?"
+    # exactly the kind of textbook US-only question this check exists to
+    # catch, yet it slipped through entirely). Root cause: every "to\s+
+    # work" alt below hardcoded the preposition "work" after the
+    # eligible/authorized verb — "eligible FOR EMPLOYMENT in" (a direct
+    # and common synonym for "eligible TO WORK in") never matched any
+    # alt. Replaced the fixed "to\s+work" bridge with a (?:to\s+work|
+    # for\s+(?:employment|hire)|to\s+be\s+(?:employed|hired)|to\s+accept
+    # \s+(?:employment|a\s+position)|to\s+hold\s+employment) group that
+    # covers every real-world equivalent of "work in <country>" without
+    # loosening the surrounding anchor (still requires the eligible/
+    # authorized/entitled/permitted/allowed verb AND an "in <country>"
+    # tail; this isn't a bare "employment in" catch-all).
     r"\b(?:must\s+(?:be|have|currently\s+be)\s+)?(?:currently\s+)?"
-    r"(?:legally\s+)?(?:authorized|authorised|eligible|entitled|permitted)\s+to\s+work\s+"
+    r"(?:legally\s+|lawfully\s+)?(?:authorized|authorised|eligible|entitled|permitted|allowed|able)\s+"
+    r"(?:to\s+(?:work|be\s+(?:employed|hired)|accept\s+(?:employment|a\s+position)|hold\s+employment)"
+    r"|for\s+(?:employment|hire))\s+"
     r"(?:lawfully\s+)?(?:for\s+(?:any|an)\s+employer\s+)?(?:lawfully\s+)?(?:in|within)\s+"
     r"(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\b(?:us|u\.s\.|uk|u\.k\.|canadian|australian|british|indian|german|irish)\s+work\s+authoriz"
@@ -3844,6 +3882,13 @@ _COUNTRY_AUTH_RE = re.compile(
     # alternative above expects). Confirmed via a cross-LLM review of live
     # JD text; this exact phrasing never matched any prior alternative.
     r"|\bauthoriz(?:ation|ations)\s+to\s+work\s+(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    # 2026-10: noun-phrase "eligibility/eligible/authorization for
+    # employment in <country>" variant — same shape as the "authorization
+    # to work in" alt just above, but with the "for employment"
+    # preposition the Insurity-style questions use. Keeps the structure
+    # of the alt above (noun-phrase + "in <country>" tail), so no bare
+    # "employment in Germany" sentence matches it on its own.
+    r"|\b(?:eligibility|eligible|authoriz(?:ation|ations)|authoriz(?:ed|able))\s+for\s+employment\s+(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+(?:currently\s+)?reside\s+in\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bright\s+to\s+work\s+in\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 NEW (explicit user report, real posting: Ofload's Workable
@@ -3853,6 +3898,32 @@ _COUNTRY_AUTH_RE = re.compile(
     # common phrasing uses BOTH the plural and "for", and matched nothing.
     r"|\bwork\s+rights?\s+(?:in|for)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     r"|\bmust\s+have\s+(?:a\s+)?valid\s+(?:us|u\.s\.|uk|canadian|australian|indian)\s+work\s+(?:visa|permit)\b"
+    # 2026-10 NEW (same Insurity posting, Q2): "Do you now or will you
+    # in the future require [COMPANY] to petition for, sponsor, or
+    # transfer a nonimmigrant or immigrant employment visa in order for
+    # you to work in the United States?" — a direct, pre-filled-with-
+    # country sponsorship-requirement question. Nothing matched this
+    # before: has_hard_no_sponsorship_signal requires sponsor+negation
+    # in the same clause (none here — "require sponsor" is affirmative,
+    # not negated), and every _COUNTRY_AUTH_RE alt above anchors on
+    # eligible/authorized/entitled/permitted/allowed/rights/reside/
+    # citizen — none of which this phrasing uses. New alt: a question
+    # that pairs "require/need [company?] to [petition for/sponsor/
+    # transfer] [a?] visa/sponsorship/work permit [in order] to work in
+    # <country>" is itself a country-specific authorization signal —
+    # the question wouldn't be worded this way for a role that would
+    # consider applicants without that country's work authorization.
+    # Deliberately scoped to "to work in <country>" tail so a generic
+    # country-agnostic "do you require sponsorship for employment visa
+    # status" (no country named) does NOT fire this — same no-country-
+    # named-in-the-question-itself discipline every other alt uses.
+    r"|\brequire\s+(?:[A-Za-z][\w\s'.\-]*?\s+)?(?:to\s+)?"
+    r"(?:petition(?:\s+for)?|sponsor|transfer)\s+"
+    r"(?:[^.?\n]*?)\b(?:visa|sponsorship|work\s+permit|immigration\s+support)\b"
+    r"(?:[^.?\n]*?)\bto\s+work\s+(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
+    # Simpler synonym family: "require/need visa sponsorship to work in <country>".
+    r"|\b(?:require|need|seek)\s+(?:[a-z\s]*\s+)?(?:visa\s+sponsorship|sponsorship|a\s+visa|a\s+work\s+permit|immigration\s+support)\s+"
+    r"(?:[^.?\n]*?)\bto\s+work\s+(?:in|within)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b"
     # 2026-09 BUG FIX (explicit user report, real posting: Weploy's
     # Greenhouse application question "Please specify whether you are an
     # AU or NZ citizen or Permanent Resident:"). Two gaps the existing
@@ -3865,7 +3936,7 @@ _COUNTRY_AUTH_RE = re.compile(
     # word "citizen" sits directly after "NZ"); still adding "au" for the
     # same phrasing in the other order ("NZ or AU citizen").
     r"|\b(?:au|nz|new\s+zealand(?:er)?)\s+(?:citizen(?:ship)?|permanent\s+resident)\b"
-    r"|\b(?:u\.?s\.?a?\.?|united\s+states|u\.?k\.?|united\s+kingdom|canadian|australian|irish|german|indian)\s+"
+    r"|\b(?:u\.?s\.?a?\.?|united\s+states|u\.?k\.?|united\s+kingdom|canadian|australian|british|irish|german|indian)\s+"
     r"(?:citizen(?:ship)?|permanent\s+resident)\b"
     r"|\bpermanent\s+resident\s+of\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
     re.I,
@@ -3891,8 +3962,53 @@ _COUNTRY_AUTH_RE = re.compile(
 # place by definition) and has_referential_auth_question_with_named_place_
 # signal (the universal version, for Rank 1/2/3a/3b, which separately
 # checks whether a real place is already named) for the two call sites.
+# 2026-10 BUG FIX (explicit user report, real posting: Ping Identity's
+# Greenhouse "Manager, Customer Success", location "UK - Remote" -> admitted
+# at Rank 4/4a, job-boards.greenhouse.io/pingidentity/jobs/8807392002 — its
+# application questions were "Will you now or in the future require
+# sponsorship to work in the country where this job is located?" and "Upon
+# hire, can you provide verification of your identity and legal right to
+# work in the country where this job is located?"). Neither matched any
+# alternative below: the first-listed alternative only handled "right to
+# work WHERE this role is located" (no "in the country" bridge) and the
+# second required the verb "authoriz*" specifically — so "legal right to
+# work in the country where this job is located" and "require sponsorship
+# to work in the country where this job is located" both slipped through.
+# Rather than adding one more one-off alternative per phrasing, these two
+# fragments split every referential question into its two real parts —
+# (1) an authorization/sponsorship/right-to-work HEAD and (2) a PLACE TAIL
+# that refers back to wherever the role itself is located/listed/based (or
+# where "you are applying") — and the alternative that follows matches any
+# head followed (within one sentence) by any tail. The same safety gates as
+# every other alternative apply unchanged: both call sites only treat a hit
+# as disqualifying when the job's OWN location already resolved to one
+# narrow place, and _referential_auth_hit() additionally skips a sentence
+# that is only company-benefit framing ("we provide work permit support to
+# help you work in the country where this role is located").
+_REFERENTIAL_AUTH_HEAD_FRAGMENT = (
+    r"(?:(?:legal(?:ly)?\s+|lawful(?:ly)?\s+)?rights?\s+to\s+work"
+    r"|(?:legally\s+|lawfully\s+|currently\s+)?(?:authori[sz]ed|eligible|entitled|permitted|allowed|able|qualified)"
+    r"\s+(?:to\s+(?:work|be\s+employed|be\s+hired|accept\s+employment|take\s+up\s+employment)|for\s+employment)"
+    r"|work\s+(?:authori[sz]ation|permit|visa|rights?)"
+    r"|employment\s+(?:authori[sz]ation|eligibility|visa)"
+    r"|(?:require|requires|need|needs)\s+(?:(?:visa|work|employment|immigration)\s+)?(?:sponsorship|support)"
+    r"|(?:require|requires|need|needs)\s+an?\s+(?:(?:work|employment)\s+)?(?:visa|permit)"
+    r"|(?:citizenship|residen(?:cy|ce)|immigration)\s+status"
+    r"|verif\w*\s+(?:of\s+)?(?:your\s+)?(?:identity|eligibility|work\s+authori[sz]ation))"
+)
+_REFERENTIAL_PLACE_TAIL_FRAGMENT = (
+    r"(?:(?:in|within|at|for)\s+)?(?:the\s+)?"
+    r"(?:(?:country|countries|location|jurisdiction|region|place|state|city)\s+)?"
+    r"(?:(?:where|wherever|in\s+which|that)\s+(?:this\s+|the\s+|your\s+|our\s+)?"
+    r"(?:role|job|position|opportunity|vacancy|posting|work|employment|office)\s+"
+    r"(?:is\s+|will\s+be\s+|would\s+be\s+|are\s+)?(?:located|based|listed|situated|posted|advertised|performed|held)"
+    r"|(?:where|in\s+which)\s+you\s+(?:are|will\s+be|would\s+be|'re)\s+(?:applying|working|based|located|employed|hired)"
+    r"|of\s+(?:this|the)\s+(?:role|job|position|opportunity)(?:'s\s+location)?)\b"
+)
+
 _REFERENTIAL_AUTH_QUESTION_RE = re.compile(
-    r"\b(?:right|eligib\w*|authoriz(?:ed|ation)?|permitted?)\s+to\s+work\s+"
+    r"\b" + _REFERENTIAL_AUTH_HEAD_FRAGMENT + r"[^.!?\n]{0,80}?\b" + _REFERENTIAL_PLACE_TAIL_FRAGMENT
+    + r"|\b(?:right|eligib\w*|authoriz(?:ed|ation)?|permitted?)\s+to\s+work\s+"
     r"(?:where|wherever)\s+(?:this\s+)?(?:role|position|job)\s+(?:is\s+)?"
     r"(?:listed|located|based)\b"
     r"|\bauthoriz\w*\s+to\s+work\s+in\s+the\s+countr(?:y|ies)\s+(?:in\s+which|where)\s+"
@@ -4358,8 +4474,25 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
     loc = str(location).strip()
     if loc and not PLACEHOLDER_LOC_RE.match(loc):
         normalized = re.sub(r"[\s,|/()\-–—]+", " ", loc).strip()
+        # 2026-10 (adversarial-coverage pass, real bug: "Remote - Global",
+        # "Global (Remote)", "Remote, Worldwide", "Anywhere - Remote" were
+        # all hard-rejected here): the fixed accepted-set below only knew
+        # the bare words "remote"/"global"/... ALONE, so any location
+        # combining a work-mode filler word with an accepted broad scope
+        # normalized to e.g. "Remote Global", missed the set, found just
+        # one region word, and fell through to `return True` (restrictive)
+        # -- a false rejection of an explicitly global posting. Strip the
+        # work-mode filler first and compare what's left.
+        _loc_core = re.sub(
+            r"\b(?:remote|fully|work\s+from\s+home|wfh|home\s*based|virtual|"
+            r"telecommute|telecommuting|distributed)\b",
+            " ", normalized, flags=re.I)
+        _loc_core = re.sub(r"\s+", " ", _loc_core).strip().lower()
         if normalized and normalized.lower() not in {
             "remote", "fully remote", "remote worker", "remote job",
+            "global", "worldwide", "international", "anywhere",
+            "emea", "africa", "sub saharan africa",
+        } and _loc_core not in {
             "global", "worldwide", "international", "anywhere",
             "emea", "africa", "sub saharan africa",
         }:
@@ -4494,6 +4627,15 @@ _EXTRA_RESTRICTIVE_PATTERNS = [
     # "must reside in".
     r"\b(?:for|to)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)|" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+(?:residents?|candidates?|applicants?)\s+only\b",
     r"\b(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)\s+(?:residents?|candidates?|applicants?)\s+only\b",
+    # 2026-10 (adversarial-coverage pass, real-shape failing case: "This
+    # role is open only to US-based candidates" / "UK-based applicants
+    # only"). The alt just above requires a whitespace between the country
+    # and the "candidates/applicants/residents" noun; a hyphenated
+    # "US-based"/"UK-based"/"Canada-based"/... adjective form (equally
+    # common in real postings, especially "<country>-based" compound
+    # modifiers) never matched any prior alt. Scoped to the same curated
+    # country list used just above, so "<countryfragment>-based" doesn't
+    # accidentally catch "home-based" or "office-based".
     r"\bremote\s*[,;:/\-–—(]?\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\s+only\b",
     r"\b(?:remote|work\s+remotely)\s*[,;:/\-–—(]?\s*(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+only\b",
     r"\b(?:role|position|job|opportunity)\s+(?:is\s+)?(?:remote\s+)?(?:only|exclusively)\s+(?:for|in|from)\s+(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b",
@@ -4519,6 +4661,69 @@ _EXTRA_RESTRICTIVE_PATTERNS = [
     r"\b(?:must|need\s+to)\s+(?:be\s+)?(?:within|in)\s+(?:the\s+)?(?:same|specified)\s+time\s*zone\b",
 ]
 _EXTRA_RESTRICTIVE_RE = [re.compile(p, re.I) for p in _EXTRA_RESTRICTIVE_PATTERNS]
+
+# 2026-10 (adversarial-coverage pass, real-shape failing case: "This role
+# is open only to US-based candidates" / "UK-based applicants only"): the
+# hyphenated "<country>-based candidates only" shapes. Kept in their own
+# list (not folded into _EXTRA_RESTRICTIVE_PATTERNS) because, unlike every
+# pattern there, they can trail a negated lead-in ("This role is NOT
+# restricted to US-based candidates only") and so are only applied when
+# _NEGATED_RESTRICTION_RE doesn't match the same sentence — see
+# has_extra_restrictive_geography_signal.
+_EXTRA_RESTRICTIVE_BASED_ONLY_RE = [re.compile(p, re.I) for p in (
+    r"\b(?:open|available)\s+only\s+to\s+(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)[\s\-]*based\s+(?:residents?|candidates?|applicants?)\b",
+    r"\b(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland|USA|United[\s\-]States)[\s\-]+based\s+(?:residents?|candidates?|applicants?)\s+only\b",
+    r"\bonly\s+(?:hiring|hire|open)\s+(?:to\s+)?(?:US|U\.S\.|UK|Canada|Australia|Germany|France|Ireland)[\s\-]*based\s+(?:residents?|candidates?|applicants?)\b",
+)]
+_NEGATED_RESTRICTION_RE = re.compile(
+    r"\b(?:not|no\s+longer|isn'?t|aren'?t|never|without|neither|nor)\b[^.!?\n]{0,40}?\brestrict\w*\b",
+    re.I,
+)
+
+# 2026-10 (generated fuzz suite, test_filters_fuzz_every_filter.py — real
+# phrasing gaps found by running ~2,300 generated TP/FP cases through the
+# actual Rank 4 gate): hiring-scope phrasings none of the existing
+# restriction regexes covered. Each one still names a concrete PLACE (a
+# country from the project-wide vocabulary, a "following countries" list,
+# a timezone, a destination city, a state licence) so none fires on a bare
+# "hiring"/"outside"/"relocation" mention. Applied sentence-by-sentence in
+# has_extra_restrictive_geography_signal behind the same negated-
+# restriction guard as the hyphenated "-based only" list above.
+_SCOPE_PLACE = (r"(?:the\s+)?" + _PLACE_CHAIN_PREFIX_FRAGMENT + r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b")
+_EXTRA_RESTRICTIVE_SCOPE_RE = [re.compile(p, re.I) for p in (
+    # "This role is restricted/limited (only) to the United States."
+    r"\b(?:role|position|job|opportunity|hiring|employment|vacancy|posting)\s+(?:is\s+|are\s+)?"
+    r"(?:restricted|limited)\s+(?:only\s+)?to\s+" + _SCOPE_PLACE,
+    # "We are not hiring outside the UK." / "We don't hire anyone outside Canada."
+    r"\b(?:not|never)\s+hiring\s+(?:anyone\s+|candidates\s+|applicants\s+|people\s+)?outside\s+(?:of\s+)?" + _SCOPE_PLACE,
+    r"\b(?:do\s+not|don'?t|cannot|can'?t|will\s+not|won'?t|unable\s+to)\s+(?:currently\s+)?"
+    r"(?:hire|employ|recruit)\s+(?:anyone\s+|candidates\s+|applicants\s+|people\s+)?outside\s+(?:of\s+)?" + _SCOPE_PLACE,
+    # "Candidates outside the US will not be considered." (subject-first order)
+    r"\b(?:candidates|applicants|applications|anyone|people|those)\s+(?:located\s+|based\s+|residing\s+|living\s+|applying\s+)?"
+    r"(?:from\s+)?outside\s+(?:of\s+)?" + _SCOPE_PLACE + r"[^!?\n]{0,40}?"
+    r"\b(?:not\s+be\s+(?:considered|accepted|reviewed|processed|hired)|cannot\s+be\s+(?:considered|accepted|hired)|"
+    r"(?:are|is)\s+(?:not\s+eligible|ineligible)|will\s+be\s+(?:rejected|declined|disqualified))\b",
+    # "We can only hire candidates who are in the United States."
+    r"\b(?:can|will|do|does)\s+only\s+(?:hire|employ|consider|accept)\s+(?:candidates|applicants|people|those|individuals)\s+"
+    r"(?:who\s+are\s+|that\s+are\s+|who\s+live\s+|who\s+reside\s+)?(?:located\s+|based\s+|residing\s+|living\s+|currently\s+)?"
+    r"(?:in|within|from)\s+" + _SCOPE_PLACE,
+    # "Only candidates in the following countries will be considered: ..."
+    r"\bonly\s+(?:candidates|applicants)\s+(?:in|from|based\s+in|located\s+in|residing\s+in)\s+the\s+following\s+countries\b",
+    # "We can only employ in countries where we have an EOR / entity."
+    r"\bcan\s+only\s+(?:employ|hire)\s+(?:in|within)\s+countries\s+where\s+(?:we|the\s+company)\s+have\b",
+    # "Must be in a European timezone." / "Must reside in a Pacific time zone."
+    r"\b(?:must|should|need\s+to|required\s+to)\s+(?:be\s+)?(?:in|within|reside\s+in|live\s+in|be\s+located\s+in|be\s+based\s+in)\s+"
+    r"(?:a\s+|an\s+|the\s+)?(?:us|u\.s\.|uk|u\.k\.|north\s+american?|european?|apac|latam|pacific|eastern|central|mountain|"
+    r"gmt|est|cst|mst|pst|cet)\s*time\s*zones?\b",
+    # Passive relocation: "Relocation to New York is required."
+    r"\brelocation\s+to\s+(?:the\s+|our\s+)?(?-i:[A-Z])[\w\s,]{0,39}?\s+(?:is\s+|will\s+be\s+)?"
+    r"(?:required|mandatory|necessary|a\s+must)\b",
+    # State professional licences phrased with extra words: "valid Texas
+    # insurance producer license", "California real estate broker license".
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+(?:state\s+)?"
+    r"(?:(?:insurance|real\s+estate|nursing|contractor|cosmetology|bar|securities|mortgage|notary|adjuster|"
+    r"pharmacy|medical|teaching|producer|broker|health|life|property|casualty)\s+){1,4}licens[ei]\w*\b",
+)]
 
 def _apply_location_ai_authority_gate(jobs: list[dict], results: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Apply the final geographic decision contract.
@@ -4566,7 +4771,21 @@ def has_extra_restrictive_geography_signal(job: dict) -> bool:
         # already do.
         if _has_multi_region_breadth(sentence):
             continue
+        # 2026-10 (caught by test_top_to_bottom_audit.py after the
+        # "<country>-based candidates only" alternatives were added): a
+        # NEGATED restriction ("This role is NOT restricted to US-based
+        # candidates only", "We are NO LONGER restricted to ...") is the
+        # opposite of a restriction. Only the hyphenated "-based ... only"
+        # alternatives are guarded here, since they are the ones that can
+        # trail a "restricted to" lead-in; every other alternative's
+        # behavior is untouched.
         if any(rx.search(sentence) for rx in _EXTRA_RESTRICTIVE_RE):
+            return True
+        if (not _NEGATED_RESTRICTION_RE.search(sentence)
+                and any(rx.search(sentence) for rx in _EXTRA_RESTRICTIVE_BASED_ONLY_RE)):
+            return True
+        if (not _NEGATED_RESTRICTION_RE.search(sentence)
+                and any(rx.search(sentence) for rx in _EXTRA_RESTRICTIVE_SCOPE_RE)):
             return True
     return False
 
@@ -4831,6 +5050,23 @@ _APPLICATION_AUTH_QUESTION_MARKER = "Application Question:"
 # it from code that compiles earlier in this file.
 # 3+ comma-separated 2-letter uppercase tokens, anywhere in the text.
 _STATE_ABBR_RUN_RE = re.compile(r"\b([A-Z]{2}(?:\s*,\s*[A-Z]{2}){2,})\b")
+# 3+ FULL U.S. state names joined by commas / "and" / "or" (see the
+# 2026-10 note in has_state_list_restriction_signal).
+_STATE_FULL_NAME_RUN_RE = re.compile(
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\b"
+    r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\b"
+    r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\b",
+    re.I,
+)
+_STATE_LIST_COMPANY_FOOTPRINT_RE = re.compile(
+    r"\b(?:offices?|headquarters|hq|branches|studios|campus(?:es)?|locations|facilities)\b", re.I)
+_STATE_LIST_FRAMING_RE = re.compile(
+    r"\b(?:hire|hiring|reside|resid\w+|live|living|located|based|eligib\w+|"
+    r"candidates?|applicants?|only|following\s+states|these\s+states|in\s+one\s+of)\b",
+    re.I,
+)
 
 
 def has_state_list_restriction_signal(job: dict) -> bool:
@@ -4865,6 +5101,29 @@ def has_state_list_restriction_signal(job: dict) -> bool:
         tokens = [t.strip() for t in m.group(1).split(",")]
         valid = [t for t in tokens if t in _US_STATE_ABBRS]
         if len(valid) >= 3 and len(valid) / len(tokens) >= 0.8:
+            # 2026-10 (generated fuzz suite): "We have offices in CA, TX,
+            # NY, FL, WA." is a company-footprint sentence, not a hiring
+            # restriction. Skip a run whose own lead-in sentence talks
+            # about offices/HQ/locations AND carries no hiring/residency
+            # framing at all — any framing word ("candidates who reside
+            # in states where we have offices: ...") keeps it a hit.
+            lead = re.split(r"[.!?\n]", text[max(0, m.start() - 160):m.start()])[-1]
+            if (_STATE_LIST_COMPANY_FOOTPRINT_RE.search(lead)
+                    and not _STATE_LIST_FRAMING_RE.search(lead)):
+                continue
+            return True
+    # 2026-10 (adversarial-coverage pass, real-shape failing case: "We can
+    # only hire in these states: California, Texas, New York, Washington."):
+    # the abbreviation-run check above never sees a list spelled out as
+    # FULL state names. Same restriction, same reasoning — but unlike a
+    # run of 2-letter codes, a list of full names also shows up in plain
+    # company prose ("our offices are in California, Texas and New York"),
+    # so a hit additionally has to sit in a sentence with hiring/residency
+    # framing and NOT in company/office/customer context.
+    for sentence in _split_into_sentences(text):
+        if not sentence.strip() or _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+            continue
+        if _STATE_FULL_NAME_RUN_RE.search(sentence) and _STATE_LIST_FRAMING_RE.search(sentence):
             return True
     return False
 
@@ -4961,6 +5220,25 @@ def has_hard_country_specific_auth_signal(job: dict) -> bool:
     return bool(_COUNTRY_AUTH_RE.search(text))
 
 
+def _referential_auth_hit(text: str) -> bool:
+    """True if any sentence in `text` matches _REFERENTIAL_AUTH_QUESTION_RE
+    AND isn't purely company-benefit framing ("we provide work permit
+    support to help you work in the country where this role is located" —
+    a benefit offered, not a requirement placed on the applicant). Same
+    benefit-vs-requirement discipline has_country_tied_sponsorship_permit_
+    residency_signal already applies to its own regex."""
+    if not text or not text.strip():
+        return False
+    for sentence in _split_into_sentences(text):
+        if not sentence.strip() or not _REFERENTIAL_AUTH_QUESTION_RE.search(sentence):
+            continue
+        if (_RANK4_BENEFIT_FRAMING_RE.search(sentence)
+                and not _RANK4_REQUIREMENT_FRAMING_RE.search(sentence)):
+            continue
+        return True
+    return False
+
+
 def has_referential_auth_question_with_named_place_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter — the universal (Rank 1/2/3a/3b)
     counterpart to _rank4_has_country_tied_restrictive_question's Rank-4-
@@ -4989,7 +5267,7 @@ def has_referential_auth_question_with_named_place_signal(job: dict) -> bool:
     """
     desc = job.get("description_snippet") or ""
     text = desc + " " + (job.get("title") or "")
-    if not _REFERENTIAL_AUTH_QUESTION_RE.search(text):
+    if not _referential_auth_hit(text):
         return False
 
     raw_loc = job.get("location") or ""
@@ -5060,7 +5338,30 @@ _OFFICE_ATTENDANCE_RE = re.compile(
     # same reasoning as the "willing to work..." alternative above's
     # `[\w\s]{0,30}?` slack before "office".
     r"|\b(?:open|willing|able)\s+to\s+work(?:ing)?\s+(?:\w+\s+){0,2}"
-    r"(?:on[\s\-]?site|in[\s\-]?office|in[\s\-]?person|hybrid)\b",
+    r"(?:on[\s\-]?site|in[\s\-]?office|in[\s\-]?person|hybrid)\b"
+    # 2026-10 (adversarial-coverage pass, six real-shape failing phrasings:
+    # "You will be in the office 3 days per week", "Required to be onsite 4
+    # days a week", "Must be in the office at least 3 days a week", "4 days
+    # per week in-office required", "This role requires 4 days a week
+    # onsite in New York", "Hybrid schedule: 3 days in office, 2 remote").
+    # The original alternatives all expect the frequency BEFORE "in the
+    # office" or a "willing/able to" lead-in; the reversed word order
+    # (location qualifier first, frequency second -- or vice versa with
+    # onsite/in-office/in-person instead of the literal word "office") was
+    # never covered. Every new alternative still REQUIRES a per-week
+    # frequency (or an explicit remote-days contrast for the "N days in
+    # office" form) so a bare "visit the office" / "quarterly in-office
+    # retreat" / "first 3 days of onboarding" doesn't match.
+    r"|\b(?:in|at)\s+(?:the|our|an?)\s+office\b[^.!?\n]{0,40}?"
+    r"\b(?:\d+|one|two|three|four|five)\s*(?:-|\s)?days?\s*(?:a|per|each|every|/)\s*week\b"
+    r"|\b(?:on[\s\-]?site|in[\s\-]?office|in[\s\-]?person)\b[^.!?\n]{0,30}?"
+    r"\b(?:\d+|one|two|three|four|five)\s*(?:-|\s)?days?\s*(?:a|per|each|every|/)\s*week\b"
+    r"|\b(?:\d+|one|two|three|four|five)\s*(?:-|\s)?days?\s*(?:a|per|each|every|/)\s*week\b[^.!?\n]{0,20}?"
+    r"\b(?:on[\s\-]?site|in[\s\-]?office|in[\s\-]?person)\b"
+    r"|\b(?:\d+|one|two|three|four|five)\s*days?\s+(?:in|at)\s+(?:the\s+|our\s+)?office\b[^.!?\n]{0,30}?"
+    r"\b(?:remote|from\s+home|wfh|a\s+week|per\s+week)\b"
+    r"|\b(?:hybrid|schedule)\b[^.!?\n]{0,40}?"
+    r"\b(?:\d+|one|two|three|four|five)\s*days?\s+(?:in|at)\s+(?:the\s+|our\s+)?office\b",
     re.I,
 )
 
@@ -5644,6 +5945,19 @@ def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
 _NON_REMOTE_WORKPLACE_RE = re.compile(
     r"\b(hybrid|on[\s\-]?site|in[\s\-]?office|in[\s\-]?person)\b", re.I
 )
+# 2026-10 (adversarial-coverage pass): "On-Premise"/"On-Premises"/"On
+# Premise" — enterprise/IT shorthand some companies put in a structured
+# workplace_type FIELD instead of "On-site" (same physical-presence
+# meaning). Deliberately a SEPARATE regex used only by
+# has_non_remote_workplace_type (a dedicated field whose whole job is to
+# say where the work happens): _NON_REMOTE_WORKPLACE_RE itself is also
+# scanned against job TITLES, where "On-Premise" very commonly names the
+# PRODUCT ("Account Executive - On-Premise Software"), not an attendance
+# requirement, and widening that shared regex would have mass-rejected
+# those.
+_NON_REMOTE_WORKPLACE_FIELD_RE = re.compile(
+    r"\b(hybrid|on[\s\-]?site|in[\s\-]?office|in[\s\-]?person|on[\s\-]?premises?)\b", re.I
+)
 _REMOTE_WORKPLACE_RE = re.compile(r"\bremote\b", re.I)
 
 
@@ -5707,7 +6021,7 @@ def has_non_remote_workplace_type(job: dict) -> bool:
         return False
     if _REMOTE_WORKPLACE_RE.search(wt):
         return False
-    return bool(_NON_REMOTE_WORKPLACE_RE.search(wt))
+    return bool(_NON_REMOTE_WORKPLACE_FIELD_RE.search(wt))
 
 
 # 2026-09 (explicit user report, two real postings): neither
@@ -6027,7 +6341,7 @@ def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     text = desc + " " + (job.get("title") or "")
     if not text.strip():
         return False
-    if _REFERENTIAL_AUTH_QUESTION_RE.search(text):
+    if _referential_auth_hit(text):
         return True
     return has_country_tied_sponsorship_permit_residency_signal(job)
 

@@ -1265,3 +1265,105 @@ location is still rejected even with a confirmed form (proving this only
 changes the capture-confirmation gate, not `classify_rank4()`'s own
 restriction scanning), and a confirmed-form job whose captured text
 carries a real restriction signal is still correctly rejected.
+
+## 2026-10: Insurity / Ping Identity leaks — application-question and hiring-scope phrasings the filters never matched
+
+Explicit user report, verbatim: *"These fucking made it in:
+job-boards.greenhouse.io/insurityllc/jobs/4297878009 ... both asking if you
+are legally allowed to work in the US ... Are you legally eligible for
+employment in the United States? / Do you now or will you in the future
+require Insurity to petition for, sponsor, or transfer a nonimmigrant or
+immigrant employment visa in order for you to work in the United States?"* —
+and a second report: Ping Identity (`.../pingidentity/jobs/8807392002`):
+*"Will you now or in the future require sponsorship to work in the country
+where this job is located? / Upon hire, can you provide verification of your
+identity and legal right to work in the country where this job is located?"*
+Both were real production rows (`clearance=rank4`, `location_priority=4a`,
+locations "Remote - US" and "UK - Remote"). The user's instruction: generate
+every wording, in the hundreds, for the application-question filters and then
+for every other filter, including false positives.
+
+**Root causes (all confirmed by reproducing against the committed code):**
+
+1. `_COUNTRY_AUTH_RE` hardcoded the bridge "authorized/eligible **to work**
+   in <country>" — "eligible **for employment** in", "to be employed/hired
+   in", "to accept employment in" never matched. Rewritten with a bridge group
+   covering those, plus a noun-phrase "eligibility/authorization for
+   employment in <country>" alternative.
+2. Nothing matched the *sponsorship-requirement* question shape ("require
+   <X> to petition for, sponsor, or transfer a ... visa in order for you to
+   work in <country>", "require/need visa sponsorship to work in <country>").
+   `has_hard_no_sponsorship_signal` needs sponsor **+ negation** in one
+   clause, and this phrasing has none. Two new `_COUNTRY_AUTH_RE`
+   alternatives, both requiring a named country in the same sentence.
+3. `_REFERENTIAL_AUTH_QUESTION_RE` (the "...in the country where this job is
+   located" family; Rank 4 treats any hit as disqualifying since its location
+   is already one known country) only handled "right to work *where* this
+   role is located" and "authoriz\* to work in the country where...". Now
+   split into a HEAD fragment (right to work / authorized|eligible|permitted|
+   allowed|able to work or for employment / work permit|visa|rights /
+   require sponsorship|a visa / citizenship|residency status / verification
+   of identity) and a PLACE-TAIL fragment (in the country|location|
+   jurisdiction where|in which this role|job|position is located|based|
+   listed, "where you are applying", "of this role"), matched head-then-tail
+   within one sentence. `_referential_auth_hit()` additionally skips a
+   sentence that is pure company-benefit framing ("we provide work permit
+   support to help you work in the country where this role is located").
+4. Gaps found by the generated fuzz suite in *other* filters (each a real
+   leak path, each requires a named place so none fires on a bare word):
+   - sponsorship: "immigration support" was not a sponsorship topic, and
+     "work without a visa" required a topic word it deliberately doesn't have
+     (`_SPONSOR_WITHOUT_TOPIC_RE` now fires on its own);
+   - workplace_type field: "On-Premise/On-Premises" (field only — NOT titles,
+     where "On-Premise" usually names the product: "Account Executive -
+     On-Premise Software" must keep passing);
+   - hyphenated "US-based candidates only" / "open only to UK-based
+     applicants" (`_EXTRA_RESTRICTIVE_BASED_ONLY_RE`, with a negation guard so
+     "not restricted to US-based candidates only" still passes — caught by an
+     existing audit test);
+   - "This role is restricted to <country>", "We are not hiring outside <X>",
+     "Candidates outside <X> will not be considered", "We can only hire
+     candidates who are in <X>", "Only candidates in the following countries
+     will be considered", "We can only employ in countries where we have an
+     EOR", "Must be in a European/Pacific timezone", passive "Relocation to
+     <City> is required", "valid <State> insurance producer license"
+     (`_EXTRA_RESTRICTIVE_SCOPE_RE`, same negation guard);
+   - office attendance: reversed word order ("You will be in the office 3
+     days per week", "4 days per week in-office", "onsite 4 days a week",
+     "Hybrid schedule: 3 days in office, 2 remote") — every new alternative
+     still needs a per-week frequency or an explicit remote-days contrast;
+   - state lists spelled as FULL names ("We can only hire in these states:
+     California, Texas, New York"), gated on hiring/residency framing and
+     not company/office context; and the abbreviation-list check no longer
+     fires on a pure footprint sentence ("We have offices in CA, TX, NY,
+     FL, WA.").
+5. False-rejection bug found on the way: structured locations such as
+   "Remote - Global", "Global (Remote)", "Remote, Worldwide" were hard-
+   rejected by `has_role_specific_place_restriction_signal` because the
+   accepted-set only knew the bare words alone. Work-mode filler is now
+   stripped before comparing.
+
+**Verification (scratch suites, not committed):** each was run against the
+committed code first to prove it detects the bug, then against the fix.
+- `test_referential_auth_massive.py`: the four real leaked questions through
+  `classify_rank4()`, plus 20 templates x 15 tails x 5 Rank-4 locations (1,500
+  rejections) and the universal named-place gate on 4 named / 4 agnostic
+  locations per phrasing, plus benefit-framing and ordinary-question
+  false-positive banks: 4,073 cases, committed code 2,373 failing, fix 0.
+- `test_auth_question_coverage_massive.py`: 341 cases (146 country-auth
+  phrasings, 31 no-sponsorship, 52 false positives, end-to-end), 114 failing
+  before, 0 after.
+- `test_filters_fuzz_every_filter.py`: >=100 true positives per filter family
+  (no-sponsorship, workplace_type, title qualifiers, workplace labels,
+  country residency, hyphenated "-based only", entity/exclusion, timezone/
+  relocation, state lists, office attendance, state licences, language
+  fluency, metadata/location-symbol, country auth) run through the real Rank
+  4 gate: 2,333 cases, 367 failing before, 4 after. The 4 remaining are
+  *false rejections* (not leaks), deliberately left: "Our customers are based
+  in the United States and Europe." and "Our official conference sponsor does
+  not affect hiring." — widening the company-context guards to cover them
+  would let "You must be based in the US to serve our US customers" past one
+  of the filters, and leaks are the priority.
+- `test_filters_comprehensive.py`: 362 end-to-end pipeline cases, 0 failing.
+- All 36 earlier scratch suites unchanged vs. the committed baseline (the
+  only differences are the new suites above).
