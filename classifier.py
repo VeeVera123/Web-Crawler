@@ -67,6 +67,15 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 5  # seconds
 
+# 2026-10 (explicit user request: "if an LLM did not see it, have it wait
+# and then try one more time after which you should discard it should it
+# fail"): how long ai_classify_locations' last-chance retry waits before
+# forcing one final attempt at every job no provider ever actually
+# reviewed. Deliberately short — this is a bounded, single extra wait per
+# run (only triggered when no_ai_read is non-empty), not a substitute for
+# a daily-quota reset, which this wait cannot fix regardless of length.
+_LAST_CHANCE_RETRY_WAIT_SECONDS = 45
+
 
 def _make_client(provider: dict):
     """Create an OpenAI-compatible client for a provider config dict.
@@ -227,9 +236,18 @@ def _available_providers(providers: list[dict]) -> list[dict]:
     return [p for p in providers if not _provider_is_exhausted(p["name"])]
 
 
-def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500) -> str | None:
+def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_tokens: int = 500,
+              force: bool = False) -> str | None:
     """Call an OpenAI-compatible provider with retry on rate limit.
     Returns response text or None on failure.
+
+    force=True (2026-10, explicit user request — see ai_classify_locations'
+    last-chance retry) skips both exhaustion guards below so a provider
+    already marked dead by _mark_exhausted still gets one real network
+    attempt. Only ever passed by that one deliberate, bounded last-chance
+    retry — every other call site leaves this False, so _mark_exhausted's
+    normal "no more traffic for the rest of this run" behavior is
+    completely unaffected everywhere else.
 
     2026-09 ROUND 7: for Groq (both accounts), this call only actually
     proceeds while this process holds the cross-shard Groq lock (see
@@ -256,7 +274,7 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
     is_groq = name in _GROQ_NAMES
 
     # FIRST GUARD: never start work for a provider already known dead.
-    if _provider_is_exhausted(name):
+    if not force and _provider_is_exhausted(name):
         return None
 
     if is_groq:
@@ -276,7 +294,7 @@ def _ai_call(provider: dict, client, system_prompt: str, user_msg: str, max_toke
         # subsequently acquired the lock and fired anyway.  The shared check
         # MUST happen again after the lock is held and immediately before any
         # pacing/counter/network work.
-        if _provider_is_exhausted(name):
+        if not force and _provider_is_exhausted(name):
             return None
 
         interval = provider.get("min_call_interval", 0.0)
@@ -2530,8 +2548,13 @@ Respond ONLY with lines like:
 4 UNCERTAIN"""
 
 
-def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> tuple[list[str], bool]:
+def _classify_location_batch(batch_jobs: list[dict], provider: dict, client,
+                              force: bool = False) -> tuple[list[str], bool]:
     """Classify a single batch of jobs by location using a specific provider.
+
+    force=True is threaded straight through to _ai_call (see its own
+    docstring) — only ai_classify_locations' last-chance retry ever passes
+    this.
 
     Descriptions are sent IN FULL — no per-job truncation happens anywhere
     in this pipeline any more (see _assign_jobs_by_desc_length's ROUND 7
@@ -2573,7 +2596,7 @@ def _classify_location_batch(batch_jobs: list[dict], provider: dict, client) -> 
     # once a batch has more jobs than the cap can cover, and every job past
     # the cutoff keeps its default "uncertain" label. ~8 tokens/line + buffer.
     max_tokens = max(1500, len(batch_jobs) * 8 + 200)
-    text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
+    text = _ai_call(provider, client, LOCATION_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens, force=force)
 
     batch_results = ["uncertain"] * len(batch_jobs)
     if text is None:
@@ -3072,7 +3095,10 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
     # that index, so this only reflects the FINAL outcome.
     no_ai_read: set[int] = set()
 
-    def _run_round(work):
+    def _run_round(work, force=False):
+        # force=True (last-chance retry only, see below) is passed straight
+        # through to _classify_location_batch/_ai_call so an already-
+        # exhausted provider still gets one real network attempt.
         # 2026-09 ROUND 6 (explicit user request, real production log dump:
         # ~30 separate WARNING lines in the same second, one per failed
         # batch, e.g. "groq-c failed on a 1-job batch — reassigning to
@@ -3096,7 +3122,7 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
                     failed_batches.append((provider["name"], orig_indices, batch))
                     no_ai_read.update(orig_indices)
                     continue
-                f = pool.submit(_classify_location_batch, batch, provider, client)
+                f = pool.submit(_classify_location_batch, batch, provider, client, force)
                 future_map[f] = (provider["name"], orig_indices, batch)
 
             for future in as_completed(future_map):
@@ -3239,6 +3265,55 @@ def ai_classify_locations(jobs: list[dict]) -> list[tuple[str, str | None]]:
         # Loop repeats: anything that failed again lands back in
         # failed_batches and gets picked up next iteration, still
         # excluding every provider already tried for that specific job.
+
+    # ── Last-chance retry (2026-10, explicit user request: "if an LLM did
+    # not see it, have it wait and then try one more time after which you
+    # should discard it should it fail"). The cascade above only ever
+    # reassigns a job to a provider it HASN'T tried yet, and skips any
+    # provider _mark_exhausted already marked dead for the rest of this
+    # run — so once every configured provider has given up on a job once
+    # (most likely with few providers active, e.g. a run that only
+    # enabled one of NVIDIA/OpenAI/Groq), that job lands on
+    # ('uncertain', None) with zero further chance in this run, no matter
+    # how transient the real cause was. This is the deliberate, bounded
+    # exception: wait briefly, then force exactly ONE more real network
+    # attempt per still-unreviewed job against every configured provider,
+    # bypassing _mark_exhausted's breaker for this single attempt only
+    # (see _ai_call's force= param). Whatever still comes back
+    # ('uncertain', None) after this is genuinely never going to be
+    # reviewed this run — callers (crawl_i.py/crawl_ii.py) now discard
+    # those instead of keeping them under an "ai_unreviewed" clearance.
+    if no_ai_read:
+        retry_indices = sorted(no_ai_read)
+        log.warning(f"Location classification: {len(retry_indices)} job(s) were never "
+                    f"reviewed by any provider — waiting {_LAST_CHANCE_RETRY_WAIT_SECONDS}s "
+                    f"for one final forced retry before they're discarded")
+        time.sleep(_LAST_CHANCE_RETRY_WAIT_SECONDS)
+
+        retry_jobs = [jobs[i] for i in retry_indices]
+        retry_assignments = _assign_jobs_by_desc_length(list(enumerate(retry_jobs)), providers)
+        last_chance_work = []
+        for p in providers:
+            assigned = retry_assignments[p["name"]]
+            if not assigned:
+                continue
+            client = _get_location_client(p)
+            if not client:
+                continue
+            assigned_jobs = [job for _, job in assigned]
+            assigned_local_idx = [idx for idx, _ in assigned]
+            for start_idx, batch in _build_dynamic_batches(assigned_jobs, p["max_batch_chars"], provider_name=p["name"]):
+                batch_local_idx = assigned_local_idx[start_idx:start_idx + len(batch)]
+                batch_orig_idx = [retry_indices[i] for i in batch_local_idx]
+                last_chance_work.append((p, client, batch_orig_idx, batch))
+
+        if last_chance_work:
+            recovered_before = len(no_ai_read)
+            _run_round(last_chance_work, force=True)
+            recovered = recovered_before - len(no_ai_read)
+            log.info(f"Location classification: last-chance retry recovered a real review "
+                     f"for {recovered}/{len(retry_indices)} job(s); "
+                     f"{len(no_ai_read)} still never reviewed — will be discarded")
 
     # ── FINAL AI AUTHORITY GATE ───────────────────────────────────────
     results = _apply_location_ai_authority_gate(jobs, results)

@@ -154,6 +154,19 @@ def _excluded_cache_shard_path(shard: int) -> str:
 
 DEFAULT_ATS_LABEL = "in_house"  # jobs.ats value for every Crawl II row — free-text column, no CHECK
 
+# 2026-10 (explicit user request): how many confirmed application-form
+# boilerplate fields (name/email/phone/resume/cover letter/etc. — see
+# ats_scrapers.py's _count_confirmed_application_form_fields) a Crawl II
+# job needs before its captured form counts as genuinely real rather than
+# an unfetched/blank page — see _try_rank4 below for the full policy.
+# Picked the middle of the "maybe three or even 5" range the user floated:
+# high enough that a stray 1-2 field contact form (e.g. just "email" and
+# "message") can't pass as a real application form, low enough that a
+# normal company careers form (which routinely has name+email+phone+
+# resume+cover letter, i.e. 5 boilerplate fields on its own) clears it
+# easily off just the standard fields alone.
+RANK4_CONFIRMED_FORM_FIELD_THRESHOLD = 3
+
 CRAWL_CONCURRENCY = int(os.environ.get("CRAWL_II_CONCURRENCY", "300"))
 # 2026-09 (explicit user report: crawl_ii "took a shit ton of time...
 # increase concurrency"; raised 60 -> 150, then explicit follow-up "bump
@@ -1386,17 +1399,50 @@ def _filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
         # the same enrich_application_questions_async() as Crawl I (see
         # this file's imports), so a Crawl II job CAN carry a real
         # "Application Question:" marker. In practice every Crawl II row
-        # is currently tagged source_ats=DEFAULT_ATS_LABEL ("in_house"),
-        # never one of RANK4_ELIGIBLE_ATS's real platform names, so this
-        # gate is correct-but-currently-inert here — kept for consistency
-        # and in case that ever changes, not a guess that it fires today.
+        # was tagged source_ats=DEFAULT_ATS_LABEL ("in_house"), never one
+        # of RANK4_ELIGIBLE_ATS's real platform names, so this gate used
+        # to be correct-but-permanently-inert here — there was no path
+        # for an in-house/unsupported-ATS job to ever earn Rank 4.
+        #
+        # 2026-10 (explicit user request): Crawl II now has its OWN
+        # earned path in, alongside the RANK4_ELIGIBLE_ATS one. The
+        # original "Application Question:" marker check only ever
+        # confirmed we'd genuinely fetched the real form as a SIDE
+        # EFFECT of finding a substantive, non-boilerplate screening
+        # question in it (see _format_screening_questions in
+        # ats_scrapers.py) — a real captured form that happens to ask NO
+        # custom screening questions beyond the standard fields would
+        # never set that marker at all, and was being dropped as if it
+        # had never been fetched. _fetch_wild_questions (the one fetcher
+        # every in-house/unsupported-ATS job always goes through) now
+        # separately counts how many of the RAW fetched fields are
+        # confirmed application-form boilerplate (name, email, phone,
+        # resume/CV, cover letter, LinkedIn, EEO fields, etc. — the
+        # fields every real application form has, screening questions or
+        # not) and stores that count on the job as
+        # _confirmed_application_form_fields. Seeing enough of them
+        # (RANK4_CONFIRMED_FORM_FIELD_THRESHOLD) is direct, positive
+        # proof the page rendered a real application form — not an
+        # unfetched/blank/wrong-URL result — so it earns the exact same
+        # trust RANK4_ELIGIBLE_ATS membership already grants, and skips
+        # requiring the "Application Question:" marker too (whatever
+        # description_snippet actually holds, even just boilerplate
+        # fields and no screening questions at all, is now trustworthy
+        # input). classify_rank4() itself is completely unchanged — it
+        # still scans for the identical auth/sponsorship/restriction
+        # signals either way; this only changes how Crawl II earns the
+        # right to be scanned at all.
         if not rank4_enabled:
             return False
         if job.get("role_category") not in ("CS", "AM"):
             return False
-        if job.get("source_ats") not in RANK4_ELIGIBLE_ATS:
+        confirmed_form = (
+            job.get("_confirmed_application_form_fields", 0)
+            >= RANK4_CONFIRMED_FORM_FIELD_THRESHOLD
+        )
+        if job.get("source_ats") not in RANK4_ELIGIBLE_ATS and not confirmed_form:
             return False
-        if "Application Question:" not in (job.get("description_snippet") or ""):
+        if not confirmed_form and "Application Question:" not in (job.get("description_snippet") or ""):
             return False
         priority, reason = classify_rank4(job)
         if not priority:
@@ -1524,41 +1570,33 @@ def _filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 confidences.append("uncertain")
-            elif label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions:
+            elif (label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions
+                    and provider_name is not None):
                 # 2026-09 policy, refined per explicit user follow-up —
                 # see crawl_i.py's filter_locations for the full
                 # reasoning. Short version: the location field explicitly
-                # said "Remote" — a real signal from the company — so it's
-                # kept at PRIORITY_UNSURE whether the AI actually reviewed
-                # it and said UNCERTAIN, or never got reviewed at all. A
-                # BLANK location field can't be told apart from a scraper
-                # extraction bug (confirmed live twice this week — see
-                # ats_scrapers.py's scrape_jazzhr/scrape_successfactors
-                # fixes), so it no longer gets kept on "AI looked (or
-                # didn't) and still couldn't tell" alone — see the "blank"
-                # case in the comment below.
+                # said "Remote" — a real signal from the company — so a
+                # GENUINE AI review that comes back uncertain is kept at
+                # PRIORITY_UNSURE. A BLANK location field can't be told
+                # apart from a scraper extraction bug (confirmed live
+                # twice this week — see ats_scrapers.py's scrape_jazzhr/
+                # scrape_successfactors fixes), so it no longer gets kept
+                # on "AI looked and still couldn't tell" alone — see the
+                # "blank" case in the comment below.
                 #
-                # BUG FOUND & FIXED 2026-09 (AI-classification-stage
-                # audit — see the matching fix in crawl_i.py's
-                # filter_locations for the full writeup, including
-                # empirical repro): this branch used to ALSO require
-                # `provider_name is not None`, so a job whose AI review
-                # never actually happened (every LOCATION_PROVIDERS entry
-                # exhausted/rate-limited/unavailable — see classifier.py's
-                # _mark_exhausted circuit breaker, which keeps a provider
-                # dead for the rest of the run after just one give-up) was
-                # dropped identically to a genuine "no_match", even though
-                # its location field's own "Remote" text is real,
-                # unconditional evidence that doesn't depend on the AI
-                # ever confirming it. That's exactly the live failure mode
-                # behind csm_roles in the 10,000-17,000 range collapsing
-                # to global_jobs of 11-75 per shard (scan_reports,
-                # Supabase project mqkcmkwpfvpajzjrbdji): once a shared
-                # free-tier key (e.g. Groq's real 8K TPM pool, shared with
-                # role classification too) trips the circuit breaker early
-                # in a run, every later bare-remote job in that shard gets
-                # provider_name=None and was being silently rejected.
-                job["clearance"] = clearance if provider_name else "ai_unreviewed"
+                # 2026-10 POLICY SUPERSESSION (explicit user instruction —
+                # see crawl_i.py's filter_locations for the full
+                # writeup): the `provider_name is not None` requirement
+                # this branch dropped in 2026-09 (so a never-reviewed job
+                # was kept identically to a genuinely-uncertain one) is
+                # back, now that ai_classify_locations() runs a
+                # last-chance retry (wait, then one forced attempt
+                # bypassing the circuit breaker) before ever returning
+                # provider_name=None for good. A job that still comes back
+                # unreviewed after that real retry has had its fair shot
+                # and failed it — falls through to the `else` below and is
+                # discarded, same as any other drop.
+                job["clearance"] = clearance
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 confidences.append("uncertain")
@@ -1576,9 +1614,19 @@ def _filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                 before = len(matched)
                 _try_rank4(job)
                 if len(matched) == before:
-                    url = job.get("url")
-                    if url:
-                        new_exclusions.add(url)
+                    # 2026-10 (explicit user request — see crawl_i.py's
+                    # filter_locations for the full reasoning): never
+                    # cache this as an exclusion when provider_name is
+                    # None — no AI ever actually reviewed this job, even
+                    # after the last-chance retry, so caching it
+                    # identically to a genuine negative verdict would make
+                    # a future run (possibly with healthy providers again)
+                    # silently skip the LLM call for this URL for the full
+                    # 21-day TTL.
+                    if provider_name is not None:
+                        url = job.get("url")
+                        if url:
+                            new_exclusions.add(url)
 
     return matched, confidences
 

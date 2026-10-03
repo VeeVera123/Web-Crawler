@@ -1100,7 +1100,7 @@ with no restrictive verb/construction around it.
 | `1` | Global | regex only | all |
 | `2` | EMEA / Africa | regex only | all |
 | `3a` | Blank location, LLM found real evidence | LLM (demoted, never promoted) | all |
-| `3b` | Bare "Remote", real signal, AI-confirmed or genuinely uncertain | LLM or kept-by-default | all |
+| `3b` | Bare "Remote", real signal, AI-confirmed or genuinely uncertain | LLM, incl. after a last-chance retry | all |
 | `4a` | Bare country/region/continent, no restrictive tie | regex only, Crawl I/II | CS/AM only |
 | `4b` | Title/JD names a region, location is a different place | regex only, Crawl I/II | CS/AM only |
 | *(dropped)* | Keyword no-match, or AI no_match/blank-unconfirmed, or a Rank-4 candidate that fails its exclusion gate | — | — |
@@ -1119,3 +1119,149 @@ with no restrictive verb/construction around it.
   checkbox, wired into the Crawl I and Crawl II job steps (not Crawl III —
   its stapply.ai CSVs never carry application questions, so the gate can
   never pass there regardless of this flag).
+
+## 2026-10: a bare-remote job that no provider ever reviewed is now retried once, then discarded — not kept as "ai_unreviewed"
+
+Explicit user complaint, verbatim: *"why do some of the clearance notes
+say: ai_unreviewed like tf?? if an LLM did not see it, have it wait and
+then try one more time after which you should discard it should it fail.
+Although this issue likely just happened cause I chose one provider."*
+
+**Before this:** `ai_classify_locations()`'s cross-provider cascade
+(classifier.py) only ever reassigns a job to a provider it HASN'T tried
+yet, and skips any provider `_mark_exhausted` has already marked dead for
+the rest of the run. Once every *configured* provider has failed once for
+a job — trivially easy with only one provider active (exactly the
+scenario the user called out: `USE_OPENAI=true`/`USE_NVIDIA=true` with
+Groq excluded, or any run with just one provider enabled) — that job lands
+on `('uncertain', None)` with zero further chance in that run, no matter
+how transient the real failure was. crawl_i.py's `filter_locations()` and
+crawl_ii.py's `_filter_locations()` both then kept a bare-"Remote" job in
+exactly this state at `PRIORITY_UNSURE_SILENT`, tagged
+`clearance="ai_unreviewed"` — a job that had never actually been read by
+any model at all, indistinguishable in the output from a genuine AI
+verdict.
+
+**Fix, in two parts:**
+
+1. **A real last-chance retry** (`ai_classify_locations()`, right before
+   the final AI-authority gate): if any job is still unreviewed
+   (`no_ai_read` non-empty) after the normal cascade, wait
+   `_LAST_CHANCE_RETRY_WAIT_SECONDS` (45s), then force exactly ONE more
+   real network attempt per still-unreviewed job against every configured
+   provider — bypassing `_mark_exhausted`'s circuit breaker for this
+   single attempt only. `_ai_call()` and `_classify_location_batch()` both
+   grew a `force: bool = False` parameter for this; every other call site
+   leaves it `False`, so normal circuit-breaker behavior is completely
+   unaffected everywhere else. This is a deliberate, bounded exception —
+   the breaker's whole point is to stop *wasting* traffic on a provider
+   expected to keep failing for the rest of a multi-hour run, which
+   doesn't apply to one last, explicitly-accepted-cost attempt before a
+   job is discarded for good.
+
+2. **Caller-side policy supersession** (crawl_i.py's `filter_locations()`,
+   crawl_ii.py's `_filter_locations()`): the bare-remote branch now
+   requires `provider_name is not None` again — the opposite of the
+   2026-09 fix that removed this requirement (full history kept in both
+   files' comments). That 2026-09 fix existed because a job could reach
+   that point having genuinely never gotten a real shot at review; that's
+   no longer true now that the last-chance retry exists, so a job that
+   *still* comes back `provider_name=None` after it has had a genuine fair
+   shot and failed — it now falls through to the same drop path as a
+   `no_match`/`blank` job (Rank 4 still gets one last look first, same as
+   everything else). The `"ai_unreviewed"` clearance string no longer
+   exists anywhere in the codebase.
+
+3. **Exclusion-cache side effect, also fixed:** the final drop path caches
+   a job's URL into `new_exclusions` (skips the LLM call on a future run,
+   TTL 21 days — see `excluded_cache.py`) whenever Rank 4 doesn't rescue
+   it. That cache is meant for a job the AI *genuinely reviewed and
+   rejected* — caching "nobody ever actually looked at this" identically
+   would mean a future run (possibly with healthy providers again)
+   silently skips the LLM call for up to 21 days, compounding the exact
+   provider-outage problem that caused the drop in the first place. Both
+   files now skip the `new_exclusions.add(url)` call whenever
+   `provider_name is None`.
+
+Verified (`test_location_last_chance_retry.py`, scratch-only, not
+committed): a single-provider setup where every normal-round call fails —
+confirms the wait actually happens, a forced retry that succeeds recovers
+a real `(label, provider_name)` verdict, a forced retry that also fails
+leaves the job genuinely `('uncertain', None)`, and crawl_i.py's
+`filter_locations()` discards such a job entirely (and does NOT cache its
+URL into `new_exclusions`) rather than keeping it.
+
+## 2026-10: Crawl II earns its own path into Rank 4 — confirmed application-form field count, not ATS platform membership
+
+Explicit user request, verbatim: *"for crawl 2, cant we make it have an
+entry into rank 4 too. Like have it detect questions that would show it
+successfully captured the application questions part like email address,
+phone number, name, resume filed, cover letter field and boilerplate
+sections that all application questions have. Like if it means maybe
+three or even 5 of these? its confiremed that those are questions and its
+scanned for auth and sponsorship questions just like crawl 1 and then let
+in."*
+
+**Before this:** Rank 4's eligibility gate (`_try_rank4()`, duplicated in
+both crawl_i.py and crawl_ii.py) required `job["source_ats"] in
+RANK4_ELIGIBLE_ATS` — a fixed list of named, structured ATS platforms
+(Greenhouse, Lever, etc.) where the pipeline has a dedicated fetcher it
+trusts to reliably capture the real application form. Every Crawl II row
+is tagged `source_ats="in_house"` (crawl_ii.py's `DEFAULT_ATS_LABEL`,
+never a `RANK4_ELIGIBLE_ATS` member), so this gate was correct but
+**permanently inert** for Crawl II — there was no path for an in-house/
+unsupported-ATS job to ever earn Rank 4, no matter what its real captured
+form looked like.
+
+The second half of the old gate — requiring a literal `"Application
+Question:"` line in `description_snippet` — was also only an *indirect*
+proxy for "we genuinely captured the real form": that marker only appears
+as a side effect of finding at least one *substantive, non-boilerplate*
+screening question (see `_format_screening_questions`'s
+`_BOILERPLATE_QUESTION_RE` filter in ats_scrapers.py). A real, fully
+captured application form that happens to ask zero custom screening
+questions — just the standard name/email/phone/resume/cover-letter
+fields, which plenty of real company career forms do — would never set
+that marker at all, indistinguishable from a page that was never fetched.
+
+**Fix:** a direct, positive confirmation signal instead of an indirect
+proxy.
+
+- `ats_scrapers.py`'s `_fetch_wild_questions()` — the one fetcher every
+  in-house/unsupported-ATS job always goes through (it's never in
+  `QUESTION_FETCHERS`) — now also counts how many of the RAW fetched form
+  fields match `_BOILERPLATE_QUESTION_RE` (name, email, phone, resume/CV,
+  cover letter, LinkedIn, website, EEO fields, etc. — exactly the fields
+  the user named, reusing the existing pattern rather than writing a new
+  one) via the new `_count_confirmed_application_form_fields()` helper,
+  and stashes the count on `job["_confirmed_application_form_fields"]`.
+  This is a side-channel annotation only — the formatted string that
+  feeds `description_snippet` is completely unchanged, so every other
+  caller/behavior is unaffected.
+- crawl_ii.py's `_try_rank4()`: a job with
+  `_confirmed_application_form_fields >= RANK4_CONFIRMED_FORM_FIELD_THRESHOLD`
+  (set to 3 — the midpoint of the "maybe three or even 5" range the user
+  floated; low enough that a normal company form, which routinely has 5
+  boilerplate fields on its own, clears it easily, high enough that a
+  stray 1-2-field contact form can't) now earns the exact same trust
+  `RANK4_ELIGIBLE_ATS` membership already grants — including skipping the
+  `"Application Question:"` marker requirement, since a confirmed-real
+  form with zero screening questions is still trustworthy input.
+  `classify_rank4()` itself is completely unchanged: it scans whatever
+  `description_snippet` actually holds for the identical
+  auth/sponsorship/restriction signals either way. This only changes how
+  Crawl II earns the right to be scanned at all — crawl_i.py is untouched.
+
+Verified (`test_crawl_ii_rank4_form_confirmation.py`, scratch-only, not
+committed): the field-counter correctly counts a realistic form (6
+boilerplate fields) vs. a tiny 2-field contact form (1); `_fetch_wild_questions`
+correctly annotates the job without leaking boilerplate fields into the
+returned question text; and — driven through crawl_ii.py's real
+`_filter_locations()` — a Germany-located job with a confirmed real form
+and zero screening questions is now admitted to Rank 4 (the old gate would
+have rejected it outright), the same job with only 1 confirmed field
+(below threshold) is correctly NOT admitted, a hard-disqualified US-state
+location is still rejected even with a confirmed form (proving this only
+changes the capture-confirmation gate, not `classify_rank4()`'s own
+restriction scanning), and a confirmed-form job whose captured text
+carries a real restriction signal is still correctly rejected.

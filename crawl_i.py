@@ -702,7 +702,8 @@ def filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 matched_confidences.append("uncertain")
-            elif label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions:
+            elif (label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions
+                    and provider_name is not None):
                 # 2026-09 policy change (refined per explicit user
                 # follow-up): a GENUINE AI-reviewed uncertainty — the AI
                 # actually read the title/description and still couldn't
@@ -724,65 +725,47 @@ def filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                 # `unsure_reason == "blank"` branch below, which drops it
                 # instead.
                 #
-                # BUG FOUND & FIXED 2026-09 (AI-classification-stage
-                # audit, triggered by a live collapse from 1500+/day to
-                # <300/day survivors with csm_roles in the 10,000-17,000
-                # range per shard but global_jobs down to 11-75 — see
-                # scan_reports in Supabase, project mqkcmkwpfvpajzjrbdji):
-                # this branch used to ALSO require `provider_name is not
-                # None` (i.e. some LOCATION_PROVIDERS entry actually
-                # produced this job's verdict), which meant "no provider
-                # ever got a chance to review this job" (every provider
-                # exhausted/rate-limited/unavailable — see
-                # ai_classify_locations' results default of
-                # ('uncertain', None) in classifier.py, and _mark_exhausted's
-                # circuit breaker which, once ANY provider gives up once,
-                # marks it dead for the REST OF THE RUN with zero further
-                # network calls) was treated IDENTICALLY to a real
-                # "no_match" and dropped outright.
+                # 2026-10 POLICY SUPERSESSION (explicit user instruction:
+                # "why do some of the clearance notes say ai_unreviewed...
+                # if an LLM did not see it, have it wait and then try one
+                # more time after which you should discard it should it
+                # fail"): the `provider_name is not None` requirement this
+                # branch used to drop (2026-09 fix, full writeup below,
+                # kept for history) is now back, on purpose. That 2026-09
+                # fix existed because a job could reach this point having
+                # genuinely NEVER gotten a real shot at review — every
+                # provider exhausted/rate-limited with no retry left in
+                # that same run — so treating "never reviewed" the same
+                # as "no_match" meant silently losing real Remote signal
+                # to upstream rate-limiting, not anything about the job.
+                # That's no longer true: ai_classify_locations() now runs
+                # a last-chance retry (wait, then one forced attempt
+                # bypassing the circuit breaker) for exactly this
+                # scenario before ever returning — see its own docstring.
+                # A job that STILL comes back with provider_name=None
+                # after that has had a genuine fair shot and failed it,
+                # which is exactly the "discard it should it fail" case
+                # the user asked for — it now falls through to the `else`
+                # below like any other drop (Rank4 still gets one last
+                # look there first, same as everything else).
                 #
-                # That is a real, reproducible failure mode, not a
-                # hypothetical: this project runs one process per ATS
-                # shard (10+ concurrent GitHub Actions jobs), several of
-                # LOCATION_PROVIDERS' free-tier keys are SHARED across all
-                # of them (Groq's real pool is only 8K TPM, shared with
-                # role classification too — see config.py), and once one
-                # provider trips the circuit breaker early in a run (a
-                # burst of 429s, a transient outage, a bad key for that
-                # run), it never serves another request for the rest of
-                # that shard's ~3 hour run. If enough/all providers do
-                # this, EVERY remaining bare-remote job for the rest of
-                # the run gets provider_name=None and was being silently
-                # rejected — even though the job's OWN location field
-                # ("Remote") is a real, unconditional signal from the
-                # company that doesn't actually depend on the AI ever
-                # confirming it; that's exactly what PRIORITY_UNSURE
-                # exists for ("kept as a plausible match, but geographic
-                # scope wasn't confirmed by keyword OR AI evidence" — see
-                # classifier.py's PRIORITY_UNSURE constant). Verified
-                # empirically: with every LOCATION_PROVIDERS client
-                # unable to complete a real call (invalid keys / no
-                # network route, standing in for "every provider
-                # exhausted its rate limit mid-run"), ai_classify_locations
-                # returns ('uncertain', None) for 100% of a 30-job batch of
-                # synthetic bare-"Remote" jobs, and this branch's OLD
-                # `provider_name is not None` condition dropped all 30 of
-                # them instead of keeping them at PRIORITY_UNSURE.
-                #
-                # Fix: drop the `provider_name is not None` requirement
-                # here. A bare_remote job is kept at PRIORITY_UNSURE
-                # whether the AI genuinely reviewed it and said UNCERTAIN,
-                # or never got reviewed at all — both cases collapse to
-                # "we have a real Remote signal and no dis-confirming
-                # evidence", which is the bar PRIORITY_UNSURE was designed
-                # for. This does NOT touch the separate, deliberately
-                # stricter 'blank' handling below (still requires a real
-                # match_global/match_africa AI verdict to survive) — that
-                # one exists to guard against scraper extraction bugs
-                # (GFL Environmental, Inabia/JazzHR, Sonepar/
-                # SuccessFactors — see history above), which bare_remote
-                # was never meant to be conflated with.
-                job["clearance"] = provider_name or "ai_unreviewed"
+                # ORIGINAL 2026-09 WRITEUP (why the requirement was
+                # removed then — superseded above, kept for context):
+                # triggered by a live collapse from 1500+/day to <300/day
+                # survivors with csm_roles in the 10,000-17,000 range per
+                # shard but global_jobs down to 11-75 (scan_reports,
+                # Supabase project mqkcmkwpfvpajzjrbdji). This project
+                # runs one process per ATS shard (10+ concurrent GitHub
+                # Actions jobs), several of LOCATION_PROVIDERS' free-tier
+                # keys are SHARED across all of them (Groq's real pool is
+                # only 8K TPM, shared with role classification too — see
+                # config.py), and once one provider trips the circuit
+                # breaker early in a run, it never serves another request
+                # for the rest of that shard's ~3 hour run — with no
+                # last-chance retry existing yet at the time, that was a
+                # real, unrecoverable dead end for every later bare-remote
+                # job in the shard.
+                job["clearance"] = provider_name
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 matched_confidences.append("uncertain")
@@ -810,9 +793,23 @@ def filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                     # Genuinely excluded this run (AI didn't confirm it,
                     # and Rank 4 didn't rescue it either) — record it so a
                     # future run with the same URL skips the LLM call.
-                    url = job.get("url")
-                    if url:
-                        new_exclusions.add(url)
+                    #
+                    # 2026-10 (explicit user request — see the bare_remote
+                    # branch above's policy-supersession note): NEVER cache
+                    # this as an exclusion when provider_name is None —
+                    # that means no AI ever actually reviewed this job,
+                    # even after the last-chance retry. Caching a "nobody
+                    # looked" outcome identically to a genuine negative AI
+                    # verdict would mean a future run (possibly with
+                    # healthy providers again) silently skips the LLM call
+                    # for this URL for the full 21-day TTL, compounding the
+                    # exact provider-outage problem that caused this
+                    # instead of giving it a fresh look once providers
+                    # recover.
+                    if provider_name is not None:
+                        url = job.get("url")
+                        if url:
+                            new_exclusions.add(url)
 
     log.info(f"After location filter: {len(matched)} global/Africa/Rank3/Rank4 jobs")
     return matched, matched_confidences

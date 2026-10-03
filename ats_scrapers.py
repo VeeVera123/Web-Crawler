@@ -7717,6 +7717,28 @@ _BOILERPLATE_QUESTION_RE = re.compile(
 )
 
 
+def _count_confirmed_application_form_fields(questions: list[dict]) -> int:
+    """2026-10 (explicit user request, Crawl II Rank 4 extension — see
+    crawl_ii.py's _try_rank4 for the full policy): counts how many of the
+    RAW fetched form fields are universal application-form boilerplate
+    (name/email/phone/resume/CV/cover letter/LinkedIn/website/EEO fields —
+    see _BOILERPLATE_QUESTION_RE) rather than substantive screening
+    questions. Deliberately reuses that exact pattern: those are precisely
+    the fields that appear on nearly every real job-application form
+    regardless of what, if anything, it also asks about eligibility, so
+    seeing enough of them is direct, positive proof the page genuinely
+    rendered a real application form — not a blank/failed fetch, a 404, or
+    an unrelated contact form with one or two fields. Only used as a
+    CONFIRMATION signal (the caller checks this against its own
+    threshold); never changes what reaches description_snippet, which
+    still only gets the non-boilerplate survivors via
+    _format_screening_questions."""
+    return sum(
+        1 for q in questions or []
+        if (q.get("label") or "").strip() and _BOILERPLATE_QUESTION_RE.match((q.get("label") or "").strip())
+    )
+
+
 def _format_screening_questions(questions: list[dict]) -> str:
     """Given [{label, required}, ...], keep every substantive screening
     question — excluding only universal PII/identity fields (name, email,
@@ -8833,8 +8855,19 @@ def _fetch_wild_questions(job: dict) -> str:
     for supported platforms (_fetch_generic_form_questions_multi) — it
     doesn't know this platform's API, but the plain-URL-guess convention
     it tries is platform-agnostic by design, so it's exactly as applicable
-    to an unknown wild site as to a named ATS with no dedicated fetcher."""
-    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
+    to an unknown wild site as to a named ATS with no dedicated fetcher.
+
+    2026-10 (explicit user request — see crawl_ii.py's _try_rank4): also
+    stashes how many of the raw fetched fields are confirmed application-
+    form boilerplate onto job["_confirmed_application_form_fields"] —
+    Crawl II's own Rank 4 eligibility gate reads this directly off the
+    job dict, since this is the one fetcher every in-house/unsupported-
+    ATS job (archive_ii's entire population) always goes through. Every
+    other caller of this function is unaffected — the returned string is
+    unchanged, this only adds a side-channel annotation on `job`."""
+    raw_questions = _fetch_generic_form_questions_multi(job.get("url", ""))
+    job["_confirmed_application_form_fields"] = _count_confirmed_application_form_fields(raw_questions)
+    return _format_auth_questions(raw_questions)
 
 
 async def enrich_application_questions_async(jobs: list[dict], max_workers: int = 150) -> list[dict]:
