@@ -27,6 +27,19 @@ themselves built by `discovery.py` + `node.py` — a separate crawler that
 finds and classifies company career pages from several public slug
 inventories, independent of the ranking logic below.
 
+**ATS coverage research (2026-10)** — platforms checked for a public,
+robots-allowed job API before being added to Crawl I:
+
+| Platform | Result |
+|---|---|
+| Dayforce (Ceridian) | **Added** (`scrape_dayforce`): CSRF handshake + `jobposting/search` POST on `jobs.dayforcehcm.com`, full JD inline. Slug is `tenant` or `tenant\|board` (board names are per-tenant). 1,737 registry slugs via open-jobs |
+| HireHive | **Added** (`scrape_hirehive`): `{slug}.hirehive.com/api/v1/jobs`, robots allows all |
+| Eightfold | Not added — public `/api/apply/v2/jobs` returns 403 "Not authorized for PCSX" |
+| UKG / UltiPro | Not added — robots.txt disallows `JobBoardView` (the search endpoint) |
+| Dover, Employment Hero | Not added — robots.txt disallows `/api/` |
+| Manatal (`careers-page.com`) | Not added — the JSON API (`api.careers-page.com/open/v1/...`) has no per-job URL code (public URLs use a short hash), so a job URL can't be built without an N+1 JSON-LD crawl |
+| JobScore, Crelate, ApplicantPro/Stack, CareerPlug, GoHire, Comeet | Not added — HTML-only or SPA/token-gated, and mostly local/hourly US roles that the location filter would drop |
+
 ## Pipeline stages
 
 For every new job (URL not already in Supabase):

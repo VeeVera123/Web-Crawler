@@ -5647,6 +5647,207 @@ def scrape_hireology(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Dayforce (Ceridian) ─────────────────────────────────
+# 2026-10 (explicit user request: "see if there is another ATS source that
+# is not included here, maybe major ones"). Dayforce was already
+# slug-DISCOVERED (682 tenants in archive_i from the latmay dataset, plus
+# 1,740 live + 872 dead in elliottdehn/open-jobs' slugs.json) but had no
+# scraper — the earlier note in discovery.py said the candidate-portal
+# search schema "could not be verified live" from that session. Verified
+# live this session, from this sandbox, end to end:
+#   1. GET  https://jobs.dayforcehcm.com/api/auth/csrf
+#        -> {"csrfToken": "..."} + a session cookie (double-submit CSRF)
+#   2. POST https://jobs.dayforcehcm.com/api/geo/{tenant}/jobposting/search
+#        headers: x-csrf-token, Origin; JSON body
+#        {"clientNamespace", "jobBoardCode", "cultureCode": "en-US",
+#         "distanceUnit": 0, "paginationStart": N}
+#        -> {"jobPostings": [...25...], "maxCount", "offset", "count"}
+#      Each posting carries the FULL description inline (jobDescription,
+#      plain text with \n) — no per-job detail call needed.
+# jobBoardCode is REQUIRED (400 without it) and is per-tenant:
+# "CANDIDATEPORTAL" is Dayforce's default and worked for the tenants
+# sampled (4refuel, 99cents), while mydayforce's own board is "alljobs"
+# (CANDIDATEPORTAL returns 1 job there) — so both are tried, a 404 meaning
+# "no such board for this tenant". Tenants that renamed their board to
+# something else are not reachable (no public endpoint lists a tenant's
+# boards — /api/geo/{tenant}/jobboard(s) both 404).
+# robots.txt (jobs.dayforcehcm.com): only a Cloudflare content-signals
+# preamble, NO Disallow rules at all; the ceridian JobFeeds REST API on
+# www.dayforcehcm.com (which IS robots-disallowed) is deliberately not
+# used. A fresh requests.Session per call keeps the CSRF cookie jar
+# private to one tenant's scrape (the shared httpx client's cookie jar
+# would mix tokens across concurrent tenants).
+_DAYFORCE_BOARD_CODES = ("CANDIDATEPORTAL", "alljobs")
+
+
+def scrape_dayforce(slug: str) -> list[dict]:
+    """Slug is either a bare tenant code ("4refuel" — the board is then
+    guessed from _DAYFORCE_BOARD_CODES) or "tenant|boardCode" when the
+    board name is known (elliottdehn/open-jobs' registry carries 72 such
+    pairs, e.g. "acv/166CandidatePortal" -> "acv|166CandidatePortal";
+    a tenant can run several boards, each with its own job set, and no
+    public endpoint lists them)."""
+    ns, _, board_hint = (slug or "").strip().strip("/").partition("|")
+    ns, board_hint = ns.strip(), board_hint.strip()
+    if not ns:
+        return []
+    base = "https://jobs.dayforcehcm.com"
+    sess = requests.Session()
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+
+    def _csrf() -> str | None:
+        try:
+            r = sess.get(f"{base}/api/auth/csrf", headers=headers, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            return (r.json() or {}).get("csrfToken")
+        except Exception as e:
+            log.debug(f"Dayforce: CSRF handshake failed for {ns}: {e}")
+            return None
+
+    token = _csrf()
+    if not token:
+        return []
+    post_headers = {**headers, "Content-Type": "application/json", "x-csrf-token": token,
+                    "Origin": base, "Referer": f"{base}/en-US/{ns}/{board_hint or 'CANDIDATEPORTAL'}"}
+
+    page_size = 25
+    max_pages = 80  # defensive ceiling (2,000 postings/tenant)
+    # Bare-tenant slugs try EVERY default board code and merge (deduped by
+    # jobPostingId): verified live that "mydayforce" returns 1 posting on
+    # CANDIDATEPORTAL but 105 on alljobs, so stopping at the first board
+    # that answers would silently drop most of a tenant's postings.
+    jobs: list[dict] = []
+    seen: set = set()
+    for board in ((board_hint,) if board_hint else _DAYFORCE_BOARD_CODES):
+        start = 0
+        for _ in range(max_pages):
+            body = {"clientNamespace": ns, "jobBoardCode": board, "cultureCode": "en-US",
+                    "distanceUnit": 0, "paginationStart": start}
+            try:
+                r = sess.post(f"{base}/api/geo/{ns}/jobposting/search", json=body,
+                              headers=post_headers, timeout=REQUEST_TIMEOUT)
+            except Exception as e:
+                log.debug(f"Dayforce: search failed for {ns}/{board}: {e}")
+                break
+            if r.status_code == 429:
+                time.sleep(2)
+                continue
+            if r.status_code != 200:
+                break
+            try:
+                payload = r.json()
+            except Exception:
+                break
+            items = payload.get("jobPostings") or []
+            if not isinstance(items, list) or not items:
+                break
+            for j in items:
+                if not isinstance(j, dict):
+                    continue
+                jid = j.get("jobPostingId")
+                title = (j.get("jobTitle") or "").strip()
+                if not title or jid in seen:
+                    continue
+                seen.add(jid)
+                locs = []
+                for loc in (j.get("postingLocations") or []):
+                    if isinstance(loc, dict):
+                        addr = (loc.get("formattedAddress") or "").strip()
+                        if addr and addr not in locs:
+                            locs.append(addr)
+                location = "; ".join(locs[:5])
+                if not location and j.get("hasVirtualLocation"):
+                    location = "Remote"
+                desc = _snippet(j.get("jobDescription") or "")
+                jobs.append({
+                    "title": title,
+                    "url": f"{base}/en-US/{ns}/{board}/jobs/{jid}" if jid else f"{base}/en-US/{ns}/{board}",
+                    "company": ns.replace("-", " ").replace("_", " ").title() if len(ns) > 6 else ns.upper(),
+                    "location": location,
+                    "country": "",
+                    "department": "",
+                    "workplace_type": "Remote" if j.get("hasVirtualLocation") and not locs else "",
+                    "employment_type": "",
+                    "salary": _extract_salary(desc),
+                    "description_snippet": desc,
+                    "source_ats": "Dayforce",
+                    "slug": slug,
+                })
+            max_count = payload.get("maxCount")
+            start += page_size
+            if isinstance(max_count, int) and start >= max_count:
+                break
+            if len(items) < page_size:
+                break
+    return jobs
+
+
+# ── HireHive ────────────────────────────────────────────
+# 2026-10 (explicit user request: add missing ATS sources). Public,
+# unauthenticated JSON API per tenant subdomain:
+#   GET https://{slug}.hirehive.com/api/v1/jobs[?page=N]
+#   -> {"jobs": [...], "publishedJobsCount", "nextPage"}
+# Confirmed live from this sandbox. {slug}.hirehive.com/robots.txt is
+# "User-agent: * / Disallow:" (nothing disallowed). Each job carries
+# title, location (city), stateCode, country {name, code}, description
+# {html, text} (full), type, publishedDate and a canonical hostedUrl.
+# HireHive's default page is the top 30 open jobs; `nextPage` is falsy on
+# the last page.
+def scrape_hirehive(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return []
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    jobs: list[dict] = []
+    seen: set = set()
+    max_pages = 50
+    for page in range(1, max_pages + 1):
+        r = _get_requests_sync(f"https://{slug}.hirehive.com/api/v1/jobs",
+                               headers=headers, params={"page": page} if page > 1 else None)
+        if not r:
+            break
+        try:
+            payload = r.json()
+        except Exception as e:
+            log.debug(f"HireHive: JSON parse failed for {slug} page {page}: {e}")
+            break
+        items = payload.get("jobs") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not items:
+            break
+        for j in items:
+            if not isinstance(j, dict):
+                continue
+            title = (j.get("title") or "").strip()
+            jid = j.get("id")
+            if not title or jid in seen:
+                continue
+            seen.add(jid)
+            country = j.get("country") or {}
+            country_name = (country.get("name") or "").strip() if isinstance(country, dict) else ""
+            location = ", ".join(p for p in (
+                (j.get("location") or "").strip(), (j.get("stateCode") or "").strip(), country_name) if p)
+            desc_obj = j.get("description") or {}
+            desc = _snippet((desc_obj.get("html") or desc_obj.get("text") or "") if isinstance(desc_obj, dict) else str(desc_obj))
+            typ = j.get("type") or {}
+            jobs.append({
+                "title": title,
+                "url": j.get("hostedUrl") or f"https://{slug}.hirehive.com/",
+                "company": slug.replace("-", " ").title(),
+                "location": location,
+                "country": country_name,
+                "department": ((j.get("category") or {}).get("name", "") if isinstance(j.get("category"), dict) else ""),
+                "workplace_type": "",
+                "employment_type": (typ.get("name") or "").strip() if isinstance(typ, dict) else "",
+                "salary": _extract_salary(desc),
+                "description_snippet": desc,
+                "source_ats": "HireHive",
+                "slug": slug,
+            })
+        if not payload.get("nextPage"):
+            break
+    return jobs
+
+
 # ── RecruiterBox / Trakstar Hire ──────────────────────────
 # 2026-09: added at explicit user request. RecruiterBox rebranded to
 # "Trakstar Hire" some years ago but the public API host and the legacy
@@ -6133,6 +6334,11 @@ SCRAPERS = {
     # no auth, no robots.txt on jobs.gem.com at all).
     "gem": scrape_gem,
     "recruiterbox": scrape_recruiterbox,
+    # 2026-10: Dayforce (Ceridian) + HireHive — see scrape_dayforce's and
+    # scrape_hirehive's block comments above for the live-verified
+    # endpoint/robots.txt evidence.
+    "dayforce": scrape_dayforce,
+    "hirehive": scrape_hirehive,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -7284,6 +7490,13 @@ DESCRIPTION_FETCHERS = {
     # case (same as Zoho/BambooHR above), but registered with the generic
     # fetcher as a defensive fallback for the rare short/empty case.
     "Hireology": _fetch_generic_description,
+    # 2026-10: Dayforce / HireHive — both list endpoints already return the
+    # full description inline (jobDescription / description.html), so no
+    # enrichment fetch is needed in the common case. Deliberately NOT
+    # registered: Dayforce's job URL is a JS-rendered SPA shell (a generic
+    # fetch would return the same content-free page for every job, same
+    # reasoning as Gem below) and HireHive's hostedUrl would only repeat
+    # what the API already gave.
     # RecruiterBox / Trakstar Hire deliberately NOT registered here (same
     # reasoning as Gem below): scrape_recruiterbox's jsapi.recruiterbox.com
     # listing call already returns the full HTML description inline, and

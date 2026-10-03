@@ -570,6 +570,14 @@ SUPPORTED_ATS = {
     # ats_scrapers.scrape_hireology/scrape_isolvedhire for the full
     # evidence trail.
     "hireology", "isolvedhire",
+    # 2026-10 (explicit user request: add missing major ATS sources):
+    # Dayforce (Ceridian) — 682 tenants were already slug-discovered here
+    # with no scraper; scrape_dayforce is live-verified (CSRF handshake +
+    # jobposting/search POST, see its block comment in ats_scrapers.py).
+    # HireHive — public per-tenant JSON API ({slug}.hirehive.com/api/v1/
+    # jobs), robots.txt allows everything, 404 "Company not found" for a
+    # fake tenant.
+    "dayforce", "hirehive",
     # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
     # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
     # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
@@ -1979,6 +1987,24 @@ def _url_to_slug_hireology(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_hirehive(url: str) -> str | None:
+    """Extract slug from HireHive URLs (2026-10, new platform).
+    Pattern: {slug}.hirehive.com/... — subdomain-per-tenant. Confirmed
+    live: hirehive.hirehive.com/api/v1/jobs (a real tenant) vs
+    zzzz-fake-tenant-99999.hirehive.com (404 {"message":"Company not
+    found"}). www./app./api. etc. are HireHive's own marketing/product
+    hosts, not tenants."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(".hirehive.com"):
+        return None
+    slug = host[: -len(".hirehive.com")]
+    if (slug and "." not in slug and slug not in ("www", "app", "api", "docs", "help", "blog", "status")
+            and slug not in SKIP_SLUGS):
+        return slug
+    return None
+
+
 def _url_to_slug_isolvedhire(url: str) -> str | None:
     """Extract slug from isolvedhire (iSolved Hire) URLs (2026-09, new
     platform). Pattern: {slug}.isolvedhire.com/... — subdomain-per-tenant,
@@ -2144,9 +2170,23 @@ def _url_to_slug_dayforce(url: str) -> str | None:
         return None
     m = re.match(r"^/api/geo/([^/]+)/?$", parsed.path)
     if not m:
-        return None
+        # 2026-10: the PUBLIC job-board URL shape too —
+        # /en-US/{tenant}/{board}[/jobs/{id}] (confirmed live:
+        # jobs.dayforcehcm.com/en-US/mydayforce/alljobs/jobs/103002).
+        # Needed for Common Crawl / Wayback, which see these links, not
+        # the /api/geo/ ones. The locale segment is xx or xx-YY.
+        m = re.match(r"^/[a-z]{2}(?:-[A-Za-z]{2})?/([^/]+)(?:/|$)", parsed.path)
+        if not m:
+            return None
     tenant = m.group(1)
     if tenant.lower() not in SKIP_SLUGS and _looks_like_real_slug(tenant):
+        # 2026-10: a public /{locale}/{tenant}/{board} URL names the board;
+        # keep it as "tenant|board" unless it's Dayforce's default board
+        # (a tenant can run several boards with different job sets — see
+        # ats_scrapers.scrape_dayforce's slug docstring).
+        bm = re.match(r"^/[a-z]{2}(?:-[A-Za-z]{2})?/[^/]+/([A-Za-z0-9_-]+)(?:/|$)", parsed.path)
+        if bm and bm.group(1).lower() != "candidateportal":
+            return f"{tenant}|{bm.group(1)}"
         return tenant
     return None
 
@@ -2354,6 +2394,7 @@ URL_TO_SLUG = {
     "jazzhr": _url_to_slug_jazzhr,
     # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
     "hireology": _url_to_slug_hireology,
+    "hirehive": _url_to_slug_hirehive,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3046,6 +3087,11 @@ CC_PLATFORM_PATTERNS = {
     # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
     "hireology": ["careers.hireology.com/*/*/description"],
     "isolvedhire": ["*.isolvedhire.com/*"],
+    # New (2026-10): Dayforce / HireHive — see SUPPORTED_ATS comment above.
+    # Dayforce's candidate portal URLs are /en-US/{tenant}/{board}[/jobs/id]
+    # on ONE shared host (jobs.dayforcehcm.com).
+    "dayforce": ["jobs.dayforcehcm.com/*"],
+    "hirehive": ["*.hirehive.com/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3122,6 +3168,8 @@ CC_EXTRACTORS = {
     "paycom": _url_to_slug_paycom,
     # New (2026-09): Hireology / isolvedhire — see CC_PLATFORM_PATTERNS above.
     "hireology": _url_to_slug_hireology,
+    "hirehive": _url_to_slug_hirehive,
+    "dayforce": _url_to_slug_dayforce,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3323,6 +3371,20 @@ def _cc_check_hireology(slug: str) -> bool | None:
     try:
         r = requests.get(f"https://api.hireology.com/v2/public/careers/{slug}",
                           params={"page": 1, "page_size": 1}, timeout=10,
+                          headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_hirehive(slug: str) -> bool | None:
+    """Fallback copy of verification.py's _verify_hirehive (2026-10): a
+    fake tenant 404s with {"message":"Company not found"}, a real one
+    200s. See that function's docstring for the live evidence."""
+    try:
+        r = requests.get(f"https://{slug}.hirehive.com/api/v1/jobs", timeout=10,
                           headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
     except Exception:
         return None
@@ -3728,6 +3790,7 @@ _CC_LIVE_CHECK = {
     # _cc_check_pageup/_cc_check_workday functions above for the fallback
     # path's own docstrings.
     "hireology": _via_verification("hireology", _cc_check_hireology),
+    "hirehive": _via_verification("hirehive", _cc_check_hirehive),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,
@@ -3763,6 +3826,9 @@ _CC_LIVE_CHECK = {
 #    own tenant-level robots.txt before a response could even be
 #    inspected.
 #  - successfactors — JS-rendered, no HTTP scraper at all.
+#  - dayforce (2026-10) — a 404 from jobposting/search can't tell a dead
+#    tenant from a real tenant asked for a board code it doesn't have
+#    (board names are per-tenant and not enumerable).
 #  - jobylon — no cheap per-company signal exists at all; the real
 #    scraper needs a full sitemap-wide crawl per row, not a single
 #    request.
@@ -3809,7 +3875,7 @@ _DROP_DEAD_PROGRESS_EVERY = 100  # see _drop_dead_cc_slugs's log line
 _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
-    "jobvite", "paylocity", "hireology", "pageup", "gem",
+    "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -6397,6 +6463,10 @@ _GITHUB_REGISTRY_ATS_MAP = {
     # _url_to_slug_isolvedhire for the full evidence trail).
     "hireology": "hireology",
     "isolvedhire": "isolvedhire",
+    # 2026-10: Dayforce / HireHive — bare tenant string is what the
+    # scrapers take; a missing openroles file for either is harmless.
+    "dayforce": "dayforce",
+    "hirehive": "hirehive",
     # 2026-09: Gem — checked, NOT present. openroles' data/tenants/ and
     # scraper/src/ats/ file listings (via data.jsdelivr.com's flat
     # structure endpoint) confirmed live to have no "gem" entry at all.
@@ -6630,6 +6700,8 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     # SUPPORTED_ATS platform with zero alias here, so every prior source
     # that might have seen a "softgarden" label had it silently dropped).
     "softgarden": "softgarden",
+    # 2026-10: Dayforce / HireHive (new scrapers).
+    "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -6645,6 +6717,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("jobylon.com", "jobylon"), ("hireology.com", "hireology"),
     ("isolvedhire.com", "isolvedhire"), ("gem.com", "gem"),
     ("recruiterbox.com", "recruiterbox"), ("trakstar.com", "recruiterbox"),
+    ("jobs.dayforcehcm.com", "dayforce"), ("hirehive.com", "hirehive"),
 )
 
 
@@ -6874,6 +6947,10 @@ def _parse_generic_github_json(text: str, repo: str) -> dict[str, dict[str, str]
 #     GREYLIST_ATS.md), or need per-tenant metadata this repo doesn't
 #     provide either.
 _OPENJOBS_DIRECT_ATS = {
+    # 2026-10: "dayforce" added — slugs.json carries 1,740 live Dayforce
+    # tenant codes (+872 dead, which the "gone" bucket already excludes);
+    # the bare string is exactly the {tenant} scrape_dayforce takes.
+    "dayforce",
     "ashby", "bamboohr", "breezy", "greenhouse", "jazzhr", "jobvite",
     "lever", "paycom", "personio", "pinpoint", "recruitee",
     "smartrecruiters", "taleo", "workable",
@@ -6918,6 +6995,17 @@ def _parse_openjobs_slugmap(text: str, repo: str) -> dict[str, dict[str, str]]:
             # clientkey (see _GITHUB_REGISTRY_ATS_MAP's own "verified
             # live" comment on this exact shape), so it's the one
             # deliberate exception to that filter here.
+            if ats == "dayforce" and "/" in slug:
+                # open-jobs stores some Dayforce tenants as "tenant/board"
+                # (72 of 1,740) — convert to this project's "|" compound
+                # slug convention instead of letting _looks_like_real_slug
+                # drop them (it rejects "/").
+                tenant, _, board = slug.partition("/")
+                if (re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", tenant)
+                        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", board)
+                        and tenant.lower() not in SKIP_SLUGS):
+                    out.setdefault(ats, {})[f"{tenant}|{board}"] = ""
+                continue
             if ats != "paycom" and not _looks_like_real_slug(slug):
                 continue
             out.setdefault(ats, {})[slug] = ""

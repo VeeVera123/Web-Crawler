@@ -401,6 +401,12 @@ def _new_connector(concurrency: int) -> aiohttp.TCPConnector:
 # Left completely untouched — never checked, never deleted, only counted.
 # See the module docstring above for why each one is here.
 _UNVERIFIABLE_ATS = {
+    "dayforce",           # 2026-10: NOT safe — checked live: a fabricated tenant 404s on
+                          # jobposting/search, but so does a REAL tenant asked for a board
+                          # code it doesn't have (4refuel + "nonexistentboard" -> 404; the
+                          # board name is per-tenant and not enumerable — /api/geo/{t}/
+                          # jobboard(s) both 404), so a 404 cannot distinguish a dead
+                          # tenant from a wrong board guess.
     # "workday" MOVED OUT 2026-09 — the DNS-per-tenant shortcut still
     # doesn't exist (unlike Taleo below, a fake Workday tenant subdomain
     # resolves anyway, to the same shared per-instance load balancer every
@@ -777,6 +783,30 @@ async def _verify_hireology(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_hirehive(session: aiohttp.ClientSession, slug: str) -> bool:
+    """HireHive (2026-10, new platform — see discovery.py's SUPPORTED_ATS
+    comment). GET the tenant's public jobs API.
+
+    Confirmed live 2026-10: a fabricated tenant
+    (zzzz-fake-tenant-99999.hirehive.com/api/v1/jobs) returns a clean
+    404 {"message":"Company not found"} from HireHive itself, while a real
+    tenant (hirehive.hirehive.com) returns 200 + {"jobs":[...],
+    "publishedJobsCount", "nextPage"} — and a deliberately out-of-range
+    ?page=999 on that real tenant still returns 200, so an empty page is
+    never mistaken for a missing company. Not separately confirmed
+    against a real tenant with ZERO published jobs (none was found at
+    research time), but "Company not found" is an explicit tenant-level
+    message, not an empty-result shape. Any non-404 status is left
+    ambiguous via raise_for_status() below — never treated as dead."""
+    url = f"https://{slug}.hirehive.com/api/v1/jobs"
+    async with session.get(url, timeout=REQUEST_TIMEOUT,
+                            headers={"Accept": "application/json", "User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool:
     """isolvedhire (2026-09, new platform — see discovery.py's
     SUPPORTED_ATS comment). GET the tenant's /jobs/ board page and follow
@@ -930,6 +960,7 @@ ARCHIVE_II_VERIFIERS = {
     # oracle_cloud_hcm-style real-empty-vs-dead ambiguity before being
     # added here, per this file's own WHY-19-OF-26 methodology above).
     "hireology": _verify_hireology,
+    "hirehive": _verify_hirehive,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full
     # live-confirmed evidence, including finding and ruling out its own

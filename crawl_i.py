@@ -195,6 +195,13 @@ PLATFORM_WORKERS = {
     # support the same board-level concurrency as any other per-tenant
     # platform here.
     "successfactors": 30,
+
+    # 2026-10: Dayforce — every tenant shares ONE host (jobs.dayforcehcm.com)
+    # and each scrape does a CSRF handshake plus 25-posting pages, so keep
+    # it bounded like the other shared-host platforms above. HireHive is
+    # subdomain-per-tenant with a single light JSON call per ~30 jobs.
+    "dayforce": 6,
+    "hirehive": 12,
 }
 
 
