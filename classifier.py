@@ -6142,6 +6142,36 @@ def _rank4_location_field_is_hard_disqualified(loc: str) -> bool:
         return True
     return False
 
+
+# 2026-10 POLICY CHANGE (explicit user instruction: "even though jobs in
+# Kenya and co mention global hiring, they should still not make it. They
+# must be in the list of allowed countries/regions/continents to do
+# so."): a bare country NOT on Rank 4's own curated eligible list
+# (_RANK4_PLACE_INNER_FRAGMENT — US/UK/Canada/Australia/Germany/Ireland/
+# Singapore/Luxembourg/Norway/Switzerland/Denmark/Netherlands/Iceland/
+# Sweden/Italy, plus the named business regions) used to still be
+# rescuable at 4b purely on genuine "we hire globally"-shaped JD text —
+# confirmed live for Kenya/Brazil/South Africa/India-named postings. That
+# is no longer allowed: real broad-hiring language in the JD is NOT
+# sufficient on its own if the location field itself names a country
+# outside the curated list.
+#
+# Reuses _COUNTRY_AUTH_NAMES_RE_FRAGMENT — the project-wide, much BROADER
+# "does this text name any real country" vocabulary already used
+# everywhere else in this file for exclusion purposes — checked against
+# `remainder`, not raw `loc`: `remainder` already has every Rank-4-
+# eligible place name stripped out (computed just above, before either 4a
+# check), so a bare eligible region abbreviation that also happens to sit
+# in the broader fragment (APAC/LATAM/Europe are in both) never
+# false-positives here — by the time this runs, 4a has already failed,
+# which only happens when `remainder` is non-empty, i.e. real leftover
+# text _RANK4_PLACE_RE doesn't recognize. If THAT leftover text itself
+# names a real country, this is a hard, unconditional reject — no
+# title/JD language can override it. A bare city with no country word at
+# all ("London") leaves no such match and is unaffected, preserving the
+# legitimate "title: CSM, EMEA / location: London" 4b case.
+_RANK4_ANY_NAMED_COUNTRY_RE = re.compile(r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b", re.I)
+
 # 2026-09 NEW (explicit user policy, verbatim: "a JD saying based in one
 # our (allowed country/region) offices should not be allowed. Regions are
 # allowed. The aim of rank 4 is that maybe if they did not ask an app
@@ -6271,6 +6301,18 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     remainder = re.sub(r"[,\s/|()\-–—]+", " ", remainder).strip()
     if not remainder and _RANK4_PLACE_RE.search(loc):
         return PRIORITY_MIXED_COUNTRY, "bare_country_or_region"
+
+    # 2026-10 POLICY CHANGE: the location field names a real country that
+    # isn't on Rank 4's own curated list (see _RANK4_ANY_NAMED_COUNTRY_RE's
+    # module comment) -- a hard, unconditional reject regardless of what
+    # the title/JD separately claims. Checked here, right after the bare-
+    # country 4a check fails, so it also covers the "City, <disallowed
+    # country>" shape before the city+country 4a check below gets a
+    # chance to NOT match it anyway (that check only ever matches an
+    # ELIGIBLE country, so this isn't redundant with it -- it's closing
+    # off the DIFFERENT, broader path through 4b that follows).
+    if _RANK4_ANY_NAMED_COUNTRY_RE.search(remainder):
+        return None, None
 
     # 4a (city variant): "City, Country" — e.g. "Sydney, Australia",
     # "London, United Kingdom" — see _RANK4_CITY_COMMA_COUNTRY_RE's module

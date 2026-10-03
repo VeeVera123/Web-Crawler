@@ -917,9 +917,65 @@ Deliberately **not** extended to Canadian provinces or other shapes with
 no real posting evidence yet — scoped to what was actually observed, same
 discipline this file applies everywhere else. Verified the fix doesn't
 regress the legitimate cases it sits right next to: `"Germany"` (4a),
-`"Sydney, Australia"` (4a), `"CSM, EMEA"` + `"London"` (4b), and bare
-`"Kenya"`/`"Brazil"`/`"South Africa"` with genuine broad-hiring JD text
-(4b) all still classify exactly as before.
+`"Sydney, Australia"` (4a), `"CSM, EMEA"` + `"London"` (4b) all still
+classify exactly as before. (Bare `"Kenya"`/`"Brazil"`/`"South Africa"`
+with broad-hiring JD text used to also still admit at 4b — see the
+immediately following policy change, which supersedes that for good
+reason.)
+
+## 2026-10: policy change — a non-curated country is never rescuable, even by genuine "we hire globally" text
+
+Same day, explicit user instruction, directly prompted by the leak above:
+*"even though jobs in Kenya and co mention global hiring, they should
+still not make it. They must be in the list of allowed countries/
+regions/continents to do so."*
+
+Before this, a bare country **not** on Rank 4's own curated eligible list
+(`_RANK4_PLACE_INNER_FRAGMENT` — US/UK/Canada/Australia/Germany/Ireland/
+Singapore/Luxembourg/Norway/Switzerland/Denmark/Netherlands/Iceland/
+Sweden/Italy, plus the named business regions) could still reach 4b
+purely on the strength of genuine broad-hiring JD language ("we're a
+fully remote, globally distributed team, hiring from anywhere") — this
+was the actual, confirmed mechanism admitting the real Kenya/Brazil/
+South Africa/Bangalore-India rows from the leak above. Not a bug in the
+narrow sense (the broad-evidence detection itself was working correctly
+and finding real language) — but a policy gap: genuine company-wide
+hiring openness was being treated as sufficient on its own, when the
+user's actual bar is narrower — the location itself must *also* be
+somewhere Rank 4 already trusts.
+
+Fixed with `_RANK4_ANY_NAMED_COUNTRY_RE`, reusing the project-wide,
+much broader `_COUNTRY_AUTH_NAMES_RE_FRAGMENT` vocabulary (every real
+country name this file recognizes anywhere, not just Rank 4's short
+curated list). Checked against `remainder` — the location field with
+every Rank-4-eligible place name already stripped out, the same value
+4a's own bare-country check computes — not raw `loc`: this is what
+keeps a bare eligible region abbreviation that also happens to sit in
+the broader fragment (APAC/LATAM/Europe appear in both) from false-
+positiving, since by construction `remainder` is only ever non-empty
+here because 4a's bare-country check already failed to recognize
+everything in it. If what's left over names a real country, that's an
+unconditional reject — no title/JD language can override it. A bare
+city with no country word at all (`"London"`) leaves no such match and
+is unaffected, preserving the legitimate "title: `CSM, EMEA` / location:
+`London`" 4b case the project has relied on since Rank 4 shipped.
+
+Also closes a related, previously-accepted case the same way: Belgium
+named in the location field (`"Brussels, Brussels, Belgium"`) used to
+still admit at 4b when the JD separately mentioned "European Union
+institutions" — Belgium itself was never curated, so this is now
+rejected too, regardless of the EU mention.
+
+Verified: Kenya/Brazil/South Africa/Bangalore-India (even restated with
+genuine broad-hiring JD text) and the Belgium+EU case all now correctly
+reject; `"Germany"` (4a), `"APAC"`/`"LATAM"` alone (4a, confirming no
+false-positive from the broader fragment also containing those words),
+`"Sydney, Australia"` (4a), and `"CSM, EMEA"` + `"London"` (4b) all still
+classify exactly as before. 26 tests in
+`test_rank4_location_hard_disqualify.py`, plus the pre-existing
+`test_rank4_allowlist.py` updated to match the new, intentionally
+stricter policy (not a reverted regression — the old expectation was
+exactly the gap this change closes).
 
 ## Top-to-bottom audit (2026-09, explicit user-commissioned sweep)
 
