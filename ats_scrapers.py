@@ -381,6 +381,34 @@ def _note_host_response(url: str, *, was_rate_limited: bool, was_error: bool) ->
                 state["clean_streak"] = 0
 
 
+# ── Per-job enrichment fetch cache (2026-10) ──────────────────────────
+# crawl_i.py runs enrich_descriptions() then enrich_application_questions()
+# as two fully separate passes over the SAME job dicts. For 7 platforms
+# (ADP, iCIMS, Taleo, Oracle Cloud HCM, JazzHR, Paylocity, JOIN — confirmed
+# live, not guessed: each one's description fetcher and question fetcher
+# independently fetch the identical URL), that meant every one of those
+# jobs paid for the same network request TWICE, back to back -- real,
+# measured waste at crawl scale, not a theoretical one. Stashed directly
+# on the job dict (not a global/module-level cache): both enrichment
+# passes mutate the SAME job objects in place, so this is naturally
+# scoped per-job with zero cross-job leakage and zero extra memory held
+# beyond a single job's lifetime -- no TTL or eviction logic needed, it's
+# simply discarded along with the job dict once enrichment finishes.
+# Every cache PUT only ever happens after a genuinely successful fetch
+# (never caches a failure), so a cache MISS always means "a real fetch is
+# still needed here," same as if this layer didn't exist at all.
+def _enrich_cache_get(job: dict | None, url: str) -> str | None:
+    if not job or not url:
+        return None
+    return (job.get("_enrich_fetch_cache") or {}).get(url)
+
+
+def _enrich_cache_put(job: dict | None, url: str, text: str | None) -> None:
+    if job is None or not url or not text:
+        return
+    job.setdefault("_enrich_fetch_cache", {})[url] = text
+
+
 def _get_requests_sync(url: str, **kwargs) -> requests.Response | None:
     """LEGACY sync transport (requests) — 2026-09: kept only for
     not-yet-migrated scrape_*/_fetch_* functions during the batched async
@@ -6350,11 +6378,19 @@ def _extract_icims_location(html: str) -> str:
     return _extract_location_from_html(html)
 
 
-def _fetch_icims_content(url: str) -> str:
+def _fetch_icims_content(url: str, job: dict | None = None) -> str:
     """Fetch iCIMS job page HTML, handling the iframe wrapper problem.
     Many iCIMS career sites wrap the actual job content in an iframe.
     The real content is at the same URL with ?in_iframe=1.
-    Returns the HTML with actual job content, or empty string."""
+    Returns the HTML with actual job content, or empty string.
+
+    2026-10: optional `job` -- Strategy 2 below fetches the bare `url`,
+    the exact same URL iCIMS's question fetcher (_fetch_icims_questions)
+    asks for as its own first step. Caching it here lets that later call
+    reuse this fetch instead of repeating it. See _enrich_cache_get's
+    module comment. Strategy 1's iframe_url variant isn't cached -- the
+    question fetcher never asks for that URL, so there's nothing for it
+    to reuse there."""
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
     # Strategy 1: Try ?in_iframe=1 first — this gets the ACTUAL content
@@ -6376,6 +6412,7 @@ def _fetch_icims_content(url: str) -> str:
     r = _get_requests_sync(url, headers=headers)
     if r and r.text:
         text = r.text
+        _enrich_cache_put(job, url, text)
         # Check if it's a wrapper page (has iframe src pointing to itself)
         has_iframe = re.search(r'<iframe[^>]*src=["\'][^"\']*in_iframe', text, re.I)
         if has_iframe:
@@ -6404,7 +6441,7 @@ def _fetch_icims_description(job: dict) -> str:
     """Fetch full description and location from an individual iCIMS job page.
     Also extracts location as a side-effect (updates job dict in place).
     Handles iframe wrapper pages by trying multiple URL variants."""
-    html = _fetch_icims_content(job["url"])
+    html = _fetch_icims_content(job["url"], job)
     if not html:
         return ""
 
@@ -6737,6 +6774,11 @@ def _fetch_adp_description(job: dict) -> str:
     })
     if not r:
         return ""
+    # ADP's question fetcher (_fetch_adp_questions) hits this exact same
+    # detail endpoint for its own screeningRequirements field -- stash the
+    # raw JSON text so it can re-parse instead of re-fetching. See
+    # _enrich_cache_get's module comment.
+    _enrich_cache_put(job, url, r.text)
     try:
         data = r.json()
     except Exception:
@@ -6750,6 +6792,11 @@ def _fetch_taleo_description(job: dict) -> str:
     r = _get_requests_sync(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return ""
+    # Taleo's own question fetcher (_fetch_taleo_questions) falls back to
+    # this exact same URL when the dedicated jobapply.ftl page yields
+    # nothing -- stash it so that fallback can reuse this fetch instead of
+    # repeating it. See _enrich_cache_get's module comment.
+    _enrich_cache_put(job, job["url"], r.text)
     # Taleo pages have description in specific divs
     patterns = [
         r'class="[^"]*jobdescription[^"]*"[^>]*>(.*?)</div>',
@@ -6917,6 +6964,11 @@ async def _fetch_generic_description(job: dict) -> str:
         return ""
 
     html = r.text
+    # See _enrich_cache_get/_put's module comment: this lets a later
+    # application-question fetch for the SAME job (JazzHR, Paylocity,
+    # JOIN all route their description through this exact function)
+    # reuse this page instead of re-fetching the identical URL.
+    _enrich_cache_put(job, url, html)
 
     # ── Extract location if missing (side-effect) ──────────
     if not job.get("location"):
@@ -7072,6 +7124,11 @@ def _fetch_oracle_cloud_hcm_description(job: dict) -> str:
         r = _get_requests_sync(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
         if not r:
             return ""
+        # _fetch_oracle_cloud_hcm_questions hits this exact same endpoint
+        # (same api_url, same params) for its own question-shaped fields
+        # -- stash the raw JSON text so it can re-parse instead of
+        # re-fetching. See _enrich_cache_get's module comment.
+        _enrich_cache_put(job, api_url, r.text)
         data = r.json()
     except Exception:
         return ""
@@ -7774,20 +7831,32 @@ def _parse_form_elements(html_text: str) -> list[dict]:
     return questions
 
 
-def _fetch_generic_form_questions(url: str) -> list[dict]:
+def _fetch_generic_form_questions(url: str, job: dict | None = None) -> list[dict]:
     """Universal Level-3 fallback used by every platform: fetch a URL and
     try embedded JSON first, then raw form-element parsing. Returns []
     (not an exception) on any failure — callers treat that as 'no signal
-    found', which is expected and fine for JS-rendered platforms."""
+    found', which is expected and fine for JS-rendered platforms.
+
+    2026-10: optional `job` lets this reuse a page already fetched for
+    this exact URL during description enrichment (see _enrich_cache_get's
+    module comment) instead of re-fetching it — `job` is None for every
+    call site that isn't part of the description/questions enrichment
+    pair, which behaves exactly as before (always a real fetch)."""
     if not url:
         return []
-    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
-    if not r:
-        return []
-    found = _find_embedded_questions(r.text)
+    cached = _enrich_cache_get(job, url)
+    if cached is not None:
+        html_text = cached
+    else:
+        r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        if not r:
+            return []
+        html_text = r.text
+        _enrich_cache_put(job, url, html_text)
+    found = _find_embedded_questions(html_text)
     if found:
         return found
-    return _parse_form_elements(r.text)
+    return _parse_form_elements(html_text)
 
 
 def _generic_form_url_candidates(url: str) -> list[str]:
@@ -7926,7 +7995,7 @@ def _discover_real_apply_link(html_text: str, base_url: str) -> str | None:
     return best_url
 
 
-def _fetch_generic_form_questions_multi(url: str) -> list[dict]:
+def _fetch_generic_form_questions_multi(url: str, job: dict | None = None) -> list[dict]:
     """The full Level-3 chase, in priority order: (1) the bare listing
     URL itself — some platforms render the form right there; (2) a REAL
     apply link discovered directly on that same already-fetched page
@@ -7938,25 +8007,41 @@ def _fetch_generic_form_questions_multi(url: str) -> list[dict]:
     JS-driven button with no real href at all). Stops at the first
     candidate that yields ANY signal — a fetch that fails outright is
     silently treated the same as one that fetched fine but found
-    nothing, matching every other best-effort step in this file."""
+    nothing, matching every other best-effort step in this file.
+
+    2026-10: optional `job`, threaded through to every nested fetch call
+    below — see _fetch_generic_form_questions' own 2026-10 note. Only the
+    bare `url` step (the one most often identical to the description
+    fetcher's own URL) is actually expected to ever hit the cache; the
+    discovered-apply-link and suffix-guess steps target different URLs
+    by construction, so passing `job` there is a harmless, usually-
+    missing lookup, not a behavior change."""
     if not url:
         return []
 
-    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
-    if r:
-        found = _find_embedded_questions(r.text) or _parse_form_elements(r.text)
+    cached = _enrich_cache_get(job, url)
+    if cached is not None:
+        html_text = cached
+    else:
+        r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        html_text = r.text if r else None
+        if html_text:
+            _enrich_cache_put(job, url, html_text)
+
+    if html_text:
+        found = _find_embedded_questions(html_text) or _parse_form_elements(html_text)
         if found:
             return found
-        apply_link = _discover_real_apply_link(r.text, url)
+        apply_link = _discover_real_apply_link(html_text, url)
         if apply_link and apply_link != url:
-            found = _fetch_generic_form_questions(apply_link)
+            found = _fetch_generic_form_questions(apply_link, job)
             if found:
                 return found
 
     for candidate in _generic_form_url_candidates(url):
         if candidate == url:
             continue  # already tried above, whether or not the fetch itself succeeded
-        found = _fetch_generic_form_questions(candidate)
+        found = _fetch_generic_form_questions(candidate, job)
         if found:
             return found
     return []
@@ -8314,11 +8399,22 @@ def _fetch_jazzhr_questions(job: dict) -> str:
     url = job.get("url", "")
     if not url:
         return ""
-    r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    # 2026-10: JazzHR's description fetcher (_fetch_generic_description,
+    # DESCRIPTION_FETCHERS["JazzHR"]) fetches this exact same URL — reuse
+    # that page instead of re-fetching it. See _enrich_cache_get's module
+    # comment.
+    cached = _enrich_cache_get(job, url)
+    if cached is not None:
+        html_text = cached
+    else:
+        r = _get_requests_sync(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        html_text = r.text if r else None
+        if html_text:
+            _enrich_cache_put(job, url, html_text)
 
     questions = []
-    if r:
-        soup = BeautifulSoup(r.text, "lxml")
+    if html_text:
+        soup = BeautifulSoup(html_text, "lxml")
         container = soup.select_one("div.job-form-fields") or soup
         for label_el in container.select('label[id^="resumator-questionnaire-"]'):
             raw_label = label_el.get_text(" ", strip=True)
@@ -8329,7 +8425,7 @@ def _fetch_jazzhr_questions(job: dict) -> str:
             questions.append({"label": label, "required": required})
 
     if not questions:
-        questions = _fetch_generic_form_questions(url)
+        questions = _fetch_generic_form_questions(url, job)
     return _format_auth_questions(questions)
 
 
@@ -8399,15 +8495,24 @@ def _fetch_oracle_cloud_hcm_questions(job: dict) -> str:
                 "ora-irc-cx-userid": str(_uuid.uuid4()),
                 "ora-irc-language": "en",
             }
-            r = _get_requests_sync(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
-            if r:
-                data = r.json()
+            # 2026-10: reuse _fetch_oracle_cloud_hcm_description's fetch of
+            # this exact same endpoint if it already ran for this job --
+            # see _enrich_cache_get's module comment.
+            cached = _enrich_cache_get(job, api_url)
+            if cached is not None:
+                data = json.loads(cached)
                 _walk_for_questions(data, questions)
+            else:
+                r = _get_requests_sync(api_url, params={"onlyData": "true", "expand": "all"}, headers=headers)
+                if r:
+                    _enrich_cache_put(job, api_url, r.text)
+                    data = r.json()
+                    _walk_for_questions(data, questions)
         except Exception:
             pass
 
     if not questions:
-        questions = _fetch_generic_form_questions_multi(url)
+        questions = _fetch_generic_form_questions_multi(url, job)
     return _format_auth_questions(questions)
 
 
@@ -8453,14 +8558,23 @@ def _fetch_adp_questions(job: dict) -> str:
     url = job.get("_adp_api_detail_url", "")
     if not url:
         return ""
-    r = _get_requests_sync(url, headers={
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-    })
-    if not r:
-        return ""
+    # 2026-10: reuse _fetch_adp_description's fetch of this exact same
+    # endpoint if it already ran for this job -- see _enrich_cache_get's
+    # module comment.
+    cached = _enrich_cache_get(job, url)
+    if cached is not None:
+        raw_text = cached
+    else:
+        r = _get_requests_sync(url, headers={
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "application/json",
+        })
+        if not r:
+            return ""
+        raw_text = r.text
+        _enrich_cache_put(job, url, raw_text)
     try:
-        data = r.json()
+        data = json.loads(raw_text)
     except Exception:
         return ""
     questions: list[dict] = []
@@ -8590,7 +8704,10 @@ def _fetch_bamboohr_questions(job: dict) -> str:
 
 
 def _fetch_icims_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
+    # 2026-10: pass `job` so this can reuse whatever _fetch_icims_content
+    # (iCIMS's description fetcher) already fetched for this exact URL —
+    # see _enrich_cache_get's module comment.
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", ""), job))
 
 
 def _fetch_workday_questions(job: dict) -> str:
@@ -8616,7 +8733,9 @@ def _fetch_personio_questions(job: dict) -> str:
 
 
 def _fetch_joincom_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
+    # 2026-10: pass `job` -- JOIN's description fetcher routes through
+    # _fetch_generic_description on this exact URL. See _enrich_cache_get.
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", ""), job))
 
 
 def _fetch_taleo_questions(job: dict) -> str:
@@ -8634,11 +8753,18 @@ def _fetch_taleo_questions(job: dict) -> str:
         found = _fetch_generic_form_questions(apply_url)
         if found:
             return _format_auth_questions(found)
-    return _format_auth_questions(_fetch_generic_form_questions(url))
+    # 2026-10: pass `job` on this specific fallback branch only -- this is
+    # the one that targets the exact same URL Taleo's description fetcher
+    # (_fetch_taleo_description) already fetched. The jobapply.ftl branch
+    # above targets a genuinely different URL, so it's left alone.
+    return _format_auth_questions(_fetch_generic_form_questions(url, job))
 
 
 def _fetch_paylocity_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
+    # 2026-10: pass `job` -- Paylocity's description fetcher
+    # (_fetch_generic_description) fetches this exact URL. See
+    # _enrich_cache_get's module comment.
+    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", ""), job))
 
 
 # ── SmartRecruiters ──
