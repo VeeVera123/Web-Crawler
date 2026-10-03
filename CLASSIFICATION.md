@@ -871,6 +871,56 @@ already apply — so it stays safe on a genuinely blank/bare-Remote/broad
 location, benefit-of-the-doubt preserved, identical to the citizenship
 fix.
 
+## 2026-10: real production leak — 4b admitting disallowed US states and a raw street address
+
+User-reported, from a real crawl run, not a hypothetical: rows written with
+location `"New York, NY"`, `"Remote, New York"`,
+`"Denver, CO; New York City, NY; San Francisco, CA"`, a long enumerated
+multi-state list (`"Boston, Massachusetts; Chicago, Illinois; ..."`), and a
+raw European street address (`"AT002 Industriestraße 2, 5303 Thalgau"`) —
+every one `clearance='rank4'`, `location_priority='4b'`.
+
+Root cause, confirmed by directly reproducing it against the exact title/
+location pairs from the real rows: once `classify_rank4()`'s two 4a checks
+both fail (the location is neither a bare eligible country/region nor a
+clean "City, eligible-country" pair), the function falls through to 4b's
+Global/EMEA/Africa-family broad-evidence check — which tests `loc`/`title`
+for words like "Global"/"EMEA"/multi-region breadth with **no verification
+at all that `loc` itself isn't already a flatly disallowed shape**. A title
+as mundane as "Global Account Manager, Strategics (New York)" — "Global"
+used as a job-level flourish, nothing to do with hiring geography — was
+enough to grant 4b despite the location field unambiguously naming a
+specific, disqualifying US state. 4b's own premise (title/JD supplies a
+broader claim while the location field is merely a narrower-but-still-
+*eligible* place, e.g. "EMEA" + "London") was never meant to let title/JD
+language override a location field that's already concretely disqualifying
+on its own.
+
+Fixed with `_rank4_location_field_is_hard_disqualified(loc)`, checked
+once, right after 4a fails, blocking **both** 4b paths (not just the
+Global/EMEA/Africa one — `_RANK4_STRICT_PLACE_RE`'s mixed_title_or_jd_signal
+path gets the same guard). Scoped to exactly what real evidence showed:
+
+1. A US state, spelled out in full anywhere in `loc`.
+2. A US state abbreviation immediately after a `"<word(s)>, "` prefix,
+   validated against the real, closed `_US_STATE_ABBRS` set — not a bare
+   `re.I` alternation of 2-letter codes, which would also match "ca"/"ny"
+   inside ordinary words like "Canada"/"many" (same case-sensitivity
+   discipline as `_has_metro_area_state_abbr_signal`, and the same
+   `re.I`-vs-bare-letters bug class the 2026-09 top-to-bottom audit below
+   found repeatedly elsewhere in this file).
+3. A raw street address: a short digit run (a postal code, 4-6 digits)
+   sitting directly in front of a word (the city name) — "5303 Thalgau" —
+   a shape no legitimate bare country/region/city name ever takes.
+
+Deliberately **not** extended to Canadian provinces or other shapes with
+no real posting evidence yet — scoped to what was actually observed, same
+discipline this file applies everywhere else. Verified the fix doesn't
+regress the legitimate cases it sits right next to: `"Germany"` (4a),
+`"Sydney, Australia"` (4a), `"CSM, EMEA"` + `"London"` (4b), and bare
+`"Kenya"`/`"Brazil"`/`"South Africa"` with genuine broad-hiring JD text
+(4b) all still classify exactly as before.
+
 ## Top-to-bottom audit (2026-09, explicit user-commissioned sweep)
 
 The user asked for a full top-to-bottom pass over this file — every check,

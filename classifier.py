@@ -6085,6 +6085,63 @@ _RANK4_CITY_COMMA_COUNTRY_RE = re.compile(
     re.I,
 )
 
+# 2026-10 BUG FIX (real production leak, explicit user report: a live
+# crawl wrote rows with location "Remote, New York", "Denver, CO; New
+# York City, NY; San Francisco, CA", "Boston, Massachusetts; Chicago,
+# Illinois; ... Remote, New Jersey", and a raw European street address,
+# "AT002 Industriestraße 2, 5303 Thalgau" — none of them a legitimate
+# Rank 4 admission. Root cause: once the 4a checks above both fail (this
+# location is neither a bare eligible country/region nor a clean "City,
+# eligible-country" pair), classify_rank4() falls through to 4b's
+# Global/EMEA/Africa-family check, which tests `loc`/`title` for broad
+# evidence (_text_has_global_evidence, _TITLE_MULTI_REGION_WORDS_RE,
+# etc.) with NO check at all that `loc` itself isn't already a flatly
+# disallowed shape. A title merely containing the word "Global" ("Global
+# Account Manager, Strategics (New York)") was enough to grant 4b despite
+# the location field unambiguously naming a specific US state — 4b's own
+# premise (title/JD supplies a broader claim while the location field is
+# merely a narrower-but-still-ELIGIBLE place, e.g. "EMEA" + "London")
+# requires the location to at least be eligible on its own; it was never
+# meant to let title/JD language override a location field that's
+# already concretely disqualifying.
+#
+# Checked once, right after 4a fails, and blocks BOTH 4b paths below
+# (not just the Global/EMEA/Africa one) — a location this clearly
+# specific shouldn't be rescuable via _RANK4_STRICT_PLACE_RE either.
+# Deliberately scoped to what real evidence showed, not every
+# conceivable disqualifying shape (e.g. Canadian provinces aren't
+# covered — no real posting has shown that gap yet):
+#   1. A US state, spelled out in full anywhere in `loc` ("Remote, New
+#      York", "Boston, Massachusetts; Chicago, Illinois; ...").
+#   2. A US state abbreviation immediately after a "<word(s)>, " prefix,
+#      validated against the real, closed _US_STATE_ABBRS set (not a
+#      bare re.I alternation of 2-letter codes, which would also match
+#      "ca"/"ny" inside ordinary words like "Canada"/"many" — same
+#      case-sensitivity discipline as _has_metro_area_state_abbr_signal).
+#   3. A raw street address: a short digit run (a postal code, 4-6
+#      digits) sitting directly in front of a word (the city name) --
+#      "5303 Thalgau" -- a shape no legitimate bare country/region/city
+#      name ever takes.
+_LOCATION_FIELD_US_STATE_FULL_RE = re.compile(
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\b", re.I
+)
+_LOCATION_FIELD_STATE_ABBR_RE = re.compile(
+    r"\b[A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*){0,3}\s*,\s*([A-Za-z]{2})\b"
+)
+_RANK4_RAW_STREET_ADDRESS_RE = re.compile(
+    r"\b\d{1,5}\s*,?\s*\d{4,6}\s+[A-Za-zÀ-ÖØ-öø-ÿ]"
+)
+
+
+def _rank4_location_field_is_hard_disqualified(loc: str) -> bool:
+    if _LOCATION_FIELD_US_STATE_FULL_RE.search(loc):
+        return True
+    if any(m.group(1) in _US_STATE_ABBRS for m in _LOCATION_FIELD_STATE_ABBR_RE.finditer(loc)):
+        return True
+    if _RANK4_RAW_STREET_ADDRESS_RE.search(loc):
+        return True
+    return False
+
 # 2026-09 NEW (explicit user policy, verbatim: "a JD saying based in one
 # our (allowed country/region) offices should not be allowed. Regions are
 # allowed. The aim of rank 4 is that maybe if they did not ask an app
@@ -6223,6 +6280,16 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # city name itself is never in _RANK4_PLACE_RE's vocabulary).
     if _RANK4_CITY_COMMA_COUNTRY_RE.match(loc.strip()):
         return PRIORITY_MIXED_COUNTRY, "city_in_eligible_country"
+
+    # Neither 4a shape matched -- before letting 4b's title/JD-driven
+    # checks have a say, rule out a location field that's already
+    # concretely disqualifying on its own (a US state, an enumerated
+    # list containing one, or a raw street address). See
+    # _rank4_location_field_is_hard_disqualified's own module comment
+    # for the real leaked postings this closes -- no title/JD language
+    # should be able to rescue a location field this specific.
+    if _rank4_location_field_is_hard_disqualified(loc):
+        return None, None
 
     # 4b: the location field is something ELSE (a city, e.g.) but the
     # title/description independently name an allowed region/country — a
