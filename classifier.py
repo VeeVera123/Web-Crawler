@@ -6181,7 +6181,7 @@ def has_non_remote_labeled_text_signal(job: dict) -> bool:
 # audit, ats_capability_probe-style: 25-30 real companies sampled per
 # platform through the actual production pipeline) to reliably return
 # BOTH a location and application-question value on the same job —
-# Workday/iCIMS/Ashby/ADP/BambooHR/Oracle Cloud HCM/SmartRecruiters/
+# Workday/iCIMS/ADP/BambooHR/Oracle Cloud HCM/SmartRecruiters/
 # Zoho/HRMDirect/Taleo/Paylocity/JOIN/BreezyHR/Jobvite all either have a
 # confirmed-broken/auth-walled question fetcher or too high a missing-
 # questions rate to trust for a tier whose entire admission logic
@@ -6193,8 +6193,11 @@ def has_non_remote_labeled_text_signal(job: dict) -> bool:
 RANK4_ELIGIBLE_ATS = {
     "Greenhouse", "Workable", "Personio", "JazzHR", "Teamtailor",
     "Recruitee", "Lever", "PageUp", "isolvedhire", "Pinpoint",
-    "Rippling",
+    "Rippling", "Ashby",
 }
+# 2026-10: Ashby added once its question fetcher worked again (GraphQL; the old
+# posting API returned 401). Live probe, 30 random boards / 72 jobs: location on
+# 72/72, form fetch OK on 72/72, >=1 non-boilerplate question on 58/72.
 # 2026-10: Eploy removed — no dedicated question fetcher (only the
 # generic wild fallback, which is unreliable for Eploy's server-rendered
 # HTML forms), so Rank 4's core premise ("we confirmed the questions are

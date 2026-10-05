@@ -105,7 +105,7 @@ the LLM's verdict is what actually decides the outcome.**
 | # | Condition |
 |---|---|
 | 1 | `role_category` is `CS` or `AM` |
-| 2 | `source_ats` in `RANK4_ELIGIBLE_ATS`: Greenhouse, Workable, Personio, JazzHR, Teamtailor, Recruitee, Lever, Eploy, PageUp, isolvedhire, Pinpoint, Rippling |
+| 2 | `source_ats` in `RANK4_ELIGIBLE_ATS`: Greenhouse, Workable, Personio, JazzHR, Teamtailor, Recruitee, Lever, PageUp, isolvedhire, Pinpoint, Rippling, Ashby |
 | 3 | `ENABLE_RANK4_COUNTRY_SPECIFIC` config flag is on |
 | 4 | `"Application Question:"` literally present in `description_snippet` |
 

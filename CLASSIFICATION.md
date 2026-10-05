@@ -310,12 +310,14 @@ otherwise drop.
 called):
 1. `role_category` is `"CS"` or `"AM"` (never PM/OM).
 2. The job's ATS platform is in `RANK4_ELIGIBLE_ATS` — the 12 platforms
-   live-verified (2026-09 probe, ~25-30 real companies sampled per
-   platform) to reliably return **both** a location and application-question
-   value on the same job: **Greenhouse, Workable, Personio, JazzHR,
-   Teamtailor, Recruitee, Lever, Eploy, PageUp, isolvedhire, Pinpoint,
-   Rippling**. Notably, Ashby did **not** qualify (application questions
-   are auth-walled) despite looking like an obvious candidate.
+   live-verified to reliably return **both** a location and
+   application-question value on the same job: **Greenhouse, Workable,
+   Personio, JazzHR, Teamtailor, Recruitee, Lever, PageUp, isolvedhire,
+   Pinpoint, Rippling, Ashby**. Eploy was removed (2026-10): it has no
+   dedicated question fetcher. Ashby was excluded in 2026-09 because its
+   posting API started returning 401, and added in 2026-10 once questions
+   were fetched through its GraphQL endpoint (72 sampled jobs: location on
+   all, form fetch OK on all, at least one real question on 58).
 
    **2026-10 re-check (explicit user request — "expand the list... maybe
    Ashby... top 5", then "increase company count"):** re-verified live
