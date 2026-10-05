@@ -1388,7 +1388,7 @@ production data (2026-10-05): 1,596 of 5,729 active rows were Rank 4 (815 at
 Fix — `revalidate.py` (pure decision logic, no network/DB/LLM), wired into
 both crawls' dedupe step:
 - New column `jobs.classifier_version smallint default 0` (migration
-  `add_jobs_classifier_version`) and `classifier_version.CLASSIFIER_VERSION`
+  `add_jobs_classifier_version`) and `supabase_handler.CLASSIFIER_VERSION`
   (currently 1; **bump it whenever the deterministic rules or Rank 4 policy
   change in a way that should reach stored jobs**). Every freshly classified
   row is stamped; every pre-existing row is 0, so each is re-checked once.

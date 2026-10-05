@@ -4911,7 +4911,14 @@ _METADATA_LOCATION_LINE_RE = re.compile(r"^Metadata Location:\s*(.+)$", re.M)
 # a glyph-adjacent place name is a deliberate visual cue a company put
 # there for the exact same reason the location FIELD exists, just not
 # exposed through whatever API/DOM field this project's scrapers read.
-_LOCATION_SYMBOL_LINE_RE = re.compile(r"Location Symbol:\s*([^|]+)")
+# 2026-10: one line only ([^|\n]) - the old [^|]+ ran on past the end of the
+# line into the next "Application Question:" text when no "|" followed. And
+# unrendered-template / loading-screen junk scraped off an application form
+# ("{{display_location}}", "Loading application form" - both seen on real
+# Rank 4 rows) is not a location, so it must never count as one.
+_LOCATION_SYMBOL_LINE_RE = re.compile(r"Location Symbol:[ \t]*([^|\n]+)")
+_LOCATION_SYMBOL_JUNK_RE = re.compile(
+    r"\{\{|\}\}|\{%|<%|\$\{|\bloading\b|\bplaceholder\b|\bundefined\b|\bnull\b", re.I)
 
 
 def has_hard_location_symbol_signal(job: dict) -> bool:
@@ -4929,7 +4936,7 @@ def has_hard_location_symbol_signal(job: dict) -> bool:
         return False
     for m in _LOCATION_SYMBOL_LINE_RE.finditer(desc):
         value = m.group(1).strip()
-        if not value:
+        if not value or _LOCATION_SYMBOL_JUNK_RE.search(value):
             continue
         if _has_multi_region_breadth(value):
             continue

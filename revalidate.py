@@ -24,7 +24,7 @@ cheap, evidence-only second look at those rows:
 The callers (crawl_i.py, crawl_ii.py) enrich the stale rows' description and
 application questions with the normal enrichment functions, call decide() on
 each, mark vetoed rows via supabase_handler.mark_jobs_vetoed(), and stamp the
-rest with config.CLASSIFIER_VERSION so each row is re-checked once per
+rest with supabase_handler.CLASSIFIER_VERSION so each row is re-checked once per
 version, not every run. postfix_notion.py later archives the Notion page and
 deletes the vetoed rows (supabase_handler.purge_vetoed_jobs).
 """
@@ -33,6 +33,8 @@ import os
 
 from classifier import (
     classify_rank4,
+    _RANK4_GENUINE_RESTRICTION_CHECKS,
+    has_rank4_region_residency_enforcement_signal,
     _keyword_classify_location_detail,
     _is_bare_location,
     STANDALONE_GLOBAL_RE,
@@ -79,6 +81,18 @@ def _location_is_open_shaped(job: dict) -> bool:
     return bool(STANDALONE_GLOBAL_RE.search(loc) or "emea" in low or "africa" in low)
 
 
+def _rank4_veto_cause(job: dict) -> str:
+    """Name of the first Rank 4 restriction check that fires (for the log), or
+    the location/admission rule when none does."""
+    for check in (*_RANK4_GENUINE_RESTRICTION_CHECKS, has_rank4_region_residency_enforcement_signal):
+        try:
+            if check(job):
+                return check.__name__.lstrip("_")
+        except Exception:
+            continue
+    return "location not admissible (non-curated country / no eligible place)"
+
+
 def decide(job: dict, meta: dict) -> tuple[str, str]:
     """(verdict, reason) for one already-stored job.
 
@@ -103,7 +117,7 @@ def decide(job: dict, meta: dict) -> tuple[str, str]:
         if priority:
             verdict, reason = KEEP, f"rank4 still eligible ({why})"
         else:
-            verdict, reason = VETO, "rank4 no longer eligible under current rules"
+            verdict, reason = VETO, f"rank4 no longer eligible: {_rank4_veto_cause(job)}"
     else:
         result, _, _ = _keyword_classify_location_detail(job)
         if result == "no_match" and _location_is_open_shaped(job):
@@ -194,3 +208,93 @@ def plan(results: list[tuple[dict, dict, str, str]]) -> tuple[list[dict], list[d
         else:
             retry.append(job)
     return veto, stamp, retry
+
+
+# ── Standalone run ──────────────────────────────────────────────────────
+# `python revalidate.py` re-checks stored, active jobs stamped below the
+# current CLASSIFIER_VERSION WITHOUT running a crawl. Read-only unless
+# --apply is given. Needs the same env as a crawl (Supabase + provider keys,
+# because ats_scrapers imports config); no LLM call is ever made.
+# Evidence limit: Greenhouse/Workable/Lever supply a clean description at scrape
+# time, but a stored row has none, and the job-page fallback drags in sidebar
+# text ("related jobs" lists were mistaken for a US state list). So for platforms
+# without a dedicated description fetcher only the title, location and
+# application questions are judged - it can under-veto vs a crawl, never over-veto.
+
+def main(argv=None) -> int:
+    import argparse
+    import random
+
+    ap = argparse.ArgumentParser(description="Re-validate stored jobs under the current rules.")
+    ap.add_argument("--clearance", default="", help="only rows with this clearance, e.g. rank4")
+    ap.add_argument("--ats", default="", help="only these ATS names, comma-separated (e.g. Greenhouse,Lever)")
+    ap.add_argument("--limit", type=int, default=0, help="random sample size; 0 = every stale row")
+    ap.add_argument("--workers", type=int, default=16, help="parallel page fetches")
+    ap.add_argument("--apply", action="store_true",
+                    help="write vetoes + version stamps (default: dry run, writes nothing)")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
+
+    import ats_scrapers
+    import supabase_handler as sh
+
+    global REVALIDATE_DRY_RUN
+    REVALIDATE_DRY_RUN = not args.apply
+    version = sh.CLASSIFIER_VERSION
+    params = ("select=id,title,job_url,company_name,location,ats,role_category,clearance,"
+              "location_priority,application_status,classifier_version"
+              f"&is_active=eq.true&classifier_version=lt.{version}&order=id")
+    if args.clearance:
+        params += f"&clearance=eq.{args.clearance}"
+    if args.ats:
+        params += "&ats=in.(" + ",".join(a.strip() for a in args.ats.split(",") if a.strip()) + ")"
+    rows, offset = [], 0
+    while True:  # PostgREST caps a single response at 1000 rows
+        page = sh._get("jobs", f"{params}&offset={offset}", limit=1000)
+        rows += page
+        if len(page) < 1000:
+            break
+        offset += 1000
+    log.info(f"{len(rows)} active rows below classifier_version {version}"
+             + (f" (clearance={args.clearance})" if args.clearance else ""))
+    if args.limit and len(rows) > args.limit:
+        rows = random.Random(11).sample(rows, args.limit)
+        log.info(f"sampled {len(rows)}")
+    if not rows:
+        return 0
+
+    jobs, meta = [], {}
+    for r in rows:
+        jobs.append({"title": r["title"], "url": r["job_url"], "company": r.get("company_name") or "",
+                     "location": r.get("location") or "", "country": "", "workplace_type": "",
+                     "source_ats": r.get("ats") or "", "description_snippet": "",
+                     "role_category": r.get("role_category")})
+        meta[r["job_url"]] = r
+    jobs = ats_scrapers.enrich_descriptions(jobs)
+    jobs = ats_scrapers.enrich_application_questions(jobs, max_workers=args.workers)
+    dedicated = set(ats_scrapers.DESCRIPTION_FETCHERS)
+    for j in jobs:
+        if j["source_ats"] not in dedicated:
+            j["description_snippet"] = "\n".join(
+                l for l in j["description_snippet"].split("\n") if l.startswith(_QUESTION_MARKER))
+    results = evaluate(jobs, meta)
+    summarize(results, "Manual")
+    veto, stamp, _retry = plan(results)  # dry run: logs "would veto" lines, returns nothing to write
+    if not args.apply:
+        log.info("DRY RUN - nothing written. Re-run with --apply to veto/stamp.")
+        return 0
+    for j in veto:
+        log.info(f"  vetoing {j['url']}")
+    sh.mark_jobs_vetoed(veto)
+    ids = [meta[j["url"]]["id"] for j in stamp if meta.get(j["url"], {}).get("id") is not None]
+    for i in range(0, len(ids), 200):
+        # version-only PATCH: unlike touch_seen_jobs_raw this does NOT bump last_seen,
+        # which a manual run (jobs not just seen on their board) must not do.
+        sh._patch("jobs", "id=in.(" + ",".join(map(str, ids[i:i + 200])) + ")", {"classifier_version": version})
+    log.info(f"applied: {len(veto)} vetoed (Notion page + row removed by the next postfix_notion run), "
+             f"{len(ids)} stamped v{version}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

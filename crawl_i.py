@@ -67,7 +67,7 @@ from supabase_handler import (
     SupabaseFetchError,
     log_egress_summary,
 )
-from classifier_version import CLASSIFIER_VERSION
+from supabase_handler import CLASSIFIER_VERSION  # noqa: E402
 import revalidate
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —

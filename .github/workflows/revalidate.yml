@@ -1,0 +1,74 @@
+name: Revalidate Stored Jobs
+
+# Manual only. Re-checks jobs ALREADY in the `jobs` table against the current
+# classifier rules WITHOUT running a crawl (see revalidate.py): deterministic,
+# veto-only, no LLM calls. Default is a DRY RUN - it logs what it would veto
+# and writes nothing. Tick "Apply" to veto + stamp; vetoed rows are then removed
+# (and their Notion page archived) by the next crawl's postfix step.
+#
+# Run it from the Actions tab -> "Revalidate Stored Jobs" -> "Run workflow".
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply (else dry run)"
+        required: false
+        type: boolean
+        default: false
+      clearance:
+        description: "Only this clearance"
+        required: false
+        default: "rank4"
+      ats:
+        description: "Only these ATS (comma list)"
+        required: false
+        default: ""
+      limit:
+        description: "Max rows (0 = all)"
+        required: false
+        default: "0"
+
+# Same group as crawl.yml so a veto run never overlaps a crawl.
+concurrency:
+  group: crawl-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  revalidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Revalidate
+        env:
+          # config.py requires every provider key at import time; none is ever called.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_C: ${{ secrets.GROQ_API_KEY_C }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          APPLY: ${{ inputs.apply }}
+          CLEARANCE: ${{ inputs.clearance }}
+          ATS: ${{ inputs.ats }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          ARGS="--workers 12 --limit ${LIMIT:-0}"
+          [ -n "$CLEARANCE" ] && ARGS="$ARGS --clearance $CLEARANCE"
+          [ -n "$ATS" ] && ARGS="$ARGS --ats $ATS"
+          [ "$APPLY" = "true" ] && ARGS="$ARGS --apply"
+          echo "revalidate.py $ARGS"
+          exec python revalidate.py $ARGS

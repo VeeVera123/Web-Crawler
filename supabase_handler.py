@@ -11,7 +11,18 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
 
-from classifier_version import CLASSIFIER_VERSION
+# Rules version stamped onto every row of `jobs` (jobs.classifier_version).
+# Lives here, not in config.py/classifier.py: this module must stay importable
+# with only the Supabase secrets (config.py hard-requires every provider key at
+# import time; classifier.py imports this module transitively).
+#
+# BUMP whenever the deterministic location/restriction rules or the Rank 4
+# admission policy change in a way that should also apply to jobs already
+# stored. Every row stamped lower is re-checked ONCE by revalidate.py
+# (deterministic, veto-only, no LLM calls), then stamped with the new value.
+#   1 - 2026-10-05: introduced with revalidate.py (after the Insurity / Ping
+#       Identity / Kenya / India Rank 4 leaks). Every pre-existing row is 0.
+CLASSIFIER_VERSION = 1
 
 import os
 from dotenv import load_dotenv

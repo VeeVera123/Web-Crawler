@@ -127,7 +127,7 @@ from supabase_handler import (  # noqa: E402
     touch_archive_ii_last_seen,
     log_egress_summary, bump_scan_report, finish_scan_report_for_pipeline,
 )
-from classifier_version import CLASSIFIER_VERSION  # noqa: E402
+from supabase_handler import CLASSIFIER_VERSION  # noqa: E402
 import revalidate  # noqa: E402
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
