@@ -28,7 +28,11 @@ import requests as http_requests
 #   3 - 2026-10-05: Eploy removed from RANK4_ELIGIBLE_ATS (no question fetcher);
 #       Africa Rank 2 (2+ countries) now requires a remote signal; Americas/AMER
 #       excluded from 4b rescue path.
-CLASSIFIER_VERSION = 3
+#   4 - 2026-10-05: Ashby application questions fetched again (GraphQL; the
+#       posting API returned 401, so stored Ashby rows were never checked
+#       against their questions); bare "Name"/"Preferred pronouns" no longer
+#       count as screening questions.
+CLASSIFIER_VERSION = 4
 
 import os
 from dotenv import load_dotenv

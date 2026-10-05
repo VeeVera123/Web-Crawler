@@ -8167,14 +8167,14 @@ def _clean_label(text: str) -> str:
 # in the same posting) still correctly passes through untouched.
 _BOILERPLATE_QUESTION_RE = re.compile(
     r"^(?:"
-    r"first\s*name|last\s*name|full\s*name|preferred\s*name|"
+    r"name|first\s*name|last\s*name|full\s*name|preferred\s*name|legal\s*name|"
     r"e-?mail(?:\s*address)?|phone(?:\s*number)?|"
     r"r[ée]sum[ée]\s*/?\s*cv|r[ée]sum[ée]|cv|"
     r"cover\s*letter|"
     r"linked\s*in(?:\s*(?:profile|url))?|"
     r"website|portfolio|github|personal\s*website|"
     r"how\s+did\s+you\s+hear\s+about\s+(?:this|us)|referral|referred\s+by|"
-    r"pronouns?|"
+    r"(?:preferred\s*)?pronouns?|"
     r"race(?:\s*/\s*ethnicit\w*)?|ethnicit\w*|gender(?:\s*identity)?|\bsex\b|"
     r"veteran\s*status|disabilit\w*(?:\s*status)?|"
     r"sexual\s*orientation|"
@@ -8646,10 +8646,18 @@ def _fetch_greenhouse_questions(job: dict) -> str:
     return "\n".join(auth_questions)
 
 
-# ── Level 1/2: Ashby (public API) ──
+# ── Level 1/2: Ashby (GraphQL) ──
+
+_ASHBY_FORM_QUERY = (
+    "query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) {"
+    " jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName,"
+    " jobPostingId: $jobPostingId) {"
+    " applicationForm { sections { title fieldEntries { id isRequired descriptionHtml field } } } } }"
+)
+
 
 def _fetch_ashby_questions(job: dict) -> str:
-    """Fetch application form from Ashby posting API.
+    """Fetch application form from Ashby's GraphQL endpoint.
     Returns work-authorization-related form fields, or empty.
 
     2026-09 ROUND 5 (explicit user request: "use multiple methods and
@@ -8669,40 +8677,41 @@ def _fetch_ashby_questions(job: dict) -> str:
         return _fallback()
     slug, job_id = m.group(1), m.group(2)
 
-    # Ashby's posting-api/posting endpoint returns form fields
-    api_url = f"https://api.ashbyhq.com/posting-api/posting/{slug}/{job_id}"
-    r = _get_requests_sync(api_url)
-    if not r:
-        return _fallback()
+    # 2026-10: api.ashbyhq.com/posting-api/posting/{slug}/{id} now returns
+    # 401 for every tenant, so no question was ever fetched (real leak:
+    # Hightouch's "authorized to work in the U.S." / "commuting distance"
+    # form). The form is served by the GraphQL endpoint Ashby's own job
+    # pages call. robots.txt disallows /api/ there; user explicitly chose
+    # to use it anyway (2026-10-05).
+    auth_questions = []
     try:
-        data = r.json()
-    except Exception:
+        resp = _get_session().post(
+            "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting",
+            json={
+                "operationName": "ApiJobPosting",
+                "variables": {"organizationHostedJobsPageName": slug, "jobPostingId": job_id},
+                "query": _ASHBY_FORM_QUERY,
+            },
+            headers={"User-Agent": random.choice(USER_AGENTS), "Content-Type": "application/json",
+                     "Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        posting = ((resp.json().get("data") or {}).get("jobPosting")) or {}
+    except Exception as e:
+        log.debug(f"Ashby: GraphQL form fetch failed for {slug}/{job_id}: {e}")
         return _fallback()
 
-    # 2026-09: was `if _WORK_AUTH_RE.search(title)` — see
-    # _format_screening_questions's docstring for why every substantive
-    # question is now kept, filtering only universal PII/EEO boilerplate.
-    auth_questions = []
-    # Check applicationFormDefinition for work auth questions
-    form_def = data.get("applicationFormDefinition") or data.get("formDefinition") or {}
-    sections = form_def.get("sections") or []
-    for section in sections:
-        fields = section.get("fields") or section.get("fieldEntries") or []
-        for field in fields:
-            # field might be nested: {field: {title: ...}} or {title: ...}
-            f = field.get("field", field) if isinstance(field, dict) else field
+    # Every substantive question is kept, filtering only universal PII/EEO
+    # boilerplate — see _format_screening_questions's docstring.
+    for section in (posting.get("applicationForm") or {}).get("sections") or []:
+        for entry in section.get("fieldEntries") or []:
+            f = entry.get("field") if isinstance(entry, dict) else None
             if not isinstance(f, dict):
                 continue
-            title = (f.get("title", "") or f.get("label", "") or f.get("name", "")).strip()
+            title = (f.get("title") or "").strip()
             if title and not _BOILERPLATE_QUESTION_RE.match(title):
                 auth_questions.append(f"Application Question: {title}")
-
-    # Also check surveyQuestions
-    survey = data.get("surveyQuestions") or []
-    for sq in survey:
-        label = (sq.get("label", "") or sq.get("title", "") or sq.get("question", "")).strip()
-        if label and not _BOILERPLATE_QUESTION_RE.match(label):
-            auth_questions.append(f"Application Question: {label}")
 
     if not auth_questions:
         # Same reasoning as Greenhouse above: a successful API call with
