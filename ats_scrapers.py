@@ -9,6 +9,7 @@ import asyncio
 import re
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -8654,73 +8655,82 @@ _ASHBY_FORM_QUERY = (
     " jobPostingId: $jobPostingId) {"
     " applicationForm { sections { title fieldEntries { id isRequired descriptionHtml field } } } } }"
 )
+_ASHBY_GQL_URL = "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting"
+# 150 enrichment workers all hitting one host got a fifth or more of the forms
+# silently rate-limited in production, so calls are capped and retried.
+_ASHBY_GQL_SEM = threading.BoundedSemaphore(int(os.environ.get("ASHBY_GQL_CONCURRENCY", "6")))
+_ASHBY_GQL_ATTEMPTS = 4
+
+
+def _ashby_form_questions(slug: str, job_id: str) -> list[str] | None:
+    """Substantive question titles of one Ashby posting's application form.
+    [] = the form was read and holds only standard fields; None = the form
+    could NOT be read (rate-limited/blocked/errored every attempt, or the
+    posting no longer exists)."""
+    payload = {
+        "operationName": "ApiJobPosting",
+        "variables": {"organizationHostedJobsPageName": slug, "jobPostingId": job_id},
+        "query": _ASHBY_FORM_QUERY,
+    }
+    for attempt in range(_ASHBY_GQL_ATTEMPTS):
+        retry_after = 0.0
+        try:
+            with _ASHBY_GQL_SEM:
+                resp = _get_session().post(
+                    _ASHBY_GQL_URL, json=payload, timeout=REQUEST_TIMEOUT,
+                    headers={"User-Agent": random.choice(USER_AGENTS), "Content-Type": "application/json",
+                             "Accept": "application/json"})
+            if resp.status_code == 200:
+                posting = (resp.json().get("data") or {}).get("jobPosting")
+                if not posting:
+                    log.debug(f"Ashby: no posting returned for {slug}/{job_id}")
+                    return None
+                titles = []
+                for section in (posting.get("applicationForm") or {}).get("sections") or []:
+                    for entry in section.get("fieldEntries") or []:
+                        f = entry.get("field") if isinstance(entry, dict) else None
+                        title = ((f or {}).get("title") or "").strip() if isinstance(f, dict) else ""
+                        if title and not _BOILERPLATE_QUESTION_RE.match(title):
+                            titles.append(title)
+                return titles
+            if resp.status_code not in (403, 408, 425, 429, 500, 502, 503, 504):
+                log.debug(f"Ashby: GraphQL HTTP {resp.status_code} for {slug}/{job_id}")
+                return None
+            ra = resp.headers.get("Retry-After", "")
+            retry_after = float(ra) if ra.strip().isdigit() else 0.0
+        except Exception as e:
+            log.debug(f"Ashby: GraphQL request failed for {slug}/{job_id}: {e}")
+        if attempt < _ASHBY_GQL_ATTEMPTS - 1:
+            time.sleep(min(max(retry_after, 1.5 * 2 ** attempt), 20) + random.uniform(0, 1))
+    return None
 
 
 def _fetch_ashby_questions(job: dict) -> str:
-    """Fetch application form from Ashby's GraphQL endpoint.
-    Returns work-authorization-related form fields, or empty.
+    """Fetch the application form from Ashby's GraphQL endpoint.
 
-    2026-09 ROUND 5 (explicit user request: "use multiple methods and
-    fallbacks"): mirrors the same fallback added to
-    _fetch_greenhouse_questions above — if the URL doesn't match Ashby's
-    known shape, the posting-api call fails, or the API returns no
-    substantive fields, fall back to the generic DOM/embedded-JSON parser
-    against the real job page rather than giving up with ""."""
+    Ashby's posting API (api.ashbyhq.com/posting-api/posting/...) returns 401
+    for every tenant, so the form comes from the endpoint Ashby's own job pages
+    call. robots.txt disallows /api/ there; the user explicitly chose to use it
+    (2026-10-05). Sets job["_form_status"] to "ok" (form read, possibly with no
+    custom questions) or "failed" (could not be read) so callers can refuse to
+    admit a job whose form was never actually seen."""
     url = job.get("url", "")
 
     def _fallback() -> str:
         return _format_auth_questions(_fetch_generic_form_questions_multi(url)) if url else ""
 
-    # https://jobs.ashbyhq.com/SLUG/JOBID
     m = re.search(r"ashbyhq\.com/([^/]+)/([a-f0-9-]+)", url)
     if not m:
+        job["_form_status"] = "failed"
         return _fallback()
-    slug, job_id = m.group(1), m.group(2)
-
-    # 2026-10: api.ashbyhq.com/posting-api/posting/{slug}/{id} now returns
-    # 401 for every tenant, so no question was ever fetched (real leak:
-    # Hightouch's "authorized to work in the U.S." / "commuting distance"
-    # form). The form is served by the GraphQL endpoint Ashby's own job
-    # pages call. robots.txt disallows /api/ there; user explicitly chose
-    # to use it anyway (2026-10-05).
-    auth_questions = []
-    try:
-        resp = _get_session().post(
-            "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting",
-            json={
-                "operationName": "ApiJobPosting",
-                "variables": {"organizationHostedJobsPageName": slug, "jobPostingId": job_id},
-                "query": _ASHBY_FORM_QUERY,
-            },
-            headers={"User-Agent": random.choice(USER_AGENTS), "Content-Type": "application/json",
-                     "Accept": "application/json"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        posting = ((resp.json().get("data") or {}).get("jobPosting")) or {}
-    except Exception as e:
-        log.debug(f"Ashby: GraphQL form fetch failed for {slug}/{job_id}: {e}")
+    titles = _ashby_form_questions(unquote(m.group(1)), m.group(2))
+    if titles is None:
+        job["_form_status"] = "failed"
         return _fallback()
-
-    # Every substantive question is kept, filtering only universal PII/EEO
-    # boilerplate — see _format_screening_questions's docstring.
-    for section in (posting.get("applicationForm") or {}).get("sections") or []:
-        for entry in section.get("fieldEntries") or []:
-            f = entry.get("field") if isinstance(entry, dict) else None
-            if not isinstance(f, dict):
-                continue
-            title = (f.get("title") or "").strip()
-            if title and not _BOILERPLATE_QUESTION_RE.match(title):
-                auth_questions.append(f"Application Question: {title}")
-
-    if not auth_questions:
-        # Same reasoning as Greenhouse above: a successful API call with
-        # zero fields could be a genuinely question-free posting, or could
-        # mean this tenant's form isn't shaped the way applicationForm
-        # Definition/surveyQuestions above expect — give the generic DOM
-        # parser a shot at the real page before giving up entirely.
-        return _fallback()
-    return "\n".join(auth_questions)
+    job["_form_status"] = "ok"
+    if titles:
+        return "\n".join(f"Application Question: {t}" for t in titles)
+    return _fallback()
 
 
 # ── Level 3 (server-rendered, predictable DOM): Lever ──
@@ -9556,6 +9566,16 @@ async def enrich_application_questions_async(jobs: list[dict], max_workers: int 
         log.warning(f"enrich_application_questions: unexpected (non-fetch) failures on "
                     f"{outcome_counts['crashed']} job(s): "
                     f"{', '.join(f'{k}:{v}' for k, v in sorted(crashed_platforms.items()))}")
+    unreadable: dict[str, int] = {}
+    for job in to_enrich:
+        if job.get("_form_status") == "failed":
+            ats = job.get("source_ats") or "unknown"
+            unreadable[ats] = unreadable.get(ats, 0) + 1
+    if unreadable:
+        log.warning(f"enrich_application_questions: application form UNREADABLE for "
+                    f"{sum(unreadable.values())} job(s) "
+                    f"({', '.join(f'{k}:{v}' for k, v in sorted(unreadable.items()))}) — these are not "
+                    f"admitted and not re-validated until their form can be read")
 
     return jobs
 

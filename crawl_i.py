@@ -577,6 +577,17 @@ def filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
     if new_exclusions is None:
         new_exclusions = set()
 
+    # A job whose application form could not be read (rate-limited/blocked/
+    # errored) is NOT judged on a form nobody saw: it is neither admitted nor
+    # remembered as excluded, so it comes back as new and is retried next run.
+    # (Hightouch's "authorized to work in the U.S." form was admitted at Rank 1
+    # because an unreadable form looked the same as a question-free one.)
+    unreadable = [j for j in jobs if j.get("_form_status") == "failed"]
+    if unreadable:
+        log.warning(f"  {len(unreadable)} jobs deferred: application form unreadable "
+                    f"({sum(1 for j in unreadable if j.get('source_ats') == 'Ashby')} Ashby) — retried next run")
+        jobs = [j for j in jobs if j.get("_form_status") != "failed"]
+
     matched = []
     matched_confidences = []
     unsure_jobs = []

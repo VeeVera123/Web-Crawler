@@ -32,7 +32,11 @@ import requests as http_requests
 #       posting API returned 401, so stored Ashby rows were never checked
 #       against their questions); bare "Name"/"Preferred pronouns" no longer
 #       count as screening questions.
-CLASSIFIER_VERSION = 4
+#   5 - 2026-10-05: new geography-binding application-question detector (relocate /
+#       commute / reside / authorized-to-work-in / clearance / time-zone hours, ~3x
+#       the phrasings), and rows stamped 4 while their Ashby form was unreadable
+#       (Hightouch) are re-checked with the retrying Ashby fetcher.
+CLASSIFIER_VERSION = 5
 
 import os
 from dotenv import load_dotenv

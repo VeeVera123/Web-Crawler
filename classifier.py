@@ -1963,6 +1963,11 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_hard_country_specific_auth_signal(job):
         return "no_match", None, None
 
+    # 2026-10: application questions that bind the candidate to a place
+    # (relocate / commute / reside / authorized-to-work-in / clearance ...).
+    if has_restrictive_geo_question_signal(job):
+        return "no_match", None, None
+
     # ── 0.76. HARD OVERRIDE (2026-09, explicit user-commissioned
     # adversarial fuzz test — ~4,820 generated restrictive phrasings run
     # directly against this pipeline): sponsorship/work-permit/residency
@@ -6374,12 +6379,181 @@ def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     return has_country_tied_sponsorship_permit_residency_signal(job)
 
 
+# ── 2026-10: geography-binding APPLICATION QUESTIONS (explicit user report:
+# Hightouch's Ashby form asked "Are you willing to relocate to NYC, San
+# Francisco or Denver?" / "Are you authorized to work for any employer in the
+# U.S?" while the posting said "location independent ... remote-first").
+# Only "Application Question:" lines are read, never JD prose, so a JD that
+# merely mentions a place can't trip it. A question counts when it BINDS the
+# candidate to a place: work authorization / citizenship / visa tied to a
+# place, residence, relocation, commuting, on-site or hybrid attendance,
+# local licensing, a named time zone's working hours, or a security
+# clearance. Ordinary questions that only mention a place ("experience with
+# customers in Germany") don't match. check_restrictive_questions.py is the
+# regression corpus for this detector. ──
+_Q_EXTRA_COUNTRIES = (
+    r"argentina|colombia|chile|peru|uruguay|ecuador|venezuela|costa\s+rica|panama|puerto\s+rico|jamaica|"
+    r"dominican\s+republic|israel|turkey|t[uü]rkiye|ukraine|russia|belarus|romania|bulgaria|serbia|croatia|"
+    r"slovenia|slovakia|czech(?:ia|\s+republic)?|hungary|greece|cyprus|malta|luxembourg|iceland|estonia|latvia|"
+    r"lithuania|england|scotland|wales|northern\s+ireland|vietnam|thailand|malaysia|indonesia|pakistan|"
+    r"bangladesh|sri\s+lanka|nepal|taiwan|hong\s+kong|south\s+korea|korea|saudi\s+arabia|qatar|kuwait|bahrain|"
+    r"oman|jordan|lebanon|morocco|tunisia|algeria|ethiopia|tanzania|uganda|zambia|zimbabwe|rwanda|senegal|"
+    r"cameroon|kazakhstan|georgia\s+\(country\)|armenia|azerbaijan|uzbekistan"
+)
+_Q_REGIONS = (
+    r"europe|north\s+america|latin\s+america|latam|apac|asia|oceania|middle\s+east|nordics?|benelux|dach|anz|"
+    r"the\s+americas|south\s+america|central\s+america|caribbean|scandinavia|gulf"
+)
+_Q_PROVINCES = (
+    r"ontario|quebec|qu[eé]bec|british\s+columbia|alberta|manitoba|saskatchewan|nova\s+scotia|new\s+brunswick|"
+    r"newfoundland|prince\s+edward\s+island"
+)
+_Q_CITIES = (
+    r"new\s+york(?:\s+city)?|nyc|manhattan|brooklyn|san\s+francisco|sf|bay\s+area|silicon\s+valley|san\s+jose|"
+    r"oakland|los\s+angeles|san\s+diego|sacramento|seattle|portland|denver|boulder|salt\s+lake\s+city|phoenix|"
+    r"scottsdale|las\s+vegas|austin|dallas|houston|san\s+antonio|fort\s+worth|atlanta|miami|orlando|tampa|"
+    r"jacksonville|charlotte|raleigh|durham|nashville|memphis|louisville|columbus|cleveland|cincinnati|"
+    r"pittsburgh|philadelphia|baltimore|washington,?\s+d\.?c\.?|d\.?c\.?|boston|cambridge|providence|hartford|"
+    r"chicago|milwaukee|minneapolis|st\.?\s+louis|kansas\s+city|omaha|detroit|indianapolis|new\s+orleans|"
+    r"honolulu|anchorage|tri-?state|dmv|dfw|atx|pnw|socal|norcal|"
+    r"toronto|vancouver|montr[eé]al|ottawa|calgary|edmonton|winnipeg|gta|"
+    r"london|manchester|birmingham|leeds|bristol|edinburgh|glasgow|cardiff|belfast|dublin|cork|galway|"
+    r"berlin|munich|m[uü]nchen|hamburg|frankfurt|cologne|k[oö]ln|stuttgart|d[uü]sseldorf|paris|lyon|marseille|"
+    r"toulouse|madrid|barcelona|valencia|lisbon|porto|rome|milan|turin|amsterdam|rotterdam|the\s+hague|utrecht|"
+    r"eindhoven|brussels|antwerp|zurich|z[uü]rich|geneva|basel|vienna|prague|warsaw|krak[oó]w|wroc[lł]aw|"
+    r"budapest|bucharest|sofia|athens|stockholm|gothenburg|oslo|copenhagen|helsinki|tallinn|riga|vilnius|"
+    r"sydney|melbourne|brisbane|perth|adelaide|canberra|auckland|wellington|christchurch|singapore|tokyo|osaka|"
+    r"seoul|beijing|shanghai|shenzhen|bangalore|bengaluru|mumbai|delhi|new\s+delhi|hyderabad|chennai|pune|gurgaon|"
+    r"gurugram|noida|kolkata|manila|jakarta|bangkok|kuala\s+lumpur|ho\s+chi\s+minh|hanoi|dubai|abu\s+dhabi|"
+    r"riyadh|doha|tel\s+aviv|istanbul|cairo|lagos|abuja|nairobi|accra|johannesburg|cape\s+town|durban|"
+    r"mexico\s+city|guadalajara|monterrey|bogot[aá]|medell[ií]n|lima|santiago|buenos\s+aires|s[aã]o\s+paulo|"
+    r"rio\s+de\s+janeiro|montevideo|panama\s+city|san\s+juan"
+)
+_Q_ABBR_PLACES = r"(?-i:US|USA|UK|EU|EEA|UAE|NYC|SF|DC|GTA|DMV|DFW|ATX|PNW|SoCal|NorCal)"
+_Q_PLACE = (
+    r"(?:(?:the\s+)?(?:greater\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _Q_EXTRA_COUNTRIES + r"|"
+    + _Q_REGIONS + r"|" + _Q_PROVINCES + r"|" + _US_STATE_FULL_NAMES_FRAGMENT + r"|" + _Q_CITIES + r"|"
+    + _Q_ABBR_PLACES + r")(?:\s+(?:area|metro|region|office|offices|hub))?)"
+)
+_Q_PLACE_RE = re.compile(r"\b" + _Q_PLACE + r"(?![\w])", re.I)
+
+_Q_AUTH_CUE = (
+    r"authori[sz]ed|authori[sz]ation|eligib\w+|legal(?:ly)?\s+(?:able|allowed|entitled|permitted|eligible|"
+    r"authori[sz]ed|work|employ|reside|resident)|right\s+to\s+(?:work|be\s+employed|employment)|"
+    r"(?:work|employment)\s+(?:permit|visa|authori[sz]ation|status|eligibility)|permit(?:ted)?\s+to\s+work|"
+    r"(?:valid|current|hold|have|possess|need|require)\s+(?:a\s+|an\s+)?(?:valid\s+)?(?:work\s+|employment\s+)?"
+    r"(?:visa|permit)|visa\s+(?:that\s+)?(?:permits|allows|entitles|status|holder)|citizen\w*|nationals?\b|"
+    r"permanent\s+resident|green\s*card|residency|resident\s+status|immigration\s+status|"
+    r"proof\s+of\s+(?:eligib\w+|right|identity)|sponsorship|(?:employed|employment)\s+in"
+)
+_Q_AUTH_CUE_RE = re.compile(r"\b(?:" + _Q_AUTH_CUE + r")", re.I)
+_Q_YOU_RE = re.compile(r"\b(?:you|your|i|i'm|i\s+am|we|applicant|candidate)\b|^\s*(?:please\s+)?(?:confirm|indicate|state)\b", re.I)
+
+_GEO_QUESTION_FRAMES = tuple(re.compile(p, re.I) for p in (
+    # relocation (a place is NOT required: being asked to relocate means the role is tied to a location)
+    r"\b(?:willing|open|able|prepared|ready|comfortable|happy|amenable|agreeable|keen|interested|available|"
+    r"consider\w*|plan\w*|can|could|would)\b[^?.]{0,40}?\b(?:relocat\w+|reloc\b|mov(?:e|ing)\s+(?:to|house|home|closer|near))",
+    r"\brelocation\s+(?:to|is\s+required|required)\b",
+    # commuting / proximity / on-site attendance
+    r"\bcommut(?:e|es|ed|ing|able)\b",
+    r"\bwithin\s+(?:\d+|a\s+\w+)\s*(?:miles?|mi|km|kilomet\w+|minutes?|mins?|hours?)\s+(?:of|from|drive)\b",
+    r"\b(?:live|living|located|reside|residing|based)\s+(?:in\s+or\s+)?(?:near|around|close\s+to|nearby|within\s+\w+\s+of)\b",
+    r"\b(?:are\s+you|be|being)\s+(?:a\s+)?local\b|\blocal\s+to\b|\blocals?\s+only\b",
+    r"\b(?:work|working|come|coming|be|being|report|reporting|attend|attending|present|show\s+up)\b[^?.]{0,30}?"
+    r"\b(?:on[- ]?site|in[- ]?person|in[- ]?office|in\s+the\s+office|(?:from|at|to|into)\s+(?:our|the|a)\s+(?:\w+\s+){0,2}office)\b",
+    r"\bhybrid\s+(?:schedule|work\w*|role|model|arrangement|position|environment|setup|basis)\b",
+    r"\b\d+\s*days?\s*(?:a|per|each|/)\s*week\b[^?.]{0,20}\b(?:in|at|from)\b[^?.]{0,15}\boffice\b",
+    r"\boffice\s+(?:days|attendance|presence)\b",
+    # security clearance
+    r"\b(?:security|secret|top[- ]secret|ts/sci|public[- ]trust)\s+clearance\b|\bclearance\s+(?:level|status)\b",
+))
+_Q_RESIDENCE_FRAME = re.compile(
+    r"\b(?:reside|resides|residing|resident|live|living|located|based|domiciled|home\s+base|citizen|native)\b",
+    re.I)
+_Q_ABILITY_FRAME = re.compile(
+    r"\b(?:able|willing|available|ready|prepared|comfortable|happy|can|could|will|would|be|are|do|have|"
+    r"working|work|works|working|working)\b", re.I)
+_Q_WORK_VERB = re.compile(r"\b(?:work|working|works|employ\w*|operate|operating|be\s+based|based|located|reside|live|stay)\b", re.I)
+_Q_LICENSE_CUE = re.compile(r"\b(?:licen[sc]e[ds]?|licensure|registered|registration|certified|certification|bar|admitted|credential\w*)\b", re.I)
+_Q_BACKGROUND_CUE = re.compile(r"\b(?:background|credit|drug|criminal)\s+(?:check|screen\w*|test)\b|\b(?:driver'?s?|driving)\s+licen[cs]e\b|\bpassport\b", re.I)
+_Q_ZONE = (
+    r"(?:(?:us|u\.s\.|north\s+american|european|australian|indian|uk|eu)\s+)?"
+    r"(?:eastern|pacific|mountain|central|atlantic|alaska(?:n)?|hawaii(?:an)?|greenwich)(?:\s+standard)?(?:\s+time)?|"
+    r"est|edt|cst|cdt|mst|mdt|pst|pdt|cet|cest|bst|ist|aest|aedt|jst|kst|sgt|gmt|utc|"
+    r"utc\s*[+\-−±]?\s*\d{1,2}|gmt\s*[+\-−±]\s*\d{1,2}|"
+    r"(?:us|u\.s\.|eu|european|uk|australian|indian|nz|north\s+american)\s+(?:business\s+|working\s+|office\s+)?"
+    r"(?:hours|time\s*zones?|time)"
+)
+_Q_ZONE_RE = re.compile(r"\b(?:" + _Q_ZONE + r")\b", re.I)
+_Q_HOURS_CUE = re.compile(r"\b(?:hours|time\s*zones?|overlap|business\s+hours|working\s+hours|shift|schedule|coverage|cover)\b|\btime\b", re.I)
+_Q_CAP_PLACE_RE = re.compile(
+    r"\b(?:do|are|will|can)\s+you\s+(?:currently\s+|now\s+)?(?:live|living|reside|residing|located|based)\s+"
+    r"(?:in|within|near|around)\s+(?:or\s+(?:near|around)\s+)?(?:the\s+)?(?-i:[A-Z][\w.'’-]*)", re.I)
+
+
+# Wording that means the question is ABOUT the place, not binding the candidate to it.
+_Q_NON_BINDING_RE = re.compile(
+    r"\b(?:experience\w*|interested|company|companies|customers?|clients?|market|markets|industry|"
+    r"headquarter\w*|familiar\w*|knowledge|worked\s+(?:with|in|at|for)|years?|exposure|regulat\w+|"
+    r"across|multiple|various|different|flexib\w+|distributed)\b", re.I)
+_Q_RESIDENCE_BOUND_RE = re.compile(
+    r"\b(?:you|your|i|i'm|applicant|candidate)\b[^?.]{0,40}?\b(?:reside|residing|live|living|located|based|"
+    r"domiciled|resident|citizen|national|native)\b[^?.]{0,30}?\b(?:in|within|near|around|at|of)\b", re.I)
+
+
+def _geo_question_hit(q: str) -> bool:
+    """True when this single application-question text binds the candidate to a place."""
+    if not q or len(q) > 600:
+        return False
+    if any(rx.search(q) for rx in _GEO_QUESTION_FRAMES):
+        return True
+    if _Q_CAP_PLACE_RE.search(q):
+        return True
+    you = _Q_YOU_RE.search(q)
+    if _Q_PLACE_RE.search(q):
+        # authorization / citizenship / visa / sponsorship + a named place, framed at the candidate
+        if you and _Q_AUTH_CUE_RE.search(q):
+            return True
+        if you and not _Q_NON_BINDING_RE.search(q):
+            # residence / location of the candidate ("Do you live in X", "Are you a X resident")
+            if _Q_RESIDENCE_BOUND_RE.search(q) or re.search(
+                    r"\b(?:resident|citizen|national|native|local)\s+of\b|\b(?:based|resident|local)\b(?=\s*\?)|"
+                    r"\ba\s+\w+(?:\s+\w+)?\s+resident\b", q, re.I):
+                return True
+            # "able/willing to work in/from <place>"
+            if _Q_ABILITY_FRAME.search(q) and re.search(
+                    r"\b(?:work|working|be\s+based|operate|operating)\s+(?:in|from|out\s+of|at|within)\b", q, re.I):
+                return True
+            # state / province licensing, background checks, local passport or driver's licence
+            if _Q_LICENSE_CUE.search(q) or _Q_BACKGROUND_CUE.search(q):
+                return True
+    # named time zone + availability / hours wording aimed at the candidate
+    if you and _Q_ZONE_RE.search(q) and _Q_HOURS_CUE.search(q) and not _Q_NON_BINDING_RE.search(q):
+        return True
+    return False
+
+
+def has_restrictive_geo_question_signal(job: dict) -> bool:
+    """Deterministic hard filter over the job's application questions only —
+    see the module comment above _Q_EXTRA_COUNTRIES."""
+    desc = job.get("description_snippet") or ""
+    if _APPLICATION_AUTH_QUESTION_MARKER not in desc:
+        return False
+    for line in desc.split("\n"):
+        line = line.strip()
+        if line.startswith(_APPLICATION_AUTH_QUESTION_MARKER) and _geo_question_hit(
+                line[len(_APPLICATION_AUTH_QUESTION_MARKER):].strip()):
+            return True
+    return False
+
+
 _RANK4_GENUINE_RESTRICTION_CHECKS = (
     has_hard_no_sponsorship_signal,
     has_non_remote_workplace_type,
     has_non_remote_title_signal,
     has_non_remote_labeled_text_signal,
     has_hard_country_specific_auth_signal,
+    has_restrictive_geo_question_signal,
     has_state_list_restriction_signal,
     has_hard_country_based_restriction_signal,
     has_hard_metadata_location_signal,

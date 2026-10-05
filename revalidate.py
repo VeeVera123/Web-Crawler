@@ -104,6 +104,12 @@ def decide(job: dict, meta: dict) -> tuple[str, str]:
 
     verdict, reason = KEEP, "no contradicting evidence"
 
+    if job.get("_form_status") == "failed" and clearance != "ai_unreviewed":
+        # The application form could not be read this run, so there is no evidence
+        # either way. Keeping + stamping it here is how a row whose form says
+        # "authorized to work in the U.S." stayed in the table as "validated".
+        return UNDECIDED, "application form unreadable this run"
+
     if clearance == "ai_unreviewed":
         # Policy (explicit user instruction, 2026-10): a job no LLM ever
         # reviewed is discarded, not kept under an "ai_unreviewed" tag.
@@ -251,7 +257,7 @@ def main(argv=None) -> int:
     params = ("select=id,title,job_url,company_name,location,ats,role_category,clearance,"
               "location_priority,application_status,classifier_version"
               f"&is_active=eq.true&classifier_version=lt.{version}&order=id")
-    if args.clearance:
+    if args.clearance and args.clearance.lower() not in ("all", "any"):
         params += f"&clearance=eq.{args.clearance}"
     if args.ats:
         params += "&ats=in.(" + ",".join(a.strip() for a in args.ats.split(",") if a.strip()) + ")"
