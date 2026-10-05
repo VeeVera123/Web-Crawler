@@ -6510,7 +6510,9 @@ def _geo_question_hit(q: str) -> bool:
     if _Q_CAP_PLACE_RE.search(q):
         return True
     you = _Q_YOU_RE.search(q)
-    if _Q_PLACE_RE.search(q):
+    # A zone phrase ("US Eastern", "UK time", "GMT") is a working-HOURS statement,
+    # not a place the candidate must live in, so it is blanked before looking for places.
+    if _Q_PLACE_RE.search(_Q_ZONE_RE.sub(" ", q)):
         # authorization / citizenship / visa / sponsorship + a named place, framed at the candidate
         if you and _Q_AUTH_CUE_RE.search(q):
             return True
@@ -6527,9 +6529,16 @@ def _geo_question_hit(q: str) -> bool:
             # state / province licensing, background checks, local passport or driver's licence
             if _Q_LICENSE_CUE.search(q) or _Q_BACKGROUND_CUE.search(q):
                 return True
-    # named time zone + availability / hours wording aimed at the candidate
-    if you and _Q_ZONE_RE.search(q) and _Q_HOURS_CUE.search(q) and not _Q_NON_BINDING_RE.search(q):
-        return True
+    # A named time zone only rejects when the candidate must be LOCATED in it
+    # ("Are you located in the Eastern time zone?"). "Overlap with US hours",
+    # "work UTC+1", "available during PST" dictate working hours, not location,
+    # and stay unflagged (UTC+1 is West Africa Time).
+    if you and _Q_ZONE_RE.search(q) and not _Q_NON_BINDING_RE.search(q):
+        if re.search(r"\b(?:located|based|reside|residing|resident|live|living|situated|home\s+base)\b[^?.]{0,40}?"
+                     r"\b(?:" + _Q_ZONE + r")\b", q, re.I) or re.search(
+                r"\b(?:are\s+you|be|being|is)\s+(?:currently\s+)?in\s+(?:the\s+|a\s+)?(?:" + _Q_ZONE +
+                r")\b[^?.]{0,15}\b(?:time\s*zone|zone)\b", q, re.I):
+            return True
     return False
 
 

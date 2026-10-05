@@ -123,13 +123,11 @@ RESTRICTIVE = [
     "Do you hold an active license in {S}?",
     "Are you authorized to work in {S}?",
     "Will you be working from {S}?",
-    # time zone / hours
-    "Are you able to work {Z} business hours?",
-    "Are you able to work in the {Z} time zone?",
+    # time zone as a LOCATION
     "Are you located in the {Z} time zone?",
-    "Can you overlap at least 4 hours with {Z} time?",
-    "Are you available to work {Z} hours?",
-    "Will you be working in the {Z} time zone?",
+    "Are you based in the {Z} time zone?",
+    "Are you currently in the {Z} time zone?",
+    "Do you live in the {Z} time zone?",
     # citizenship / clearance / background
     "Are you a U.S. citizen?",
     "Are you a US citizen or green card holder?",
@@ -200,6 +198,16 @@ BENIGN = [
     "Describe your ideal working environment.",
     "Are you comfortable with a role that is 100% remote?",
     "Is there anything else you'd like us to know?",
+    # time zones that dictate working HOURS, not location (UTC+1 is West Africa Time)
+    "Are you able to work {Z} business hours?",
+    "Can you overlap at least 4 hours with {Z} time?",
+    "Are you available to work {Z} hours?",
+    "We require an overlap with US hours. Are you comfortable with that?",
+    "This role requires you to work UTC+1. Does that work for you?",
+    "Are you able to work UTC+1 hours?",
+    "Can you be available during PST business hours?",
+    "Are you comfortable working EST hours?",
+    "Do you have at least 4 hours of overlap with US Pacific time?",
 ]
 
 JOB = {"title": "Customer Success Manager", "location": "Remote", "country": "", "workplace_type": "",
