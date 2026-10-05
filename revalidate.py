@@ -270,9 +270,15 @@ def main(argv=None) -> int:
                      "source_ats": r.get("ats") or "", "description_snippet": "",
                      "role_category": r.get("role_category")})
         meta[r["job_url"]] = r
-    jobs = ats_scrapers.enrich_descriptions(jobs)
-    jobs = ats_scrapers.enrich_application_questions(jobs, max_workers=args.workers)
+    # Only platforms with a dedicated description fetcher keep a description (see the
+    # evidence-limit note above), so don't fetch the others' job pages at all - that
+    # was ~1,260 wasted page fetches per run, and Greenhouse 403s CI runner IPs on them.
     dedicated = set(ats_scrapers.DESCRIPTION_FETCHERS)
+    with_fetcher = [j for j in jobs if j["source_ats"] in dedicated]
+    if with_fetcher:
+        with_fetcher = ats_scrapers.enrich_descriptions(with_fetcher)
+    jobs = with_fetcher + [j for j in jobs if j["source_ats"] not in dedicated]
+    jobs = ats_scrapers.enrich_application_questions(jobs, max_workers=args.workers)
     for j in jobs:
         if j["source_ats"] not in dedicated:
             j["description_snippet"] = "\n".join(
