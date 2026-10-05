@@ -36,7 +36,10 @@ import requests as http_requests
 #       commute / reside / authorized-to-work-in / clearance / time-zone hours, ~3x
 #       the phrasings), and rows stamped 4 while their Ashby form was unreadable
 #       (Hightouch) are re-checked with the retrying Ashby fetcher.
-CLASSIFIER_VERSION = 5
+#   6 - 2026-10-05: Rank 4 fails closed on the location field (Bangkok / "Brasil" roles
+#       were admitted): it must resolve to a curated country, a region name, "City,
+#       <curated country>" or a known city of a curated non-US country.
+CLASSIFIER_VERSION = 6
 
 import os
 from dotenv import load_dotenv

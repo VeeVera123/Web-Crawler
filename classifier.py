@@ -6595,9 +6595,11 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
 # unchanged — explicit user confirmation that regions stay as-is
 # ("regions are allowed too, like LATAM, AMER, etc.").
 _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT = (
-    r"u\.?s\.?a?\.?|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
-    r"canada|australia|germany|(?:republic\s+of\s+)?ireland|singapore|"
-    r"luxembourg|norway|switzerland|denmark|netherlands|iceland|sweden|italy"
+    r"(?-i:US)|u\.s\.?a?\.?|usa|united\s+states(?:\s+of\s+america)?|u\.?k\.?|united\s+kingdom|"
+    r"great\s+britain|england|scotland|wales|"
+    r"canada|australia|germany|deutschland|(?:republic\s+of\s+)?ireland|singapore|"
+    r"luxembourg|norway|norge|switzerland|schweiz|suisse|svizzera|denmark|danmark|"
+    r"netherlands|nederland|iceland|sweden|sverige|italy|italia"
 )
 
 # Every non-EMEA/non-Africa business region and continent this file
@@ -6610,7 +6612,7 @@ _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT = (
 # reaches 4a/4b.
 _RANK4_PLACE_INNER_FRAGMENT = (
     _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r"|"
-    r"european\s+union|\beu\b|apac|latam|amers?|americas|mena|middle\s+east|"
+    r"european\s+union|\beu\b|apac|latam|latin\s+america|amers?|americas|mena|middle\s+east|"
     r"anz|dach|benelux|nordics?|"
     r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
     r"northern\s+europe|"
@@ -6619,7 +6621,7 @@ _RANK4_PLACE_INNER_FRAGMENT = (
     r"oceania|pacific|north\s+america|central\s+america|south\s+america|"
     r"caribbean|cee|cis|japac|apj|europe"
 )
-_RANK4_PLACE_RE = re.compile(r"\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b", re.I)
+_RANK4_PLACE_RE = re.compile(r"\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")(?!\w)", re.I)
 
 # 2026-09 BUG FIX (explicit user report, real production data: bare-city
 # locations naming a DISALLOWED country/city — "India", "Shanghai", "South
@@ -6667,7 +6669,7 @@ _RANK4_STRICT_PLACE_RE = re.compile(
 # as a mixed signal for 4b admission.
 _RANK4_4B_PLACE_INNER_FRAGMENT = (
     _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r"|"
-    r"european\s+union|\beu\b|apac|latam|mena|middle\s+east|"
+    r"european\s+union|\beu\b|apac|latam|latin\s+america|mena|middle\s+east|"
     r"anz|dach|benelux|nordics?|"
     r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
     r"northern\s+europe|"
@@ -6838,6 +6840,99 @@ _RANK4_WORLD_COUNTRIES_FRAGMENT = (
 _RANK4_ANY_NAMED_COUNTRY_RE = re.compile(
     r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _RANK4_WORLD_COUNTRIES_FRAGMENT + r")\b", re.I)
 
+# ── 2026-10: Rank 4 fails CLOSED (explicit user report: Bangkok and Brazil
+# ("Brasil") roles were admitted). The old guard was a DENY-list
+# (_RANK4_ANY_NAMED_COUNTRY_RE: "does the location name a country we know is
+# disallowed?"), and 4b then admitted on any title/JD regional wording without
+# ever requiring the location itself to be an allowed place, so any city,
+# local-language country name or spelling the deny-list lacked ("Bangkok",
+# "Brasil", "Ontario") got in. Policy: the location field must POSITIVELY
+# resolve to allowed places — a curated country, a region NAME (APAC, LATAM,
+# ...), "City, <curated country>", or a known city of a curated non-US country.
+# A region's member countries and cities (Thailand/Bangkok for APAC, Brazil for
+# LATAM) and states/provinces are not allowed because the region is. ──
+_RANK4_ALLOWED_CITIES = (
+    "london,manchester,birmingham,leeds,liverpool,bristol,edinburgh,glasgow,cardiff,belfast,sheffield,nottingham,"
+    "leicester,southampton,oxford,reading,brighton,aberdeen,milton keynes,coventry,bath,york,exeter,norwich,"
+    "toronto,vancouver,montreal,montréal,ottawa,calgary,edmonton,winnipeg,quebec city,halifax,mississauga,"
+    "waterloo,kitchener,sydney,melbourne,brisbane,perth,adelaide,canberra,gold coast,hobart,darwin,wollongong,"
+    "berlin,munich,münchen,hamburg,frankfurt,cologne,köln,stuttgart,düsseldorf,dusseldorf,leipzig,dresden,"
+    "hannover,hanover,nuremberg,nürnberg,bremen,dortmund,essen,karlsruhe,mannheim,heidelberg,bonn,"
+    "dublin,cork,galway,limerick,waterford,oslo,bergen,trondheim,stavanger,"
+    "zurich,zürich,geneva,genève,basel,bern,lausanne,lugano,zug,"
+    "copenhagen,københavn,aarhus,odense,aalborg,amsterdam,rotterdam,the hague,den haag,utrecht,eindhoven,"
+    "groningen,delft,leiden,reykjavik,reykjavík,stockholm,gothenburg,göteborg,malmö,malmo,uppsala,lund,"
+    "milan,milano,rome,roma,turin,torino,bologna,florence,firenze,naples,napoli,venice,genoa,verona"
+)
+_RANK4_LOC_ONSITE_RE = re.compile(
+    r"\b(?:hybrid|on[\s-]?sites?|in[\s-]?offices?|in[\s-]?person|office[\s-]?based|offices?|on[\s-]?premises?|"
+    r"co-?working)\b", re.I)
+_RANK4_BROAD_WORDS_RE = re.compile(
+    r"\b(?:emea|africa|global(?:ly)?|worldwide|world[\s-]*wide|anywhere|international)\b", re.I)
+# Deliberately NOT NON_GEO_WORDS_RE: that strips "new" (so "New York" would collapse to
+# "York", a UK city) and a bare "city" qualifier must not turn "Quebec City" into "Quebec".
+_RANK4_LOC_FILLER_RE = re.compile(
+    r"\b(?:greater|area|metro|region|office|offices|hq|headquarters|hub|centre|center|remote|hybrid|based|"
+    r"in|at|the|of|fully|flexible|home|open|to|from|for|with|only)\b", re.I)
+
+
+def _rank4_place_key(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", _RANK4_LOC_FILLER_RE.sub(" ", text).lower()).split())
+
+
+_RANK4_ALLOWED_CITY_KEYS = frozenset(k for k in (_rank4_place_key(c) for c in _RANK4_ALLOWED_CITIES.split(",")) if k)
+_RANK4_SPLIT_RE = re.compile(r"[,;/|()\[\]:+–—-]+|\b(?:and|or)\b|&", re.I)
+
+
+def _rank4_location_resolves_to_allowed(loc: str) -> bool:
+    """True only when EVERY place the location names is allowed: curated countries and
+    region names are stripped, then whatever is left (split on , ; / | ( ) - and/or) must
+    be a known city of a curated non-US country. Unknown text (a foreign city, a local-
+    language country name, a state/province, a non-Latin script) fails."""
+    rest = _RANK4_BROAD_WORDS_RE.sub(" ", _RANK4_PLACE_RE.sub(" ", loc))
+    for segment in _RANK4_SPLIT_RE.split(rest):
+        key = _rank4_place_key(segment)
+        if key and key != "city" and key not in _RANK4_ALLOWED_CITY_KEYS:
+            return False
+    return True
+
+
+# Places that are NOT allowed, used only to reject "<foreign place>, <allowed country>" (a
+# list such as "Bangkok, Singapore"), where the old city-before-country pattern took any
+# word as a city.
+_RANK4_FOREIGN_CITIES_FRAGMENT = (
+    r"bangkok|chiang\s+mai|phuket|hanoi|ho\s+chi\s+minh|jakarta|kuala\s+lumpur|manila|cebu|mumbai|delhi|"
+    r"bengaluru|bangalore|hyderabad|chennai|pune|gurgaon|gurugram|noida|kolkata|karachi|lahore|dhaka|colombo|"
+    r"shanghai|beijing|shenzhen|guangzhou|taipei|seoul|busan|tokyo|osaka|dubai|abu\s+dhabi|riyadh|doha|"
+    r"tel\s+aviv|istanbul|ankara|cairo|casablanca|lagos|abuja|nairobi|accra|johannesburg|cape\s+town|durban|"
+    r"addis\s+ababa|kampala|dar\s+es\s+salaam|kigali|mexico\s+city|guadalajara|monterrey|bogot[aá]|"
+    r"medell[ií]n|lima|santiago|buenos\s+aires|s[aã]o\s+paulo|rio\s+de\s+janeiro|bras[ií]lia|"
+    r"belo\s+horizonte|curitiba|porto\s+alegre|montevideo|paris|lyon|madrid|barcelona|lisbon|porto|brussels|"
+    r"vienna|warsaw|krak[oó]w|prague|budapest|bucharest|sofia|athens|helsinki|tallinn|riga|vilnius|kyiv|"
+    r"moscow|belgrade|zagreb|auckland|wellington|christchurch|benin\s+city|port\s+harcourt|kumasi|lusaka|"
+    r"harare|maputo|luanda|dakar|abidjan|tunis|algiers|amman|beirut|kathmandu|yangon|phnom\s+penh|"
+    r"ulaanbaatar|almaty|tashkent|baku|tbilisi|yerevan|minsk|sarajevo|bratislava|ljubljana|salvador|recife|"
+    r"fortaleza|campinas|florian[oó]polis|quito|guayaquil|caracas|havana|santo\s+domingo|kingston|marseille|"
+    r"vientiane|lille|nice|ghent|antwerp|valencia|seville|bilbao|bordeaux|nantes|strasbourg|toulouse|malaga|"
+    r"zaragoza|cluj|wroc[lł]aw|gda[nń]sk|brno|pozna[nń]|[lł][oó]d[zź]|katowice|thessaloniki|izmir|bursa|antalya|"
+    r"haifa|jerusalem|alexandria|giza|rabat|marrakech|tangier|kinshasa|douala|libreville|windhoek|gaborone|"
+    r"lilongwe|antananarivo|port\s+louis|mombasa|kisumu|arusha|entebbe|ibadan|kano|enugu|lekki|tema|takoradi|"
+    r"bamako|ouagadougou|conakry|freetown|monrovia|lom[eé]|cotonou|niamey|khartoum|juba|mogadishu|asmara|"
+    r"tripoli|benghazi|surabaya|bandung|medan|davao|quezon\s+city|makati|taguig|pasig|iloilo|kochi|ahmedabad|"
+    r"jaipur|chandigarh|indore|nagpur|coimbatore|thiruvananthapuram|lucknow|kanpur|surat|vadodara|bhopal|"
+    r"visakhapatnam|mysuru|mysore|mangalore|rawalpindi|faisalabad|chittagong|sylhet|kandy|johor\s+bahru|penang|"
+    r"george\s+town|ipoh|kota\s+kinabalu|da\s+nang|hai\s+phong|can\s+tho|nonthaburi|pattaya|chengdu|hangzhou|"
+    r"nanjing|wuhan|xi.an|chongqing|tianjin|suzhou|qingdao|dalian|kaohsiung|taichung|yokohama|nagoya|fukuoka|"
+    r"sapporo|kyoto|kobe|incheon|daegu|sharjah|jeddah|mecca|medina|baghdad|tehran|isfahan|kabul|"
+    r"cali|barranquilla|cartagena|arequipa|trujillo|rosario|cordoba|mendoza|valpara[ií]so|concepci[oó]n|"
+    r"tijuana|puebla|le[oó]n|quer[eé]taro|m[eé]rida|cancun|punta\s+cana|san\s+pedro\s+sula|"
+    r"belgrade|novi\s+sad|ni[sš]|plovdiv|varna|constanta|iasi|timisoara|bratislava|kosice|kaunas|tartu|"
+    r"odessa|kharkiv|lviv|dnipro|st\.?\s+petersburg|novosibirsk|yekaterinburg|minsk"
+)
+_RANK4_FOREIGN_PLACE_RE = re.compile(
+    r"\b(?:" + _RANK4_WORLD_COUNTRIES_FRAGMENT + r"|bras[ií]l|m[eé]xico|espa[nñ]a|polska|[oö]sterreich|"
+    + _RANK4_FOREIGN_CITIES_FRAGMENT + r")(?!\w)", re.I)
+
 # 2026-09 NEW (explicit user policy, verbatim: "a JD saying based in one
 # our (allowed country/region) offices should not be allowed. Regions are
 # allowed. The aim of rank 4 is that maybe if they did not ask an app
@@ -6946,6 +7041,12 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
         return None, None
 
+    # A workplace-type word inside the location text ("London (Hybrid)", "Berlin Office",
+    # "On-site - Sydney") means physical presence. Only an explicit "Remote" alongside it
+    # (a genuine remote option, like workplace_type "Hybrid, Remote") keeps the job in play.
+    if _RANK4_LOC_ONSITE_RE.search(loc) and not re.search(r"\bremote\b", loc, re.I):
+        return None, None
+
     # 4a: the location field, once every recognized place-name span is
     # removed, has nothing left over — it's ENTIRELY made of one or more
     # allowed country/region/continent names (+ connectors). Same
@@ -6992,7 +7093,8 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # specific/acceptable as the bare country alone, and would otherwise
     # be rejected by the "remainder must be empty" check just above (the
     # city name itself is never in _RANK4_PLACE_RE's vocabulary).
-    if _RANK4_CITY_COMMA_COUNTRY_RE.match(loc.strip()):
+    if (_RANK4_CITY_COMMA_COUNTRY_RE.match(loc.strip())
+            and not _RANK4_FOREIGN_PLACE_RE.search(loc.strip().rsplit(",", 1)[0])):
         return PRIORITY_MIXED_COUNTRY, "city_in_eligible_country"
 
     # Neither 4a shape matched -- before letting 4b's title/JD-driven
@@ -7003,6 +7105,12 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # for the real leaked postings this closes -- no title/JD language
     # should be able to rescue a location field this specific.
     if _rank4_location_field_is_hard_disqualified(loc):
+        return None, None
+
+    # Fail closed: whatever the location still names must be an allowed place (see
+    # _rank4_location_resolves_to_allowed). No title/JD wording can rescue a location
+    # that names a foreign city, a region's member country, or a state/province.
+    if not _rank4_location_resolves_to_allowed(loc):
         return None, None
 
     # 4b: the location field is something ELSE (a city, e.g.) but the
