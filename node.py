@@ -17,6 +17,7 @@ never a gate on whether a hit gets written.
 """
 import asyncio
 import concurrent.futures
+import errno
 import gzip
 import json
 import logging
@@ -1702,9 +1703,48 @@ async def _fetch_homepage_race(session: aiohttp.ClientSession, candidates: list[
             await asyncio.gather(*in_flight, return_exceptions=True)
 
 
-async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> tuple[str, str] | None:
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+# Failure kinds worth ONE retry later at lower concurrency — everything else
+# (NXDOMAIN, refused, 404/403, TLS, redirect loops) is a property of the page.
+TRANSIENT_FETCH_KINDS = frozenset({"timeout", "dns_other", "conn_other", "http_transient"})
+
+
+def _classify_fetch_error(e: BaseException) -> str:
+    if isinstance(e, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(e, aiohttp.TooManyRedirects):
+        return "redirects"
+    dns_cls = getattr(aiohttp, "ClientConnectorDNSError", None)
+    if dns_cls is not None and isinstance(e, dns_cls):
+        msg = str(getattr(e, "os_error", "") or e).lower()
+        if "not found" in msg or "no data" in msg or "nxdomain" in msg or "not known" in msg:
+            return "dns_notfound"
+        return "dns_other"
+    if isinstance(e, aiohttp.ClientSSLError):
+        return "tls"
+    if isinstance(e, aiohttp.ClientConnectorError):
+        if getattr(getattr(e, "os_error", None), "errno", None) == errno.ECONNREFUSED:
+            return "conn_refused"
+        return "conn_other"
+    if isinstance(e, (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, aiohttp.ClientPayloadError)):
+        return "conn_other"
+    return "other"
+
+
+def _note_fetch_failure(stats: dict, fail_kind: list | None, kind: str) -> None:
+    key = "fail_" + kind
+    stats[key] = stats.get(key, 0) + 1
+    if fail_kind is not None:
+        fail_kind.append(kind)
+
+
+async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict,
+                      fail_kind: list | None = None) -> tuple[str, str] | None:
     """One page, capped at MAX_PAGE_BYTES. No retries/backoff — a single
-    miss just means this path didn't pan out, not worth re-hammering."""
+    miss just means this path didn't pan out, not worth re-hammering.
+    A caller that DOES want to retry (crawl_ii, whose pages are known) can
+    pass `fail_kind=[]`: on failure it receives one kind string, and
+    stats["fail_<kind>"] is bumped for every caller regardless."""
     stats["requests_attempted"] += 1
     try:
         async with session.get(url, timeout=REQUEST_TIMEOUT,
@@ -1714,10 +1754,15 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
                 stats["http_error"] += 1
                 if r.status == 404:
                     stats["status_404"] += 1
+                if r.status in _TRANSIENT_HTTP_STATUSES:
+                    _note_fetch_failure(stats, fail_kind, "http_transient")
+                else:
+                    _note_fetch_failure(stats, fail_kind, "http_gone" if r.status in (404, 410) else "http_blocked")
                 return None
             content_type = r.headers.get("Content-Type", "").lower()
             if content_type.startswith(_BINARY_CONTENT_PREFIXES):
                 stats["non_html"] += 1
+                _note_fetch_failure(stats, fail_kind, "non_html")
                 return None
             chunks = []
             total = 0
@@ -1729,14 +1774,17 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict) -> 
             text = b"".join(chunks).decode("utf-8", errors="ignore")
             if not text.strip():
                 stats["non_html"] += 1
+                _note_fetch_failure(stats, fail_kind, "non_html")
                 return None
             stats["fetched_ok"] += 1
             return str(r.url), text
     except asyncio.TimeoutError:
         stats["timeout"] += 1
+        _note_fetch_failure(stats, fail_kind, "timeout")
         return None
-    except Exception:
+    except Exception as e:
         stats["unreachable"] += 1
+        _note_fetch_failure(stats, fail_kind, _classify_fetch_error(e))
         return None
 
 

@@ -214,6 +214,14 @@ MAX_HEURISTIC_CANDIDATES_PER_PAGE = 25  # bounds worst-case detail-page fetches 
 # added cost needs tuning against TIME_BUDGET_MINUTES/CRAWL_CONCURRENCY.
 MAX_CAREER_LINK_FOLLOW = int(os.environ.get("CRAWL_II_MAX_LINK_FOLLOW", "1"))
 
+# 2026-10: same-size hash shards of the SAME registry showed 4,138 to 13,431
+# unreachable pages per shard in one run (13%-44%), while a sample fetched from
+# a quiet network reached 97% of the registry — so most "unreachable" pages were
+# runner-load failures (DNS/timeouts at CRAWL_CONCURRENCY=400), not dead sites.
+# Pages that failed with a transient error get one more attempt after the main
+# pass, at this much lower concurrency.
+RETRY_CONCURRENCY = int(os.environ.get("CRAWL_II_RETRY_CONCURRENCY", "100"))
+
 # 2026-09: archive_ii previously only ever read ONE listing page per
 # company career URL. A landing/stub page with no listings at all was
 # already handled (MAX_CAREER_LINK_FOLLOW above), but a genuine listings
@@ -1109,10 +1117,13 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     network request); a real find costs one extra fetch plus whatever
     that page's own extraction needs — same bounded, best-effort pattern
     as every other fetch in this pipeline."""
+    fail_kind: list[str] = []
     async with sem:
-        fetched = await node._fetch_page(session, page["career_page_url"], stats)
+        fetched = await node._fetch_page(session, page["career_page_url"], stats, fail_kind=fail_kind)
     if not fetched:
         stats["page_unreachable"] += 1
+        if fail_kind and fail_kind[0] in node.TRANSIENT_FETCH_KINDS:
+            page["_retry"] = True
         return []
     final_url, html = fetched
     company = _company_name_from_domain(page["website_url"])
@@ -1674,6 +1685,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     """
     all_candidate_jobs: list[dict] = []
     all_pages_with_roles: set[str] = set()
+    retry_pages: list[dict] = []
     time_budget_hit = False
     i = 0
     report_stats = {"total_jobs_raw": 0, "csm_roles": 0, "global_jobs": 0, "duplicates": 0}
@@ -1697,6 +1709,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         # before role/location filtering below, so any posting counts,
         # not just CSM/AM ones.
         all_pages_with_roles |= {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
+        retry_pages.extend(p for p in batch if p.pop("_retry", False))
 
         done = min(i + batch_size, len(pages))
         elapsed = time.monotonic() - crawl_start
@@ -1705,6 +1718,32 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
                  f"{len(batch_candidates)} postings found this batch ({len(all_candidate_jobs)} total)")
 
     pages_done = min(len(pages), i + batch_size) if pages else 0
+
+    if retry_pages and time.monotonic() - crawl_start < time_budget_seconds:
+        log.info(f"── Retry pass: {len(retry_pages)} pages failed with a transient error "
+                 f"(timeout/DNS/connection) — retrying at concurrency {RETRY_CONCURRENCY} ──")
+        retry_sem = asyncio.Semaphore(RETRY_CONCURRENCY)
+        unreachable_before = stats["page_unreachable"]
+        recovered_with_postings = 0
+        for j in range(0, len(retry_pages), batch_size):
+            if time.monotonic() - crawl_start >= time_budget_seconds:
+                log.warning(f"  time budget reached during retry pass at {j}/{len(retry_pages)}")
+                break
+            rbatch = retry_pages[j:j + batch_size]
+            rresults = await asyncio.gather(
+                *(extract_postings_from_page(session, retry_sem, p, stats, parse_pool) for p in rbatch))
+            for p, page_jobs in zip(rbatch, rresults):
+                p.pop("_retry", None)
+                if page_jobs:
+                    recovered_with_postings += 1
+                    all_candidate_jobs.extend(page_jobs)
+                    all_pages_with_roles.add(p["website_url"])
+        still_failing = stats["page_unreachable"] - unreachable_before
+        stats["retry_attempted"] = len(retry_pages)
+        stats["retry_still_unreachable"] = still_failing
+        stats["retry_recovered_with_postings"] = recovered_with_postings
+        log.info(f"  retry pass done: {len(retry_pages) - still_failing}/{len(retry_pages)} pages fetched this time, "
+                 f"{recovered_with_postings} of them with postings")
 
     if all_pages_with_roles:
         touch_archive_ii_last_seen(all_pages_with_roles)
@@ -1947,6 +1986,11 @@ async def _run_shard(shard: int, total_shards: int) -> None:
              f"postings confirmed")
     log.info(f"  Unreachable/no-signal: {stats['page_unreachable']} pages unreachable, "
              f"{stats['no_postings_found']} pages with no postings found")
+    fail_breakdown = ", ".join(f"{k[5:]}={v}" for k, v in sorted(stats.items()) if k.startswith("fail_"))
+    log.info(f"  Fetch failures by kind (every request, incl. link-follow/pagination): {fail_breakdown or 'none'}")
+    if stats.get("retry_attempted"):
+        log.info(f"  Retry pass: {stats['retry_attempted']} pages retried, {stats['retry_still_unreachable']} "
+                 f"still unreachable, {stats['retry_recovered_with_postings']} recovered with postings")
     log.info(f"  Apply-page augmented: {stats['apply_page_augmented']} postings enriched with apply URL")
     log.info(f"  Career-link follow: {stats['career_link_follow_attempted']} links followed, "
              f"{stats['career_link_follow_found_postings']} of those pages had postings")
