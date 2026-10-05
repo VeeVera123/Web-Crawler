@@ -5848,6 +5848,257 @@ def scrape_hirehive(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Manatal (careers-page.com) ──────────────────────────
+# 2026-10: added at explicit user request ("why not add ... Manatal ... at
+# least the biggest ones"). Evidence (all confirmed live from this sandbox):
+#   * Board: https://www.careers-page.com/{slug}[?page=N] — server-rendered
+#     (no JS needed), 10 postings per page, each <li> carries the title,
+#     the location and the job's SHORT CODE: href="/{slug}/job/{CODE}".
+#   * Why HTML and not Manatal's JSON API
+#     (api.careers-page.com/open/v1/career-pages/{slug}/job-posts): the API
+#     is public and unrobotted, but its items carry only an internal UUID —
+#     the public job URL needs the short code, and /{slug}/job/{uuid} is a
+#     404. Without a real URL there is nothing a user could apply through,
+#     so the board HTML (which has the codes) is the source of truth.
+#   * robots: careers-page.com serves no robots.txt (the path returns the
+#     site's HTML 404 page), so no Disallow applies.
+#   * A dead/unknown slug 404s (verified with a fake tenant).
+# The list page has no description, so jobs here carry description_snippet=""
+# and rely on DESCRIPTION_FETCHERS["Manatal"] (detail page, <div
+# class="redactor-styles">).
+_MANATAL_BOARD = "https://www.careers-page.com"
+# Manatal boards come in more than one theme (a <h5>-in-<li> list and a
+# card layout with an <h3>, confirmed live on two real tenants), so the
+# parser is anchored on the one thing every theme shares: the job link
+# href="/{slug}/job/{CODE}". The title is that anchor's own text (skipping
+# the "Apply" button anchors that point at the same code) and the location
+# is the text after the map-marker icon inside the same posting block.
+_MANATAL_ANCHOR_RE = re.compile(
+    r'<a\b[^>]*?href="/[^"/]+/job/(?P<code>[A-Za-z0-9]+)"[^>]*>(?P<inner>.*?)</a>', re.I | re.S)
+_MANATAL_LOC_RE = re.compile(
+    r"fa-map-marker[^\"']*[\"'][^>]*>\s*(?:</(?:i|span)>)?\s*([^<]+)", re.I | re.S)
+_MANATAL_APPLY_TEXT = {"", "apply", "apply now", "apply for position", "view", "view job", "read more"}
+
+
+def _manatal_clean(fragment: str) -> str:
+    return _text(re.sub(r"<[^>]+>", " ", fragment or ""))
+
+
+def _manatal_parse_board(html: str) -> list[tuple[str, str, str]]:
+    """(code, title, location) per posting on one board page, in page order."""
+    anchors = list(_MANATAL_ANCHOR_RE.finditer(html))
+    first_pos: dict[str, int] = {}
+    for m in anchors:
+        first_pos.setdefault(m.group("code"), m.start())
+    codes = sorted(first_pos, key=first_pos.get)
+    out = []
+    for i, code in enumerate(codes):
+        block_end = first_pos[codes[i + 1]] if i + 1 < len(codes) else len(html)
+        block = html[first_pos[code]:block_end]
+        title = ""
+        for m in _MANATAL_ANCHOR_RE.finditer(block):
+            if m.group("code") != code:
+                continue
+            cand = _manatal_clean(m.group("inner"))
+            if cand.lower() not in _MANATAL_APPLY_TEXT:
+                title = cand
+                break
+        lm = _MANATAL_LOC_RE.search(block)
+        location = _manatal_clean(lm.group(1)) if lm else ""
+        if title:
+            out.append((code, title, location))
+    return out
+
+
+def scrape_manatal(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return []
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    jobs: list[dict] = []
+    seen: set = set()
+    max_pages = 60  # 600 postings — the biggest registry tenant has ~140
+    company = ""
+    for page in range(1, max_pages + 1):
+        url = f"{_MANATAL_BOARD}/{slug}" if page == 1 else f"{_MANATAL_BOARD}/{slug}?page={page}"
+        r = _get_requests_sync(url, headers=headers)
+        if not r:
+            break
+        html = r.text
+        if page == 1:
+            m = re.search(r'<meta property="og:title" content="([^"]*)"', html, re.I) or \
+                re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+            t = _manatal_clean(m.group(1)) if m else ""
+            company = re.sub(r"\s*[|]\s*Career Page\s*$", "", t, flags=re.I).strip(" -|")
+        added = 0
+        for code, title, location in _manatal_parse_board(html):
+            if code in seen:
+                continue
+            seen.add(code)
+            added += 1
+            jobs.append({
+                "title": title,
+                "url": f"{_MANATAL_BOARD}/{slug}/job/{code}",
+                "company": company if company and company.lower() != "manatal" else slug.replace("-", " ").title(),
+                "location": location,
+                "country": "",
+                "department": "",
+                "workplace_type": "",
+                "employment_type": "",
+                "salary": "",
+                "description_snippet": "",
+                "source_ats": "Manatal",
+                "slug": slug,
+            })
+        if not added or f"?page={page + 1}" not in html:
+            break
+    return jobs
+
+
+async def _fetch_manatal_description(job: dict) -> str:
+    """Manatal detail page: the real JD is the <div class="redactor-styles">
+    block (the banner above it is title/location/salary + Apply buttons).
+    Falls back to the generic extractor if the template ever changes."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    r = await _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return ""
+    html = r.text
+    _enrich_cache_put(job, url, html)
+    if not job.get("location"):
+        lm = _MANATAL_LOC_RE.search(html)
+        if lm:
+            job["location"] = _manatal_clean(lm.group(1))
+    soup = BeautifulSoup(html, "html.parser")
+    node = soup.select_one("div.redactor-styles")
+    if node:
+        text = _snippet(str(node))
+        if len(text) > 50:
+            return text
+    return await _fetch_generic_description(job)
+
+
+# ── JobScore ───────────────────────────────────────────
+# 2026-10: added at explicit user request. Public per-tenant JSON feed:
+#   GET https://careers.jobscore.com/jobs/{slug}/feed.json
+# Confirmed live: full HTML descriptions, per-job detail_url, location /
+# city / state / country, a `remote` field ("Yes | …" / "Hybrid | …" /
+# "No | Must be able to work onsite …"). robots.txt disallows only
+# /apply_flow/ (the application flow), which this scraper never touches —
+# apply_url is NOT used; detail_url (a /careers/{slug}/jobs/… page) is the
+# job link. A removed tenant returns 410 (or 404 for an unknown one).
+_JOBSCORE_WORKPLACE = (("hybrid", "Hybrid"), ("yes", "Remote"), ("no", "On-site"))
+
+
+def scrape_jobscore(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return []
+    r = _get_requests_sync(f"https://careers.jobscore.com/jobs/{slug}/feed.json",
+                           headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+    if not r:
+        return []
+    try:
+        payload = r.json()
+    except Exception as e:
+        log.debug(f"JobScore: JSON parse failed for {slug}: {e}")
+        return []
+    items = payload.get("jobs") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return []
+    company = _text(payload.get("company_name") or payload.get("company")) or slug.replace("-", " ").title()
+    jobs: list[dict] = []
+    seen: set = set()
+    for j in items:
+        if not isinstance(j, dict):
+            continue
+        title = _text(j.get("title"))
+        jid = j.get("id")
+        if not title or jid in seen:
+            continue
+        seen.add(jid)
+        url = (j.get("detail_url") or "").split("?")[0] or f"https://careers.jobscore.com/careers/{slug}/jobs/{j.get('url_slug') or jid}"
+        location = _text(j.get("location")) or ", ".join(
+            p for p in (_text(j.get("city")), _text(j.get("state")), _text(j.get("country"))) if p)
+        remote = (j.get("remote") or "").strip().lower()
+        workplace = next((label for key, label in _JOBSCORE_WORKPLACE if remote.startswith(key)), "")
+        desc = _snippet(j.get("description") or "")
+        jobs.append({
+            "title": title,
+            "url": url,
+            "company": _text(j.get("company_name")) or company,
+            "location": location,
+            "country": _text(j.get("country")),
+            "department": _text(j.get("department")),
+            "workplace_type": workplace,
+            "employment_type": _text(j.get("job_type")),
+            "salary": _text(j.get("formatted_public_compensation")) or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "JobScore",
+            "slug": slug,
+        })
+    return jobs
+
+
+# ── Crelate ────────────────────────────────────────────
+# 2026-10: added at explicit user request. The Crelate candidate portal
+# (jobs.crelate.com/portal/{slug}) is a JS shell, but every portal links its
+# own public RSS feed ("Subscribe to an RSS feed of available jobs"):
+#   GET https://jobs.crelate.com/portal/{slug}/rss
+# Confirmed live: per-job permalink (/portal/{slug}/job/{id}), title, the
+# FULL HTML description, a <crelate:location> element, 404 for an unknown
+# tenant. jobs.crelate.com/robots.txt disallows only static asset dirs.
+def scrape_crelate(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return []
+    r = _get_requests_sync(f"https://jobs.crelate.com/portal/{slug}/rss",
+                           headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return []
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError as e:
+        log.debug(f"Crelate: RSS parse failed for {slug}: {e}")
+        return []
+    channel = root.find("channel")
+    if channel is None:
+        return []
+    ch_title = _text(channel.findtext("title"))
+    company = re.sub(r"\s+Jobs Feed\s*$", "", ch_title, flags=re.I).strip() or slug.replace("-", " ").title()
+    jobs: list[dict] = []
+    seen: set = set()
+    for item in channel.findall("item"):
+        title = _text(item.findtext("title"))
+        link = _text(item.findtext("link") or item.findtext("guid"))
+        if not title or not link or link in seen:
+            continue
+        seen.add(link)
+        location = ""
+        for child in item:
+            if child.tag.rsplit("}", 1)[-1] == "location":
+                location = _text(child.text)
+                break
+        desc = _snippet(item.findtext("description") or "")
+        jobs.append({
+            "title": title,
+            "url": link,
+            "company": company,
+            "location": location,
+            "country": "",
+            "department": "",
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Crelate",
+            "slug": slug,
+        })
+    return jobs
+
+
 # ── RecruiterBox / Trakstar Hire ──────────────────────────
 # 2026-09: added at explicit user request. RecruiterBox rebranded to
 # "Trakstar Hire" some years ago but the public API host and the legacy
@@ -6339,6 +6590,10 @@ SCRAPERS = {
     # endpoint/robots.txt evidence.
     "dayforce": scrape_dayforce,
     "hirehive": scrape_hirehive,
+    # 2026-10: Manatal / JobScore / Crelate — see each scraper's block comment.
+    "manatal": scrape_manatal,
+    "jobscore": scrape_jobscore,
+    "crelate": scrape_crelate,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -7497,6 +7752,10 @@ DESCRIPTION_FETCHERS = {
     # fetch would return the same content-free page for every job, same
     # reasoning as Gem below) and HireHive's hostedUrl would only repeat
     # what the API already gave.
+    # 2026-10: Manatal's board list has no description — every job needs the
+    # detail-page fetch. JobScore (feed.json) and Crelate (RSS) return the
+    # full description inline, so they are deliberately NOT registered.
+    "Manatal": _fetch_manatal_description,
     # RecruiterBox / Trakstar Hire deliberately NOT registered here (same
     # reasoning as Gem below): scrape_recruiterbox's jsapi.recruiterbox.com
     # listing call already returns the full HTML description inline, and

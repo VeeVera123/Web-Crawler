@@ -578,6 +578,11 @@ SUPPORTED_ATS = {
     # jobs), robots.txt allows everything, 404 "Company not found" for a
     # fake tenant.
     "dayforce", "hirehive",
+    # 2026-10 (same user request): Manatal (careers-page.com board HTML —
+    # the open JSON API has no job-URL code and 404s for many live boards),
+    # JobScore (public feed.json) and Crelate (public per-portal RSS). See
+    # each scraper's block comment in ats_scrapers.py for the evidence.
+    "manatal", "jobscore", "crelate",
     # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
     # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
     # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
@@ -2005,6 +2010,66 @@ def _url_to_slug_hirehive(url: str) -> str | None:
     return None
 
 
+def _url_to_slug_manatal(url: str) -> str | None:
+    """Extract slug from Manatal career-page URLs (2026-10, new platform).
+    Pattern: www.careers-page.com/{slug}[/job/{CODE}[/apply]] — ONE shared
+    host, tenant = first path segment (confirmed live). The host also serves
+    Manatal's own marketing/legal pages, hence the segment guard."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host not in ("www.careers-page.com", "careers-page.com"):
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts:
+        return None
+    slug = parts[0].lower()
+    if (slug in _MANATAL_NON_SLUGS or slug in SKIP_SLUGS or not _looks_like_real_slug(slug)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug)):
+        return None
+    return slug
+
+
+_MANATAL_NON_SLUGS = {
+    "job", "jobs", "login", "logout", "signup", "register", "terms", "privacy",
+    "about", "contact", "pricing", "help", "support", "static", "media",
+    "career", "careers", "career-page", "employer", "candidate", "candidates",
+}
+
+
+def _url_to_slug_jobscore(url: str) -> str | None:
+    """Extract slug from JobScore URLs (2026-10, new platform).
+    Patterns (all confirmed live): careers.jobscore.com/careers/{slug}[/jobs/..],
+    careers.jobscore.com/jobs/{slug}/feed.json|feed.xml. One shared host."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() != "careers.jobscore.com":
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0].lower() not in ("careers", "jobs"):
+        return None
+    slug = parts[1].lower()
+    if slug in SKIP_SLUGS or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug):
+        return None
+    return slug
+
+
+def _url_to_slug_crelate(url: str) -> str | None:
+    """Extract slug from Crelate candidate-portal URLs (2026-10, new
+    platform). Patterns (confirmed live): jobs.crelate.com/portal/{slug}[/job/ID|/rss],
+    and the portal's own asset form jobs.crelate.com/portal/v2/{slug}/... .
+    Slugs are lowercased (the portal's canonical link is lowercase)."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() != "jobs.crelate.com":
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[0].lower() != "portal":
+        return None
+    idx = 2 if parts[1].lower() == "v2" and len(parts) > 2 else 1
+    slug = parts[idx].lower()
+    if slug in SKIP_SLUGS or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug):
+        return None
+    return slug
+
+
 def _url_to_slug_isolvedhire(url: str) -> str | None:
     """Extract slug from isolvedhire (iSolved Hire) URLs (2026-09, new
     platform). Pattern: {slug}.isolvedhire.com/... — subdomain-per-tenant,
@@ -2395,6 +2460,9 @@ URL_TO_SLUG = {
     # New (2026-09): Hireology / isolvedhire — see SUPPORTED_ATS comment above.
     "hireology": _url_to_slug_hireology,
     "hirehive": _url_to_slug_hirehive,
+    "manatal": _url_to_slug_manatal,
+    "jobscore": _url_to_slug_jobscore,
+    "crelate": _url_to_slug_crelate,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3092,6 +3160,10 @@ CC_PLATFORM_PATTERNS = {
     # on ONE shared host (jobs.dayforcehcm.com).
     "dayforce": ["jobs.dayforcehcm.com/*"],
     "hirehive": ["*.hirehive.com/*"],
+    # New (2026-10): Manatal / JobScore / Crelate — see SUPPORTED_ATS comment.
+    "manatal": ["www.careers-page.com/*"],
+    "jobscore": ["careers.jobscore.com/*"],
+    "crelate": ["jobs.crelate.com/portal/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3170,6 +3242,9 @@ CC_EXTRACTORS = {
     "hireology": _url_to_slug_hireology,
     "hirehive": _url_to_slug_hirehive,
     "dayforce": _url_to_slug_dayforce,
+    "manatal": _url_to_slug_manatal,
+    "jobscore": _url_to_slug_jobscore,
+    "crelate": _url_to_slug_crelate,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3386,6 +3461,45 @@ def _cc_check_hirehive(slug: str) -> bool | None:
     try:
         r = requests.get(f"https://{slug}.hirehive.com/api/v1/jobs", timeout=10,
                           headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_manatal(slug: str) -> bool | None:
+    """Fallback copy of verification.py's _verify_manatal (2026-10): the
+    board HTML 404s for an unknown tenant. (NOT the open JSON API — that
+    404s for many live boards, so its 404 proves nothing.)"""
+    try:
+        r = requests.get(f"https://www.careers-page.com/{slug}", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_jobscore(slug: str) -> bool | None:
+    """Fallback copy of verification.py's _verify_jobscore (2026-10): a
+    removed tenant answers 410, an unknown one 404."""
+    try:
+        r = requests.get(f"https://careers.jobscore.com/jobs/{slug}/feed.json", timeout=10,
+                          headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code in (404, 410):
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_crelate(slug: str) -> bool | None:
+    """Fallback copy of verification.py's _verify_crelate (2026-10)."""
+    try:
+        r = requests.get(f"https://jobs.crelate.com/portal/{slug}/rss", timeout=10,
+                          headers={"User-Agent": _ROBOTS_UA})
     except Exception:
         return None
     if r.status_code == 404:
@@ -3791,6 +3905,9 @@ _CC_LIVE_CHECK = {
     # path's own docstrings.
     "hireology": _via_verification("hireology", _cc_check_hireology),
     "hirehive": _via_verification("hirehive", _cc_check_hirehive),
+    "manatal": _via_verification("manatal", _cc_check_manatal),
+    "jobscore": _via_verification("jobscore", _cc_check_jobscore),
+    "crelate": _via_verification("crelate", _cc_check_crelate),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,
@@ -3876,6 +3993,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
+    "manatal", "jobscore", "crelate",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -6467,6 +6585,12 @@ _GITHUB_REGISTRY_ATS_MAP = {
     # scrapers take; a missing openroles file for either is harmless.
     "dayforce": "dayforce",
     "hirehive": "hirehive",
+    # 2026-10: Manatal (2,481 live tenants in openroles' manatal.json — the
+    # single biggest slug source for it) / JobScore (171 live) — bare slug
+    # is what both scrapers take. Crelate is not an openroles platform
+    # (it comes from open-jobs' slugs.json, see _OPENJOBS_DIRECT_ATS).
+    "manatal": "manatal",
+    "jobscore": "jobscore",
     # 2026-09: Gem — checked, NOT present. openroles' data/tenants/ and
     # scraper/src/ats/ file listings (via data.jsdelivr.com's flat
     # structure endpoint) confirmed live to have no "gem" entry at all.
@@ -6702,6 +6826,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "softgarden": "softgarden",
     # 2026-10: Dayforce / HireHive (new scrapers).
     "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
+    "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -6718,6 +6843,8 @@ _GITHUB_ATS_HOST_HINTS = (
     ("isolvedhire.com", "isolvedhire"), ("gem.com", "gem"),
     ("recruiterbox.com", "recruiterbox"), ("trakstar.com", "recruiterbox"),
     ("jobs.dayforcehcm.com", "dayforce"), ("hirehive.com", "hirehive"),
+    ("careers-page.com", "manatal"), ("careers.jobscore.com", "jobscore"),
+    ("jobs.crelate.com", "crelate"),
 )
 
 
@@ -6951,6 +7078,10 @@ _OPENJOBS_DIRECT_ATS = {
     # tenant codes (+872 dead, which the "gone" bucket already excludes);
     # the bare string is exactly the {tenant} scrape_dayforce takes.
     "dayforce",
+    # 2026-10: crelate (367 live) and jobscore (49 live) — bare lowercase
+    # portal/tenant strings, exactly what scrape_crelate/scrape_jobscore
+    # take (lowercased below: crelate registry rows mix case).
+    "crelate", "jobscore",
     "ashby", "bamboohr", "breezy", "greenhouse", "jazzhr", "jobvite",
     "lever", "paycom", "personio", "pinpoint", "recruitee",
     "smartrecruiters", "taleo", "workable",
@@ -7006,6 +7137,8 @@ def _parse_openjobs_slugmap(text: str, repo: str) -> dict[str, dict[str, str]]:
                         and tenant.lower() not in SKIP_SLUGS):
                     out.setdefault(ats, {})[f"{tenant}|{board}"] = ""
                 continue
+            if ats in ("crelate", "jobscore"):
+                slug = slug.lower()
             if ats != "paycom" and not _looks_like_real_slug(slug):
                 continue
             out.setdefault(ats, {})[slug] = ""

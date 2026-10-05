@@ -204,6 +204,12 @@ PLATFORM_WORKERS = {
     # subdomain-per-tenant with a single light JSON call per ~30 jobs.
     "dayforce": 6,
     "hirehive": 12,
+    # 2026-10: Manatal — shared host (careers-page.com), a scrape is one
+    # HTML page per 10 postings (up to ~60 pages) so keep it modest;
+    # JobScore / Crelate are one JSON / RSS call per tenant on shared hosts.
+    "manatal": 8,
+    "jobscore": 12,
+    "crelate": 12,
 }
 
 

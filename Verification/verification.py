@@ -807,6 +807,52 @@ async def _verify_hirehive(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_manatal(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Manatal (2026-10, new platform — see discovery.py's SUPPORTED_ATS
+    comment). GET the tenant's public board page.
+
+    Confirmed live 2026-10: 6 of 6 openroles-"dead" slugs 404 on
+    https://www.careers-page.com/{slug}, 6 of 6 "live" ones 200, and a
+    fabricated slug 404s. Deliberately NOT Manatal's JSON API
+    (api.careers-page.com/open/v1/...): it 404s for many boards that are
+    live and listing jobs on the HTML page (25 of 40 randomly sampled
+    registry-"live" tenants answered API 404; all 4 of those spot-checked
+    had a working, populated board), so an API 404 is not a dead signal. Any non-404 failure stays ambiguous via raise_for_status()."""
+    url = f"https://www.careers-page.com/{slug}"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
+async def _verify_jobscore(session: aiohttp.ClientSession, slug: str) -> bool:
+    """JobScore (2026-10, new platform). GET the tenant's public feed.json.
+    Confirmed live 2026-10: a real tenant 200s (even with zero openings the
+    feed is a valid document with an empty jobs list — checked on a tenant
+    with 0 postings), a removed tenant answers 410 "Page Gone" and a
+    fabricated slug 404s. Both are definitive; anything else is ambiguous."""
+    url = f"https://careers.jobscore.com/jobs/{slug}/feed.json"
+    async with session.get(url, timeout=REQUEST_TIMEOUT,
+                            headers={"Accept": "application/json", "User-Agent": USER_AGENT}) as r:
+        if r.status in (404, 410):
+            return False
+        r.raise_for_status()
+        return True
+
+
+async def _verify_crelate(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Crelate (2026-10, new platform). GET the portal's public RSS feed.
+    Confirmed live 2026-10: real portals 200 (RSS 2.0), a fabricated slug
+    404s. Any other failure stays ambiguous via raise_for_status()."""
+    url = f"https://jobs.crelate.com/portal/{slug}/rss"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool:
     """isolvedhire (2026-09, new platform — see discovery.py's
     SUPPORTED_ATS comment). GET the tenant's /jobs/ board page and follow
@@ -961,6 +1007,9 @@ ARCHIVE_II_VERIFIERS = {
     # added here, per this file's own WHY-19-OF-26 methodology above).
     "hireology": _verify_hireology,
     "hirehive": _verify_hirehive,
+    "manatal": _verify_manatal,
+    "jobscore": _verify_jobscore,
+    "crelate": _verify_crelate,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full
     # live-confirmed evidence, including finding and ruling out its own

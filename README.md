@@ -34,11 +34,16 @@ robots-allowed job API before being added to Crawl I:
 |---|---|
 | Dayforce (Ceridian) | **Added** (`scrape_dayforce`): CSRF handshake + `jobposting/search` POST on `jobs.dayforcehcm.com`, full JD inline. Slug is `tenant` or `tenant\|board` (board names are per-tenant). 1,737 registry slugs via open-jobs |
 | HireHive | **Added** (`scrape_hirehive`): `{slug}.hirehive.com/api/v1/jobs`, robots allows all |
+| Manatal (`careers-page.com`) | **Added** (`scrape_manatal`): paginated server-rendered board HTML (`/{slug}?page=N`, 10 per page, two themes handled) gives title/location/short job code; JD from the detail page's `redactor-styles` block. Not the JSON API: it has no job-URL code and 404s for many live boards. 2,481 live slugs via openroles |
+| JobScore | **Added** (`scrape_jobscore`): public `careers.jobscore.com/jobs/{slug}/feed.json` (full JD, location, remote flag); robots only blocks `/apply_flow/`. 171 openroles + 49 open-jobs slugs |
+| Crelate | **Added** (`scrape_crelate`): the portal is a JS shell, but every portal publishes `jobs.crelate.com/portal/{slug}/rss` (permalink, full JD, location); robots only blocks static dirs. 367 open-jobs slugs |
 | Eightfold | Not added — public `/api/apply/v2/jobs` returns 403 "Not authorized for PCSX" |
 | UKG / UltiPro | Not added — robots.txt disallows `JobBoardView` (the search endpoint) |
-| Dover, Employment Hero | Not added — robots.txt disallows `/api/` |
-| Manatal (`careers-page.com`) | Not added — the JSON API (`api.careers-page.com/open/v1/...`) has no per-job URL code (public URLs use a short hash), so a job URL can't be built without an N+1 JSON-LD crawl |
-| JobScore, Crelate, ApplicantPro/Stack, CareerPlug, GoHire, Comeet | Not added — HTML-only or SPA/token-gated, and mostly local/hourly US roles that the location filter would drop |
+| Dover | Not added — robots.txt disallows `/api/` |
+| Employment Hero | Not added — `jobs.employmenthero.com` is a client-rendered job marketplace: no sitemap, no per-employer slug in URLs, and every data route is under the robots-disallowed `/api/` / `/_next/` |
+| GoHire | Not added — `app.gohire.io/{slug}` is an SPA shell (200 for any slug, so no dead-slug signal) and no public list endpoint was found |
+| Comeet | Not added — the careers API needs a per-company `uid` + token that the 73-slug registry doesn't carry; `comeet.com/jobs/{name}` 404s |
+| ApplicantPro/Stack, CareerPlug | Not added — HTML-only / token-gated, and mostly local/hourly US roles that the location filter would drop |
 
 ## Pipeline stages
 
