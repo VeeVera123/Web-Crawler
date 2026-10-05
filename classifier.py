@@ -2165,7 +2165,18 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
 
     african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
     if len(african_hits) >= 2:
-        return "match", PRIORITY_AFRICA, None
+        # 2026-10: 2+ African countries alone isn't enough — require a
+        # remote signal to confirm this is an Africa-wide remote role, not
+        # local hiring across specific African cities/offices.
+        wt = job.get("workplace_type") or ""
+        title_str = job.get("title") or ""
+        has_remote_signal = (
+            has_remote
+            or bool(_REMOTE_WORKPLACE_RE.search(wt))
+            or bool(re.search(r"\bremote\b", title_str, re.I))
+        )
+        if has_remote_signal:
+            return "match", PRIORITY_AFRICA, None
 
     # ── 2.5. Multi-region breadth in the LOCATION FIELD itself → match
     # (2026-09 ROUND 5 FALSE-NEGATIVE FIX, found during this session's
@@ -6181,9 +6192,13 @@ def has_non_remote_labeled_text_signal(job: dict) -> bool:
 # neither can ever satisfy this tier's own admission requirement.
 RANK4_ELIGIBLE_ATS = {
     "Greenhouse", "Workable", "Personio", "JazzHR", "Teamtailor",
-    "Recruitee", "Lever", "Eploy", "PageUp", "isolvedhire", "Pinpoint",
+    "Recruitee", "Lever", "PageUp", "isolvedhire", "Pinpoint",
     "Rippling",
 }
+# 2026-10: Eploy removed — no dedicated question fetcher (only the
+# generic wild fallback, which is unreliable for Eploy's server-rendered
+# HTML forms), so Rank 4's core premise ("we confirmed the questions are
+# silent on this") cannot be trusted for Eploy jobs.
 
 PRIORITY_MIXED_COUNTRY = "4a"  # bare country/region/continent location,
                        # no restrictive tie confirmed
@@ -6457,6 +6472,28 @@ _RANK4_STRICT_PLACE_RE = re.compile(
     r"\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b"
     r".{0,80}\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b"
     r"|\b(?:" + _RANK4_PLACE_INNER_FRAGMENT + r")\b"
+    r".{0,80}\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b",
+    re.I,
+)
+# 2026-10: 4b-specific variant that excludes "Americas"/"AMER" as rescue
+# signals. A JD mentioning "Americas" when the location is a specific US
+# city doesn't prove the role is open outside the US — too broad to count
+# as a mixed signal for 4b admission.
+_RANK4_4B_PLACE_INNER_FRAGMENT = (
+    _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r"|"
+    r"european\s+union|\beu\b|apac|latam|mena|middle\s+east|"
+    r"anz|dach|benelux|nordics?|"
+    r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|"
+    r"northern\s+europe|"
+    r"gulf\s+cooperation\s+council|gcc|gulf|"
+    r"south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|asia|"
+    r"oceania|pacific|central\s+america|south\s+america|"
+    r"caribbean|cee|cis|japac|apj|europe"
+)
+_RANK4_4B_STRICT_PLACE_RE = re.compile(
+    r"\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b"
+    r".{0,80}\b(?:" + _RANK4_4B_PLACE_INNER_FRAGMENT + r")\b"
+    r"|\b(?:" + _RANK4_4B_PLACE_INNER_FRAGMENT + r")\b"
     r".{0,80}\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b",
     re.I,
 )
@@ -6803,7 +6840,7 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # elsewhere in this file), so generic company-description mentions no
     # longer count as evidence.
     full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
-    if _RANK4_STRICT_PLACE_RE.search(full_text):
+    if _RANK4_4B_STRICT_PLACE_RE.search(full_text):
         return PRIORITY_MIXED_SIGNAL, "mixed_title_or_jd_signal"
 
     # 2026-09 NEW (explicit user instruction, verbatim: "if the title is:

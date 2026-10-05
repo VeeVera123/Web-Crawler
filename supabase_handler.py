@@ -25,7 +25,10 @@ import requests as http_requests
 #   2 - 2026-10-05: re-validation also vetoes stored Rank 1/2/3 rows whose location
 #       is a concrete place the current rules reject (legacy LLM-admitted "Atlanta,
 #       GA" rows; false regex matches such as "Benin City, Nigeria").
-CLASSIFIER_VERSION = 2
+#   3 - 2026-10-05: Eploy removed from RANK4_ELIGIBLE_ATS (no question fetcher);
+#       Africa Rank 2 (2+ countries) now requires a remote signal; Americas/AMER
+#       excluded from 4b rescue path.
+CLASSIFIER_VERSION = 3
 
 import os
 from dotenv import load_dotenv
