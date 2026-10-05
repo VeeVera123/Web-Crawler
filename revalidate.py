@@ -120,8 +120,15 @@ def decide(job: dict, meta: dict) -> tuple[str, str]:
             verdict, reason = VETO, f"rank4 no longer eligible: {_rank4_veto_cause(job)}"
     else:
         result, _, _ = _keyword_classify_location_detail(job)
-        if result == "no_match" and _location_is_open_shaped(job):
-            verdict, reason = VETO, "hard override fires on current rules"
+        if result == "no_match":
+            # Blank / bare-"Remote" / Global-shaped location: only a hard override
+            # can produce no_match. Any other (concrete) place: today's policy admits
+            # only Global/EMEA/Africa (Rank 1/2) or, via Rank 4, its own tier - so a
+            # stored Rank 1/2/3 row with, say, "Atlanta, GA" (admitted by the older
+            # LLM policy) or a false regex match ("Benin City") no longer qualifies.
+            verdict = VETO
+            reason = ("hard override fires on current rules" if _location_is_open_shaped(job)
+                      else "location no longer qualifies under current rules")
 
     if verdict == VETO and status != "not_applied":
         return PROTECTED, f"would veto ({reason}) but application_status={status}"

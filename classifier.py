@@ -1844,8 +1844,11 @@ PRIORITY_UNSURE_SILENT = "3b"  # location field, description, AND
 # apparatus is needed here: no African country name in this project's
 # gazetteer collides with a US state/Canadian province name the way
 # "Mexico"/"Wales"/"Ontario" did, so a bare word-boundary match is safe.
+# 2026-10 correction: two real collisions - "Benin City" (a city in Nigeria,
+# so "Benin City, Nigeria" counted as TWO African countries and was admitted
+# as Rank 2) and "Papua New Guinea" (not Guinea).
 _AFRICAN_COUNTRY_RE = re.compile(
-    r"\b(" + "|".join(re.escape(c) for c in sorted(geo.AFRICAN_COUNTRIES, key=len, reverse=True)) + r")\b",
+    r"(?<!Papua New )\b(" + "|".join(re.escape(c) for c in sorted(geo.AFRICAN_COUNTRIES, key=len, reverse=True)) + r")\b(?!\s+City\b)",
     re.I,
 )
 

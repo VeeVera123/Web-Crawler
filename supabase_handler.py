@@ -22,7 +22,10 @@ import requests as http_requests
 # (deterministic, veto-only, no LLM calls), then stamped with the new value.
 #   1 - 2026-10-05: introduced with revalidate.py (after the Insurity / Ping
 #       Identity / Kenya / India Rank 4 leaks). Every pre-existing row is 0.
-CLASSIFIER_VERSION = 1
+#   2 - 2026-10-05: re-validation also vetoes stored Rank 1/2/3 rows whose location
+#       is a concrete place the current rules reject (legacy LLM-admitted "Atlanta,
+#       GA" rows; false regex matches such as "Benin City, Nigeria").
+CLASSIFIER_VERSION = 2
 
 import os
 from dotenv import load_dotenv
