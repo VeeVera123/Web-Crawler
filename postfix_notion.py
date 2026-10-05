@@ -7,8 +7,8 @@ old crawl_i.py/crawl_ii.py `--finalize` split this replaces). Named for
 what it writes TO: it takes whatever's new in Supabase and pushes it to
 Notion, then runs the regular stale-job cleanup.
 
-Two steps, done in this order, each its own clearly-marked section in the
-log:
+Steps, done in this order, each its own clearly-marked section in the log
+(2026-10: a "Step 1b" was added between 1 and 2 — see below):
 
   1. Push every Supabase job that's never been mirrored to Notion yet
      (jobs.notion_synced_at IS NULL — see supabase_handler.
@@ -16,6 +16,13 @@ log:
      Covers new rows from BOTH pipelines in one pass — no need to know
      which pipeline inserted which row, and safe to run any number of
      times a day (a row is only ever offered here once).
+
+  1b. (2026-10) Purge the jobs the shards' re-validation pass vetoed
+     (revalidate.py: stored jobs classified under older rules that today's
+     deterministic rules now contradict, marked clearance='vetoed'): archive
+     their Notion pages, then delete the rows. A vetoed row that was never
+     pushed is simply never offered to Notion in step 1
+     (get_jobs_pending_notion_sync skips vetoed rows).
 
   2. The regular stale-job cleanup — previously `crawl_i.py --finalize`
      and `crawl_ii.py --finalize`, run as two separate CI jobs. Merged
@@ -81,6 +88,13 @@ def main() -> None:
     push_summary = notion_sync.push_pending_jobs_to_notion()
     log.info(f"  {push_summary['created']}/{push_summary['attempted']} "
               f"new jobs created in Notion")
+
+    log.info("── Step 1b: purging jobs vetoed by re-validation ──")
+    import supabase_handler
+    purge = supabase_handler.purge_vetoed_jobs(
+        archive_notion_fn=notion_sync.archive_notion_pages_for_supabase_ids)
+    log.info(f"  {purge['deleted']}/{purge['vetoed']} vetoed jobs deleted "
+             f"({purge['archived']} Notion pages archived)")
 
     log.info("── Step 2: Crawl I cleanup ──")
     crawl_i.run_finalize()

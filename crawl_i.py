@@ -62,11 +62,13 @@ from classifier import (
 from supabase_handler import (
     add_jobs_batch, bump_scan_report, finish_scan_report_for_pipeline,
     get_all_slugs, cleanup_stale_jobs,
-    get_existing_urls, touch_seen_jobs_raw,
+    get_existing_urls, get_known_jobs_meta, touch_seen_jobs_raw, mark_jobs_vetoed,
     touch_archive_i_last_seen,
     SupabaseFetchError,
     log_egress_summary,
 )
+from classifier_version import CLASSIFIER_VERSION
+import revalidate
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
 # see notion_sync.py's module docstring for why. This file is back to
@@ -896,7 +898,13 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
         # genuinely new URLs go on to filter_roles() below; already-known
         # ones just get last_seen/is_active refreshed directly.
         log.info("── Deduplication ──")
-        existing_urls = get_existing_urls()
+        # 2026-10 (pipeline audit): the per-URL metadata also tells us which
+        # rules version classified each stored row, so rows written under
+        # OLDER rules get one deterministic, veto-only re-check below — see
+        # revalidate.py's module docstring for why (a classifier fix used to
+        # never reach jobs that were already stored).
+        known_meta = get_known_jobs_meta()
+        existing_urls = set(known_meta) if known_meta else get_existing_urls()
         new_jobs, already_seen = [], []
         for job in all_jobs:
             url = job.get("url", "")
@@ -907,7 +915,20 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
         if already_seen:
             log.info(f"  {len(already_seen)}/{raw_scraped_count} jobs already known — "
                      f"skipping LLM classification, just refreshing last_seen")
-            touch_seen_jobs_raw(already_seen)
+            stale, rest = revalidate.select_stale(already_seen, known_meta, CLASSIFIER_VERSION)
+            if stale:
+                log.info(f"── Re-validation ({len(stale)} stored jobs classified under older rules "
+                         f"than v{CLASSIFIER_VERSION}) ──")
+                stale = enrich_descriptions(stale)
+                stale = enrich_application_questions(stale)
+                results = revalidate.evaluate(stale, known_meta)
+                revalidate.summarize(results, "Crawl I")
+                veto_jobs, stamp_jobs, retry_jobs = revalidate.plan(results)
+                mark_jobs_vetoed(veto_jobs)
+                touch_seen_jobs_raw(stamp_jobs, classifier_version=CLASSIFIER_VERSION)
+                touch_seen_jobs_raw(rest + retry_jobs)
+            else:
+                touch_seen_jobs_raw(already_seen)
         if not new_jobs:
             log.info("No new (previously unseen) jobs to classify.")
             bump_scan_report(

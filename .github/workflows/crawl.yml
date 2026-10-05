@@ -184,6 +184,7 @@ jobs:
       archive_i_matrix: ${{ steps.build.outputs.archive_i_matrix }}
       archive_ii_matrix: ${{ steps.build.outputs.archive_ii_matrix }}
       crawl_iii_matrix: ${{ steps.build.outputs.crawl_iii_matrix }}
+      ai_rate_shards: ${{ steps.build.outputs.ai_rate_shards }}
     steps:
       - name: Build shard-index matrices from shard_count inputs
         id: build
@@ -191,11 +192,27 @@ jobs:
           ARCHIVE_I_SHARDS="${{ github.event.inputs.archive_i_shard_count || '10' }}"
           ARCHIVE_II_SHARDS="${{ github.event.inputs.archive_ii_shard_count || '10' }}"
           CRAWL_III_SHARDS="${{ github.event.inputs.crawl_iii_shard_count || '10' }}"
+          RUN_1_2="${{ github.event_name == 'schedule' || inputs.run_crawl_1_2 }}"
+          RUN_III="${{ github.event_name == 'schedule' || inputs.run_crawl_iii }}"
           python3 -c "
           import json
           for name, count in [('archive_i', int('$ARCHIVE_I_SHARDS')), ('archive_ii', int('$ARCHIVE_II_SHARDS')), ('crawl_iii', int('$CRAWL_III_SHARDS'))]:
               matrix = json.dumps({'include': [{'shard': s} for s in range(count)]})
               print(f'{name}_matrix={matrix}')
+          # 2026-10 (pipeline audit): AI_RATE_SHARDS used to be a hardcoded
+          # \"12\" on all three crawl jobs. It divides NVIDIA's per-process
+          # call interval (config.py: _NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS)
+          # so N concurrent processes together stay under the key's ~40 RPM
+          # — which only works if it equals the number of processes ACTUALLY
+          # running at once. Default 10+10+10 = 30 processes ran at 12, i.e.
+          # ~2.5x over the quota (and 20 shards of one crawl, 1.7x over).
+          # Now computed from the shard counts of the crawls that really run.
+          total = 0
+          if '$RUN_1_2'.lower() == 'true':
+              total += int('$ARCHIVE_I_SHARDS') + int('$ARCHIVE_II_SHARDS')
+          if '$RUN_III'.lower() == 'true':
+              total += int('$CRAWL_III_SHARDS')
+          print(f'ai_rate_shards={max(1, total)}')
           " >> "$GITHUB_OUTPUT"
           echo "archive_i shards: $ARCHIVE_I_SHARDS, archive_ii shards: $ARCHIVE_II_SHARDS, crawl_iii shards: $CRAWL_III_SHARDS"
 
@@ -293,7 +310,7 @@ jobs:
           # once, now the default on both schedule and manual dispatch);
           # a run with fewer shards or a crawl unticked just under-uses
           # its share, which is harmless.
-          AI_RATE_SHARDS: "12"
+          AI_RATE_SHARDS: ${{ needs.prepare-matrix.outputs.ai_rate_shards }}
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_i.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_i_shard_count || '10' }}
 
@@ -366,7 +383,7 @@ jobs:
           USE_NVIDIA: ${{ inputs.use_nvidia }}
           ENABLE_RANK4_COUNTRY_SPECIFIC: ${{ github.event_name == 'schedule' || inputs.enable_rank4_country_specific }}
           LLM_PROVIDER: cerebras
-          AI_RATE_SHARDS: "12"
+          AI_RATE_SHARDS: ${{ needs.prepare-matrix.outputs.ai_rate_shards }}
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_ii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.archive_ii_shard_count || '10' }}
 
@@ -429,7 +446,7 @@ jobs:
           USE_OPENAI: ${{ inputs.use_openai }}
           USE_NVIDIA: ${{ inputs.use_nvidia }}
           LLM_PROVIDER: cerebras
-          AI_RATE_SHARDS: "12"
+          AI_RATE_SHARDS: ${{ needs.prepare-matrix.outputs.ai_rate_shards }}
       # 2026-09: `exec` (see people_data_labs.yml for the full explanation) makes GitHub's Cancel-workflow signal reach python directly instead of stopping at bash.
         run: exec python crawl_iii.py --shard ${{ matrix.shard }} --total-shards ${{ github.event.inputs.crawl_iii_shard_count || '10' }}
 

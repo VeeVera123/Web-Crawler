@@ -1367,3 +1367,95 @@ committed code first to prove it detects the bug, then against the fix.
 - `test_filters_comprehensive.py`: 362 end-to-end pipeline cases, 0 failing.
 - All 36 earlier scratch suites unchanged vs. the committed baseline (the
   only differences are the new suites above).
+
+## 2026-10: pipeline audit — classifier fixes were never applied to jobs already stored (re-validation), plus three smaller findings
+
+User request: *"check the pipeline once more from ats scrapper to classifier
+and config and everything else in between and even the logs ... make sure
+that there is nothing we are missing."*
+
+**1. Already-stored jobs bypassed every classifier fix (the big one).**
+`crawl_i.py`/`crawl_ii.py` skip any job whose URL is already in `jobs`
+("skipping LLM classification, just refreshing last_seen"). That saves LLM
+calls, but it means a fix is never applied retroactively: a job that leaked
+under an old bug stays for as long as the posting is live. Confirmed on
+production data (2026-10-05): 1,596 of 5,729 active rows were Rank 4 (815 at
+4b), including rows the current policy forbids — location "India"/"Kenya"
+(4a), "El Salvador" (8), "Jamaica" (6), "Nicaragua" (5), "Hong Kong",
+"Tokyo, Japan", "Cape Town", plus the Insurity and Ping Identity postings;
+28 rows still carried the retired `ai_unreviewed` clearance.
+
+Fix — `revalidate.py` (pure decision logic, no network/DB/LLM), wired into
+both crawls' dedupe step:
+- New column `jobs.classifier_version smallint default 0` (migration
+  `add_jobs_classifier_version`) and `classifier_version.CLASSIFIER_VERSION`
+  (currently 1; **bump it whenever the deterministic rules or Rank 4 policy
+  change in a way that should reach stored jobs**). Every freshly classified
+  row is stamped; every pre-existing row is 0, so each is re-checked once.
+- A stored job whose version is below current is re-enriched (description +
+  application questions, the normal enrichment functions) and checked:
+  Rank 4 rows with `classify_rank4()` (full current policy incl. the
+  curated-country allowlist), `ai_unreviewed` rows always vetoed (the user's
+  "discard it" rule), all other rows vetoed only if a hard override fires on
+  an open-shaped location (blank / bare Remote / Global / EMEA / Africa — a
+  legacy row with a concrete location shape is left alone).
+- **Veto-only, evidence-only.** It never promotes, never calls an LLM, and
+  an absent description or a failed question fetch is `undecided` (retried
+  next run), never a reason to delete. A row the user is tracking
+  (`application_status != 'not_applied'`) is `protected`, never vetoed.
+- Vetoed rows are marked `clearance='vetoed', is_active=false` by the shard;
+  `postfix_notion.py` Step 1b (`supabase_handler.purge_vetoed_jobs`) archives
+  the Notion page (best-effort — a missing page is tolerated, as elsewhere in
+  this project) and deletes the row. `get_jobs_pending_notion_sync` skips
+  vetoed rows so a never-pushed one is never offered to Notion.
+- Safety valves: `REVALIDATE_KNOWN_JOBS=false` (off), `REVALIDATE_DRY_RUN=true`
+  (log every would-be veto, write nothing), `REVALIDATE_MAX_PER_SHARD`
+  (default 3000), and nothing is re-validated when the metadata fetch failed
+  or returned no row for a URL (an unidentifiable row is never stamped).
+- Verified by `test_revalidate.py` (34 cases: the four real leaked
+  postings vetoed, clean rows kept, no-evidence rows undecided, tracked rows
+  protected, cap/disable/partial-metadata handling, dry-run, purge with
+  mocked HTTP). **Not yet verified on a full real-data dry run** — an attempt
+  to enrich 250 stored Rank 4 rows through the production enrichment hung in
+  the sandbox and was abandoned, so the first scheduled run's
+  "Re-validation ... vetoed xN" log lines are the real check (use
+  `REVALIDATE_DRY_RUN=true` for a manual first look).
+
+**2. Rank 4's non-curated-country guard was a blocklist with gaps.**
+`_RANK4_ANY_NAMED_COUNTRY_RE` only knew the ~80 countries in the shared
+`_COUNTRY_AUTH_NAMES_RE_FRAGMENT`, so El Salvador/Jamaica/Nicaragua (live 4b
+rows) were never recognised. The policy is an allowlist, so the guard now also
+uses `_RANK4_WORLD_COUNTRIES_FRAGMENT` (~200 sovereign states and common
+territories). A second bug was found while testing it: the guard scanned
+`remainder`, which has filler words like "new"/"of" stripped, so "New
+Zealand" -> "Zealand", "Isle of Man" -> "Isle Man" slipped through; it now
+scans the location with only the curated places removed. Test:
+`test_rank4_world_countries.py` — 207 names x 3 location shapes x 2 title
+variants all rejected, plus 42 legitimate curated locations (the top 4a/4b
+shapes from the live table) still admitted: 1,286/1,286.
+
+**3. `AI_RATE_SHARDS` was a hardcoded "12" on all three crawl jobs.** It
+divides NVIDIA's per-process call interval (config.py:
+`_NVIDIA_BASE_INTERVAL * AI_RATE_SHARDS`) so N concurrent processes together
+stay under the key's ~40 RPM — correct only if it equals the processes
+actually running. The default schedule runs 10+10+10 = 30 at once (~2.5x over
+the quota); 20 shards of one crawl, 1.7x over. `prepare-matrix` now computes
+it from the shard counts of the crawls that really run and passes it to all
+three jobs (verified for four dispatch scenarios: 30 / 40 / 10 / 7).
+
+**4. Platform/registry consistency check (scripted, no gaps found).**
+SCRAPERS == SUPPORTED_ATS (41 each); every scraper's `source_ats` label has
+a matching fetcher-table convention; every `RANK4_ELIGIBLE_ATS` label is
+emitted by a scraper. Left as-is on purpose: 12 platforms use the default
+worker cap of 8; `csod`/`paycom`/`recruiterbox` have neither a verifier nor an
+`_UNVERIFIABLE_ATS` entry (verification.py skips any platform without a
+verifier, so the default is already safe).
+
+**Observations from `scan_reports` / logs (not changed):** a handful of
+`crawl_ii`/`crawl_iii` rows from 10-01/10-02 are stuck at `status='running'`
+with no `finished_at` (their finalize step only runs when that pipeline's
+cleanup flag is passed, and a cancelled run never reaches it — cosmetic);
+`csm_roles` is ~225k per Crawl I day because only *stored* jobs are skipped,
+so every role-matched job rejected on an earlier run is re-enriched (this is
+the explicit "application questions for EVERY job" instruction, and the real
+runtime driver — not changed here).

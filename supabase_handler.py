@@ -11,6 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
 
+from classifier_version import CLASSIFIER_VERSION
+
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -570,6 +572,147 @@ def get_existing_urls() -> set[str]:
     return urls
 
 
+def get_known_jobs_meta() -> dict[str, dict]:
+    """job_url -> {id, clearance, location_priority, classifier_version,
+    application_status, notion_synced_at} for every stored job.
+
+    2026-10 (pipeline audit): superset of get_existing_urls() for the
+    re-validation pass (revalidate.py) — crawl_i/crawl_ii need to know, per
+    already-known URL, which rules version classified it and whether the user
+    is already tracking it. Same tolerance as get_existing_urls(): a fetch
+    failure returns whatever was read so far (an empty/partial map just means
+    fewer rows get re-validated this run — never a failed shard)."""
+    meta: dict[str, dict] = {}
+    offset = 0
+    batch_size = 1000
+    try:
+        while True:
+            rows = _get(
+                "jobs",
+                "select=id,job_url,clearance,location_priority,classifier_version,"
+                f"application_status,notion_synced_at&order=id&offset={offset}",
+                limit=batch_size,
+            )
+            if not rows:
+                break
+            for row in rows:
+                url = row.get("job_url", "")
+                if url:
+                    meta[url] = row
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
+    except SupabaseFetchError as e:
+        log.warning(f"get_known_jobs_meta: fetch failed after retries, proceeding with "
+                    f"{len(meta)} rows known so far: {e}")
+    log.info(f"Found {len(meta)} existing jobs in Supabase (with classification metadata)")
+    return meta
+
+
+def mark_jobs_vetoed(jobs: list[dict]) -> int:
+    """Marks already-stored jobs that re-validation (revalidate.py) vetoed:
+    clearance='vetoed', is_active=false, stamped with the current rules
+    version. Deliberately NOT a delete here — the shard has no Notion
+    credentials in scope and a vetoed row may already have a Notion page;
+    purge_vetoed_jobs() (run once by postfix_notion.py) archives the page and
+    then deletes the row. Marking first also keeps the job out of the
+    pending-Notion push (see get_jobs_pending_notion_sync).
+
+    Same on_conflict upsert trick as touch_seen_jobs_raw: only the columns
+    sent are updated, but title/job_url/ats are NOT NULL and must be present
+    for Postgres to accept the INSERT half of the upsert."""
+    if not jobs:
+        return 0
+    CHUNK = 500
+    headers = {**HEADERS, "Prefer": "return=minimal,resolution=merge-duplicates"}
+    marked = 0
+    for i in range(0, len(jobs), CHUNK):
+        rows = [{
+            "title": _safe_str(j.get("title"), 500),
+            "job_url": j.get("url", ""),
+            "ats": j.get("source_ats", "unknown"),
+            "clearance": "vetoed",
+            "is_active": False,
+            "classifier_version": CLASSIFIER_VERSION,
+        } for j in jobs[i:i + CHUNK] if j.get("url")]
+        rows = _dedupe_rows_by_job_url(rows)
+        if not rows:
+            continue
+        try:
+            r = http_requests.post(f"{REST}/jobs", headers=headers, json=rows, timeout=60,
+                                   params={"on_conflict": "job_url"})
+            r.raise_for_status()
+            marked += len(rows)
+        except Exception as e:
+            log.error(f"Supabase veto-mark upsert failed for chunk of {len(rows)}: {e}")
+    log.info(f"Marked {marked}/{len(jobs)} jobs as vetoed (re-validation)")
+    return marked
+
+
+def purge_vetoed_jobs(archive_notion_fn=None) -> dict:
+    """Final step of re-validation, run once after every shard (postfix_
+    notion.py): for every row marked clearance='vetoed' (never one the user
+    is tracking — revalidate.decide() returns PROTECTED for those, so they
+    are never marked), archive its Notion page (if it was ever pushed) via
+    `archive_notion_fn(ids)`, then hard-delete the rows. Archiving is
+    best-effort by design (notion_sync.archive_notion_pages_for_supabase_ids
+    treats a missing page as a silent no-op and returns only a count, so
+    "fewer archived than pushed" cannot be told apart from "page already
+    gone"); a Notion page pointing at a deleted row is already a tolerated
+    state elsewhere in this project (see notion_sync's "Row deleted from
+    Supabase since this page was created" handling). Only an EXCEPTION from
+    the archive call defers the delete to the next run.
+    Returns {"vetoed", "archived", "deleted"}."""
+    summary = {"vetoed": 0, "archived": 0, "deleted": 0}
+    rows: list[dict] = []
+    offset = 0
+    try:
+        while True:
+            page = _get("jobs",
+                        "select=id,notion_synced_at&clearance=eq.vetoed"
+                        f"&application_status=eq.not_applied&order=id&offset={offset}",
+                        limit=1000)
+            if not page:
+                break
+            rows.extend(page)
+            if len(page) < 1000:
+                break
+            offset += 1000
+    except SupabaseFetchError as e:
+        log.warning(f"purge_vetoed_jobs: could not list vetoed rows, skipping purge this run: {e}")
+        return summary
+    summary["vetoed"] = len(rows)
+    if not rows:
+        log.info("purge_vetoed_jobs: nothing to purge")
+        return summary
+
+    pushed_ids = [r["id"] for r in rows if r.get("notion_synced_at")]
+    if pushed_ids and archive_notion_fn is not None:
+        try:
+            summary["archived"] = int(archive_notion_fn(pushed_ids) or 0)
+        except Exception as e:
+            log.error(f"purge_vetoed_jobs: Notion archive failed ({e}); leaving rows for the next run")
+            return summary
+        if summary["archived"] < len(pushed_ids):
+            log.info(f"purge_vetoed_jobs: archived {summary['archived']}/{len(pushed_ids)} Notion pages "
+                     f"(the rest were already gone or Notion isn't configured)")
+
+    ids = [r["id"] for r in rows]
+    for i in range(0, len(ids), 200):
+        chunk = ids[i:i + 200]
+        try:
+            r = http_requests.delete(
+                f"{REST}/jobs?id=in.({','.join(str(x) for x in chunk)})&clearance=eq.vetoed",
+                headers=HEADERS, timeout=60)
+            r.raise_for_status()
+            summary["deleted"] += len(chunk)
+        except Exception as e:
+            log.error(f"purge_vetoed_jobs: delete failed for chunk of {len(chunk)}: {e}")
+    log.info(f"purge_vetoed_jobs: {summary['vetoed']} vetoed, {summary['archived']} Notion pages archived, "
+             f"{summary['deleted']} rows deleted")
+    return summary
+
+
 # ── Helpers for safe string extraction ──────────────────
 
 def _safe_str(val, max_len: int = 500) -> str:
@@ -633,6 +776,10 @@ def _build_row(job: dict, location_confidence: str, source_pipeline: str = "craw
         # "" (unknown) for the rare AI-only include with no matching
         # category regex — see that function's docstring.
         "role_category": job.get("role_category", ""),
+        # 2026-10: every freshly classified row is stamped with the rules
+        # version it was classified under, so revalidate.py only re-checks
+        # rows written under OLDER rules — see classifier_version.py.
+        "classifier_version": CLASSIFIER_VERSION,
     }
 
 
@@ -650,7 +797,7 @@ def _build_row(job: dict, location_confidence: str, source_pipeline: str = "craw
 # since this job was never reclassified this run and we must not
 # overwrite its real, previously-computed values with defaults.
 
-def _build_row_raw(job: dict) -> dict:
+def _build_row_raw(job: dict, classifier_version: int | None = None) -> dict:
     """Minimal touch-only row for a job whose URL is ALREADY in the DB and
     is being skipped past classification entirely this run. Omits
     visa_sponsorship/clearance/location_priority/date_added/source_pipeline
@@ -664,7 +811,7 @@ def _build_row_raw(job: dict) -> dict:
     full story on why omitting them would fail even on a guaranteed
     update-only upsert."""
     today = date.today().isoformat()
-    return {
+    row = {
         "title": _safe_str(job.get("title"), 500),
         "job_url": job.get("url", ""),
         "company_name": _safe_str(job.get("company"), 300),
@@ -674,9 +821,12 @@ def _build_row_raw(job: dict) -> dict:
         "last_seen": today,
         "is_active": True,
     }
+    if classifier_version is not None:
+        row["classifier_version"] = classifier_version
+    return row
 
 
-def touch_seen_jobs_raw(jobs: list[dict]) -> int:
+def touch_seen_jobs_raw(jobs: list[dict], classifier_version: int | None = None) -> int:
     """Bulk-refresh last_seen/is_active for jobs skipped BEFORE
     classification because their job_url is already known (see
     crawl_i.py's/crawl_ii.py's pre-filter step). Unlike _touch_last_seen
@@ -692,7 +842,7 @@ def touch_seen_jobs_raw(jobs: list[dict]) -> int:
     touched = 0
     for i in range(0, len(jobs), CHUNK):
         chunk = jobs[i:i + CHUNK]
-        rows = [_build_row_raw(j) for j in chunk if j.get("url")]
+        rows = [_build_row_raw(j, classifier_version) for j in chunk if j.get("url")]
         rows = _dedupe_rows_by_job_url(rows)
         if not rows:
             continue
@@ -1051,7 +1201,7 @@ def get_jobs_pending_notion_sync() -> list[dict]:
             page = _get(
                 "jobs",
                 f"select=id,title,company_name,job_url,date_added,salary,role_category,location_priority"
-                f"&notion_synced_at=is.null&offset={offset}",
+                f"&notion_synced_at=is.null&or=(clearance.is.null,clearance.neq.vetoed)&offset={offset}",
                 limit=batch_size,
             )
             if not page:

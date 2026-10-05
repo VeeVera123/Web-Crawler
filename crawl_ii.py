@@ -123,9 +123,12 @@ from classifier import (  # noqa: E402
 from ats_scrapers import enrich_application_questions_async  # noqa: E402
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
-    get_existing_urls, touch_seen_jobs_raw, touch_archive_ii_last_seen,
+    get_existing_urls, get_known_jobs_meta, touch_seen_jobs_raw, mark_jobs_vetoed,
+    touch_archive_ii_last_seen,
     log_egress_summary, bump_scan_report, finish_scan_report_for_pipeline,
 )
+from classifier_version import CLASSIFIER_VERSION  # noqa: E402
+import revalidate  # noqa: E402
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
 # see notion_sync.py's module docstring for why. This file is back to
@@ -1713,7 +1716,11 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         return pages_done, 0, time_budget_hit, report_stats
 
     log.info("── Deduplication ──")
-    existing_urls = get_existing_urls()
+    # 2026-10 (pipeline audit): see crawl_i.py's matching block and
+    # revalidate.py's module docstring — already-stored rows classified
+    # under older rules get one deterministic, veto-only re-check.
+    known_meta = get_known_jobs_meta()
+    existing_urls = set(known_meta) if known_meta else get_existing_urls()
     new_jobs, already_seen = [], []
     for job in all_candidate_jobs:
         url = job.get("url", "")
@@ -1722,7 +1729,26 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         else:
             new_jobs.append(job)
     if already_seen:
-        touch_seen_jobs_raw(already_seen)
+        stale, rest = revalidate.select_stale(already_seen, known_meta, CLASSIFIER_VERSION)
+        if stale:
+            log.info(f"── Re-validation ({len(stale)} stored postings classified under older rules "
+                     f"than v{CLASSIFIER_VERSION}) ──")
+            for job in stale:
+                # Same prep _filter_locations does before classifying: this
+                # file's extractor only sets job["description"], while every
+                # shared classifier function reads description_snippet.
+                if not job.get("description_snippet"):
+                    job["description_snippet"] = job.get("description") or ""
+                _enrich_location_from_description(job)
+            stale = await enrich_application_questions_async(stale)
+            results = revalidate.evaluate(stale, known_meta)
+            revalidate.summarize(results, "Crawl II")
+            veto_jobs, stamp_jobs, retry_jobs = revalidate.plan(results)
+            mark_jobs_vetoed(veto_jobs)
+            touch_seen_jobs_raw(stamp_jobs, classifier_version=CLASSIFIER_VERSION)
+            touch_seen_jobs_raw(rest + retry_jobs)
+        else:
+            touch_seen_jobs_raw(already_seen)
     report_stats["duplicates"] = len(already_seen)
     log.info(f"  Found {len(all_candidate_jobs)} postings: {len(already_seen)} already in the "
              f"database (skipped), {len(new_jobs)} new — only the new ones get reviewed")

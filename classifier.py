@@ -6559,7 +6559,51 @@ def _rank4_location_field_is_hard_disqualified(loc: str) -> bool:
 # title/JD language can override it. A bare city with no country word at
 # all ("London") leaves no such match and is unaffected, preserving the
 # legitimate "title: CSM, EMEA / location: London" 4b case.
-_RANK4_ANY_NAMED_COUNTRY_RE = re.compile(r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b", re.I)
+# 2026-10 (pipeline audit, real production rows): the project-wide fragment
+# above is a BLOCKLIST of ~80 countries, not a complete list, so the guard
+# never fired for countries missing from it — live Rank 4 rows with location
+# "El Salvador" (8), "Jamaica" (6) and "Nicaragua" (5), all 4b, all admitted
+# on a title/JD "LATAM"/global-hiring cue. The policy ("must be in the list
+# of allowed countries/regions/continents") is an ALLOWLIST rule, so the
+# guard needs the full vocabulary of sovereign states and common territories,
+# not just the countries someone happened to add. Used ONLY by this guard
+# (the shared fragment feeds ~20 other restriction checks and is left
+# alone). Curated Rank 4 countries are deliberately absent: by the time
+# this regex runs they have already been stripped from `remainder`.
+# Ambiguous words that are also ordinary names/places (Georgia = US state,
+# handled by the state guard that also returns None; Jordan, Chad) are fine
+# here because the location FIELD is the only text inspected.
+_RANK4_WORLD_COUNTRIES_FRAGMENT = (
+    r"afghanistan|albania|algeria|andorra|angola|antigua|argentina|armenia|aruba|"
+    r"azerbaijan|bahamas|bahrain|bangladesh|barbados|belarus|belize|benin|bermuda|"
+    r"bhutan|bolivia|bosnia|botswana|brunei|bulgaria|burkina\s+faso|burundi|"
+    r"cabo\s+verde|cape\s+verde|cambodia|cameroon|cayman|central\s+african\s+republic|"
+    r"chad|comoros|congo|cook\s+islands|croatia|cuba|cura[cç]ao|cyprus|"
+    r"djibouti|dominica|ecuador|el\s+salvador|equatorial\s+guinea|eritrea|estonia|"
+    r"eswatini|swaziland|ethiopia|fiji|gabon|gambia|georgia|ghana|gibraltar|greenland|"
+    r"grenada|guadeloupe|guam|guatemala|guernsey|guinea|guinea-bissau|guyana|haiti|"
+    r"honduras|iran|iraq|isle\s+of\s+man|ivory\s+coast|c[oô]te\s+d.ivoire|jamaica|"
+    r"jersey|jordan|kazakhstan|kiribati|kosovo|kuwait|kyrgyzstan|laos|latvia|lebanon|"
+    r"lesotho|liberia|libya|liechtenstein|lithuania|macau|macao|madagascar|malawi|"
+    r"maldives|mali|malta|marshall\s+islands|martinique|mauritania|mauritius|"
+    r"micronesia|moldova|monaco|mongolia|montenegro|mozambique|myanmar|burma|namibia|"
+    r"nauru|nepal|new\s+caledonia|nicaragua|niger|north\s+korea|north\s+macedonia|"
+    r"macedonia|oman|palau|palestine|papua\s+new\s+guinea|paraguay|puerto\s+rico|"
+    r"reunion|r[eé]union|rwanda|saint\s+lucia|st\.?\s+lucia|samoa|san\s+marino|"
+    r"sao\s+tome|saudi\s+arabia|senegal|seychelles|sierra\s+leone|slovakia|slovenia|"
+    r"solomon\s+islands|somalia|south\s+sudan|sri\s+lanka|sudan|suriname|syria|"
+    r"tajikistan|tanzania|timor|togo|tonga|trinidad|tunisia|turkmenistan|tuvalu|"
+    r"uganda|uruguay|uzbekistan|vanuatu|vatican|yemen|zambia|zimbabwe|"
+    r"serbia|bosnia\s+and\s+herzegovina|qatar|"
+    r"united\s+arab\s+emirates|uae|belgium|austria|finland|portugal|poland|"
+    r"hungary|greece|romania|czechia|czech|ukraine|russia|turkey|t[uü]rkiye|"
+    r"japan|china|taiwan|hong\s+kong|south\s+korea|korea|vietnam|thailand|"
+    r"indonesia|philippines|malaysia|pakistan|india|israel|egypt|morocco|nigeria|"
+    r"kenya|ghana|south\s+africa|brazil|mexico|colombia|chile|peru|venezuela|"
+    r"costa\s+rica|panama|dominican\s+republic|new\s+zealand|france|spain"
+)
+_RANK4_ANY_NAMED_COUNTRY_RE = re.compile(
+    r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _RANK4_WORLD_COUNTRIES_FRAGMENT + r")\b", re.I)
 
 # 2026-09 NEW (explicit user policy, verbatim: "a JD saying based in one
 # our (allowed country/region) offices should not be allowed. Regions are
@@ -6700,7 +6744,13 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # chance to NOT match it anyway (that check only ever matches an
     # ELIGIBLE country, so this isn't redundant with it -- it's closing
     # off the DIFFERENT, broader path through 4b that follows).
-    if _RANK4_ANY_NAMED_COUNTRY_RE.search(remainder):
+    # 2026-10: scan the location with ONLY the curated places stripped, not
+    # `remainder` — NON_GEO_WORDS_RE (applied to build `remainder`) also
+    # strips filler words such as "new" and "of", which mangled multi-word
+    # country names before this check could see them ("New Zealand" ->
+    # "Zealand", "Isle of Man" -> "Isle Man", "New Caledonia" -> "Caledonia")
+    # and let those three through at 4b.
+    if _RANK4_ANY_NAMED_COUNTRY_RE.search(_RANK4_PLACE_RE.sub(" ", loc)):
         return None, None
 
     # 4a (city variant): "City, Country" — e.g. "Sydney, Australia",
