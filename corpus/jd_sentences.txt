@@ -1,0 +1,208 @@
+# Job-description sentences. RESTRICTIVE must reject a one-country Rank 4 job and a bare-"Remote" job on the
+# universal path; BENIGN must not. AMBIGUOUS = reported only (hours statements are NOT location restrictions
+# by explicit user policy; a few Qwen "restrictive" items name no place and no candidate-binding verb).
+# Retagged AMBIGUOUS: an Eastern-Time *hours* statement (hours are not location, by user policy), an EMEA-only
+# role (EMEA is an allowed region) and a referential sentence that names no place (only the referential check can
+# resolve it, and only when the job's own location names a country).
+# Sources: Qwen part 3 (80) and OpenAI part 3 (122).
+JD_AUTH [RESTRICTIVE] Candidates must be legally authorized to work in the United States without sponsorship.
+JD_AUTH [RESTRICTIVE] We are unable to provide visa sponsorship for this position now or in the future.
+JD_AUTH [RESTRICTIVE] This role requires you to be a U.S. citizen or lawful permanent resident due to ITAR regulations.
+JD_AUTH [RESTRICTIVE] Applicants must currently reside within commuting distance of our downtown Chicago office.
+JD_AUTH [RESTRICTIVE] We only hire candidates who are located in the EST or CST time zones.
+JD_AUTH [RESTRICTIVE] You must have the unrestricted right to work in the European Union.
+JD_AUTH [RESTRICTIVE] Relocation assistance is not provided; candidates must already be based in the Seattle area.
+JD_AUTH [RESTRICTIVE] This position is restricted to U.S. persons as defined by 22 C.F.R. § 120.15.
+JD_AUTH [RESTRICTIVE] Employment is contingent upon maintaining a valid TS/SCI security clearance.
+JD_AUTH [RESTRICTIVE] We can only employ individuals where we have an established legal entity or EOR partner.
+JD_AUTH [RESTRICTIVE] Candidates must be tax residents of the UK to comply with our payroll processing.
+JD_AUTH [RESTRICTIVE] You must hold a valid CPA license in the state of California.
+JD_AUTH [AMBIGUOUS] This role requires you to work core hours aligned with APAC business hours (GMT+8).
+JD_AUTH [AMBIGUOUS] We do not hire in states that require mandatory overtime compensation for exempt employees.
+JD_AUTH [RESTRICTIVE] Applicants must be fluent in native-level German to support our DACH customer base.
+JD_AUTH [RESTRICTIVE] You must be willing to be in the office 3 days a week in our Austin hub.
+JD_AUTH [RESTRICTIVE] This role is only open to candidates who do not require future H-1B transfers.
+JD_AUTH [RESTRICTIVE] Candidates must pass a comprehensive federal background check for access to CUI.
+JD_AUTH [RESTRICTIVE] We are currently only onboarding employees in the following 12 states: California, Texas, New York, Florida, Washington, Colorado, Illinois, Georgia, Virginia, Ohio, Arizona and Oregon.
+JD_AUTH [RESTRICTIVE] You must be based in the UK and hold a valid UK passport for government client access.
+JD_AUTH [RESTRICTIVE] Due to government contract requirements, dual citizenship with certain countries is disqualifying.
+JD_AUTH [AMBIGUOUS] Candidates must be eligible to participate in our US-based 401(k) and benefits plans.
+JD_AUTH [RESTRICTIVE] We require all team members to be located in countries where we operate a wholly-owned subsidiary.
+JD_AUTH [RESTRICTIVE] You must be authorized to work in Canada and reside within the province of Ontario.
+JD_AUTH [RESTRICTIVE] This role requires a local nexus; you must live within a 1-hour drive of our Boston office.
+JD_AUTH [RESTRICTIVE] We cannot offer employment to individuals requiring Skilled Worker visa sponsorship in the UK.
+JD_AUTH [RESTRICTIVE] Applicants must be legally permitted to work in Germany without a work permit restriction.
+JD_AUTH [RESTRICTIVE] You must be a resident of the EEA for data privacy and security compliance reasons.
+JD_AUTH [RESTRICTIVE] This position requires you to be a US Person to access export-controlled technical data.
+JD_AUTH [RESTRICTIVE] We only hire in jurisdictions where we can legally withhold local income taxes.
+JD_AUTH [RESTRICTIVE] Candidates must be willing to relocate to our new headquarters in Miami within 90 days of hire.
+JD_AUTH [RESTRICTIVE] You must have the legal right to work in Australia and be an Australian citizen or PR.
+JD_AUTH [RESTRICTIVE] This role is tied to our French entity; you must be eligible for the French "Cadre" employment status.
+JD_AUTH [RESTRICTIVE] We do not sponsor work permits for candidates outside of our approved EOR country list.
+JD_AUTH [AMBIGUOUS] Applicants must be located in a state that does not have non-compete enforcement bans.
+JD_AUTH [AMBIGUOUS] You must be authorized to work in the country where this job is listed and reside there permanently.
+JD_AUTH [RESTRICTIVE] This role requires you to be a citizen of an EU member state to handle GDPR data subject requests.
+JD_AUTH [RESTRICTIVE] We only hire candidates who can provide proof of local address and utility bills for tax purposes.
+JD_AUTH [RESTRICTIVE] You must hold an active Public Trust clearance or be eligible to obtain one (requires 3 years US residency).
+JD_AUTH [RESTRICTIVE] Candidates must be physically present in the US to attend mandatory quarterly off-sites.
+JD_NAMED [NAMED] Candidates must be legally authorized to work in the United States.
+JD_NAMED [NAMED] Candidates must have the legal right to work in Canada.
+JD_NAMED [NAMED] Applicants must be authorized to work in the United Kingdom.
+JD_NAMED [NAMED] You must be eligible to work in Australia.
+JD_NAMED [NAMED] This position is open only to candidates legally authorized to work in Germany.
+JD_NAMED [NAMED] We can only employ candidates who are authorized to work in Ireland.
+JD_NAMED [NAMED] Applicants must have unrestricted work authorization in Singapore.
+JD_NAMED [NAMED] You must be permitted to work in Switzerland without employer sponsorship.
+JD_NAMED [NAMED] Candidates must have the right to work in the Netherlands.
+JD_NAMED [NAMED] This role requires existing work authorization in Sweden.
+JD_NAMED [NAMED] Applicants must already possess valid work authorization for Italy.
+JD_NAMED [NAMED] You must be legally entitled to work in the United States.
+JD_NAMED [NAMED] We are unable to employ candidates who do not already have authorization to work in the UK.
+JD_NAMED [NAMED] Only applicants with existing Australian work rights will be considered.
+JD_NAMED [NAMED] This position is available only to individuals authorized to work in Canada.
+JD_NAMED [NAMED] Candidates must be eligible for employment in the United States without sponsorship.
+JD_NAMED [NAMED] Applicants must hold a valid work permit for Germany.
+JD_NAMED [NAMED] You must have a valid visa allowing you to work in Australia.
+JD_NAMED [NAMED] Candidates must already have permission to work in Ireland.
+JD_NAMED [NAMED] Employment is limited to candidates with valid work authorization in the Netherlands.
+JD_SPONSOR [NAMED] We are unable to sponsor visas for this position.
+JD_SPONSOR [NAMED] Visa sponsorship is not available.
+JD_SPONSOR [NAMED] This role does not offer immigration sponsorship.
+JD_SPONSOR [NAMED] We cannot provide work visa sponsorship.
+JD_SPONSOR [NAMED] Applicants requiring sponsorship will not be considered.
+JD_SPONSOR [NAMED] Candidates must not require employer sponsorship now or in the future.
+JD_SPONSOR [NAMED] We do not sponsor employment visas.
+JD_SPONSOR [NAMED] Sponsorship for employment authorization is unavailable.
+JD_SPONSOR [NAMED] This position is not eligible for visa sponsorship.
+JD_SPONSOR [NAMED] We are unable to sponsor or transfer employment visas.
+JD_SPONSOR [NAMED] Applicants must be able to work without requiring sponsorship.
+JD_SPONSOR [NAMED] Candidates requiring immigration support are not eligible.
+JD_SPONSOR [NAMED] We cannot sponsor or transfer H-1B visas for this role.
+JD_SPONSOR [NAMED] No sponsorship is available for this position.
+JD_SPONSOR [NAMED] This role requires candidates who do not need visa sponsorship.
+JD_SPONSOR [NAMED] We only consider candidates who already have unrestricted authorization to work here.
+JD_RESIDE [NAMED] Candidates must reside in the United States.
+JD_RESIDE [NAMED] You must currently be based in Canada.
+JD_RESIDE [NAMED] This position requires you to live in the United Kingdom.
+JD_RESIDE [NAMED] Applicants must be permanently based in Australia.
+JD_RESIDE [NAMED] Candidates must reside within Germany.
+JD_RESIDE [NAMED] You must be located in Ireland to be considered.
+JD_RESIDE [NAMED] This is a remote position for candidates based in the United States only.
+JD_RESIDE [NAMED] Employees must work from within Canada.
+JD_RESIDE [NAMED] The successful candidate must live in Switzerland.
+JD_RESIDE [NAMED] Candidates must currently reside in the Netherlands.
+JD_RESIDE [NAMED] You must be physically located in Sweden.
+JD_RESIDE [NAMED] The role is restricted to applicants based in Italy.
+JD_RESIDE [NAMED] Candidates must work remotely from Australia.
+JD_RESIDE [NAMED] We only hire candidates who reside in the United States.
+JD_RESIDE [NAMED] This role is available only to people currently based in the UK.
+JD_RESIDE [NAMED] You must permanently live in Canada for this position.
+JD_RESIDE [NAMED] Employees must remain located in Germany throughout employment.
+JD_RESIDE [NAMED] This position can be based anywhere in the US.
+JD_RESIDE [NAMED] Candidates must work from within the specified country.
+JD_LIST [NAMED] We only hire in the following countries: United States, Canada, and Australia.
+JD_LIST [NAMED] Employment is restricted to the following countries: Germany, Ireland, and the UK.
+JD_LIST [NAMED] We currently employ in the following countries only.
+JD_LIST [NAMED] Eligible countries are limited to the United States, Canada, and the UK.
+JD_LIST [NAMED] Applications are accepted only from candidates in the following countries.
+JD_LIST [NAMED] We accept applicants only from the following locations.
+JD_LIST [NAMED] This position is open only in the following countries.
+JD_LIST [NAMED] We can only employ candidates where we have a local entity.
+JD_LIST [NAMED] Candidates must be based in one of our supported employment countries.
+JD_LIST [NAMED] We can onboard candidates only through our EOR partners in the listed countries.
+JD_LIST [NAMED] We only employ people in states where we have an entity.
+JD_LIST [NAMED] This position is available only in California, New York, and Texas.
+JD_LIST [NAMED] Candidates must reside in one of the listed states.
+JD_LIST [NAMED] We currently hire only in California, Washington, and Massachusetts.
+JD_LIST [NAMED] Applicants outside the listed states are not eligible.
+JD_ONSITE [NAMED] This role requires employees to work from our New York office.
+JD_ONSITE [NAMED] Candidates must be within commuting distance of our Boston office.
+JD_ONSITE [NAMED] The position requires three days per week in the office.
+JD_ONSITE [NAMED] You must be willing to work onsite in San Francisco.
+JD_ONSITE [NAMED] This is a hybrid role requiring four days per week onsite.
+JD_ONSITE [NAMED] Employees are expected to work in person from our Chicago office.
+JD_ONSITE [NAMED] Candidates must live within commuting distance of the office.
+JD_ONSITE [NAMED] The successful candidate must be able to attend our London office regularly.
+JD_ONSITE [NAMED] This position requires regular in-office attendance in Toronto.
+JD_ONSITE [NAMED] You will work from our Austin office at least three days per week.
+JD_OTHER [NAMED] Must be located in a US timezone.
+JD_OTHER [AMBIGUOUS] Candidates must be available to work exclusively within Eastern Time.
+JD_OTHER [NAMED] Relocation to New York is required.
+JD_OTHER [NAMED] You must relocate to London before starting.
+JD_OTHER [AMBIGUOUS] Only candidates based in EMEA may apply.
+JD_OTHER [NAMED] Candidates must be located in one of our EMEA offices.
+JD_OTHER [NAMED] Must be a US person.
+JD_OTHER [NAMED] This position requires a US security clearance.
+JD_OTHER [NAMED] Candidates must hold an active Texas insurance license.
+JD_OTHER [NAMED] German fluency is required for this position.
+JD_OTHER [NAMED] French fluency is required.
+JD_OTHER [NAMED] Japanese language proficiency is mandatory.
+JD_BENIGN [BENIGN] We offer comprehensive relocation assistance for candidates moving to our hub cities.
+JD_BENIGN [BENIGN] Our team is proudly spread across the US, UK, Australia, and India.
+JD_BENIGN [BENIGN] We are an Equal Opportunity Employer and celebrate the diversity of our global citizen workforce.
+JD_BENIGN [BENIGN] You will work closely with our national account managers to drive enterprise sales.
+JD_BENIGN [BENIGN] Our software integrates seamlessly with Authorize.net and Stripe for payment processing.
+JD_BENIGN [BENIGN] We sponsor local tech meetups, open-source projects, and charity hackathons.
+JD_BENIGN [BENIGN] Candidates should have a strong background in B2B SaaS and cloud infrastructure.
+JD_BENIGN [BENIGN] You will help our clients navigate complex immigration law using our case management SaaS.
+JD_BENIGN [BENIGN] We provide a generous stipend for your home office setup and background music subscriptions.
+JD_BENIGN [BENIGN] Our platform helps universities track international student immigration and visa statuses.
+JD_BENIGN [BENIGN] You must have the right mix of technical skills and customer empathy to succeed here.
+JD_BENIGN [BENIGN] We use Passport.js for our internal developer portal authentication.
+JD_BENIGN [BENIGN] This role will manage our corporate sponsorships for major industry conferences.
+JD_BENIGN [BENIGN] Our engineering team operates with a 4-hour timezone overlap to ensure seamless handoffs.
+JD_BENIGN [BENIGN] You will be responsible for managing software license renewals for our Fortune 500 clients.
+JD_BENIGN [BENIGN] We are an authorized reseller of AWS and Azure cloud services.
+JD_BENIGN [BENIGN] The ideal candidate is a citizen developer who loves building internal tools in Retool.
+JD_BENIGN [BENIGN] You will oversee the customs clearance integration for our global freight forwarding clients.
+JD_BENIGN [BENIGN] We offer visa and immigration consultation services as a perk for employees who wish to travel.
+JD_BENIGN [BENIGN] Our product holds a digital product passport to track sustainability metrics across the supply chain.
+JD_BENIGN [BENIGN] You will build timezone-aware scheduling features for our global HR platform.
+JD_BENIGN [BENIGN] This role involves selling our ITAR compliance module to defense contractors.
+JD_BENIGN [BENIGN] You will design background blur features for our next-generation video conferencing app.
+JD_BENIGN [BENIGN] We partner with local charities and offer paid days off for community sponsorship events.
+JD_BENIGN [BENIGN] Our platform processes millions of Visa and Mastercard transactions daily.
+JD_BENIGN [BENIGN] You will help customers obtain building permits using our automated municipal workflow software.
+JD_BENIGN [BENIGN] We are proud to be a national brand with local roots in over 30 countries.
+JD_BENIGN [BENIGN] You will manage the export of large datasets to our data lake for analytics.
+JD_BENIGN [BENIGN] Our HR team will assist you with the right to be forgotten (GDPR) data deletion requests.
+JD_BENIGN [BENIGN] You will be working on database resident orchestrators for high-availability clusters.
+JD_BENIGN [BENIGN] We offer a "Passport to Success" onboarding program for all new hires.
+JD_BENIGN [BENIGN] You will audit open-source licenses to ensure our codebase remains compliant.
+JD_BENIGN [BENIGN] Our sales team frequently travels, and we cover all passport renewal fees.
+JD_BENIGN [BENIGN] You will integrate with city parking permit APIs for our smart-city mobility app.
+JD_BENIGN [BENIGN] We encourage our engineers to participate in citizen science data collection projects.
+JD_BENIGN [BENIGN] You will manage inventory clearance algorithms for our e-commerce retail clients.
+JD_BENIGN [BENIGN] Our platform is permitted for use in all educational institutions globally.
+JD_BENIGN [BENIGN] You will analyze national grid energy consumption data for our sustainability dashboard.
+JD_BENIGN [BENIGN] We believe in finding the right fit and offer a rigorous but fair technical interview process.
+JD_BENIGN [BENIGN] We offer relocation assistance to successful candidates.
+JD_BENIGN [BENIGN] Our team is distributed across the United States, Canada, and Europe.
+JD_BENIGN [BENIGN] We have employees across EMEA.
+JD_BENIGN [BENIGN] Our customers are located throughout the United States.
+JD_BENIGN [BENIGN] Our headquarters are based in New York.
+JD_BENIGN [BENIGN] Our London office supports customers across Europe.
+JD_BENIGN [BENIGN] We sponsor several industry conferences each year.
+JD_BENIGN [BENIGN] We sponsor employee resource groups.
+JD_BENIGN [BENIGN] The company is the plan sponsor for its retirement program.
+JD_BENIGN [BENIGN] Visa and Mastercard are among the payment networks we support.
+JD_BENIGN [BENIGN] Experience with immigration software is a plus.
+JD_BENIGN [BENIGN] Familiarity with visa-management platforms is helpful.
+JD_BENIGN [BENIGN] We welcome candidates from all backgrounds.
+JD_BENIGN [BENIGN] We are committed to equal employment opportunity.
+JD_BENIGN [BENIGN] Our workforce represents citizens of more than 40 countries.
+JD_BENIGN [BENIGN] We work with customers in Africa, Europe, and North America.
+JD_BENIGN [BENIGN] The right candidate will be passionate about customer success.
+JD_BENIGN [BENIGN] We want to find the right fit for the team.
+JD_BENIGN [BENIGN] Relocation support may be available depending on circumstances.
+JD_BENIGN [BENIGN] Our team members live in many different countries.
+JD_BENIGN [BENIGN] We have offices in Germany and the United Kingdom.
+JD_BENIGN [BENIGN] The company is incorporated in the United States.
+JD_BENIGN [BENIGN] Our EOR partner operates in more than 100 countries.
+JD_BENIGN [BENIGN] We use an EOR to support our international workforce.
+JD_BENIGN [BENIGN] Employees may work with payroll teams across multiple countries.
+JD_BENIGN [BENIGN] Candidates will collaborate with colleagues across time zones.
+JD_BENIGN [BENIGN] Some meetings take place during US business hours.
+JD_BENIGN [BENIGN] We support customers across multiple time zones.
+JD_BENIGN [BENIGN] We have a global remote-first culture.
+JD_BENIGN [BENIGN] Our team spans Africa, Europe, Asia, and North America.

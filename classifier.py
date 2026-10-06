@@ -35,6 +35,7 @@ adds more capacity.
 
 import re
 import time
+import unicodedata
 import heapq
 import logging
 import threading
@@ -1853,6 +1854,20 @@ _AFRICAN_COUNTRY_RE = re.compile(
 )
 
 
+def _with_normalized_text(job: dict) -> dict:
+    """The job with title / location / description Unicode-normalised (fullwidth letters, zero-width and
+    soft-hyphen characters, non-breaking spaces, wrapped question lines) so a look-alike character can't
+    hide a restriction from any detector. Returns the same object when nothing changes."""
+    changed = {}
+    for key in ("title", "location", "description_snippet"):
+        v = job.get(key)
+        if isinstance(v, str) and v:
+            n = _normalize_form_text(v)
+            if n != v:
+                changed[key] = n
+    return dict(job, **changed) if changed else job
+
+
 def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str | None]:
     """
     Returns (result, priority, unsure_reason) where result is 'match',
@@ -1904,6 +1919,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     'unsure' so the AI stage gets a look at genuinely ambiguous listings,
     rather than every non-matching job being silently AI-reviewed.
     """
+    job = _with_normalized_text(job)
     # ── 0. HARD OVERRIDE: explicit "we can't/won't sponsor" language
     # anywhere in the title/description always means NO_MATCH, checked
     # BEFORE the location field or the AI stage ever gets a say. See
@@ -1966,6 +1982,15 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # 2026-10: application questions that bind the candidate to a place
     # (relocate / commute / reside / authorized-to-work-in / clearance ...).
     if has_restrictive_geo_question_signal(job):
+        return "no_match", None, None
+
+    # 2026-10: a field's answer options bind the candidate to a place (see has_restrictive_answer_options_signal).
+    if has_restrictive_answer_options_signal(job):
+        return "no_match", None, None
+
+    # 2026-10: description sentences that bind the candidate to an office, place, legal entity,
+    # nationality or clearance in wording the older detectors missed.
+    if has_candidate_binding_jd_signal(job):
         return "no_match", None, None
 
     # ── 0.76. HARD OVERRIDE (2026-09, explicit user-commissioned
@@ -5433,7 +5458,7 @@ _TITLE_LANGUAGE_SPEAKING_RE = re.compile(
 )
 _LANGUAGE_FLUENCY_RE = re.compile(
     r"\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")[\s\-]speak(?:ing|er)\b"
-    r"|\b(?:fluent|fluency|proficient|proficiency)\s+(?:in\s+|with\s+)?"
+    r"|\b(?:fluent|fluency|proficient|proficiency)\s+(?:in\s+|with\s+)?(?:(?:native|professional|business|full)[\s\-]+(?:level\s+)?)?"
     r"(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
     r"|\bnative\s+(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s*(?:speaker)?\b"
     r"|\bmust\s+(?:speak|be\s+fluent\s+in)\s+(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
@@ -5465,7 +5490,8 @@ _HARD_REQUIREMENT_HEADER_RE = re.compile(
 )
 _INLINE_LANGUAGE_SOFTENER_RE = re.compile(
     r"\bis\s+a\s+plus\b|\ba\s+plus\b|\bbonus\b|\bpreferred\b|\bdesirable\b|"
-    r"\bnice\s+to\s+have\b|\boptional\b|\bnot\s+required\b|\bnot\s+mandatory\b",
+    r"\bnice\s+to\s+have\b|\boptional\b|\bnot\s+required\b|\bnot\s+mandatory\b|\bhelpful\b|\bbeneficial\b|"
+    r"\badvantage(?:ous)?\b|\bwelcome\b|\bappreciated\b|\bideally\b|\buseful\b|\bvalued\b",
     re.I,
 )
 
@@ -6406,7 +6432,7 @@ _Q_EXTRA_COUNTRIES = (
 )
 _Q_REGIONS = (
     r"europe|north\s+america|latin\s+america|latam|apac|asia|oceania|middle\s+east|nordics?|benelux|dach|anz|"
-    r"the\s+americas|south\s+america|central\s+america|caribbean|scandinavia|gulf"
+    r"the\s+americas|south\s+america|central\s+america|caribbean|scandinavia|gulf|schengen"
 )
 _Q_PROVINCES = (
     r"ontario|quebec|qu[eé]bec|british\s+columbia|alberta|manitoba|saskatchewan|nova\s+scotia|new\s+brunswick|"
@@ -6463,12 +6489,13 @@ _Q_YOU_RE = re.compile(r"\b(?:you|your|i|i'm|i\s+am|we|applicant|candidate)\b|^\
 _GEO_QUESTION_FRAMES = tuple(re.compile(p, re.I) for p in (
     # relocation (a place is NOT required: being asked to relocate means the role is tied to a location)
     r"\b(?:willing|open|able|prepared|ready|comfortable|happy|amenable|agreeable|keen|interested|available|"
-    r"consider\w*|plan\w*|can|could|would)\b[^?.]{0,40}?\b(?:relocat\w+|reloc\b|mov(?:e|ing)\s+(?:to|house|home|closer|near))",
+    r"consider\w*|plan\w*|can|could|would)\b[^?.]{0,40}?\b(?:relocat\w+(?=\s*(?:[?.,;!)]|$|\s(?:to|for|if|when|within|before|after|at|by|in|on|closer|permanently|temporarily|internationally|abroad|overseas|immediately|upon|once|as|should|or|and|with|from|near|across|around|early|soon|now|locally)\b))|reloc\b|mov(?:e|ing)\s+(?:to|house|home|closer|near))",
     r"\brelocation\s+(?:to|is\s+required|required)\b",
     # commuting / proximity / on-site attendance
     r"\bcommut(?:e|es|ed|ing|able)\b",
     r"\bwithin\s+(?:\d+|a\s+\w+)\s*(?:miles?|mi|km|kilomet\w+|minutes?|mins?|hours?)\s+(?:of|from|drive)\b",
-    r"\b(?:live|living|located|reside|residing|based)\s+(?:in\s+or\s+)?(?:near|around|close\s+to|nearby|within\s+\w+\s+of)\b",
+    r"\b(?:you|i|we|applicants?|candidates?)\b[^?.]{0,30}\b(?:live|living|located|reside|residing|based)\s+(?:in\s+or\s+)?"
+    r"(?:near|around|close\s+to|nearby|within\s+\w+\s+of)\b",
     r"\b(?:are\s+you|be|being)\s+(?:a\s+)?local\b|\blocal\s+to\b|\blocals?\s+only\b",
     r"\b(?:work|working|come|coming|be|being|report|reporting|attend|attending|present|show\s+up)\b[^?.]{0,30}?"
     r"\b(?:on[- ]?site|in[- ]?person|in[- ]?office|in\s+the\s+office|(?:from|at|to|into)\s+(?:our|the|a)\s+(?:\w+\s+){0,2}office)\b",
@@ -6541,6 +6568,50 @@ _Q_RESIDENCE_BOUND_RE = re.compile(
     r"domiciled|resident|citizen|national|native)\b[^?.]{0,30}?\b(?:in|within|near|around|at|of)\b", re.I)
 
 
+# A clause that asks about the candidate's EXPERIENCE with something ("Have you sold SaaS to immigration
+# law firms?", "Do you have experience with Visa APIs?", "Are you familiar with Passport.js?") is about a
+# subject area, not about the candidate's own eligibility, so the eligibility vocabulary inside it
+# (visa, immigration, citizen, permit, clearance, export...) is exempt -- unless the clause also carries a
+# self-eligibility cue ("...and the right to work there"), in which case it is checked as normal.
+_Q_EXPERIENCE_FRAME_RE = re.compile(
+    r"\b(?:have|did|do)\s+you\s+(?:ever\s+|previously\s+|also\s+)?(?:sell|sold|manag\w+|build|built|us(?:e|ed)|support\w*|"
+    r"integrat\w+|configur\w+|implement\w*|develop\w*|design\w*|led|lead|run|ran|operat\w+|audit\w*|test\w*|deploy\w*|"
+    r"administ\w+|own|owned|handl\w+|coordinat\w+|creat\w+|market\w*|migrat\w+|negotiat\w+|wr[io]t\w+|troubleshoot\w*|"
+    r"troubleshot|debug\w*|analy[sz]\w+|process\w*|train\w*|work\w*\s+(?:with|on)|deal\w*\s+with|dealt\s+with|exercis\w+|"
+    r"participat\w+|oversee|oversaw|overseen|track\w*|evaluat\w+|assist\w*|help\w*|establish\w*|supervis\w+|set\s+up|"
+    r"roll\w*\s+out|sourc\w+|secur\w+|draft\w*|review\w*|measur\w+|advocat\w+|promot\w+|launch\w*|maintain\w*|scal\w+|"
+    r"onboard\w*|renew\w*|upsell|upsold|clos\w+|won|win|price|pric\w+|calculat\w+|clear\w*|purg\w+|parse|pars\w+)\b"
+    r"|\b(?:do|did)\s+you\s+(?:have|possess)\s+(?:any\s+|some\s+|prior\s+|previous\s+|hands[- ]on\s+|direct\s+|"
+    r"relevant\s+|a\s+(?:strong|solid|technical|proven|deep)\s+)?(?:experience|expertise|knowledge|background|"
+    r"familiarity|track\s+record)\b"
+    r"|\b(?:are\s+you\s+)?(?:familiar|conversant|experienced)\s+(?:with|in|of)\b"
+    r"|\b(?:do\s+you\s+)?(?:know\s+how\s+to|understand)\b"
+    r"|^\s*(?:describe|explain|tell\s+us|walk\s+us|share|give\s+an?\s+example)\b"
+    r"|\bhow\s+(?:many\s+years|do\s+you)\b"
+    r"|\b(?:which|what)\s+(?:\w+\s+){0,3}(?:have\s+you|do\s+you\s+use|are\s+you\s+familiar)\b", re.I)
+_Q_STATUS_CUE_RE = re.compile(
+    r"\bright\s+to\s+work\b|\b(?:legally\s+)?authori[sz]ed\s+to\s+work\b|\beligible\s+to\s+work\b|"
+    r"\bpermitted\s+to\s+work\b|\bentitled\s+to\s+work\b|\b(?:require|need)s?\s+(?:\w+\s+){0,2}(?:sponsorship|visa)\b|"
+    r"\bsponsor\s+(?:you|your)\b|\bwork\s+(?:permit|visa|authori[sz]ation)\s+(?:for|in)\b|\bcitizen\s+of\b|"
+    r"\bnational\s+of\b|\bresid(?:e|ent|ing)\s+(?:in|of)\b|\bwilling\s+to\s+(?:relocate|commute)\b|"
+    r"\bwhether\s+you\s+(?:are|have|need|require)\b|\b(?:permanent|primary|legal|principal|tax|usual)\s+residen\w+|"
+    r"\btax\s+resid\w+|\bpermanent\s+address\b|\bdomicile\w*|\bwhere\s+you\s+(?:live|reside|are\s+(?:based|located))\b", re.I)
+_Q_IDIOM_RE = re.compile(
+    r"\b(?:first|second)[- ]class\s+citizens?\b|\bcitizen[\s-]+(?:developers?|development|science|scientists?|engagement|"
+    r"journalism|facing|services?|satisfaction)\b|\b(?:global|digital|corporate|brand)\s+citizen\w*|"
+    r"\bpassport\.?js\b|\b(?:product|data|brand|api|digital|health|internal|vaccine)\s+passports?\b|\bpassport\s+to\b", re.I)
+_Q_CLAUSE_SPLIT_RE = re.compile(r"(?<=[?!;])\s+|(?<=[a-z0-9\"')])\.\s+(?=[A-Z])|\s+[—–]\s+")
+
+
+def _strip_experience_clauses(q: str) -> str:
+    """The question text with its experience/familiarity clauses removed (see _Q_EXPERIENCE_FRAME_RE);
+    whatever remains is what could still bind the candidate. Empty string = nothing left to check."""
+    clauses = _Q_CLAUSE_SPLIT_RE.split(_Q_IDIOM_RE.sub(" ", q or ""))
+    kept = [c for c in clauses
+            if c.strip() and not (_Q_EXPERIENCE_FRAME_RE.search(c) and not _Q_STATUS_CUE_RE.search(c))]
+    return " ".join(kept)
+
+
 # Demonyms and localized country names: "Australian police clearance", "British nationality",
 # "Estados Unidos". Only consulted together with an authorization / entity / country-tied-check
 # cue, never on their own ("Do you speak French?" must not match).
@@ -6565,6 +6636,9 @@ _Q_COUNTRY_CHECK_RE = re.compile(
 def _geo_question_hit(q: str) -> bool:
     """True when this single application-question text binds the candidate to a place."""
     if not q or len(q) > 600:
+        return False
+    q = _strip_experience_clauses(q)
+    if not q:
         return False
     if any(rx.search(q) for rx in _GEO_QUESTION_FRAMES):
         return True
@@ -6619,16 +6693,221 @@ def _geo_question_hit(q: str) -> bool:
     return False
 
 
+_FORM_ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u2060\ufeff\u00ad]")
+
+
+def _normalize_form_text(text: str) -> str:
+    """Unicode-normalise scraped form/JD text so look-alike characters, non-breaking spaces and
+    zero-width / soft-hyphen characters can't hide a restriction from the regexes. Newlines are kept
+    (sentence splitting uses them)."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = _FORM_ZERO_WIDTH_RE.sub("", text)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    # a question hard-wrapped onto continuation lines (rows stored before the fetchers collapsed
+    # whitespace): a lowercase-initial line right after an unfinished question line continues it
+    for _ in range(6):
+        joined = re.sub(r"(Application (?:Question|Options):[^\n]*[^\n?.!:|])\n(?=[a-z(\"'])", r"\1 ", text)
+        if joined == text:
+            break
+        text = joined
+    return text
+
+
+# ── 2026-10 (OpenAI/Qwen review, part 4): the restriction can live entirely in a field's ANSWER OPTIONS.
+# ats_scrapers appends "Application Options: <question> => opt1 | opt2 ..." right after the question
+# line (Yes/No-only answers and lists longer than 40 are dropped there). An option counts when it
+#   (a) is itself a place-bound eligibility statement ("I am authorized to work in the United States
+#       without sponsorship", "Yes, I am willing to relocate"), or names a place/nationality + a status
+#       word ("US citizen", "UK Skilled Worker", "Canadian PR"), or
+#   (b) together with the others forms a CLOSED COUNTRY LIST: the question asks where you live/are
+#       located and offers 2-15 short place names, no "Other / Rest of world", none of them African.
+# Bare statuses ("I require sponsorship", "H-1B") are left to Rank 4's narrow-scope rule
+# (rank4_question_eligibility_hit), exactly like a bare question. ──
+_APPLICATION_OPTIONS_MARKER = "Application Options:"
+_CLOSED_LIST_LABEL_RE = re.compile(
+    r"\b(?:country|countries|located|location|reside|residence|resident|based|where\s+(?:are|do|will)\s+you|region|"
+    r"nationality)\b", re.I)
+_OPEN_OPTION_RE = re.compile(
+    r"\b(?:other|rest\s+of|elsewhere|anywhere|not\s+listed|outside|international|global|worldwide|prefer\s+not|"
+    r"remote)\b", re.I)
+_AFRICA_OPTION_RE = re.compile(
+    r"\b(?:africa\w*|" + "|".join(re.escape(c) for c in sorted(geo.AFRICAN_COUNTRIES, key=len, reverse=True)) + r")\b", re.I)
+
+
+_PAYMENT_BRAND_OPTIONS = {"mastercard", "amex", "american express", "discover", "paypal", "stripe", "maestro", "jcb"}
+
+
+def _option_groups(job: dict) -> list[tuple[str, list[str]]]:
+    out = []
+    for line in _normalize_form_text(job.get("description_snippet") or "").split("\n"):
+        line = line.strip()
+        if line.startswith(_APPLICATION_OPTIONS_MARKER):
+            label, _, rest = line[len(_APPLICATION_OPTIONS_MARKER):].partition("=>")
+            opts = [o.strip() for o in rest.split("|") if o.strip()]
+            if opts:
+                out.append((label.strip(), opts))
+    return out
+
+
+def _is_closed_country_list(label: str, opts: list[str]) -> bool:
+    if not _CLOSED_LIST_LABEL_RE.search(label) or not 2 <= len(opts) <= 15:
+        return False
+    if any(_OPEN_OPTION_RE.search(o) or _AFRICA_OPTION_RE.search(o) for o in opts):
+        return False
+    return all(len(o.split()) <= 5 and _Q_PLACE_RE.search(o) for o in opts)
+
+
+def _option_binds_candidate(option: str) -> bool:
+    if _geo_question_hit(option):
+        return True
+    place = _Q_PLACE_RE.search(_Q_ZONE_RE.sub(" ", option)) or _Q_DEMONYM_RE.search(option)
+    return bool(place and _Q_AUTH_CUE_RE.search(option) and not _Q_NON_BINDING_RE.search(option))
+
+
+def has_restrictive_answer_options_signal(job: dict) -> bool:
+    """True when a form field's answer options bind the candidate to a place (see the comment above)."""
+    for label, opts in _option_groups(job):
+        if _is_closed_country_list(label, opts) or any(_option_binds_candidate(o) for o in opts):
+            return True
+    return False
+
+
 def has_restrictive_geo_question_signal(job: dict) -> bool:
     """Deterministic hard filter over the job's application questions only —
     see the module comment above _Q_EXTRA_COUNTRIES."""
-    desc = job.get("description_snippet") or ""
+    desc = _normalize_form_text(job.get("description_snippet") or "")
     if _APPLICATION_AUTH_QUESTION_MARKER not in desc:
         return False
     for line in desc.split("\n"):
         line = line.strip()
         if line.startswith(_APPLICATION_AUTH_QUESTION_MARKER) and _geo_question_hit(
                 line[len(_APPLICATION_AUTH_QUESTION_MARKER):].strip()):
+            return True
+    return False
+
+
+# ── 2026-10 (OpenAI + Qwen JD-sentence corpus, corpus/jd_sentences.txt): restrictions written in the
+# DESCRIPTION itself in wording the older detectors missed -- on-site attendance ("work from our New York
+# office", "within commuting distance"), "work from within <place>", lists referenced without being listed
+# ("only in the following countries", "supported employment countries"), entity / EOR / payroll / tax
+# gates, US-person / export-control / clearance, "without requiring sponsorship", relocation as a
+# condition, time-zone residence, local-licence, dual citizenship, data-residency and shipping gates.
+# A sentence counts only when it (1) has requirement framing, (2) is about the CANDIDATE (candidate/
+# applicant/you/employee, "must be", "restricted to"), (3) matches one binding family below, and (4) is not
+# a skills sentence ("experience with ITAR", "familiarity with immigration software") or a benefit
+# ("we offer relocation assistance"). Plain company facts ("we have offices in Germany", "our London office
+# supports customers across Europe", "our EOR partner operates in 100 countries") have no requirement
+# framing and never match. ──
+_JD_REQUIREMENT_RE = re.compile(
+    r"\bmust\b|\brequire[sd]?\b|\brequirements?\b|\bonly\b|\bcannot\b|\bcan(?:'|’)?t\b|\bunable\b|\bexpected\s+to\b|"
+    r"\bneed(?:s|ed)?\s+to\b|\bhave\s+to\b|\bcontingent\b|\bineligible\b|\bdisqualif\w+|"
+    r"\bnot\s+(?:eligible|able|available|provided|offered)\b|\bwill\s+not\b|\bdo(?:es)?\s+not\b|\bdon(?:'|’)?t\b|"
+    r"\bexclusively\b|\bsubject\s+to\b|\brestricted\b|\blimited\s+to\b|\bat\s+least\b|\bonly\s+open\b", re.I)
+_JD_SUBJECT_RE = re.compile(
+    r"\b(?:candidates?|applicants?|you|your|employees?|individuals?|team\s+members?|persons?|people|hires?|staff|"
+    r"incumbents?|successful|(?:this\s+)?(?:position|role|job|opportunity|employment))\b|\bmust\s+be\b|"
+    r"\brestricted\s+to\b|\bopen\s+only\b|^\s*(?:must|required|cannot)\b", re.I)
+_JD_SKILL_RE = re.compile(
+    r"\b(?:experience\w*|familiar\w*|knowledge|expertise|exposure|proficien\w+|understanding|background\s+in|"
+    r"track\s+record|a\s+plus|nice\s+to\s+have|preferred|bonus)\b", re.I)
+_JD_PLACE = r"(?:" + _Q_PLACE + r"|the\s+(?:specified|listed|applicable|relevant)\s+(?:country|state|region|jurisdiction))"
+_JD_AUTH_WORK_RE = re.compile(
+    r"\bauthori[sz]\w*[^.?!]{0,40}\bwork\b|\bwork\b[^.?!]{0,60}\bauthori[sz]\w*|\bright\s+to\s+work\b|\beligible\s+to\s+work\b|"
+    r"\bpermitted\s+to\s+work\b|\bwork\s+(?:permit|visa|rights?)\b|\bcitizens?\b|\bpermanent\s+resident|\bgreen\s*card\b|"
+    r"\bimmigration\s+status\b", re.I)
+_JD_MULTI_REQUIREMENT_RE = re.compile(
+    r"\b(?:erforderlich|vorausgesetzt|notwendig|muss|m[üu]ssen|requis\w*|obligatoire|exig\w+|n[ée]cessaire|doit|devez|"
+    r"richiest\w+|necessari\w+|obbligatori\w+|deve|devi|vereist|verplicht|moet|moeten|kr[äa]vs|m[åa]ste|kreves|p[åa]kr[æa]vet|"
+    r"debe|debes|requerid\w+|necesari\w+|obligatori\w+|tem\s+que|deve\s+ter|exigid\w+|necess[áa]ri\w+)\b", re.I)
+_JD_BINDING_FAMILIES = tuple(re.compile(pat, re.I) for pat in (
+    # "work outside <place>", "<place> work authorization", "work authorization: <place>"
+    r"\b(?:work\w*|located|based|reside\w*)\s+(?:from\s+)?(?:outside|beyond)\s+(?:of\s+)?(?:the\s+)?" + _JD_PLACE + r"(?![\w])",
+    r"\b" + _JD_PLACE + r"(?:\s*[/,&]\s*" + _JD_PLACE + r")*\s+(?:work|employment)\s+(?:authori[sz]ation|permit|visa|rights?|eligibility)\b",
+    r"\bwork\w*\s+(?:authori[sz]ation|permit|visa|eligibility)\s*[:\-–]\s*(?:the\s+)?" + _JD_PLACE + r"(?![\w])",
+    # on-site / office attendance and proximity
+    r"\b(?:work(?:ing)?|be|attend\w*|report\w*|come|commute)\b[^.?!]{0,40}\b(?:from|at|in|to|into)\s+(?:our|the)\s+"
+    r"(?:\w+\s+){0,3}offices?\b",
+    r"\bcommuting\s+distance\b|\b\d+[- ]?(?:hour|minute|mile|km)s?\s+(?:drive|commute)\b|"
+    r"\bwithin\s+(?:a\s+)?\d+[- ](?:hour|minute|mile|km)s?\s+(?:drive|of)\b|\bwithin\s+driving\s+distance\b",
+    r"\bin[- ]office\s+(?:attendance|presence|days|requirements?)\b|\bregular\s+in[- ]office\b|"
+    r"\battend\w*\s+(?:our|the)\s+(?:\w+\s+){0,3}offices?\b|"
+    r"\bone\s+of\s+our\s+(?:\w+\s+){0,2}offices\b",
+    # "work from within <place>", present / located / based / resident in a named place
+    r"\bwork\w*\s+(?:from\s+)?within\s+(?:the\s+)?" + _JD_PLACE + r"(?![\w])",
+    r"\b(?:be|remain|stay)\s+(?:\w+\s+)?(?:physically\s+)?(?:present|located|based|resident|reside)\s+(?:in|within|at)\s+(?:the\s+|a\s+)?"
+    + _JD_PLACE + r"(?![\w])",
+    r"\b(?:reside|live)\s+(?:in|within)\s+(?:the\s+|a\s+)?" + _JD_PLACE + r"(?![\w])",
+    r"\bphysically\s+present\b",
+    # lists referenced without being listed
+    r"\b(?:following|listed|supported|approved|eligible|specified)\s+(?:employment\s+)?(?:countries|states|locations|"
+    r"regions|jurisdictions|provinces)\b",
+    # entity / EOR / payroll / tax
+    r"\b(?:legal\s+entit(?:y|ies)|employing\s+entit(?:y|ies)|subsidiar(?:y|ies)|employer[- ]of[- ]record|\bEOR\b|payroll)\b",
+    r"\bwhere\s+we\s+(?:have|operate)\s+(?:an?\s+)?(?:\w+\s+){0,2}(?:entity|entities|subsidiary|presence)\b|"
+    r"\btied\s+to\s+(?:our|the)\s+(?:\w+\s+){0,2}entity\b|\b(?:employed|hired|contracted|engaged|onboarded)\s+(?:through|by|via)\s+"
+    r"(?:our|the)\s+(?:\w+\s+){0,2}(?:entity|subsidiary)\b",
+    r"\btax\s+resident\w*|\bwithhold\w*\s+(?:local\s+)?(?:income\s+)?tax\w*|\bPAYE\b|\bproof\s+of\s+(?:local\s+)?address\b|"
+    r"\butility\s+bills?\b",
+    # US person / export control / clearance / federal
+    r"(?-i:\bU\.?S\.?)\s+persons?\b|\bunited\s+states\s+persons?\b|\bITAR\b|\bexport[- ]control\w*|(?-i:\bEAR\b)|"
+    r"\bcontrolled\s+(?:technical\s+data|technology|unclassified)\b|(?-i:\bCUI\b)|"
+    r"\b(?:TS/SCI|top[- ]secret|secret|public[- ]trust|security|DoD|government)\s+clearance\b|\bpublic[- ]trust\b|"
+    r"\bfederal\s+(?:background|employment|suitability)\b|\b22\s*C\.?F\.?R\b",
+    # work rights / visa wording / sponsorship phrased as a candidate condition
+    r"\bwork\s+rights?\b|\bpermission\s+to\s+work\b|\bvisa\s+(?:allowing|permitting|that\s+(?:allows|permits))\b|"
+    r"\bwithout\s+(?:requiring|needing|the\s+need\s+for)\s+(?:\w+\s+){0,2}sponsorship\b|"
+    r"\b(?:do(?:es)?\s+not|don(?:'|’)?t)\s+(?:now\s+or\s+in\s+the\s+future\s+)?require\s+(?:\w+\s+){0,3}(?:sponsorship|visa|h-?1b)\b|"
+    r"\brequir\w+\s+(?:\w+\s+){0,2}h-?1b\b|\bunrestricted\s+(?:work\s+)?authori[sz]ation\b",
+    # relocation as a condition
+    r"\b(?:must|required|need|expected)\b[^.?!]{0,40}\brelocat\w+|\bwilling\s+to\s+relocate\b|\brelocation\s+(?:is\s+)?required\b",
+    # time-zone residence, local licence, dual citizenship, EU-member citizenship
+    r"\b(?:located|based|reside\w*)\s+(?:in|within)\s+(?:the\s+)?(?:\w+\s+){0,3}time\s*zones?\b",
+    r"\blicen[cs]e\s+(?:in|for|valid\s+in)\s+(?:the\s+)?(?:state\s+of\s+)?" + _JD_PLACE + r"(?![\w])",
+    r"\bdual\s+citizenship\b|\bcitizens?\s+of\s+(?:an?\s+)?(?:EU|EEA|European)\s+(?:member\s+state|countr)",
+    # data residency / shipping / embargo gates tied to where the person lives
+    r"\b(?:data\s+(?:sovereignty|residency|localization|localisation)|GDPR|data\s+privacy)\b[^.?!]{0,80}\b(?:reside|resident|"
+    r"located|based|work\s+(?:from|within|outside))\b|\b(?:reside|resident|located|based|work\s+(?:from|within|outside))\b"
+    r"[^.?!]{0,60}\b(?:data\s+(?:sovereignty|residency|localization|localisation|privacy)|GDPR)\b",
+    r"\blegally\s+ship\b|\bembargo\w*|\bsanctioned\s+countr\w+",
+))
+# a sentence that is only an exclusion list needs no subject ("Applicants outside the listed states are not eligible")
+_JD_STRONG_RE = re.compile(
+    r"(?-i:\bU\.?S\.?)\s+persons?\b|\bITAR\b|\bdual\s+citizenship\b|\bsponsor(?:ship)?\b|\bwithout\s+(?:requiring|needing)\b|"
+    r"\b(?:TS/SCI|top[- ]secret|security\s+clearance|public[- ]trust)\b|\bwork\s+(?:authori[sz]ation|permit|visa)\b|"
+    r"\bauthori[sz]ation\s+to\s+work\b|\bright\s+to\s+work\b", re.I)
+
+
+def has_candidate_binding_jd_signal(job: dict) -> bool:
+    """A job-description sentence that binds the candidate to a place, a legal entity, a nationality or
+    an office -- see the module comment above _JD_REQUIREMENT_RE."""
+    desc = job.get("description_snippet") or ""
+    if not isinstance(desc, str) or not desc.strip():
+        return False
+    body = "\n".join(l for l in _normalize_form_text(desc).split("\n")
+                     if not l.strip().startswith((_APPLICATION_AUTH_QUESTION_MARKER, _APPLICATION_OPTIONS_MARKER)))
+    body = re.sub(r"\n(?=[a-z])", " ", body)  # a hard-wrapped line continues the sentence
+    for sentence in _split_into_sentences(body):
+        if not sentence.strip() or len(sentence) > 500 or not _JD_REQUIREMENT_RE.search(sentence):
+            continue
+        if _JD_SKILL_RE.search(sentence):
+            continue
+        if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not re.search(r"\bmust\b|\bonly\b|\bcannot\b|\bunable\b", sentence, re.I):
+            continue
+        if not (_JD_SUBJECT_RE.search(sentence) or _JD_STRONG_RE.search(sentence)):
+            continue
+        if any(rx.search(sentence) for rx in _JD_BINDING_FAMILIES):
+            return True
+        # a named place together with work-authorization vocabulary ("To work in the US, candidates must
+        # have authorization")
+        if _JD_AUTH_WORK_RE.search(sentence) and re.search(r"\b" + _JD_PLACE + r"(?![\w])", sentence, re.I):
+            return True
+    # sentences not written in English: shared multilingual eligibility vocabulary + a place in any
+    # language + that language's own "required / must" word ("Wohnsitz in Deutschland erforderlich.")
+    for sentence in _split_into_sentences(body):
+        if (sentence.strip() and len(sentence) <= 400 and not _Q_ENGLISH_MARKER_RE.search(sentence)
+                and _JD_MULTI_REQUIREMENT_RE.search(sentence)
+                and (_Q_PLACE_RE.search(sentence) or _Q_LOCAL_PLACES_RE.search(sentence))
+                and any(rx.search(sentence) for rx in _ELIG_MULTILINGUAL_RES)):
             return True
     return False
 
@@ -6640,6 +6919,8 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
     has_non_remote_labeled_text_signal,
     has_hard_country_specific_auth_signal,
     has_restrictive_geo_question_signal,
+    has_restrictive_answer_options_signal,
+    has_candidate_binding_jd_signal,
     has_state_list_restriction_signal,
     has_hard_country_based_restriction_signal,
     has_hard_metadata_location_signal,
@@ -7314,8 +7595,8 @@ def _rank4_place(job: dict) -> tuple[str | None, str | None, str | None]:
 # check_rank4.py is the regression corpus for all of it.
 # ═══════════════════════════════════════════════════════════════════════════
 _ELIG_AUTH = (
-    r"\bauthori[sz](?:ed|ation|e[sd]?)\b[^.?!\n]{0,40}\b(?:work|working|employ\w*|employer|job|labou?r)\b",
-    r"\b(?:work|working|employ\w*|employer)\b[^.?!\n]{0,30}\bauthori[sz]\w*",
+    r"\bauthori[sz](?:ed|ation|e[sd]?)\b[^.?!\n]{0,60}\b(?:work|working|employ\w*|employer|job|labou?r)\b",
+    r"\b(?:work|working|employ\w*|employer)\b[^.?!\n]{0,60}\bauthori[sz]\w*",
     r"\blegal(?:ly)?\s+(?:allowed|entitled|permitted|eligible|authori[sz]ed|right|reside|resident|employable)\b",
     r"\blegal(?:ly)?\s+(?:able\s+)?to\s+(?:work|be\s+employed|reside|live)\b",
     r"\blawful(?:ly)?\s+(?:able\s+|allowed\s+|entitled\s+|permitted\s+|eligible\s+)?(?:to\s+)?"
@@ -7359,8 +7640,14 @@ _ELIG_CITIZEN = (r"\bcitizen\w*", r"\bnationalit(?:y|ies)\b", r"\bnationals?\s+o
                  r"\bexport[- ]control\w*|\bexport[- ]controlled\b|\bexport\s+restrictions?\b|\bitar\b|(?-i:\bEAR\b)|"
                  r"\bcontrolled\s+(?:technical\s+data|technology|unclassified)\b")
 _ELIG_PRESENCE_Q = (
-    r"\b(?:reside|resides|residing|resident|residents|residency|domicile\w*)\b",
-    r"\b(?:live|living|lives|located|based|situated)\s+(?:in|within|near|around|at)\b",
+    # the CANDIDATE is the one who resides / lives / is based ("Where does customer data reside?" and
+    # "Which office is the team based in?" are not about the applicant)
+    r"\b(?:you|i|applicants?|candidates?|employees?)\b[^?.!\n]{0,40}\b(?:resid\w+|live|living|lives|located|based|situated|"
+    r"domicile\w*|resident)\b",
+    r"\bresidents?\s+(?:of|in)\b|\bresidency\b|\b(?:place|country|state|city|province)\s+of\s+residen(?:ce|cy)\b|"
+    r"\b(?:permanent|primary|legal|principal|main|tax|usual|habitual)\s+residen(?:ce|cy)\b|\btax\s+resid\w+|"
+    r"\byour\s+(?:\w+\s+){0,2}residen(?:ce|cy)\b|\bresiden(?:ce|cy)\s+(?:status|permit|card|requirement)\b|"
+    r"\ba\s+(?:(?:permanent|legal|current|tax|full[- ]time)\s+)?resident\b|\bdomicile\w*",
     r"\bphysically\s+(?:located|present|based)\b",
     r"\b(?:where|in\s+which|within\s+which)\s+(?:this|the)\s+(?:role|job|position|vacancy|posting)\b",
     r"\b(?:where|in\s+which|within\s+which)\s+you\s+(?:are\s+|will\s+be\s+)?(?:applying|based|located|reside|working)\b",
@@ -7410,7 +7697,7 @@ _ELIG_MULTILINGUAL = (
 )
 _ELIG_MULTILINGUAL_RES = tuple(re.compile(p, re.I) for p in _ELIG_MULTILINGUAL)
 _ELIG_QUESTION_RES = tuple(re.compile(p, re.I) for p in
-                           _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN + _ELIG_PRESENCE_Q + _ELIG_MULTILINGUAL
+                           _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN + _ELIG_PRESENCE_Q
                            + _ELIG_ENTITY + _ELIG_LOCAL_CREDENTIAL + (r"\bvisas?\b",))
 _ELIG_TEXT_RES = tuple(re.compile(p, re.I) for p in _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN) + (
     re.compile(r"\bmust\s+(?:reside|live|be\s+(?:located|based|resident))\b|\b(?:residents?|citizens?)\s+only\b", re.I),)
@@ -7425,7 +7712,7 @@ _ELIG_TEXT_REQUIREMENT_RE = re.compile(
 
 def _rank4_question_texts(job: dict) -> list[str]:
     out = []
-    for line in (job.get("description_snippet") or "").split("\n"):
+    for line in _normalize_form_text(job.get("description_snippet") or "").split("\n"):
         line = line.strip()
         if line.startswith(_APPLICATION_AUTH_QUESTION_MARKER):
             out.append(line[len(_APPLICATION_AUTH_QUESTION_MARKER):].strip())
@@ -7448,10 +7735,23 @@ def rank4_question_eligibility_hit(job: dict) -> str | None:
     residency, where the role is located...), named place or not; None if the form is
     silent on it."""
     for q in _rank4_question_texts(job):
-        if not q or _ELIG_TOPIC_EXEMPT_RE.search(q):
+        body = _strip_experience_clauses(q)
+        if not body or _ELIG_TOPIC_EXEMPT_RE.search(body):
             continue
-        if any(rx.search(_ELIG_COMPANY_VISA_RE.sub(" ", q)) for rx in _ELIG_QUESTION_RES):
+        body = _ELIG_COMPANY_VISA_RE.sub(" ", body)
+        # the multilingual vocabulary overlaps English words ("residence", "visa"), so it only reads
+        # questions that are not written in English
+        rxs = _ELIG_QUESTION_RES if _Q_ENGLISH_MARKER_RE.search(body) else _ELIG_QUESTION_RES + _ELIG_MULTILINGUAL_RES
+        if any(rx.search(body) for rx in rxs):
             return q
+    # answer options: "I require sponsorship", "H-1B", "Citizen / PR / Need visa" ...
+    for label, opts in _option_groups(job):
+        if any(o.lower() in _PAYMENT_BRAND_OPTIONS for o in opts):
+            opts = [o for o in opts if o.lower() != "visa"]  # a card-brand list, not a visa status
+        for o in opts:
+            body = _ELIG_COMPANY_VISA_RE.sub(" ", _Q_IDIOM_RE.sub(" ", o))
+            if any(rx.search(body) for rx in _ELIG_QUESTION_RES):
+                return f"{label} => {o}"
     return None
 
 
@@ -7477,6 +7777,7 @@ def rank4_text_eligibility_requirement_hit(job: dict) -> str | None:
 def _rank4_decide(job: dict) -> tuple[str | None, str | None, str | None]:
     """(priority, reason, rejected_by): rejected_by is None when admitted, else the name of
     the requirement that failed (stable codes used in logs and by revalidate)."""
+    job = _with_normalized_text(job)
     if job.get("_form_status") == "failed":
         return None, None, "application_form_unreadable"
     for check in (*_RANK4_GENUINE_RESTRICTION_CHECKS, has_rank4_region_residency_enforcement_signal):

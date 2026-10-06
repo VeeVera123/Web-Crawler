@@ -1,0 +1,369 @@
+# Benign look-alikes: ordinary screening questions containing eligibility-sounding words.
+# Sources: Qwen part 2 (150) and OpenAI part 2 (215). Tagged BENIGN = must be kept at Rank 4 and
+# on the universal path; AMBIGUOUS = reported only (they bind a candidate to a place when a
+# job's location is narrow, so Rank 4 rejecting them is acceptable).
+FIN_VISA [BENIGN] Do you have experience integrating payment gateways like Stripe, PayPal, or Visa?
+FIN_VISA [BENIGN] Have you managed partnership accounts for major credit networks (Mastercard, Visa, Amex)?
+FIN_VISA [BENIGN] Are you familiar with the Visa Ready program for fintech startups?
+FIN_VISA [BENIGN] Do you have experience with Visa API integrations for banking apps?
+FIN_VISA [BENIGN] Have you worked on fraud detection models for Visa or Mastercard transactions?
+FIN_VISA [BENIGN] Did you manage the migration from legacy systems to the new Visa tokenization service?
+FIN_VISA [BENIGN] Are you certified in PCI-DSS compliance for processing Visa and Mastercard payments?
+FIN_VISA [BENIGN] Have you sold payment processing solutions to merchants accepting Visa?
+FIN_VISA [BENIGN] Do you understand the interchange fee structures for Visa and Mastercard?
+FIN_VISA [BENIGN] Have you tested checkout flows using Visa's test card numbers?
+FIN_VISA [BENIGN] Do you have experience using immigration case-management software?
+FIN_VISA [BENIGN] Have you worked with immigration compliance platforms?
+FIN_VISA [BENIGN] Which immigration software have you used?
+FIN_VISA [BENIGN] Have you supported customers using Visa processing software?
+FIN_VISA [BENIGN] Do you have experience with Visa Inc. products?
+FIN_VISA [BENIGN] Have you worked with Mastercard or Visa integrations?
+FIN_VISA [BENIGN] Have you used Visa APIs in a previous role?
+FIN_VISA [BENIGN] Describe your experience integrating with Visa.
+FIN_VISA [BENIGN] Have you supported a customer whose business uses Visa?
+FIN_VISA [BENIGN] Which Visa products are you familiar with?
+FIN_VISA [BENIGN] Have you worked with Visa payment-processing systems?
+FIN_VISA [BENIGN] Have you managed accounts in the financial-services sector, including Visa clients?
+FIN_VISA [BENIGN] Have you integrated Mastercard or Visa payment methods?
+FIN_VISA [BENIGN] Do you have experience troubleshooting Visa transaction issues?
+FIN_VISA [BENIGN] Have you worked with immigration-tech customers?
+FIN_VISA [BENIGN] Have you used tools for managing visa applications?
+FIN_VISA [BENIGN] Have you supported software used by immigration lawyers?
+FIN_VISA [BENIGN] Describe your experience with immigration workflows.
+FIN_VISA [BENIGN] Have you worked with a visa-management platform?
+FIN_VISA [BENIGN] Which immigration platforms have you encountered?
+FIN_VISA [BENIGN] Have you worked with Mastercard?
+FIN_VISA [BENIGN] Do you have experience with Mastercard integrations?
+FIN_VISA [BENIGN] Have you supported Mastercard customers?
+FIN_VISA [BENIGN] Have you worked with Mastercard APIs?
+FIN_VISA [BENIGN] Have you managed accounts using Mastercard products?
+FIN_VISA [BENIGN] Describe your experience with payment networks.
+FIN_VISA [BENIGN] Have you integrated card-payment providers?
+FIN_VISA [BENIGN] Have you worked with Visa and Mastercard?
+FIN_VISA [BENIGN] Have you supported payment-card products?
+FIN_VISA [BENIGN] Have you troubleshot card-payment integrations?
+FIN_VISA [BENIGN] Have you worked with payment processing?
+FIN_VISA [BENIGN] Have you managed payment-related customer escalations?
+FIN_VISA [BENIGN] Have you worked with payment APIs?
+FIN_VISA [BENIGN] Have you supported merchants accepting Visa?
+FIN_VISA [BENIGN] Have you supported merchants accepting Mastercard?
+SPONSOR [BENIGN] Have you managed corporate sponsorships for local charity events or marathons?
+SPONSOR [BENIGN] Do you have experience securing brand sponsorships for tech conferences?
+SPONSOR [BENIGN] Have you coordinated open-source project sponsorships via GitHub Sponsors?
+SPONSOR [BENIGN] Did you manage the budget for our annual developer summit sponsorships?
+SPONSOR [BENIGN] Have you negotiated naming rights or event sponsorships for university hackathons?
+SPONSOR [BENIGN] Are you familiar with the tax implications of corporate charitable sponsorships?
+SPONSOR [BENIGN] Have you managed a portfolio of sports team sponsorships for brand visibility?
+SPONSOR [BENIGN] Do you have experience writing proposals for community arts sponsorships?
+SPONSOR [BENIGN] Have you tracked ROI for marketing sponsorships using Salesforce?
+SPONSOR [BENIGN] Did you oversee the fulfillment of deliverables for our podcast sponsors?
+SPONSOR [BENIGN] Have you managed sponsored events?
+SPONSOR [BENIGN] Do you have experience working with event sponsors?
+SPONSOR [BENIGN] Describe your experience managing sponsor relationships.
+SPONSOR [BENIGN] Have you created sponsorship packages?
+SPONSOR [BENIGN] Have you worked with corporate sponsors?
+SPONSOR [BENIGN] Have you managed sponsor renewals?
+SPONSOR [BENIGN] Have you developed sponsor outreach campaigns?
+SPONSOR [BENIGN] Have you negotiated sponsorship agreements?
+SPONSOR [BENIGN] Have you managed sponsorship revenue?
+SPONSOR [BENIGN] Have you worked with sponsors on branded content?
+SPONSOR [BENIGN] Have you coordinated sponsor deliverables?
+SPONSOR [BENIGN] Have you managed a portfolio of sponsors?
+SPONSOR [BENIGN] Have you supported sponsorship activation?
+SPONSOR [BENIGN] Have you worked with nonprofit sponsors?
+SPONSOR [BENIGN] Have you developed sponsor success programs?
+SPONSOR [BENIGN] Have you used software to manage sponsorships?
+SPONSOR [BENIGN] Have you managed community sponsorships?
+SPONSOR [BENIGN] Have you worked with sponsors at conferences?
+SPONSOR [BENIGN] Have you coordinated sponsor communications?
+SPONSOR [BENIGN] Have you tracked sponsor engagement?
+CITIZEN [BENIGN] Do you advocate for "citizen developer" programs using low-code platforms?
+CITIZEN [BENIGN] Have you participated in citizen science projects involving data collection?
+CITIZEN [BENIGN] Are you familiar with the concept of the "global citizen" in international education?
+CITIZEN [BENIGN] Have you managed a "citizen engagement" portal for local government clients?
+CITIZEN [BENIGN] Do you have experience building "citizen-facing" web applications?
+CITIZEN [BENIGN] Have you worked on "citizen journalism" platforms or CMS tools?
+CITIZEN [BENIGN] Are you a "first-class citizen" in any open-source programming communities?
+CITIZEN [BENIGN] Have you evaluated "citizen satisfaction" metrics for public sector SaaS?
+CITIZEN [BENIGN] Do you understand "brand citizenship" and corporate social responsibility frameworks?
+CITIZEN [BENIGN] Have you implemented "citizen IDEAS" (Innovation, Design, Engineering) programs?
+CITIZEN [BENIGN] Have you worked with citizen-developer platforms?
+CITIZEN [BENIGN] Describe your experience with citizen development.
+CITIZEN [BENIGN] Have you supported citizen developers?
+CITIZEN [BENIGN] Have you used a citizen-development platform?
+CITIZEN [BENIGN] Have you helped customers build citizen-developed applications?
+CITIZEN [BENIGN] Have you worked on citizen science projects?
+CITIZEN [BENIGN] Have you supported civic or citizen engagement programs?
+CITIZEN [BENIGN] Have you worked with citizen-facing software?
+CITIZEN [BENIGN] Have you designed citizen engagement workflows?
+CITIZEN [BENIGN] Have you analyzed citizen feedback?
+CITIZEN [BENIGN] Have you managed citizen communications?
+CITIZEN [BENIGN] Have you worked with citizen experience programs?
+CITIZEN [BENIGN] Have you supported citizen-service platforms?
+CITIZEN [BENIGN] Have you worked on digital citizen initiatives?
+CITIZEN [BENIGN] Have you used software designed for citizen services?
+RIGHT [BENIGN] Do you believe you are the right fit for a fast-paced startup environment?
+RIGHT [BENIGN] Have you exercised the "right to be forgotten" (GDPR Article 17) in previous database roles?
+RIGHT [BENIGN] Do you have experience managing "digital rights management" (DRM) for video streaming?
+RIGHT [BENIGN] Have you configured role-based access control to ensure users only see what they have the right to access?
+RIGHT [BENIGN] Are you familiar with "mineral rights" software for the energy sector?
+RIGHT [BENIGN] Have you audited "water rights" allocations for agricultural tech clients?
+RIGHT [BENIGN] Do you know how to handle "right of publicity" claims in marketing campaigns?
+RIGHT [BENIGN] Have you managed "right to repair" compliance for consumer electronics?
+RIGHT [BENIGN] Are you comfortable asserting the "right to disconnect" policies for remote teams?
+RIGHT [BENIGN] Have you dealt with "right of way" acquisition software for telecom infrastructure?
+RIGHT [BENIGN] Why do you believe this role is the right fit for you?
+RIGHT [BENIGN] What makes you the right candidate for this role?
+RIGHT [BENIGN] Tell us about a time you found the right solution for a customer.
+RIGHT [BENIGN] How do you identify the right stakeholders?
+RIGHT [BENIGN] How do you ensure customers receive the right support?
+RIGHT [BENIGN] Describe how you choose the right communication channel.
+RIGHT [BENIGN] How do you determine the right success metrics?
+RIGHT [BENIGN] Tell us about a time you made the right decision despite limited information.
+RIGHT [BENIGN] How do you find the right balance between customer needs and business goals?
+RIGHT [BENIGN] What is the right approach to handling an escalation?
+RIGHT [BENIGN] How do you make sure the right people are involved?
+RIGHT [BENIGN] How do you identify the right expansion opportunities?
+RIGHT [BENIGN] Tell us about a time you put the right process in place.
+RIGHT [BENIGN] How do you determine whether a customer is getting the right value?
+RIGHT [BENIGN] What tools help you make the right decisions?
+RESIDENT [BENIGN] Have you debugged memory leaks caused by "resident" processes in Linux?
+RESIDENT [BENIGN] Do you have experience managing "Resident Advisor" software for university housing?
+RESIDENT [BENIGN] Have you worked on the "Resident Evil" franchise or similar gaming IPs?
+RESIDENT [BENIGN] Are you familiar with "resident" fonts in CSS and web typography?
+RESIDENT [BENIGN] Have you managed "resident" malware removal for enterprise endpoints?
+RESIDENT [BENIGN] Do you have experience with "resident" orchestrators in Kubernetes?
+RESIDENT [BENIGN] Have you configured "resident" set size (RSS) monitoring in Datadog?
+RESIDENT [BENIGN] Are you familiar with "resident" keys in hardware security modules (HSMs)?
+RESIDENT [BENIGN] Have you developed "resident" AI agents that stay active in the background?
+RESIDENT [BENIGN] Do you know how to clear "resident" cache in Redis?
+RESIDE [BENIGN] Where does your passion for customer success reside?
+RESIDE [BENIGN] Where does most of your team's expertise reside?
+RESIDE [BENIGN] Where does customer data reside within the platform?
+RESIDE [BENIGN] Which system does the customer record reside in?
+RESIDE [BENIGN] Where does your product knowledge reside?
+RESIDE [BENIGN] Where does responsibility for renewals reside?
+RESIDE [BENIGN] Where does the source of truth for customer data reside?
+RESIDE [BENIGN] Does your company have teams based around the world?
+RESIDE [BENIGN] Where are your company's engineering teams based?
+RESIDE [BENIGN] Which office is the customer success team based in?
+RESIDE [BENIGN] Where does your team live in the organizational structure?
+RESIDE [BENIGN] Which business unit does this function reside within?
+RESIDE [BENIGN] Where does the account relationship reside within your organization?
+RESIDE [BENIGN] Where does your customer data live?
+RESIDE [BENIGN] Which platform does the integration live in?
+RESIDE [BENIGN] Where does your documentation live?
+RESIDE [BENIGN] Where does the reporting data reside?
+RESIDE [BENIGN] Where does your customer knowledge live?
+RESIDE [BENIGN] Where does your team's institutional knowledge reside?
+RESIDE [BENIGN] Where does the workflow live today?
+RELOCATE [BENIGN] Have you managed data center relocations for enterprise infrastructure?
+RELOCATE [BENIGN] Do you have experience writing scripts to relocate legacy codebases to the cloud?
+RELOCATE [BENIGN] Have you overseen the physical relocation of office hardware and servers?
+RELOCATE [BENIGN] Are you familiar with database shard relocation strategies?
+RELOCATE [BENIGN] Have you used Terraform to relocate AWS resources across regions?
+RELOCATE [BENIGN] Do you have experience relocating manufacturing supply chains in SAP?
+RELOCATE [BENIGN] Have you managed the relocation of DNS records during a domain migration?
+RELOCATE [BENIGN] Are you comfortable relocating UI components in a React codebase?
+RELOCATE [BENIGN] Have you assisted clients with corporate headquarters relocation logistics?
+RELOCATE [BENIGN] Do you know how to relocate virtual machines in a VMware cluster?
+RELOCATE [BENIGN] Are you comfortable helping customers relocate their operations?
+RELOCATE [BENIGN] Have you supported customers through office relocation?
+RELOCATE [BENIGN] Have you managed a relocation project?
+RELOCATE [BENIGN] Do you have experience coordinating employee relocation programs?
+RELOCATE [BENIGN] Have you helped customers plan relocation communications?
+RELOCATE [BENIGN] Have you managed relocation vendors?
+RELOCATE [BENIGN] Have you supported a customer relocating to a new office?
+RELOCATE [BENIGN] Have you created relocation project plans?
+RELOCATE [BENIGN] Have you managed customer accounts during a company relocation?
+RELOCATE [BENIGN] Have you helped employees understand relocation benefits?
+RELOCATE [BENIGN] Have you worked with relocation-management software?
+RELOCATE [BENIGN] Have you supported international relocation services?
+RELOCATE [BENIGN] Have you managed relocation-related customer escalations?
+RELOCATE [BENIGN] Have you coordinated relocation timelines?
+RELOCATE [BENIGN] Have you worked with customers planning a relocation?
+AUTHORIZE [BENIGN] Have you integrated with Authorize.net for payment processing?
+AUTHORIZE [BENIGN] Do you have experience setting up OAuth 2.0 authorization flows?
+AUTHORIZE [BENIGN] Have you managed "authorized reseller" channels for software vendors?
+AUTHORIZE [BENIGN] Are you familiar with "authorized signatory" lists in banking SaaS?
+AUTHORIZE [BENIGN] Have you configured "authorized IP" whitelists for API gateways?
+AUTHORIZE [BENIGN] Do you have experience with "authorized capital" tracking in fintech?
+AUTHORIZE [BENIGN] Have you tested "authorized user" features for shared streaming accounts?
+AUTHORIZE [BENIGN] Are you familiar with "authorized domains" in Google Workspace admin?
+AUTHORIZE [BENIGN] Have you managed "authorized economic operator" (AEO) status in supply chain software?
+AUTHORIZE [BENIGN] Do you know how to troubleshoot "401 Unauthorized" errors in REST APIs?
+AUTHORIZE [BENIGN] Have you managed user authorization workflows?
+AUTHORIZE [BENIGN] Have you configured authorization rules?
+AUTHORIZE [BENIGN] Do you have experience with API authorization?
+AUTHORIZE [BENIGN] Have you worked with role-based authorization?
+AUTHORIZE [BENIGN] Have you configured customer permissions?
+AUTHORIZE [BENIGN] Have you managed access permissions?
+AUTHORIZE [BENIGN] Have you worked with authorization APIs?
+AUTHORIZE [BENIGN] Have you supported customer permission models?
+AUTHORIZE [BENIGN] Have you configured approval permissions?
+AUTHORIZE [BENIGN] Have you managed administrator authorization?
+AUTHORIZE [BENIGN] Have you worked with payment authorization?
+AUTHORIZE [BENIGN] Have you troubleshot authorization failures?
+AUTHORIZE [BENIGN] Have you managed user access controls?
+AUTHORIZE [BENIGN] Have you configured permission sets?
+AUTHORIZE [BENIGN] Have you worked with authorization tokens?
+AUTHORIZE [BENIGN] Have you supported OAuth authorization?
+AUTHORIZE [BENIGN] Have you implemented customer approval workflows?
+AUTHORIZE [BENIGN] Have you managed account permissions?
+AUTHORIZE [BENIGN] Have you worked with delegated authorization?
+AUTHORIZE [BENIGN] Have you supported authorization-related customer issues?
+PERMIT [BENIGN] Have you managed building permit workflows for construction tech clients?
+PERMIT [BENIGN] Do you have experience integrating with city parking permit APIs?
+PERMIT [BENIGN] Have you developed software for tracking environmental impact permits?
+PERMIT [BENIGN] Are you familiar with "permitted use" clauses in commercial real estate SaaS?
+PERMIT [BENIGN] Have you managed "permit to work" (PTW) safety systems for oil and gas?
+PERMIT [BENIGN] Do you have experience with film and photography permit applications?
+PERMIT [BENIGN] Have you built ticketing systems for national park camping permits?
+PERMIT [BENIGN] Are you familiar with "permit expediting" services for real estate developers?
+PERMIT [BENIGN] Have you configured "permitted sender" lists in email security gateways?
+PERMIT [BENIGN] Do you know how to handle CORS "permitted origins" in web development?
+CLEARANCE [BENIGN] Have you managed inventory clearance sales for e-commerce platforms?
+CLEARANCE [BENIGN] Do you have experience with snow clearance routing software for municipalities?
+CLEARANCE [BENIGN] Have you worked on "clearance rate" analytics for real estate markets?
+CLEARANCE [BENIGN] Are you familiar with "customs clearance" software for international freight?
+CLEARANCE [BENIGN] Have you managed "check clearance" workflows in banking apps?
+CLEARANCE [BENIGN] Do you have experience with "medical clearance" tracking for sports teams?
+CLEARANCE [BENIGN] Have you built "cart abandonment clearance" email campaigns?
+CLEARANCE [BENIGN] Are you familiar with "clearance levels" in gaming or RPG mechanics?
+CLEARANCE [BENIGN] Have you managed "database clearance" (purging) scripts for GDPR compliance?
+CLEARANCE [BENIGN] Do you know how to calculate "clearance prices" for retail markdown optimization?
+IMMIGRATION [BENIGN] Have you sold SaaS to immigration law firms?
+IMMIGRATION [BENIGN] Do you have experience integrating with USCIS case status APIs?
+IMMIGRATION [BENIGN] Have you managed CRM data for immigration consulting agencies?
+IMMIGRATION [BENIGN] Are you familiar with the business side of the immigration tech sector?
+IMMIGRATION [BENIGN] Have you built document translation tools for immigration applicants?
+IMMIGRATION [BENIGN] Do you have experience with "immigration impact" analytics for university admissions?
+IMMIGRATION [BENIGN] Have you marketed software to immigration nonprofits?
+IMMIGRATION [BENIGN] Are you familiar with global mobility and immigration software like Fragomen's portals?
+IMMIGRATION [BENIGN] Have you supported helpdesks for immigration case management software?
+IMMIGRATION [BENIGN] Do you understand the data privacy requirements for handling immigration case files?
+NATIONAL [BENIGN] Have you managed "National Account" sales territories for enterprise software?
+NATIONAL [BENIGN] Do you have experience with "National Park" reservation systems?
+NATIONAL [BENIGN] Have you worked on "national rollout" strategies for retail POS systems?
+NATIONAL [BENIGN] Are you familiar with "national brand" vs "private label" analytics?
+NATIONAL [BENIGN] Have you managed "national grid" infrastructure software?
+NATIONAL [BENIGN] Do you have experience with "national health service" (NHS) integrations?
+NATIONAL [BENIGN] Have you sold to "national distributors" in the telecom space?
+NATIONAL [BENIGN] Are you familiar with "national origin" discrimination training platforms?
+NATIONAL [BENIGN] Have you managed "national championship" ticketing systems?
+NATIONAL [BENIGN] Do you know how to configure "national currency" formatting in i18n libraries?
+PASSPORT [BENIGN] Have you worked on "Passport to Success" educational software?
+PASSPORT [BENIGN] Do you have experience with "product passport" tracking for sustainability?
+PASSPORT [BENIGN] Have you integrated with "Passport.js" for Node.js authentication?
+PASSPORT [BENIGN] Are you familiar with "data passport" concepts in data mesh architectures?
+PASSPORT [BENIGN] Have you managed "brand passport" guidelines for global marketing teams?
+PASSPORT [BENIGN] Do you have experience with "health passport" or vaccine credential apps?
+PASSPORT [BENIGN] Have you built "passport photo" cropping and validation tools?
+PASSPORT [BENIGN] Are you familiar with "API passport" or token management systems?
+PASSPORT [BENIGN] Have you worked on "internal passport" systems for corporate campus access?
+PASSPORT [BENIGN] Do you know how to troubleshoot Passport.js OAuth callback errors?
+BACKGROUND [BENIGN] Do you have a strong background in B2B SaaS sales?
+BACKGROUND [BENIGN] Have you designed "background" CSS properties for responsive web design?
+BACKGROUND [BENIGN] Are you familiar with "background jobs" using Sidekiq or Celery?
+BACKGROUND [BENIGN] Have you managed "background music" licensing APIs for retail tech?
+BACKGROUND [BENIGN] Do you have a technical background in computer science or engineering?
+BACKGROUND [BENIGN] Have you worked on "background blur" features for video conferencing apps?
+BACKGROUND [BENIGN] Are you familiar with "background fetch" in iOS/Android mobile development?
+BACKGROUND [BENIGN] Have you configured "background scan" intervals for antivirus software?
+BACKGROUND [BENIGN] Do you have experience with "background check" API integrations (e.g., Checkr) as a developer?
+BACKGROUND [BENIGN] Have you analyzed "background traffic" in network security monitoring?
+BACKGROUND [BENIGN] Have you managed customer background-check workflows?
+BACKGROUND [BENIGN] Have you worked with background-screening software?
+BACKGROUND [BENIGN] Have you supported customers using background-check platforms?
+BACKGROUND [BENIGN] Have you integrated background-check APIs?
+BACKGROUND [BENIGN] Have you managed verification workflows?
+BACKGROUND [BENIGN] Have you worked with identity-verification software?
+BACKGROUND [BENIGN] Have you supported customer identity verification?
+BACKGROUND [BENIGN] Have you managed document-verification workflows?
+BACKGROUND [BENIGN] Have you worked with employee verification products?
+BACKGROUND [BENIGN] Have you supported background-screening customers?
+BACKGROUND [BENIGN] Have you troubleshot verification issues?
+BACKGROUND [BENIGN] Have you managed compliance software integrations?
+BACKGROUND [BENIGN] Have you worked with credential verification?
+BACKGROUND [BENIGN] Have you supported professional-license verification?
+BACKGROUND [BENIGN] Have you worked with automated background checks?
+LICENSE [BENIGN] Have you managed software license renewals for enterprise clients?
+LICENSE [BENIGN] Do you have experience with Creative Commons license compliance?
+LICENSE [BENIGN] Have you built license key generation and validation systems?
+LICENSE [BENIGN] Are you familiar with "driver's license" OCR scanning for KYC apps?
+LICENSE [BENIGN] Have you managed "open source license" audits (e.g., GPL, MIT) for codebases?
+LICENSE [BENIGN] Do you have experience with "license plate" recognition (ALPR) software?
+LICENSE [BENIGN] Have you configured "license server" clusters for CAD software?
+LICENSE [BENIGN] Are you familiar with "hunting/fishing license" e-commerce platforms?
+LICENSE [BENIGN] Have you managed "seat-based license" tracking in SaaS billing?
+LICENSE [BENIGN] Do you know how to parse "license headers" in source code files?
+EXPORT [BENIGN] Have you managed "data export" pipelines to Snowflake or BigQuery?
+EXPORT [BENIGN] Do you have experience with "export control" classification software (ECCN)?
+EXPORT [BENIGN] Have you built CSV/PDF "export" features for financial reporting dashboards?
+EXPORT [BENIGN] Are you familiar with ITAR compliance modules in ERP systems like SAP?
+EXPORT [BENIGN] Have you sold cybersecurity tools to ITAR-regulated defense contractors?
+TIMEZONE [BENIGN] Have you built timezone conversion utilities using libraries like Moment.js?
+TIMEZONE [BENIGN] Do you have experience managing global team calendars across multiple timezones?
+TIMEZONE [BENIGN] Are you comfortable working with a team where there is a 4-hour timezone overlap?
+TIMEZONE [BENIGN] Have you configured "timezone-aware" datetime fields in PostgreSQL?
+TIMEZONE [BENIGN] Do you know how to handle daylight saving time edge cases in scheduling software?
+LANGUAGE [BENIGN] What languages do you speak?
+LANGUAGE [BENIGN] Which languages are you fluent in?
+LANGUAGE [BENIGN] What is your level of English proficiency?
+LANGUAGE [BENIGN] How would you describe your written English?
+LANGUAGE [BENIGN] How would you describe your spoken English?
+LANGUAGE [BENIGN] Have you worked with multilingual customers?
+LANGUAGE [BENIGN] Have you supported customers in multiple languages?
+LANGUAGE [BENIGN] Which languages can you use professionally?
+LANGUAGE [BENIGN] Do you have experience localizing customer communications?
+LANGUAGE [BENIGN] Have you worked with translation software?
+LANGUAGE [BENIGN] Have you managed multilingual support content?
+LANGUAGE [BENIGN] Have you created multilingual help-center articles?
+LANGUAGE [BENIGN] Have you supported international customer accounts?
+LANGUAGE [BENIGN] Have you worked with language-learning software?
+LANGUAGE [BENIGN] Have you managed language localization projects?
+PROFILE_FIELD [BENIGN] Please provide your postal code.
+PROFILE_FIELD [BENIGN] Please provide your ZIP/postal code.
+PROFILE_FIELD [BENIGN] Please enter your address.
+PROFILE_FIELD [BENIGN] Please provide your mailing address.
+PROFILE_FIELD [BENIGN] Please provide your current address.
+PROFILE_FIELD [AMBIGUOUS] What country are you currently located in?
+PROFILE_FIELD [AMBIGUOUS] What city are you currently located in?
+PROFILE_FIELD [AMBIGUOUS] Please enter your country.
+PROFILE_FIELD [AMBIGUOUS] Please enter your city.
+PROFILE_FIELD [AMBIGUOUS] Please enter your current location.
+PROFILE_FIELD [AMBIGUOUS] What is your country of residence?
+PROFILE_FIELD [AMBIGUOUS] What city do you currently live in?
+PROFILE_FIELD [AMBIGUOUS] Please select your country from the list.
+PROFILE_FIELD [AMBIGUOUS] Please select your current city.
+PROFILE_FIELD [AMBIGUOUS] What is your preferred work location?
+PROFILE_FIELD [AMBIGUOUS] Which location should we associate with your application?
+PROFILE_FIELD [AMBIGUOUS] Please confirm your city and country.
+PROFILE_FIELD [AMBIGUOUS] What is your primary location?
+PROFILE_FIELD [AMBIGUOUS] What location should appear on your profile?
+PROFILE_FIELD [AMBIGUOUS] Please select your nearest city.
+LOCATION_WORDS [BENIGN] What location would you prefer for an in-person event?
+LOCATION_WORDS [BENIGN] Which office location would be most convenient for a customer?
+LOCATION_WORDS [BENIGN] Have you managed multiple office locations?
+LOCATION_WORDS [BENIGN] Have you supported customers across multiple locations?
+LOCATION_WORDS [BENIGN] Have you managed geographically distributed teams?
+LOCATION_WORDS [BENIGN] Have you worked with location-based analytics?
+LOCATION_WORDS [BENIGN] Have you configured location-based workflows?
+LOCATION_WORDS [BENIGN] Have you used location data in customer reporting?
+LOCATION_WORDS [BENIGN] Have you managed location-based customer segments?
+LOCATION_WORDS [BENIGN] Have you worked with a global customer base?
+AMBIGUOUS [AMBIGUOUS] Are you currently based in the United States?
+AMBIGUOUS [AMBIGUOUS] Are you currently based in the UK?
+AMBIGUOUS [AMBIGUOUS] Do you currently reside in the EU?
+AMBIGUOUS [AMBIGUOUS] What country do you reside in?
+AMBIGUOUS [AMBIGUOUS] Where do you currently live?
+AMBIGUOUS [AMBIGUOUS] What is your current work location?
+AMBIGUOUS [AMBIGUOUS] Are you willing to relocate?
+AMBIGUOUS [AMBIGUOUS] Would you consider relocation for the right opportunity?
+AMBIGUOUS [AMBIGUOUS] Are you able to work from our location?
+AMBIGUOUS [AMBIGUOUS] Which country are you currently working from?
+AMBIGUOUS [AMBIGUOUS] Do you have authorization to access restricted customer data?
+AMBIGUOUS [AMBIGUOUS] Do you have the right access permissions for this system?
+AMBIGUOUS [AMBIGUOUS] Do you have clearance to access this environment?
+AMBIGUOUS [AMBIGUOUS] Are you authorized to use this platform?
+AMBIGUOUS [AMBIGUOUS] Are you currently eligible for this program?

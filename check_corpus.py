@@ -3,8 +3,9 @@ through the real classifier and report what slips through.
 
     python check_corpus.py corpus/restrictive_questions_openai_1.txt [-v]
 
-Tags: [NAMED]/[BARE] = restrictive (must reject), [BENIGN] = must be kept,
-[AMBIGUOUS] = reported only. A restrictive line is checked at four points:
+Tags: [NAMED]/[BARE]/[RESTRICTIVE] = restrictive (must reject), [BENIGN] = must be kept,
+[AMBIGUOUS] = reported only. Lines whose category starts with JD are job-DESCRIPTION sentences, all
+others are application questions. A restrictive question is checked at four points:
   rank4-narrow   job located in one allowed country (United States)   -> must NOT be admitted
   rank4-city     "City, Country" job                                  -> must NOT be admitted
   rank4-broad    job located in a region NAME (APAC)                  -> only NAMED must not be admitted
@@ -34,6 +35,16 @@ def r4_admitted(loc, q):
     return classifier.classify_rank4(dict(BASE, location=loc, description_snippet=_desc(q)))[0] is not None
 
 
+def r4_admitted_jd(loc, sentence):
+    desc = sentence + "\nApplication Question: How did you hear about this role?"
+    return classifier.classify_rank4(dict(BASE, location=loc, description_snippet=desc))[0] is not None
+
+
+def universal_rejected_jd(sentence):
+    job = dict(BASE, location="Remote", description_snippet=sentence)
+    return classifier._keyword_classify_location_detail(job)[0] == "no_match"
+
+
 def universal_rejected(q):
     job = dict(BASE, location="Remote", description_snippet=_desc(q))
     return classifier._keyword_classify_location_detail(job)[0] == "no_match"
@@ -46,18 +57,33 @@ def main():
     miss = defaultdict(list)
     n = 0
     for cat, tag, q in rows:
-        if tag in ("NAMED", "BARE"):
+        jd = cat.startswith("JD")
+        if tag in ("NAMED", "BARE", "RESTRICTIVE"):
             n += 1
+            if jd:
+                if r4_admitted_jd("United States", q):
+                    miss["rank4-narrow"].append((cat, tag, q))
+                if r4_admitted_jd("London, United Kingdom", q):
+                    miss["rank4-city"].append((cat, tag, q))
+                if tag in ("NAMED", "RESTRICTIVE") and not universal_rejected_jd(q):
+                    miss["universal"].append((cat, tag, q))
+                continue
             if r4_admitted("United States", q):
                 miss["rank4-narrow"].append((cat, tag, q))
             if r4_admitted("London, United Kingdom", q):
                 miss["rank4-city"].append((cat, tag, q))
-            if tag == "NAMED" and r4_admitted("APAC", q):
+            if tag in ("NAMED", "RESTRICTIVE") and r4_admitted("APAC", q):
                 miss["rank4-broad"].append((cat, tag, q))
-            if tag == "NAMED" and not universal_rejected(q):
+            if tag in ("NAMED", "RESTRICTIVE") and not universal_rejected(q):
                 miss["universal"].append((cat, tag, q))
         elif tag == "BENIGN":
             n += 1
+            if jd:
+                if not r4_admitted_jd("United States", q):
+                    miss["benign-rank4-narrow"].append((cat, tag, q))
+                if universal_rejected_jd(q):
+                    miss["benign-universal"].append((cat, tag, q))
+                continue
             if not r4_admitted("United States", q):
                 miss["benign-rank4-narrow"].append((cat, tag, q))
             if universal_rejected(q):

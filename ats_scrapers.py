@@ -8132,6 +8132,47 @@ def _clean_label(text: str) -> str:
     return text
 
 
+# 2026-10 (OpenAI/Qwen review, part 4): the restriction can live entirely in a field's ANSWER OPTIONS
+# ("I am authorized to work in the US without sponsorship" / "I require sponsorship" / a Country dropdown
+# with three countries), so those are captured as a separate "Application Options:" line right after
+# the question line. Yes/No-only answers add nothing and are dropped; a list longer than 40 options
+# is an ordinary demographic dropdown (every country) and is dropped too.
+_OPTION_NOISE = {"yes", "no", "n/a", "na", "none", "select", "select...", "please select", "-", "--", "—"}
+_OPTION_LIST_KEYS = ("options", "choices", "values", "answers", "answer_options", "selectableValues",
+                     "selectable_values", "possibleAnswers")
+
+
+def _option_texts(item) -> list[str]:
+    """Answer-option labels of one form-field dict, whatever the ATS calls the list."""
+    if not isinstance(item, dict):
+        return []
+    for key in _OPTION_LIST_KEYS:
+        v = item.get(key)
+        if not isinstance(v, list):
+            continue
+        out = []
+        for o in v:
+            if isinstance(o, dict):
+                o = o.get("label") or o.get("text") or o.get("name") or o.get("title") or o.get("value") or ""
+            t = _clean_label(str(o)) if o is not None else ""
+            if t:
+                out.append(t)
+        if out:
+            return out
+    return []
+
+
+def _options_line(label: str, options) -> str:
+    opts: list[str] = []
+    for o in options or []:
+        o = _clean_label(o)
+        if o and o.lower() not in _OPTION_NOISE and o[:140] not in opts:
+            opts.append(o[:140])
+    if not label or not opts or len(opts) > 40:
+        return ""
+    return f"Application Options: {label} => " + " | ".join(opts)
+
+
 # 2026-09 CRITICAL FIX (explicit user instruction, real production
 # evidence): this function used to keep ONLY questions matching
 # _WORK_AUTH_RE before ever appending them to description_snippet — every
@@ -8225,9 +8266,12 @@ def _format_screening_questions(questions: list[dict]) -> str:
     the old work-authorization-only pre-filter."""
     lines = []
     for q in questions or []:
-        label = (q.get("label") or "").strip()
+        label = _clean_label(q.get("label") or "")
         if label and not _BOILERPLATE_QUESTION_RE.match(label):
             lines.append(f"Application Question: {label}")
+            opt_line = _options_line(label, q.get("options"))
+            if opt_line:
+                lines.append(opt_line)
     return "\n".join(lines)
 
 
@@ -8268,7 +8312,7 @@ def _walk_for_questions(obj, out: list[dict], depth: int = 0):
                     label = _clean_label(str(raw_label))
                     if label:
                         required = bool(item.get("required") or item.get("isRequired"))
-                        out.append({"label": label, "required": required})
+                        out.append({"label": label, "required": required, "options": _option_texts(item)})
             else:
                 _walk_for_questions(val, out, depth + 1)
     elif isinstance(obj, list):
@@ -8321,7 +8365,8 @@ def _parse_form_elements(html_text: str) -> list[dict]:
             continue
 
         required = el.has_attr("required") or (el.get("aria-required") == "true")
-        questions.append({"label": label, "required": required})
+        options = [o.get_text(" ", strip=True) for o in el.find_all("option")] if el.name == "select" else []
+        questions.append({"label": label, "required": required, "options": options})
 
     return questions
 
@@ -8622,9 +8667,13 @@ def _fetch_greenhouse_questions(job: dict) -> str:
     questions = data.get("questions") or []
     auth_questions = []
     for q in questions:
-        label = (q.get("label") or "").strip()
+        label = _clean_label(q.get("label") or "")
         if label and not _BOILERPLATE_QUESTION_RE.match(label):
             auth_questions.append(f"Application Question: {label}")
+            gh_options = [o for fld in (q.get("fields") or []) for o in _option_texts(fld)]
+            opt_line = _options_line(label, gh_options)
+            if opt_line:
+                auth_questions.append(opt_line)
 
     # Also check metadata for location hints (e.g. "United States (Remote)")
     metadata = data.get("metadata") or []
@@ -8662,8 +8711,8 @@ _ASHBY_GQL_SEM = threading.BoundedSemaphore(int(os.environ.get("ASHBY_GQL_CONCUR
 _ASHBY_GQL_ATTEMPTS = 4
 
 
-def _ashby_form_questions(slug: str, job_id: str) -> list[str] | None:
-    """Substantive question titles of one Ashby posting's application form.
+def _ashby_form_questions(slug: str, job_id: str) -> list[tuple[str, list[str]]] | None:
+    """Substantive (title, answer options) pairs of one Ashby posting's application form.
     [] = the form was read and holds only standard fields; None = the form
     could NOT be read (rate-limited/blocked/errored every attempt, or the
     posting no longer exists)."""
@@ -8689,9 +8738,9 @@ def _ashby_form_questions(slug: str, job_id: str) -> list[str] | None:
                 for section in (posting.get("applicationForm") or {}).get("sections") or []:
                     for entry in section.get("fieldEntries") or []:
                         f = entry.get("field") if isinstance(entry, dict) else None
-                        title = ((f or {}).get("title") or "").strip() if isinstance(f, dict) else ""
+                        title = _clean_label((f or {}).get("title") or "") if isinstance(f, dict) else ""
                         if title and not _BOILERPLATE_QUESTION_RE.match(title):
-                            titles.append(title)
+                            titles.append((title, _option_texts(f)))
                 return titles
             if resp.status_code not in (403, 408, 425, 429, 500, 502, 503, 504):
                 log.debug(f"Ashby: GraphQL HTTP {resp.status_code} for {slug}/{job_id}")
@@ -8729,7 +8778,13 @@ def _fetch_ashby_questions(job: dict) -> str:
         return _fallback()
     job["_form_status"] = "ok"
     if titles:
-        return "\n".join(f"Application Question: {t}" for t in titles)
+        lines = []
+        for title, options in titles:
+            lines.append(f"Application Question: {title}")
+            opt_line = _options_line(title, options)
+            if opt_line:
+                lines.append(opt_line)
+        return "\n".join(lines)
     return _fallback()
 
 
@@ -9182,7 +9237,7 @@ def _fetch_rippling_questions(job: dict) -> str:
         # the non-worded KNOCKOUT questions (e.g. the residency-restriction
         # example above) that were already deliberately kept above. Format
         # directly instead so that filtering decision actually sticks.
-        return "\n".join(f"Application Question: {q['label']}" for q in questions)
+        return "\n".join(f"Application Question: {_clean_label(q['label'])}" for q in questions)
 
     # Fallback: the Next.js data-route trick can fail if Rippling changes
     # its build layout — fall back to the old best-effort DOM guesses

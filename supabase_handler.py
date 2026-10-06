@@ -49,7 +49,12 @@ import requests as http_requests
 #       and vetting, payroll / legal-entity / "can we legally employ you" gates, move /
 #       driving distance / attend-the-office wording, country-tied police checks, licensing,
 #       "local language", and German/Dutch/Nordic/Portuguese/Spanish phrasing.
-CLASSIFIER_VERSION = 8
+#   9 - 2026-10-06: description-sentence detector (has_candidate_binding_jd_signal: office / "work
+#       from within" / listed-countries / entity-EOR-payroll-tax / US-person / clearance / "without
+#       requiring sponsorship" / relocation / time-zone residence), answer-option detector (closed
+#       country lists, place-bound options), experience-with-topic exemption, candidate-subject
+#       presence rule, Unicode normalisation of title/location/description at both entry points.
+CLASSIFIER_VERSION = 9
 
 import os
 from dotenv import load_dotenv

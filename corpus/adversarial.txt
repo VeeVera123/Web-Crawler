@@ -1,0 +1,41 @@
+# Adversarial lines from the Part 5 review (OpenAI + Qwen): leak classes the first corpora did not cover.
+ADV_Q [NAMED] Are you authorized to work in the EU?
+ADV_Q [NAMED] Do you have the right to work in the EEA?
+ADV_Q [NAMED] Are you eligible to work in the Schengen area?
+ADV_Q [NAMED] Are you a resident of the European Union?
+ADV_Q [NAMED] Do you hold a valid EU work permit?
+JD_ADV [RESTRICTIVE] You must be based in our Newcastle office.
+JD_ADV [RESTRICTIVE] Must reside in Manchester.
+JD_ADV [RESTRICTIVE] Applicants must reside in the UK and be within 50 miles of Leeds.
+JD_ADV [RESTRICTIVE] Must be eligible for federal employment.
+JD_ADV [RESTRICTIVE] Must be able to obtain a DoD clearance.
+JD_ADV [RESTRICTIVE] Must reside in the EU to handle GDPR data.
+JD_ADV [RESTRICTIVE] Cannot work outside the EEA due to data sovereignty laws.
+JD_ADV [RESTRICTIVE] Must reside in a country where we can legally ship company laptops.
+JD_ADV [RESTRICTIVE] Must be eligible for UK PAYE.
+JD_ADV [RESTRICTIVE] Candidates located in sanctioned countries cannot be hired.
+JD_ADV [RESTRICTIVE] This position can be based anywhere in the US.
+JD_ADV [RESTRICTIVE] US-based candidates only.
+JD_ADV [RESTRICTIVE] Authorization to work in the US is required.
+JD_ADV [RESTRICTIVE] Required: authorization to work in the US.
+JD_ADV [RESTRICTIVE] Work authorization: United States required.
+JD_ADV [RESTRICTIVE] US/Canada work authorization required.
+JD_ADV [RESTRICTIVE] To work in the US, candidates must have authorization.
+JD_ADV [RESTRICTIVE] Candidates must have, before joining the company and throughout employment, valid authorization to work in the United States.
+JD_ADV [RESTRICTIVE] Authorized to work in the United States (without sponsorship).
+JD_ADV [RESTRICTIVE] Candidates must be authorized to work in the US,
+ and must not require sponsorship.
+JD_ADV [RESTRICTIVE] Wohnsitz in Deutschland erforderlich.
+JD_ADV [RESTRICTIVE] Droit de travailler en France requis.
+JD_ADV [RESTRICTIVE] Eine Arbeitserlaubnis für Deutschland ist erforderlich.
+JD_ADV [RESTRICTIVE] Debe tener autorización para trabajar en España.
+JD_ADV [RESTRICTIVE] Você deve ter autorização de trabalho no Brasil.
+JD_ADV [BENIGN] German is a plus.
+JD_ADV [BENIGN] French language skills are preferred.
+JD_ADV [BENIGN] Experience working with French-speaking customers is helpful.
+JD_ADV [BENIGN] Our EMEA team supports customers globally.
+JD_ADV [BENIGN] We have offices throughout EMEA.
+JD_ADV [BENIGN] CSMs collaborate with colleagues across EMEA.
+JD_ADV [AMBIGUOUS] Our clients may ask: "Are you authorized to work in the US?" during their own hiring.
+JD_ADV [AMBIGUOUS] We do NOT require you to be a US citizen.
+JD_ADV [AMBIGUOUS] You do not need authorization to work with our API sandbox.

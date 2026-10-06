@@ -601,6 +601,30 @@ Nordic/Portuguese/Spanish). Two deliberate departures from its tags: a *generic*
 / credit / screening check is kept (nearly every form asks one and it is not an
 eligibility test), and a question that names no place ("where this role is located") is
 only rejected through the referential check once the job's own location names a country.
+Four more corpora sit beside it: `corpus/benign_look_alikes.txt` (about 335 ordinary questions
+that contain eligibility-sounding words: "Visa" the card network, event sponsorships, citizen
+developers, Passport.js, resident processes, relocating servers...; all must be kept),
+`corpus/jd_sentences.txt` (about 195 description sentences, restrictive and benign),
+`corpus/adversarial.txt` (word-order variants, EU/EEA/Schengen, city-level residency, federal/DoD,
+data residency, shipping/embargo, PAYE, non-English requirement sentences, soft language) and
+`check_form_fields.py` (answer options, hard-wrapped questions, a transformation fuzz that re-writes
+every restrictive question with fullwidth letters, zero-width / soft-hyphen characters, NBSPs,
+upper-casing and decoration, and the fetcher helpers).
+
+**Answer options.** Fetchers append `Application Options: <question> => opt | opt ...` after a
+question (Greenhouse `fields[].values`, Ashby `selectableValues`, embedded JSON option lists and
+`<select>` elements; Yes/No answers and lists over 40 are dropped). An option that is itself a
+place-bound eligibility statement, or a short closed country list (2-15 places, no "Other / Rest of
+world", none African) on a "where do you live / which country" question, rejects the job on every
+path; bare option statuses ("I require sponsorship", "H-1B") are Rank 4 narrow-scope rejections like
+a bare question. Questions are collapsed to one line at the source, and the classifier re-joins a
+wrapped question in rows stored earlier.
+
+**Description sentences** are read by `has_candidate_binding_jd_signal`: a sentence must carry
+requirement framing, be about the candidate, match one binding family, and not be a skills or
+benefit sentence ("experience with ITAR", "we offer relocation assistance"). Plain company facts
+("we have offices in Germany", "our EOR partner operates in 100 countries") never match.
+
 Questions framed as *experience with* a topic ("experience with payroll software",
 "Visa or Mastercard") are exempt from the Rank 4 eligibility vocabulary, and a place that
 only appears as a format example ("e.g. San Jose, CA") never binds an English question.
