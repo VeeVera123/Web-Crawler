@@ -588,6 +588,23 @@ it. `check_rank4.py` is the regression corpus (17,000+ generated cases: location
 shapes, eligibility questions in ~60 phrasings plus a grammar fuzz, JD sentences,
 benefit wording, ordinary questions that must still pass).
 
+`check_corpus.py` runs an externally written, tagged question corpus
+(`corpus/*.txt`, one `CATEGORY [NAMED|BARE|BENIGN|AMBIGUOUS] question` per line)
+through four checkpoints: Rank 4 for a one-country job, Rank 4 for "City, Country",
+Rank 4 for a region-name job (named-place questions only) and the universal Rank 1/2/3
+path (named-place questions only). `corpus/restrictive_questions_openai_1.txt` is the
+first such file (about 620 lines: work authorization, visa/sponsorship and named visa
+categories, immigration status, citizenship, residence, relocation, commuting, on-site,
+clearance, export control / "US person", licensing, background checks, time zones, tax
+residency, payroll / legal-entity gates, language proxies, German/French/Italian/Dutch/
+Nordic/Portuguese/Spanish). Two deliberate departures from its tags: a *generic* background
+/ credit / screening check is kept (nearly every form asks one and it is not an
+eligibility test), and a question that names no place ("where this role is located") is
+only rejected through the referential check once the job's own location names a country.
+Questions framed as *experience with* a topic ("experience with payroll software",
+"Visa or Mastercard") are exempt from the Rank 4 eligibility vocabulary, and a place that
+only appears as a format example ("e.g. San Jose, CA") never binds an English question.
+
 ### "Informational" region mentions vs. a residency enforcement
 
 2026-09 (explicit user policy, verbatim: "a JD saying based in one our

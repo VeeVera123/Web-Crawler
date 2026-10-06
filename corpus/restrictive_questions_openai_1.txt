@@ -1,0 +1,630 @@
+# OpenAI-supplied restrictive-question corpus, part 1 (tagged NAMED/BARE by OpenAI).
+# Local retags: lines naming no place were NAMED -> BARE; GENERIC background/credit/screening checks
+# were retagged AMBIGUOUS (nearly every form asks one; it is not an eligibility test and is kept).
+WORK_AUTHORIZATION [NAMED] Are you legally authorized to work in the United States?
+WORK_AUTHORIZATION [NAMED] Are you legally authorized to work in the UK?
+WORK_AUTHORIZATION [NAMED] Do you have the legal right to work in Australia?
+WORK_AUTHORIZATION [NAMED] Do you have the right to work in Canada?
+WORK_AUTHORIZATION [NAMED] Are you permitted to work in Germany?
+WORK_AUTHORIZATION [NAMED] Are you entitled to work in Ireland?
+WORK_AUTHORIZATION [NAMED] Are you eligible to work in Singapore?
+WORK_AUTHORIZATION [NAMED] Are you currently authorized to work in Switzerland?
+WORK_AUTHORIZATION [NAMED] Are you legally allowed to work in the United States?
+WORK_AUTHORIZATION [NAMED] Do you have unrestricted authorization to work in the United States?
+WORK_AUTHORIZATION [NAMED] Do you have unrestricted work rights in Australia?
+WORK_AUTHORIZATION [NAMED] Are you authorized to accept employment in the United Kingdom?
+WORK_AUTHORIZATION [NAMED] Are you permitted to accept employment in Canada?
+WORK_AUTHORIZATION [NAMED] Are you eligible for employment in the United States?
+WORK_AUTHORIZATION [NAMED] Are you legally eligible for employment in Germany?
+WORK_AUTHORIZATION [NAMED] Can you legally work for any employer in the United States?
+WORK_AUTHORIZATION [NAMED] Can you legally work for any employer in Australia?
+WORK_AUTHORIZATION [NAMED] Do you have authorization to work for any employer in Canada?
+WORK_AUTHORIZATION [NAMED] Are you authorized to work for this employer in the UK?
+WORK_AUTHORIZATION [NAMED] Are you legally entitled to work within the United States?
+WORK_AUTHORIZATION [NAMED] Are you entitled to employment in Australia?
+WORK_AUTHORIZATION [NAMED] Do you currently hold valid authorization to work in Ireland?
+WORK_AUTHORIZATION [NAMED] Do you currently have the right to work in Germany?
+WORK_AUTHORIZATION [NAMED] Can you provide evidence of your right to work in the United States?
+WORK_AUTHORIZATION [NAMED] Can you provide proof that you are authorized to work in Canada?
+WORK_AUTHORIZATION [NAMED] Upon hire, can you provide verification of your legal right to work in Australia?
+WORK_AUTHORIZATION [NAMED] Please confirm that you are legally permitted to work in the United Kingdom.
+WORK_AUTHORIZATION [NAMED] I confirm that I am legally authorized to work in the United States.
+WORK_AUTHORIZATION [NAMED] I certify that I have the right to work in Canada.
+WORK_AUTHORIZATION [NAMED] Select the statement that best describes your authorization to work in Australia.
+WORK_AUTHORIZATION [NAMED] What is the source of your right to work in the United States?
+WORK_AUTHORIZATION [NAMED] What is the basis of your eligibility to work in Germany?
+WORK_AUTHORIZATION [BARE] Are you legally authorized to work?
+WORK_AUTHORIZATION [BARE] Do you have the legal right to work?
+WORK_AUTHORIZATION [BARE] Do you have the right to work where this role is located?
+WORK_AUTHORIZATION [BARE] Are you authorized to work for any employer?
+WORK_AUTHORIZATION [BARE] Are you legally permitted to work?
+WORK_AUTHORIZATION [BARE] Are you eligible for employment?
+WORK_AUTHORIZATION [BARE] Are you legally eligible for employment?
+WORK_AUTHORIZATION [BARE] Do you currently have unrestricted work authorization?
+WORK_AUTHORIZATION [BARE] Do you currently have unrestricted work rights?
+WORK_AUTHORIZATION [BARE] Can you legally work for any employer?
+WORK_AUTHORIZATION [BARE] Do you have authorization to accept employment?
+WORK_AUTHORIZATION [BARE] Are you entitled to accept employment?
+WORK_AUTHORIZATION [BARE] Can you provide evidence of your right to work?
+WORK_AUTHORIZATION [BARE] Can you provide proof of your work authorization?
+WORK_AUTHORIZATION [BARE] Please confirm that you are legally authorized to work.
+WORK_AUTHORIZATION [BARE] Please confirm your legal right to work.
+WORK_AUTHORIZATION [BARE] I confirm that I am legally authorized to work.
+WORK_AUTHORIZATION [BARE] I certify that I have the legal right to work.
+WORK_AUTHORIZATION [BARE] What is the source of your right to work?
+WORK_AUTHORIZATION [BARE] What is the basis of your work authorization?
+WORK_AUTHORIZATION [BARE] Please specify your employment eligibility status.
+WORK_AUTHORIZATION [BARE] Please indicate whether you are authorized to work.
+VISA_SPONSORSHIP [NAMED] Will you now or in the future require visa sponsorship to work in the United States?
+VISA_SPONSORSHIP [NAMED] Do you now or will you in the future require sponsorship to work in the United States?
+VISA_SPONSORSHIP [NAMED] Will you require sponsorship for employment in the UK?
+VISA_SPONSORSHIP [NAMED] Do you require visa sponsorship to work in Australia?
+VISA_SPONSORSHIP [NAMED] Will you require immigration sponsorship to work in Canada?
+VISA_SPONSORSHIP [NAMED] Do you need employer sponsorship to work in Germany?
+VISA_SPONSORSHIP [NAMED] Will you need sponsorship now or in the future to work in Ireland?
+VISA_SPONSORSHIP [NAMED] Does your employment in the United States require sponsorship?
+VISA_SPONSORSHIP [NAMED] Would you require sponsorship to work for us in Australia?
+VISA_SPONSORSHIP [NAMED] Would you need us to sponsor a visa for employment in the UK?
+VISA_SPONSORSHIP [NAMED] Will this position require us to sponsor your employment in the United States?
+VISA_SPONSORSHIP [NAMED] Do you anticipate requiring sponsorship for employment in Canada?
+VISA_SPONSORSHIP [NAMED] Will you require immigration support to work in Singapore?
+VISA_SPONSORSHIP [NAMED] Do you need a sponsored work permit for Germany?
+VISA_SPONSORSHIP [NAMED] Will you require company-sponsored immigration status in Australia?
+VISA_SPONSORSHIP [NAMED] Would you need visa sponsorship at any point during employment in the United States?
+VISA_SPONSORSHIP [NAMED] Will you require sponsorship now or at any time in the future to remain employed in the UK?
+VISA_SPONSORSHIP [NAMED] Do you require employer sponsorship or immigration support to work in Canada?
+VISA_SPONSORSHIP [NAMED] Will you require sponsorship to maintain your ability to work in Germany?
+VISA_SPONSORSHIP [NAMED] Please indicate whether you require visa sponsorship to work in the United States.
+VISA_SPONSORSHIP [NAMED] I confirm that I will not require employer sponsorship to work in Australia.
+VISA_SPONSORSHIP [NAMED] I confirm that I do not require visa sponsorship for employment in the UK.
+VISA_SPONSORSHIP [NAMED] Select whether you require sponsorship to work in Canada.
+VISA_SPONSORSHIP [NAMED] Do you have a visa that permits employment in the United States without sponsorship?
+VISA_SPONSORSHIP [NAMED] Can you work in Australia without employer sponsorship?
+VISA_SPONSORSHIP [NAMED] Can you accept employment in Germany without immigration sponsorship?
+VISA_SPONSORSHIP [NAMED] Are you able to work in the United States without sponsorship?
+VISA_SPONSORSHIP [BARE] Will you now or in the future require visa sponsorship?
+VISA_SPONSORSHIP [BARE] Do you now or will you in the future require sponsorship?
+VISA_SPONSORSHIP [BARE] Will you require sponsorship for employment?
+VISA_SPONSORSHIP [BARE] Do you require visa sponsorship?
+VISA_SPONSORSHIP [BARE] Will you require employer sponsorship?
+VISA_SPONSORSHIP [BARE] Would you require sponsorship to work with us?
+VISA_SPONSORSHIP [BARE] Would you need us to sponsor your visa?
+VISA_SPONSORSHIP [BARE] Will you need immigration sponsorship?
+VISA_SPONSORSHIP [BARE] Do you need immigration support to work?
+VISA_SPONSORSHIP [BARE] Will your employment require sponsorship?
+VISA_SPONSORSHIP [BARE] Will you need sponsorship now or in the future?
+VISA_SPONSORSHIP [BARE] Do you anticipate requiring sponsorship at any point?
+VISA_SPONSORSHIP [BARE] Will you require sponsorship to remain employed?
+VISA_SPONSORSHIP [BARE] Do you need a company-sponsored work permit?
+VISA_SPONSORSHIP [BARE] Do you require employer assistance with immigration status?
+VISA_SPONSORSHIP [BARE] Will you need the company to sponsor a work visa?
+VISA_SPONSORSHIP [BARE] Do you have unrestricted work authorization without sponsorship?
+VISA_SPONSORSHIP [BARE] Can you work without employer sponsorship?
+VISA_SPONSORSHIP [BARE] Can you work for us without visa sponsorship?
+VISA_SPONSORSHIP [BARE] Please indicate whether you require sponsorship.
+VISA_TYPE_TRANSFER [NAMED] Do you currently hold an H-1B visa for employment in the United States?
+VISA_TYPE_TRANSFER [NAMED] Will you require an H-1B transfer to work in the United States?
+VISA_TYPE_TRANSFER [NAMED] Would you require an H-1B transfer for this role in the United States?
+VISA_TYPE_TRANSFER [NAMED] Do you require a visa transfer to continue working in Australia?
+VISA_TYPE_TRANSFER [NAMED] Will you need your existing work visa transferred in the UK?
+VISA_TYPE_TRANSFER [NAMED] Do you require sponsorship or transfer of your current visa to work in Canada?
+VISA_TYPE_TRANSFER [NAMED] Would you need us to transfer your work authorization in Germany?
+VISA_TYPE_TRANSFER [NAMED] Will you require continuation of your current visa status in the United States?
+VISA_TYPE_TRANSFER [NAMED] Do you currently hold an H-1B, L-1, TN, or E-3 visa for US employment?
+VISA_TYPE_TRANSFER [NAMED] Will your H-1B status need to be transferred to this employer in the United States?
+VISA_TYPE_TRANSFER [NAMED] Do you require an employer change on your US work visa?
+VISA_TYPE_TRANSFER [NAMED] Are you currently on OPT and seeking employment in the United States?
+VISA_TYPE_TRANSFER [NAMED] Will you require STEM OPT employment authorization in the United States?
+VISA_TYPE_TRANSFER [NAMED] Do you have valid TN status for employment in the United States?
+VISA_TYPE_TRANSFER [NAMED] Do you hold an E-3 visa permitting employment in the United States?
+VISA_TYPE_TRANSFER [NAMED] Do you hold a Blue Card allowing you to work in Germany?
+VISA_TYPE_TRANSFER [NAMED] Do you hold an EU Blue Card permitting employment in Germany?
+VISA_TYPE_TRANSFER [NAMED] Do you require a Skilled Worker visa to work in the UK?
+VISA_TYPE_TRANSFER [NAMED] Do you currently hold UK Skilled Worker status?
+VISA_TYPE_TRANSFER [NAMED] Will you need a Tier 2 sponsorship to work in the UK?
+VISA_TYPE_TRANSFER [NAMED] Do you require a Global Talent visa to work in the UK?
+VISA_TYPE_TRANSFER [NAMED] Do you hold a subclass 482 visa allowing you to work in Australia?
+VISA_TYPE_TRANSFER [NAMED] Do you hold Australian permanent work rights?
+VISA_TYPE_TRANSFER [NAMED] Do you require a work permit renewal to remain employed in Canada?
+VISA_TYPE_TRANSFER [BARE] Do you currently hold an H-1B visa?
+VISA_TYPE_TRANSFER [BARE] Will you require an H-1B transfer?
+VISA_TYPE_TRANSFER [BARE] Do you require a visa transfer?
+VISA_TYPE_TRANSFER [BARE] Will your current visa need to be transferred?
+VISA_TYPE_TRANSFER [BARE] Do you require continuation of your current visa status?
+VISA_TYPE_TRANSFER [BARE] Are you currently on OPT?
+VISA_TYPE_TRANSFER [BARE] Will you require STEM OPT?
+VISA_TYPE_TRANSFER [BARE] Do you have valid TN status?
+VISA_TYPE_TRANSFER [BARE] Do you hold an E-3 visa?
+VISA_TYPE_TRANSFER [BARE] Do you hold a Blue Card?
+VISA_TYPE_TRANSFER [BARE] Do you hold an EU Blue Card?
+VISA_TYPE_TRANSFER [BARE] Do you require a Skilled Worker visa?
+VISA_TYPE_TRANSFER [BARE] Do you currently hold Skilled Worker status?
+VISA_TYPE_TRANSFER [BARE] Do you require Tier 2 sponsorship?
+VISA_TYPE_TRANSFER [BARE] Do you require a Global Talent visa?
+VISA_TYPE_TRANSFER [BARE] Do you hold a visa that permits employment?
+VISA_TYPE_TRANSFER [BARE] Do you need your current work authorization transferred?
+VISA_TYPE_TRANSFER [BARE] Will your current immigration status require employer action?
+VISA_RENEWAL [NAMED] Will you need your visa renewed to remain employed in the United States?
+VISA_RENEWAL [NAMED] Do you require a work permit renewal to continue working in Australia?
+VISA_RENEWAL [NAMED] Will you require immigration sponsorship when your current visa expires in the UK?
+VISA_RENEWAL [NAMED] Will your employment authorization need to be renewed in Canada?
+VISA_RENEWAL [NAMED] Can you maintain valid authorization throughout employment in Germany?
+VISA_RENEWAL [NAMED] Will your right to work in the United States expire during this employment?
+VISA_RENEWAL [NAMED] Does your Australian work authorization have an expiration date?
+VISA_RENEWAL [NAMED] Will you need employer assistance renewing your UK work permit?
+VISA_RENEWAL [NAMED] Will you require a new visa to remain employed in Singapore?
+VISA_RENEWAL [NAMED] Can you maintain your legal right to work in Ireland throughout employment?
+VISA_RENEWAL [BARE] Will you need your visa renewed to remain employed?
+VISA_RENEWAL [BARE] Does your work authorization expire?
+VISA_RENEWAL [BARE] Will your employment authorization need renewal?
+VISA_RENEWAL [BARE] Can you maintain valid work authorization throughout employment?
+VISA_RENEWAL [BARE] Will your right to work expire during employment?
+VISA_RENEWAL [BARE] Will you need employer assistance renewing your work permit?
+VISA_RENEWAL [BARE] Will you require a new visa to remain employed?
+VISA_RENEWAL [BARE] Can you maintain legal authorization throughout employment?
+VISA_RENEWAL [BARE] Will your immigration status require renewal during employment?
+IMMIGRATION_STATUS [NAMED] What is your current immigration status in the United States?
+IMMIGRATION_STATUS [NAMED] What is your immigration status in Australia?
+IMMIGRATION_STATUS [NAMED] Which immigration status permits you to work in Canada?
+IMMIGRATION_STATUS [NAMED] Do you currently hold valid immigration status in the UK?
+IMMIGRATION_STATUS [NAMED] Do you have lawful immigration status in Germany?
+IMMIGRATION_STATUS [NAMED] Are you currently authorized under your immigration status to work in Ireland?
+IMMIGRATION_STATUS [NAMED] Please specify your current immigration status in the United States.
+IMMIGRATION_STATUS [NAMED] Please indicate your current visa or immigration status in Australia.
+IMMIGRATION_STATUS [NAMED] Do you hold permanent immigration status in Canada?
+IMMIGRATION_STATUS [NAMED] Do you have settled status in the United Kingdom?
+IMMIGRATION_STATUS [NAMED] Do you have indefinite leave to remain in the UK?
+IMMIGRATION_STATUS [NAMED] Do you hold a valid residence permit in Germany?
+IMMIGRATION_STATUS [NAMED] Do you hold an Aufenthaltstitel permitting employment in Germany?
+IMMIGRATION_STATUS [NAMED] Do you have a valid EU Blue Card in Germany?
+IMMIGRATION_STATUS [BARE] What is your current immigration status?
+IMMIGRATION_STATUS [BARE] What is your current visa status?
+IMMIGRATION_STATUS [BARE] Please specify your current immigration status.
+IMMIGRATION_STATUS [BARE] Please indicate your current visa status.
+IMMIGRATION_STATUS [BARE] Do you currently hold valid immigration status?
+IMMIGRATION_STATUS [BARE] Do you have lawful immigration status?
+IMMIGRATION_STATUS [BARE] Which immigration status permits you to work?
+IMMIGRATION_STATUS [BARE] Do you hold permanent immigration status?
+IMMIGRATION_STATUS [BARE] Do you have settled status?
+IMMIGRATION_STATUS [BARE] Do you have indefinite leave to remain?
+IMMIGRATION_STATUS [BARE] Do you hold a valid residence permit?
+IMMIGRATION_STATUS [BARE] Do you hold a status that permits employment?
+IMMIGRATION_STATUS [BARE] Please select your current immigration status.
+IMMIGRATION_STATUS [BARE] Please select the type of work authorization you currently hold.
+CITIZENSHIP_NATIONALITY [NAMED] Are you a US citizen?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a citizen of the United States?
+CITIZENSHIP_NATIONALITY [NAMED] Are you an Australian citizen?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a Canadian citizen?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a British citizen?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a citizen of an EU member state?
+CITIZENSHIP_NATIONALITY [NAMED] Do you hold US citizenship?
+CITIZENSHIP_NATIONALITY [NAMED] Do you have Australian citizenship?
+CITIZENSHIP_NATIONALITY [NAMED] Do you have Canadian nationality?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a national of the United States?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a national of an EU country?
+CITIZENSHIP_NATIONALITY [NAMED] Do you hold British nationality?
+CITIZENSHIP_NATIONALITY [NAMED] Please specify whether you are an AU or NZ citizen or Permanent Resident.
+CITIZENSHIP_NATIONALITY [NAMED] Please indicate your citizenship status in Australia.
+CITIZENSHIP_NATIONALITY [NAMED] Please indicate your nationality for employment in Germany.
+CITIZENSHIP_NATIONALITY [NAMED] Are you a US person for purposes of employment?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a citizen or permanent resident of Canada?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a citizen or permanent resident of Australia?
+CITIZENSHIP_NATIONALITY [NAMED] Do you possess citizenship in the United Kingdom?
+CITIZENSHIP_NATIONALITY [NAMED] Are you a citizen, national, or permanent resident of the United States?
+CITIZENSHIP_NATIONALITY [BARE] Are you a citizen?
+CITIZENSHIP_NATIONALITY [BARE] What is your citizenship?
+CITIZENSHIP_NATIONALITY [BARE] What is your citizenship status?
+CITIZENSHIP_NATIONALITY [BARE] Please specify your citizenship.
+CITIZENSHIP_NATIONALITY [BARE] Please indicate your citizenship status.
+CITIZENSHIP_NATIONALITY [BARE] What is your nationality?
+CITIZENSHIP_NATIONALITY [BARE] Please indicate your nationality.
+CITIZENSHIP_NATIONALITY [BARE] Are you a national?
+CITIZENSHIP_NATIONALITY [BARE] What country are you a citizen of?
+CITIZENSHIP_NATIONALITY [BARE] What country issued your passport?
+CITIZENSHIP_NATIONALITY [BARE] Do you hold citizenship that permits employment?
+CITIZENSHIP_NATIONALITY [BARE] Are you a citizen, national, or permanent resident?
+CITIZENSHIP_NATIONALITY [BARE] Are you a citizen or permanent resident?
+CITIZENSHIP_NATIONALITY [BARE] Please select your citizenship or nationality.
+CITIZENSHIP_NATIONALITY [BARE] Please select your nationality for employment purposes.
+RESIDENCE [NAMED] Do you currently reside in the United States?
+RESIDENCE [NAMED] Do you currently live in Australia?
+RESIDENCE [NAMED] Are you currently located in Canada?
+RESIDENCE [NAMED] Are you based in the United Kingdom?
+RESIDENCE [NAMED] Do you permanently reside in Germany?
+RESIDENCE [NAMED] Do you maintain a primary residence in Ireland?
+RESIDENCE [NAMED] Do you have your permanent residence in Singapore?
+RESIDENCE [NAMED] Are you physically located in Switzerland?
+RESIDENCE [NAMED] Are you a resident of the United States?
+RESIDENCE [NAMED] Are you a permanent resident of Australia?
+RESIDENCE [NAMED] Do you maintain tax residency in Canada?
+RESIDENCE [NAMED] Are you a legal resident of Germany?
+RESIDENCE [NAMED] Are you domiciled in the UK?
+RESIDENCE [NAMED] Are you currently living in New York?
+RESIDENCE [NAMED] Do you reside in California?
+RESIDENCE [NAMED] Do you live within the United States?
+RESIDENCE [NAMED] Are you located within commuting distance of our New York office?
+RESIDENCE [NAMED] Do you currently reside in the Dallas/Fort Worth, TX area?
+RESIDENCE [NAMED] Are you resident in London, England?
+RESIDENCE [BARE] Do you live in the country where this role is located?
+RESIDENCE [BARE] Are you currently based where this role is located?
+RESIDENCE [BARE] Are you currently residing in the country in which this role is located?
+RESIDENCE [BARE] Do you currently reside where this role is located?
+RESIDENCE [BARE] Do you currently reside in the country where you are applying?
+RESIDENCE [BARE] Do you currently live where this role is located?
+RESIDENCE [BARE] Are you currently located where this role is based?
+RESIDENCE [BARE] Are you currently based where this role is listed?
+RESIDENCE [BARE] Do you currently live in the country in which you are applying?
+RESIDENCE [BARE] Are you currently a resident of the country where you are applying?
+RESIDENCE [BARE] Are you physically located where you would perform this role?
+RESIDENCE [BARE] Do you maintain a permanent residence in the applicable jurisdiction?
+RESIDENCE [BARE] Do you maintain a primary residence in the relevant country?
+RESIDENCE [BARE] Are you a legal resident of the applicable jurisdiction?
+RESIDENCE [BARE] Do you currently reside in the applicable location?
+RESIDENCE [BARE] Are you presently located in the applicable country?
+RESIDENCE [BARE] Do you live in the location associated with this position?
+RESIDENCE [BARE] Are you domiciled in the jurisdiction where this position is based?
+RESIDENCE [BARE] Do you currently have a permanent address in the applicable jurisdiction?
+RELOCATION [NAMED] Are you willing to relocate to New York?
+RELOCATION [NAMED] Are you willing to relocate to San Francisco?
+RELOCATION [NAMED] Would you relocate to London for this role?
+RELOCATION [NAMED] Are you able to relocate to Australia?
+RELOCATION [NAMED] Would you be willing to move to Germany?
+RELOCATION [NAMED] Are you prepared to relocate to Toronto?
+RELOCATION [NAMED] Can you relocate to the United States if required?
+RELOCATION [NAMED] Would you relocate to the UK if selected?
+RELOCATION [NAMED] Are you willing to move to the country where this role is based?
+RELOCATION [NAMED] Would you be willing to relocate to the applicable office location?
+RELOCATION [NAMED] Are you able to relocate to our New York office?
+RELOCATION [NAMED] Can you relocate to Singapore within three months?
+RELOCATION [NAMED] Would you relocate to Sydney before your start date?
+RELOCATION [NAMED] Are you willing to move to the country in which this position is located?
+RELOCATION [NAMED] If selected, can you relocate to Germany at your own expense?
+RELOCATION [NAMED] Can you relocate to the United States without relocation assistance?
+RELOCATION [NAMED] Are you willing to permanently relocate to Canada?
+RELOCATION [BARE] Are you willing to relocate?
+RELOCATION [BARE] Would you relocate if required?
+RELOCATION [BARE] Are you able to relocate for this position?
+RELOCATION [BARE] Are you willing to move for this role?
+RELOCATION [BARE] Would you be willing to move if selected?
+RELOCATION [BARE] Can you relocate before your start date?
+RELOCATION [BARE] Are you prepared to relocate if necessary?
+RELOCATION [BARE] Would you relocate at your own expense?
+RELOCATION [BARE] Are you willing to permanently relocate?
+RELOCATION [BARE] Can you relocate to the applicable work location?
+RELOCATION [BARE] Are you able to move to the role's location?
+RELOCATION [BARE] Would you be willing to relocate to the office?
+RELOCATION [BARE] Can you move closer to the office if required?
+RELOCATION [BARE] Are you willing to relocate within the required timeframe?
+RELOCATION [BARE] Would you move to the location associated with this position?
+COMMUTING [NAMED] Are you within commuting distance of our New York office?
+COMMUTING [NAMED] Can you commute to our London office?
+COMMUTING [NAMED] Are you able to commute to San Francisco three days per week?
+COMMUTING [NAMED] Do you live within 50 miles of our Toronto office?
+COMMUTING [NAMED] Are you within reasonable commuting distance of Sydney?
+COMMUTING [NAMED] Can you commute to the United States office as required?
+COMMUTING [NAMED] Are you within driving distance of our Chicago office?
+COMMUTING [NAMED] Can you reliably commute to our Berlin office?
+COMMUTING [NAMED] Are you local to New York?
+COMMUTING [NAMED] Are you local to London?
+COMMUTING [NAMED] Do you reside within commuting distance of our office in Germany?
+COMMUTING [NAMED] Can you report to our Australia office when required?
+COMMUTING [NAMED] Are you able to commute to the applicable office location?
+COMMUTING [BARE] Are you within commuting distance of the office?
+COMMUTING [BARE] Can you commute to the office?
+COMMUTING [BARE] Are you able to commute regularly?
+COMMUTING [BARE] Can you reliably commute to the workplace?
+COMMUTING [BARE] Are you within reasonable commuting distance?
+COMMUTING [BARE] Do you live within commuting distance?
+COMMUTING [BARE] Are you local to the office?
+COMMUTING [BARE] Are you able to report to the office when required?
+COMMUTING [BARE] Can you commute to the workplace several days per week?
+COMMUTING [BARE] Are you within driving distance of the office?
+COMMUTING [BARE] Can you reliably travel to the work location?
+ONSITE_HYBRID [NAMED] Are you willing to work four days per week in our San Francisco office?
+ONSITE_HYBRID [NAMED] Are you willing to work from our New York office three days per week?
+ONSITE_HYBRID [NAMED] Can you attend our London office two days per week?
+ONSITE_HYBRID [NAMED] Are you comfortable working on-site in Sydney?
+ONSITE_HYBRID [NAMED] Can you work a hybrid schedule in Toronto?
+ONSITE_HYBRID [NAMED] Are you able to work in person in Germany?
+ONSITE_HYBRID [NAMED] Can you report to our Singapore office every Monday?
+ONSITE_HYBRID [NAMED] Are you willing to be physically present in the United States?
+ONSITE_HYBRID [NAMED] Can you attend the office in Australia as required?
+ONSITE_HYBRID [NAMED] Are you willing to work from the office where this role is based?
+ONSITE_HYBRID [BARE] Are you willing to work on-site?
+ONSITE_HYBRID [BARE] Are you willing to work in person?
+ONSITE_HYBRID [BARE] Can you work from the office?
+ONSITE_HYBRID [BARE] Are you comfortable with a hybrid schedule?
+ONSITE_HYBRID [BARE] Can you work a hybrid schedule?
+ONSITE_HYBRID [BARE] Are you able to attend the office several days per week?
+ONSITE_HYBRID [BARE] Can you be physically present when required?
+ONSITE_HYBRID [BARE] Are you willing to report to an office?
+ONSITE_HYBRID [BARE] Can you work from an office on a regular basis?
+ONSITE_HYBRID [BARE] Are you comfortable with required office attendance?
+ONSITE_HYBRID [BARE] Are you willing to work from the location associated with this position?
+SECURITY_CLEARANCE [NAMED] Do you currently hold a US security clearance?
+SECURITY_CLEARANCE [NAMED] Do you have an active security clearance recognized by the United States government?
+SECURITY_CLEARANCE [NAMED] Are you eligible to obtain a US security clearance?
+SECURITY_CLEARANCE [NAMED] Do you hold a UK security clearance?
+SECURITY_CLEARANCE [NAMED] Are you eligible for UK security vetting?
+SECURITY_CLEARANCE [NAMED] Can you obtain an Australian government security clearance?
+SECURITY_CLEARANCE [NAMED] Are you eligible for German security clearance?
+SECURITY_CLEARANCE [NAMED] Do you hold an active Secret clearance for US government work?
+SECURITY_CLEARANCE [NAMED] Are you eligible for a US Public Trust position?
+SECURITY_CLEARANCE [NAMED] Do you meet the requirements for UK government security vetting?
+SECURITY_CLEARANCE [NAMED] Can you pass the required US government background investigation?
+SECURITY_CLEARANCE [NAMED] Are you eligible for a government clearance in Canada?
+SECURITY_CLEARANCE [NAMED] Do you hold an active TS/SCI clearance for US government work?
+SECURITY_CLEARANCE [BARE] Do you currently hold a security clearance?
+SECURITY_CLEARANCE [BARE] Are you eligible to obtain a security clearance?
+SECURITY_CLEARANCE [BARE] Can you obtain the required security clearance?
+SECURITY_CLEARANCE [BARE] Are you eligible for security vetting?
+SECURITY_CLEARANCE [BARE] Do you hold an active clearance?
+SECURITY_CLEARANCE [BARE] Are you eligible for government security clearance?
+SECURITY_CLEARANCE [BARE] Can you pass the required security investigation?
+SECURITY_CLEARANCE [BARE] Do you currently hold Secret clearance?
+SECURITY_CLEARANCE [BARE] Are you eligible for Public Trust?
+SECURITY_CLEARANCE [BARE] Do you meet the requirements for government vetting?
+EXPORT_CONTROL [NAMED] Are you a US person under US export-control regulations?
+EXPORT_CONTROL [NAMED] Are you a US person as defined by ITAR?
+EXPORT_CONTROL [NAMED] Are you a US person for purposes of EAR compliance?
+EXPORT_CONTROL [NAMED] Are you eligible to access ITAR-controlled information in the United States?
+EXPORT_CONTROL [NAMED] Can you legally access US export-controlled technology?
+EXPORT_CONTROL [NAMED] Do you meet US export-control requirements?
+EXPORT_CONTROL [NAMED] Are you authorized to work on ITAR-controlled projects in the United States?
+EXPORT_CONTROL [NAMED] Are you a citizen or lawful permanent resident of the United States for ITAR purposes?
+EXPORT_CONTROL [NAMED] Do you qualify as a US person under applicable export regulations?
+EXPORT_CONTROL [NAMED] Can you access controlled technical data under US law?
+EXPORT_CONTROL [BARE] Are you a US person for export-control purposes?
+EXPORT_CONTROL [BARE] Are you a US person under applicable export regulations?
+EXPORT_CONTROL [BARE] Do you meet applicable export-control requirements?
+EXPORT_CONTROL [BARE] Are you eligible to access export-controlled information?
+EXPORT_CONTROL [BARE] Can you legally access controlled technical data?
+EXPORT_CONTROL [BARE] Are you authorized to work on export-controlled projects?
+EXPORT_CONTROL [BARE] Do you qualify as a person permitted to access controlled technology?
+EXPORT_CONTROL [BARE] Can you work on projects subject to export restrictions?
+EXPORT_CONTROL [BARE] Are you eligible for export-controlled work?
+STATE_PROFESSIONAL_LICENSE [NAMED] Do you hold a valid Texas professional license?
+STATE_PROFESSIONAL_LICENSE [NAMED] Do you have an active California insurance license?
+STATE_PROFESSIONAL_LICENSE [NAMED] Are you licensed to practice in New York State?
+STATE_PROFESSIONAL_LICENSE [NAMED] Do you hold a valid Florida real estate license?
+STATE_PROFESSIONAL_LICENSE [NAMED] Are you admitted to practice law in California?
+STATE_PROFESSIONAL_LICENSE [NAMED] Do you hold a New York nursing license?
+STATE_PROFESSIONAL_LICENSE [NAMED] Are you registered to practice in Ontario?
+STATE_PROFESSIONAL_LICENSE [NAMED] Do you have a professional license valid in British Columbia?
+STATE_PROFESSIONAL_LICENSE [NAMED] Is your license valid in the state of Texas?
+STATE_PROFESSIONAL_LICENSE [NAMED] Do you hold the required California securities license?
+STATE_PROFESSIONAL_LICENSE [BARE] Do you hold the required professional license?
+STATE_PROFESSIONAL_LICENSE [BARE] Are you currently licensed to practice?
+STATE_PROFESSIONAL_LICENSE [BARE] Do you hold an active professional license?
+STATE_PROFESSIONAL_LICENSE [BARE] Is your professional license currently valid?
+STATE_PROFESSIONAL_LICENSE [BARE] Are you admitted to practice in the required jurisdiction?
+STATE_PROFESSIONAL_LICENSE [BARE] Are you registered with the applicable professional body?
+STATE_PROFESSIONAL_LICENSE [BARE] Do you hold the license required for this position?
+STATE_PROFESSIONAL_LICENSE [BARE] Is your license valid in the jurisdiction where this role is based?
+BACKGROUND_CREDIT [NAMED] Are you willing to undergo a background check required under US law?
+BACKGROUND_CREDIT [NAMED] Can you pass the required criminal background check in the United States?
+BACKGROUND_CREDIT [NAMED] Are you willing to undergo a US employment background investigation?
+BACKGROUND_CREDIT [NAMED] Can you complete the required Canadian criminal record check?
+BACKGROUND_CREDIT [NAMED] Are you able to obtain an Australian police clearance?
+BACKGROUND_CREDIT [NAMED] Can you obtain a German Führungszeugnis if required?
+BACKGROUND_CREDIT [NAMED] Are you willing to undergo a UK DBS check?
+BACKGROUND_CREDIT [NAMED] Can you pass the required UK right-to-work and background screening?
+BACKGROUND_CREDIT [NAMED] Are you willing to undergo a US credit check?
+BACKGROUND_CREDIT [NAMED] Can you satisfy the background-screening requirements applicable in Australia?
+BACKGROUND_CREDIT [AMBIGUOUS] Are you willing to undergo a background check?
+BACKGROUND_CREDIT [AMBIGUOUS] Can you pass the required background check?
+BACKGROUND_CREDIT [BARE] Are you willing to undergo a criminal record check?
+BACKGROUND_CREDIT [BARE] Can you obtain the required police clearance?
+BACKGROUND_CREDIT [AMBIGUOUS] Are you willing to undergo employment screening?
+BACKGROUND_CREDIT [AMBIGUOUS] Can you satisfy the required background-screening requirements?
+BACKGROUND_CREDIT [AMBIGUOUS] Are you willing to undergo a credit check?
+BACKGROUND_CREDIT [BARE] Can you complete the required criminal-record verification?
+BACKGROUND_CREDIT [BARE] Are you able to provide the required police certificate?
+TIMEZONE_HOURS [NAMED] Are you located in the US Eastern Time Zone?
+TIMEZONE_HOURS [NAMED] Do you live in the Pacific Time Zone?
+TIMEZONE_HOURS [NAMED] Are you currently based in the European time zone?
+TIMEZONE_HOURS [NAMED] Are you located in the UK time zone?
+TIMEZONE_HOURS [NAMED] Do you reside in an Australian time zone?
+TIMEZONE_HOURS [NAMED] Are you physically located in Central European Time?
+TIMEZONE_HOURS [NAMED] Are you based within GMT+1?
+TIMEZONE_HOURS [NAMED] Do you live within the US Eastern time zone?
+TIMEZONE_HOURS [NAMED] Are you located within Pacific Time?
+TIMEZONE_HOURS [NAMED] Can you be physically present in the required time zone?
+TIMEZONE_HOURS [BARE] Are you located in the required time zone?
+TIMEZONE_HOURS [BARE] Do you live in the required time zone?
+TIMEZONE_HOURS [BARE] Are you physically located in the required time zone?
+TIMEZONE_HOURS [BARE] Are you currently based in the applicable time zone?
+TIMEZONE_HOURS [BARE] Do you reside within the required time zone?
+TIMEZONE_HOURS [BARE] Are you located in the applicable working-hours zone?
+TIMEZONE_HOURS [BARE] Are you based in the time zone required for this role?
+TIMEZONE_HOURS [BARE] Can you be physically present in the required time zone?
+TIMEZONE_HOURS [BARE] Do you currently live within the required geographic time zone?
+TAX_RESIDENCY [NAMED] Are you a tax resident of the United States?
+TAX_RESIDENCY [NAMED] Do you maintain tax residency in Australia?
+TAX_RESIDENCY [NAMED] Are you tax resident in Canada?
+TAX_RESIDENCY [NAMED] Do you have tax residency in the UK?
+TAX_RESIDENCY [NAMED] Are you legally resident for tax purposes in Germany?
+TAX_RESIDENCY [NAMED] Do you file taxes as a resident of Ireland?
+TAX_RESIDENCY [NAMED] Are you domiciled for tax purposes in Singapore?
+TAX_RESIDENCY [NAMED] Do you have a permanent establishment or tax residence in the United States?
+TAX_RESIDENCY [NAMED] Are you currently a tax resident of Switzerland?
+TAX_RESIDENCY [NAMED] Can you be employed while tax resident in Canada?
+TAX_RESIDENCY [BARE] Are you a tax resident?
+TAX_RESIDENCY [BARE] Do you maintain tax residency?
+TAX_RESIDENCY [BARE] Where are you tax resident?
+TAX_RESIDENCY [BARE] What is your tax residence?
+TAX_RESIDENCY [BARE] Are you legally resident for tax purposes?
+TAX_RESIDENCY [BARE] Do you file taxes as a resident?
+TAX_RESIDENCY [BARE] Are you domiciled for tax purposes?
+TAX_RESIDENCY [BARE] Can you be employed while tax resident elsewhere?
+TAX_RESIDENCY [BARE] Do you have tax residency in the jurisdiction where this role is based?
+TAX_RESIDENCY [BARE] Are you able to meet the applicable tax-residency requirement?
+PAYROLL_ENTITY [NAMED] Are you located in a country where our company has a legal entity?
+PAYROLL_ENTITY [NAMED] Can you be employed through our US legal entity?
+PAYROLL_ENTITY [NAMED] Are you eligible for payroll through our Australian entity?
+PAYROLL_ENTITY [NAMED] Can you be paid through our Canadian payroll?
+PAYROLL_ENTITY [NAMED] Are you able to be employed by our UK entity?
+PAYROLL_ENTITY [BARE] Are you located in one of the countries where we have an employing entity?
+PAYROLL_ENTITY [NAMED] Can you be hired through our German legal entity?
+PAYROLL_ENTITY [NAMED] Are you eligible to be placed on our Ireland payroll?
+PAYROLL_ENTITY [NAMED] Can you be employed through our Singapore entity?
+PAYROLL_ENTITY [BARE] Are you located in a country where we have a legal entity?
+PAYROLL_ENTITY [BARE] Can you be employed through one of our legal entities?
+PAYROLL_ENTITY [BARE] Are you eligible for our local payroll?
+PAYROLL_ENTITY [BARE] Can we legally employ you from your current location?
+PAYROLL_ENTITY [BARE] Can you be hired through our employing entity?
+PAYROLL_ENTITY [BARE] Are you located in a country where we can legally employ people?
+PAYROLL_ENTITY [BARE] Can you be paid through our payroll?
+PAYROLL_ENTITY [BARE] Is your current location supported by our payroll provider?
+PAYROLL_ENTITY [BARE] Are you located in a jurisdiction where we have payroll coverage?
+PAYROLL_ENTITY [BARE] Can you be employed through our existing entity structure?
+LEGAL_ENTITY [NAMED] Is your current residence in a country where we have a legal entity?
+LEGAL_ENTITY [NAMED] Can you be employed by our US entity?
+LEGAL_ENTITY [NAMED] Can you be contracted through our UK entity?
+LEGAL_ENTITY [NAMED] Are you located within one of our employing jurisdictions in Australia?
+LEGAL_ENTITY [NAMED] Can our German entity legally employ you?
+LEGAL_ENTITY [NAMED] Is your employment location covered by our Canadian entity?
+LEGAL_ENTITY [BARE] Is your current residence in a country where we have an entity?
+LEGAL_ENTITY [BARE] Can we legally employ you from your current location?
+LEGAL_ENTITY [BARE] Is your employment location covered by one of our entities?
+LEGAL_ENTITY [BARE] Can you be employed through our existing legal structure?
+LEGAL_ENTITY [BARE] Is your jurisdiction supported by our employing entities?
+LEGAL_ENTITY [BARE] Can our entity legally employ someone in your location?
+LEGAL_ENTITY [BARE] Are you located in an employing jurisdiction?
+LEGAL_ENTITY [BARE] Is your country supported for employment?
+PAYROLL_JURISDICTION [NAMED] Can you be placed on US payroll?
+PAYROLL_JURISDICTION [NAMED] Can you be paid through Australian payroll?
+PAYROLL_JURISDICTION [NAMED] Are you eligible for Canadian payroll?
+PAYROLL_JURISDICTION [NAMED] Can you be employed through UK payroll?
+PAYROLL_JURISDICTION [NAMED] Can you receive salary through our German payroll?
+PAYROLL_JURISDICTION [BARE] Can you be placed on local payroll?
+PAYROLL_JURISDICTION [BARE] Are you eligible for our payroll?
+PAYROLL_JURISDICTION [BARE] Can you be paid through our payroll provider?
+PAYROLL_JURISDICTION [BARE] Can we process payroll for your current location?
+PAYROLL_JURISDICTION [BARE] Is payroll available in your jurisdiction?
+PAYROLL_JURISDICTION [BARE] Can your current location be supported for payroll?
+LANGUAGE_LOCATION_PROXY [NAMED] Are you fluent in German for work with customers in Germany?
+LANGUAGE_LOCATION_PROXY [NAMED] Do you have professional French fluency for our France-based customers?
+LANGUAGE_LOCATION_PROXY [NAMED] Are you fluent in Italian and able to work with our Italy team?
+LANGUAGE_LOCATION_PROXY [NAMED] Do you speak Dutch at a professional level for this Netherlands-based position?
+LANGUAGE_LOCATION_PROXY [NAMED] Are you fluent in Swedish for this Sweden-based role?
+LANGUAGE_LOCATION_PROXY [NAMED] Do you have Norwegian fluency for this Norway-based position?
+LANGUAGE_LOCATION_PROXY [NAMED] Are you fluent in Danish for our Denmark position?
+LANGUAGE_LOCATION_PROXY [BARE] Are you fluent in the language required for this position?
+LANGUAGE_LOCATION_PROXY [BARE] Do you have professional fluency in the required local language?
+LANGUAGE_LOCATION_PROXY [BARE] Are you fluent in the local language?
+LANGUAGE_LOCATION_PROXY [BARE] Do you speak the language required for this market?
+LANGUAGE_LOCATION_PROXY [BARE] Are you able to conduct customer meetings in the required local language?
+LANGUAGE_LOCATION_PROXY [BARE] Can you provide customer support in the local language?
+LANGUAGE_LOCATION_PROXY [BARE] Do you have native-level proficiency in the required language?
+LANGUAGE_LOCATION_PROXY [BARE] Are you a native speaker of the required language?
+LANGUAGE_LOCATION_PROXY [BARE] Do you have professional-level proficiency in the applicable local language?
+EUROPEAN_LANGUAGE [NAMED] Haben Sie eine gültige Arbeitserlaubnis für Deutschland?
+EUROPEAN_LANGUAGE [NAMED] Sind Sie berechtigt, in Deutschland zu arbeiten?
+EUROPEAN_LANGUAGE [NAMED] Verfügen Sie über das Recht, im Vereinigten Königreich zu arbeiten?
+EUROPEAN_LANGUAGE [NAMED] Benötigen Sie eine Arbeitserlaubnis für Deutschland?
+EUROPEAN_LANGUAGE [NAMED] Benötigen Sie ein Visum oder Sponsoring für Ihre Beschäftigung in Deutschland?
+EUROPEAN_LANGUAGE [NAMED] Haben Sie eine gültige Aufenthaltserlaubnis für Deutschland?
+EUROPEAN_LANGUAGE [NAMED] Sind Sie deutscher Staatsbürger?
+EUROPEAN_LANGUAGE [NAMED] Sind Sie in Deutschland wohnhaft?
+EUROPEAN_LANGUAGE [NAMED] Können Sie dauerhaft in Deutschland arbeiten?
+EUROPEAN_LANGUAGE [NAMED] Êtes-vous légalement autorisé à travailler en France ?
+EUROPEAN_LANGUAGE [NAMED] Avez-vous le droit de travailler en France ?
+EUROPEAN_LANGUAGE [NAMED] Avez-vous besoin d'un permis de travail pour travailler en France ?
+EUROPEAN_LANGUAGE [NAMED] Avez-vous besoin d'un parrainage de visa pour travailler en France ?
+EUROPEAN_LANGUAGE [NAMED] Êtes-vous résident en France ?
+EUROPEAN_LANGUAGE [NAMED] Êtes-vous citoyen français ?
+EUROPEAN_LANGUAGE [NAMED] Ha il diritto di lavorare in Italia?
+EUROPEAN_LANGUAGE [NAMED] È legalmente autorizzato a lavorare in Italia?
+EUROPEAN_LANGUAGE [NAMED] Ha bisogno di un permesso di lavoro per lavorare in Italia?
+EUROPEAN_LANGUAGE [NAMED] Ha bisogno di sponsorizzazione per il visto per lavorare in Italia?
+EUROPEAN_LANGUAGE [NAMED] È residente in Italia?
+EUROPEAN_LANGUAGE [NAMED] È cittadino italiano?
+EUROPEAN_LANGUAGE [NAMED] Heeft u het recht om in Nederland te werken?
+EUROPEAN_LANGUAGE [NAMED] Bent u wettelijk bevoegd om in Nederland te werken?
+EUROPEAN_LANGUAGE [NAMED] Heeft u een werkvergunning voor Nederland?
+EUROPEAN_LANGUAGE [NAMED] Heeft u visumsponsoring nodig om in Nederland te werken?
+EUROPEAN_LANGUAGE [NAMED] Bent u inwoner van Nederland?
+EUROPEAN_LANGUAGE [NAMED] Bent u Nederlands staatsburger?
+EUROPEAN_LANGUAGE [NAMED] Är du lagligt behörig att arbeta i Sverige?
+EUROPEAN_LANGUAGE [NAMED] Har du rätt att arbeta i Sverige?
+EUROPEAN_LANGUAGE [NAMED] Behöver du arbetstillstånd för att arbeta i Sverige?
+EUROPEAN_LANGUAGE [NAMED] Behöver du visumsponsring för att arbeta i Sverige?
+EUROPEAN_LANGUAGE [NAMED] Är du bosatt i Sverige?
+EUROPEAN_LANGUAGE [NAMED] Är du svensk medborgare?
+EUROPEAN_LANGUAGE [NAMED] Har du arbeidstillatelse for å jobbe i Norge?
+EUROPEAN_LANGUAGE [NAMED] Har du rett til å arbeide i Norge?
+EUROPEAN_LANGUAGE [NAMED] Trenger du visumsponsing for å jobbe i Norge?
+EUROPEAN_LANGUAGE [NAMED] Er du bosatt i Norge?
+EUROPEAN_LANGUAGE [NAMED] Er du norsk statsborger?
+EUROPEAN_LANGUAGE [NAMED] Har du arbejdstilladelse til at arbejde i Danmark?
+EUROPEAN_LANGUAGE [NAMED] Har du ret til at arbejde i Danmark?
+EUROPEAN_LANGUAGE [NAMED] Har du brug for visumsponsorering for at arbejde i Danmark?
+EUROPEAN_LANGUAGE [NAMED] Er du bosat i Danmark?
+EUROPEAN_LANGUAGE [NAMED] Er du dansk statsborger?
+EUROPEAN_LANGUAGE [NAMED] Você está legalmente autorizado a trabalhar nos Estados Unidos?
+EUROPEAN_LANGUAGE [NAMED] Você tem direito de trabalhar na Austrália?
+EUROPEAN_LANGUAGE [NAMED] Você precisa de patrocínio de visto para trabalhar no Canadá?
+EUROPEAN_LANGUAGE [NAMED] Você precisa de uma autorização de trabalho para trabalhar na Alemanha?
+EUROPEAN_LANGUAGE [NAMED] Você é cidadão australiano?
+EUROPEAN_LANGUAGE [NAMED] Você reside atualmente no Reino Unido?
+EUROPEAN_LANGUAGE [NAMED] ¿Está legalmente autorizado para trabajar en Estados Unidos?
+EUROPEAN_LANGUAGE [NAMED] ¿Tiene derecho a trabajar en Australia?
+EUROPEAN_LANGUAGE [NAMED] ¿Necesita patrocinio de visa para trabajar en Canadá?
+EUROPEAN_LANGUAGE [NAMED] ¿Necesita un permiso de trabajo para trabajar en Alemania?
+EUROPEAN_LANGUAGE [NAMED] ¿Es ciudadano australiano?
+EUROPEAN_LANGUAGE [NAMED] ¿Reside actualmente en el Reino Unido?
+EUROPEAN_LANGUAGE [BARE] Haben Sie eine gültige Arbeitserlaubnis?
+EUROPEAN_LANGUAGE [BARE] Sind Sie berechtigt, zu arbeiten?
+EUROPEAN_LANGUAGE [BARE] Benötigen Sie eine Arbeitserlaubnis?
+EUROPEAN_LANGUAGE [BARE] Benötigen Sie ein Visum?
+EUROPEAN_LANGUAGE [BARE] Benötigen Sie Sponsoring?
+EUROPEAN_LANGUAGE [BARE] Haben Sie einen gültigen Aufenthaltstitel?
+EUROPEAN_LANGUAGE [BARE] Sind Sie in dem betreffenden Land wohnhaft?
+EUROPEAN_LANGUAGE [BARE] Sind Sie Staatsbürger?
+EUROPEAN_LANGUAGE [BARE] Êtes-vous légalement autorisé à travailler ?
+EUROPEAN_LANGUAGE [BARE] Avez-vous le droit de travailler ?
+EUROPEAN_LANGUAGE [BARE] Avez-vous besoin d'un permis de travail ?
+EUROPEAN_LANGUAGE [BARE] Avez-vous besoin d'un parrainage de visa ?
+EUROPEAN_LANGUAGE [BARE] Êtes-vous résident ?
+EUROPEAN_LANGUAGE [BARE] Êtes-vous citoyen ?
+EUROPEAN_LANGUAGE [BARE] Ha il diritto di lavorare?
+EUROPEAN_LANGUAGE [BARE] È legalmente autorizzato a lavorare?
+EUROPEAN_LANGUAGE [BARE] Ha bisogno di un permesso di lavoro?
+EUROPEAN_LANGUAGE [BARE] Ha bisogno di sponsorizzazione?
+EUROPEAN_LANGUAGE [BARE] È residente?
+EUROPEAN_LANGUAGE [BARE] È cittadino?
+EUROPEAN_LANGUAGE [BARE] Heeft u het recht om te werken?
+EUROPEAN_LANGUAGE [BARE] Bent u wettelijk bevoegd om te werken?
+EUROPEAN_LANGUAGE [BARE] Heeft u een werkvergunning?
+EUROPEAN_LANGUAGE [BARE] Heeft u visumsponsoring nodig?
+EUROPEAN_LANGUAGE [BARE] Bent u inwoner?
+EUROPEAN_LANGUAGE [BARE] Bent u staatsburger?
+EUROPEAN_LANGUAGE [BARE] Är du lagligt behörig att arbeta?
+EUROPEAN_LANGUAGE [BARE] Har du rätt att arbeta?
+EUROPEAN_LANGUAGE [BARE] Behöver du arbetstillstånd?
+EUROPEAN_LANGUAGE [BARE] Behöver du visumsponsring?
+EUROPEAN_LANGUAGE [BARE] Är du bosatt?
+EUROPEAN_LANGUAGE [BARE] Är du medborgare?
+EUROPEAN_LANGUAGE [BARE] Har du arbeidstillatelse?
+EUROPEAN_LANGUAGE [BARE] Har du rett til å arbeide?
+EUROPEAN_LANGUAGE [BARE] Trenger du visumsponsing?
+EUROPEAN_LANGUAGE [BARE] Er du bosatt?
+EUROPEAN_LANGUAGE [BARE] Er du statsborger?
+EUROPEAN_LANGUAGE [BARE] Har du arbejdstilladelse?
+EUROPEAN_LANGUAGE [BARE] Har du ret til at arbejde?
+EUROPEAN_LANGUAGE [BARE] Har du brug for visumsponsorering?
+EUROPEAN_LANGUAGE [BARE] Er du bosat?
+EUROPEAN_LANGUAGE [BARE] Er du statsborger?
+EUROPEAN_LANGUAGE [BARE] Você está legalmente autorizado a trabalhar?
+EUROPEAN_LANGUAGE [BARE] Você tem direito de trabalhar?
+EUROPEAN_LANGUAGE [BARE] Você precisa de patrocínio de visto?
+EUROPEAN_LANGUAGE [BARE] Você precisa de uma autorização de trabalho?
+EUROPEAN_LANGUAGE [BARE] Você é cidadão?
+EUROPEAN_LANGUAGE [BARE] Você reside atualmente?
+EUROPEAN_LANGUAGE [BARE] ¿Está legalmente autorizado para trabajar?
+EUROPEAN_LANGUAGE [BARE] ¿Tiene derecho a trabajar?
+EUROPEAN_LANGUAGE [BARE] ¿Necesita patrocinio de visa?
+EUROPEAN_LANGUAGE [BARE] ¿Necesita un permiso de trabajo?
+EUROPEAN_LANGUAGE [BARE] ¿Es ciudadano?
+EUROPEAN_LANGUAGE [BARE] ¿Reside actualmente?

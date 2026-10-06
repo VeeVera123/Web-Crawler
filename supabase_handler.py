@@ -43,7 +43,13 @@ import requests as http_requests
 #       eligibility question rejects a job tied to one country/city, named or not), scope
 #       taken from the location field, named rejection reasons. Rows admitted before this
 #       (OpenLoop, Tenable, Mollie, Sanity...) are re-checked.
-CLASSIFIER_VERSION = 7
+#   8 - 2026-10-06: question vocabulary widened by family from an independent ~620-line
+#       corpus (corpus/restrictive_questions_openai_1.txt): named visa/permit categories
+#       (OPT, TN, Blue Card, Skilled Worker...), export control / "US person", clearance
+#       and vetting, payroll / legal-entity / "can we legally employ you" gates, move /
+#       driving distance / attend-the-office wording, country-tied police checks, licensing,
+#       "local language", and German/Dutch/Nordic/Portuguese/Spanish phrasing.
+CLASSIFIER_VERSION = 8
 
 import os
 from dotenv import load_dotenv

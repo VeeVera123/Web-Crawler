@@ -5437,7 +5437,11 @@ _LANGUAGE_FLUENCY_RE = re.compile(
     r"(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
     r"|\bnative\s+(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s*(?:speaker)?\b"
     r"|\bmust\s+(?:speak|be\s+fluent\s+in)\s+(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
-    r"|\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s+language\s+(?:skills?|proficiency|fluency)\b",
+    r"|\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s+language\s+(?:skills?|proficiency|fluency)\b"
+    # "French fluency", "professional-level Dutch", "speak Dutch at a professional level"
+    r"|\b(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\s+(?:fluency|proficiency)\b"
+    r"|\b(?:professional|business|conversational|full)[\s\-]+(?:level\s+)?(?:of\s+)?(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b"
+    r"|\bspeak\s+(?:\w+\s+){0,2}(?:" + _LANGUAGE_NAMES_FRAGMENT + r")\b[^.?!\n]{0,40}\b(?:professional|business|native|fluent\w*)\b",
     re.I,
 )
 # Section/line-level softeners — a standalone header line ("Nice to
@@ -6444,7 +6448,14 @@ _Q_AUTH_CUE = (
     r"(?:valid|current|hold|have|possess|need|require)\s+(?:a\s+|an\s+)?(?:valid\s+)?(?:work\s+|employment\s+)?"
     r"(?:visa|permit)|visa\s+(?:that\s+)?(?:permits|allows|entitles|status|holder)|citizen\w*|nationals?\b|"
     r"permanent\s+resident|green\s*card|residency|resident\s+status|immigration\s+status|"
-    r"proof\s+of\s+(?:eligib\w+|right|identity)|sponsorship|(?:employed|employment)\s+in"
+    r"proof\s+of\s+(?:eligib\w+|right|identity)|sponsorship|(?:employed|employment)\s+in|"
+    # visa / permit categories and status words ("UK Skilled Worker status", "settled status",
+    # "indefinite leave to remain", "EU Blue Card", "H-1B transfer", "British nationality")
+    r"nationalit(?:y|ies)|settled\s+status|indefinite\s+leave|leave\s+to\s+remain|blue\s*card|skilled\s+worker\s+(?:visa|status|sponsor\w*|route|licen[cs]e|transfer|category)|(?:uk|british)\s+skilled\s+worker|"
+    r"tier\s*2\s+(?:\(general\)\s+)?(?:visa|sponsor\w*|general)|global\s+talent|h-?1b|(?-i:OPT|CPT|EAD)\b|"
+    r"(?-i:TN)\s+(?:status|visa)|subclass\s*\d{3}|work\s+rights|permanent\s+work\s+rights|"
+    r"(?:status|visa|permit)\s+(?:that\s+)?(?:permits|allows)\b|(?:permits|allows)\s+(?:you\s+to\s+)?(?:work|employment)|"
+    r"(?-i:\bvisas?\b)|non-?immigrant"
 )
 _Q_AUTH_CUE_RE = re.compile(r"\b(?:" + _Q_AUTH_CUE + r")", re.I)
 _Q_YOU_RE = re.compile(r"\b(?:you|your|i|i'm|i\s+am|we|applicant|candidate)\b|^\s*(?:please\s+)?(?:confirm|indicate|state)\b", re.I)
@@ -6466,6 +6477,35 @@ _GEO_QUESTION_FRAMES = tuple(re.compile(p, re.I) for p in (
     r"\boffice\s+(?:days|attendance|presence)\b",
     # security clearance
     r"\b(?:security|secret|top[- ]secret|ts/sci|public[- ]trust)\s+clearance\b|\bclearance\s+(?:level|status)\b",
+    # 2026-10 (OpenAI-supplied corpus, corpus/restrictive_questions_openai_1.txt) — the same
+    # families again in wording the first pass missed. Every pattern here binds the candidate
+    # to a place or a nationality even when no place is named, so none needs a place token.
+    r"\b(?:active|current|valid|existing|obtain\w*|hold\w*|eligible\s+for|eligibility\s+for)\s+(?:\w+\s+){0,2}clearance\b",
+    r"\bsecurity\s+(?:vetting|investigation)\b|\b(?:government|national)\s+(?:vetting|clearance)\b|"
+    r"\bvetting\s+(?:process|requirements?)\b|\bpublic[- ]trust\b|\bdbs\s+check\b|\bf[uü]hrungszeugnis\b",
+    #   export control / "US person" (a legal nationality test)
+    r"\bexport[- ]control\w*|\bexport[- ]controlled\b|\bexport\s+restrictions?\b|\bitar\b|(?-i:\bEAR\b)|"
+    r"\bcontrolled\s+(?:technical\s+data|technology|unclassified)\b|(?-i:\bU\.?S\.?)\s+persons?\b|\bunited\s+states\s+persons?\b",
+    #   relocation phrased as "move" ("willing to move for this role / if selected")
+    r"\b(?:willing|open|able|prepared|ready|comfortable|happy|can|could|would)\b[^?.]{0,40}?\bmov(?:e|ing)\s+"
+    r"(?:for|if|when|should|upon|once|within|before|after)\b",
+    #   proximity and attendance: driving distance, travelling to / attending / working from the office
+    r"\bdriving\s+distance\b|\btravel(?:l?ing)?\s+to\s+(?:the\s+|our\s+)?(?:work\s+|office\s+|job\s+)?(?:location|office|site|workplace)\b",
+    r"\b(?:attend|attending)\s+(?:the\s+|our\s+|an?\s+)?(?:\w+\s+){0,2}offices?\b",
+    r"\b(?:report|reporting)\s+to\s+(?:an?|the|our)\s+(?:\w+\s+){0,2}offices?\b",
+    r"\bwork(?:ing)?\s+(?:out\s+of|from)\s+(?:an?|the|our)\s+(?:\w+\s+){0,2}(?:offices?|workplace)\b|"
+    r"\bwork(?:ing)?\s+from\s+the\s+(?:work\s+)?location\b",
+    r"\bphysically\s+(?:present|located|based|on[- ]?site)\b",
+    #   "can we legally employ you where you are": the company's own location gate
+    r"\blegally\s+(?:employ|hire|engage|contract)\s+(?:you|someone|people|candidates?)\b",
+    r"\b(?:country|location|jurisdiction|region|residence)\s+(?:is\s+|are\s+)?(?:currently\s+)?(?:supported|covered)\b",
+    r"\b(?:supported|covered)\s+(?:for|by)\s+(?:our\s+)?(?:employment|payroll|employing|entit\w+)\b",
+    r"\b(?:payroll|legal\s+entit(?:y|ies)|employing\s+entit(?:y|ies)|employer[- ]of[- ]record)\b[^?.]{0,50}"
+    r"\b(?:your|current)\s+(?:location|country|jurisdiction|residence)\b",
+    r"\b(?:your|current)\s+(?:location|country|jurisdiction|residence)\b[^?.]{0,50}"
+    r"\b(?:payroll|legal\s+entit|employing\s+entit)",
+    r"\b(?:located|based|resid\w+)\b[^?.]{0,25}\b(?:countr(?:y|ies)|jurisdictions?)\s+where\s+(?:we|our|the\s+company)\b",
+    r"\bpayroll\s+(?:is\s+)?(?:available|coverage)\b|\bpayroll\s+coverage\b|\bemploying\s+jurisdictions?\b",
 ))
 _Q_RESIDENCE_FRAME = re.compile(
     r"\b(?:reside|resides|residing|resident|live|living|located|based|domiciled|home\s+base|citizen|native)\b",
@@ -6501,6 +6541,27 @@ _Q_RESIDENCE_BOUND_RE = re.compile(
     r"domiciled|resident|citizen|national|native)\b[^?.]{0,30}?\b(?:in|within|near|around|at|of)\b", re.I)
 
 
+# Demonyms and localized country names: "Australian police clearance", "British nationality",
+# "Estados Unidos". Only consulted together with an authorization / entity / country-tied-check
+# cue, never on their own ("Do you speak French?" must not match).
+_Q_DEMONYM_RE = re.compile(
+    r"\b(?:american|canadian|british|australian|german|irish|swiss|swedish|norwegian|danish|dutch|italian|"
+    r"singaporean|icelandic|luxembourg(?:ish)?|french|spanish|portuguese|brazilian|mexican|indian|japanese|"
+    r"chinese|korean|new\s+zealand|emirati|israeli|polish)\b", re.I)
+_Q_LOCAL_PLACES_RE = re.compile(
+    r"\b(?:deutschland|vereinigte[nm]?\s+k[öo]nigreich|gro[ßs]britannien|frankreich|france|italia|italien|nederland|"
+    r"niederlande|belgi[eëe]n?|sverige|schweden|norge|norwegen|danmark|d[äa]nemark|estados\s+unidos|reino\s+unido|"
+    r"alemania|alemanha|francia|espa[ñn]a|portugal|brasil|brasilien|canad[áa]|austr[áa]lia|australien|[ée]tats-unis|"
+    r"royaume-uni|allemagne|stati\s+uniti|regno\s+unito|germania|vereinigte\s+staaten|suisse|schweiz|svizzera|deutsch\w*|fran[cç]ais\w*|italian[oa]\w*|nederlands\w*|svensk\w*|norsk\w*|dansk\w*|australian[oa]\w*|brit[aâ]nic\w*|canadiense|canadense|estadounidense|norteamericano|espa[ñn]ol\w*|portugu[eê]s\w*)\b", re.I)
+_Q_ENGLISH_MARKER_RE = re.compile(
+    r"\b(?:the|you|your|are|have|will|would|can|please|what|which|where|when|any|with|this|that)\b", re.I)
+_Q_ENTITY_CUE_RE = re.compile(
+    r"\b(?:payroll|legal\s+entit(?:y|ies)|employing\s+entit(?:y|ies)|entity|entities|employer[- ]of[- ]record|eor)\b", re.I)
+_Q_COUNTRY_CHECK_RE = re.compile(
+    r"\b(?:police\s+(?:clearance|certificate|check|record)|criminal[- ]record|dbs|f[uü]hrungszeugnis|"
+    r"background[\s\-]+(?:investigation|screening)|good\s+conduct\s+certificate)\b", re.I)
+
+
 def _geo_question_hit(q: str) -> bool:
     """True when this single application-question text binds the candidate to a place."""
     if not q or len(q) > 600:
@@ -6510,6 +6571,22 @@ def _geo_question_hit(q: str) -> bool:
     if _Q_CAP_PLACE_RE.search(q):
         return True
     you = _Q_YOU_RE.search(q)
+    # A question written in another language that is about eligibility/residency and names a
+    # place (in any language) binds the candidate; the multilingual vocabulary is shared with Rank 4.
+    # English questions never use this branch: its vocabulary overlaps English words ("residence",
+    # "visa") and a place that only appears as a format example ("e.g. San Jose, CA") must not bind.
+    if not _Q_ENGLISH_MARKER_RE.search(q) and (_Q_PLACE_RE.search(q) or _Q_LOCAL_PLACES_RE.search(q)) and any(
+            rx.search(q) for rx in _ELIG_MULTILINGUAL_RES):
+        return True
+    # demonym + authorization / payroll-entity / country-specific check ("Canadian nationality",
+    # "our German legal entity", "Australian police clearance"), framed at the candidate
+    if you and _Q_DEMONYM_RE.search(q) and not _Q_NON_BINDING_RE.search(q) and (
+            _Q_AUTH_CUE_RE.search(q) or _Q_ENTITY_CUE_RE.search(q) or _Q_COUNTRY_CHECK_RE.search(q)):
+        return True
+    # a named place + payroll / legal entity / country-specific check ("our US legal entity")
+    if you and _Q_PLACE_RE.search(_Q_ZONE_RE.sub(" ", q)) and not _Q_NON_BINDING_RE.search(q) and (
+            _Q_ENTITY_CUE_RE.search(q) or _Q_COUNTRY_CHECK_RE.search(q)):
+        return True
     # A zone phrase ("US Eastern", "UK time", "GMT") is a working-HOURS statement,
     # not a place the candidate must live in, so it is blanked before looking for places.
     if _Q_PLACE_RE.search(_Q_ZONE_RE.sub(" ", q)):
@@ -7252,6 +7329,9 @@ _ELIG_AUTH = (
     r"entitlement)\b",
     r"\bpermit(?:ted)?\s+to\s+work\b",
     r"\bi-?9\b|\be-?verify\b",
+    # 2026-10 (OpenAI corpus): "work for any employer", "a status that permits employment"
+    r"\b(?:work|employ\w*)\b[^.?!\n]{0,20}\bfor\s+any\s+employer\b",
+    r"\b(?:permits?|allows?)\s+(?:you\s+to\s+)?(?:work|employment)\b",
 )
 _ELIG_VISA = (
     r"\bsponsor(?:s|ed|ing|ship)?\b",
@@ -7264,9 +7344,20 @@ _ELIG_VISA = (
     r"\bimmigration\b|\bwork\s+permit\b|\bresidence\s+permit\b|\bresidency\s+permit\b",
     r"\bgreen\s*card\b|\bh-?1b\b|\bstem\s+opt\b|\bpermanent\s+resid\w+|\bresident\s+status\b|"
     r"\bsettled\s+status\b|\bindefinite\s+leave\b|\bright\s+of\s+abode\b",
+    # named visa / permit categories (US OPT/CPT/TN/E-3/L-1, UK Skilled Worker/Tier 2/Global Talent,
+    # EU Blue Card, AU subclass 482, work rights): holding or needing one IS an eligibility question
+    r"\bblue\s*card\b|\bskilled\s+worker\s+(?:visa|status|sponsor\w*|route|licen[cs]e|transfer|category)\b|"
+    r"\b(?:uk|british)\s+skilled\s+worker\b|\btier\s*2\s+(?:\(general\)\s+)?(?:visa|sponsor\w*|general)\b|"
+    r"\bglobal\s+talent\b|\bsubclass\s*\d{3}\b|\bwork\s+rights?\b|\bleave\s+to\s+remain\b|\bnon-?immigrant\b",
+    r"(?-i:\b(?:OPT|CPT|EAD)\b)|(?-i:\bTN\b)\s+(?:status|visa)|\b[ehjlofd]-?[1-3][a-d]?\s+(?:status|transfer|holder|dependent)\b",
 )
 _ELIG_CITIZEN = (r"\bcitizen\w*", r"\bnationalit(?:y|ies)\b", r"\bnationals?\s+of\b", r"\bpassport\b",
-                 r"\bstateless\b")
+                 r"\bstateless\b",
+                 # "Are you a national?", "US person" (a legal nationality test) and export control
+                 r"\b(?:an?|the)\s+nationals?\b",
+                 r"(?-i:\bU\.?S\.?)\s+persons?\b|\bunited\s+states\s+persons?\b",
+                 r"\bexport[- ]control\w*|\bexport[- ]controlled\b|\bexport\s+restrictions?\b|\bitar\b|(?-i:\bEAR\b)|"
+                 r"\bcontrolled\s+(?:technical\s+data|technology|unclassified)\b")
 _ELIG_PRESENCE_Q = (
     r"\b(?:reside|resides|residing|resident|residents|residency|domicile\w*)\b",
     r"\b(?:live|living|lives|located|based|situated)\s+(?:in|within|near|around|at)\b",
@@ -7274,6 +7365,25 @@ _ELIG_PRESENCE_Q = (
     r"\b(?:where|in\s+which|within\s+which)\s+(?:this|the)\s+(?:role|job|position|vacancy|posting)\b",
     r"\b(?:where|in\s+which|within\s+which)\s+you\s+(?:are\s+|will\s+be\s+)?(?:applying|based|located|reside|working)\b",
     r"\b(?:country|location)\s+of\s+(?:the\s+)?(?:role|job|position)\b",
+    r"\b(?:applicable|relevant|appropriate|required)\s+(?:jurisdiction|country)\b|\bpermanent\s+address\b|"
+    r"\bwhere\s+(?:you\s+)?would\s+perform\b",
+)
+# Gates that tie the candidate to the company's legal footprint or a local credential, with no
+# country named: payroll / employing entity / "can we legally employ you", country-tied
+# background documents, professional licensing, a "local language", clearance/vetting.
+_ELIG_ENTITY = (
+    r"\bpayroll\b|\b(?:legal|employing|local)\s+entit(?:y|ies)\b|\bemployer[- ]of[- ]record\b|"
+    r"\blegally\s+(?:employ|hire)\b|\b(?:supported|covered)\s+(?:for|by)\s+(?:our\s+)?(?:employment|payroll)\b|"
+    r"\bemploying\s+jurisdictions?\b|\b(?:country|jurisdiction)\s+(?:is\s+)?supported\b|\b(?:entity|legal)\s+structure\b",
+)
+_ELIG_LOCAL_CREDENTIAL = (
+    r"\bpolice\s+(?:clearance|certificate|check|record)\b|\bcriminal[- ]record\b|\bdbs\b|f[uü]hrungszeugnis|"
+    r"\bgood\s+conduct\s+certificate\b",
+    r"\bprofessional\s+licen[cs]\w*|\blicen[cs]ed\s+to\s+practi[cs]e\b|\badmitted\s+to\s+practi[cs]e\b|"
+    r"\bregistered\s+(?:with|to\s+practi[cs]e)\b|\blicen[cs]e\s+(?:required|valid|is\s+valid)\b|"
+    r"\bpractice\s+law\b|\bbar\s+(?:admission|exam|member\w*)\b",
+    r"\bvetting\b|\bclearance\b|\bpublic[- ]trust\b|\b(?:security|background)\s+investigation\b",
+    r"\b(?:local|required|applicable)\s+(?:local\s+)?language\b|\blocal\s+market\s+language\b|\blanguage\s+required\b",
 )
 _ELIG_MULTILINGUAL = (
     r"arbeitserlaubnis|arbeitsgenehmigung|aufenthaltstitel|aufenthaltserlaubnis|arbeitsberechtigung|\bvisum\b|"
@@ -7288,10 +7398,20 @@ _ELIG_MULTILINGUAL = (
     r"nationaliteit|verhuizen|woonachtig|woonplaats",
     r"arbetstillst[åa]nd|uppeh[åa]llstillst[åa]nd|medborgare|medborgarskap|\bflytta\b|arbeidstillatelse|"
     r"oppholdstillatelse|statsborger\w*|\bflytte\b|arbejdstilladelse|opholdstilladelse|bop[æa]l",
+    # 2026-10 (OpenAI corpus): wording the first vocabulary missed
+    r"\brecht\b[^.?!\n]{0,40}arbeiten|(?:dauerhaft|rechtlich|gesetzlich)\w*[^.?!\n]{0,30}arbeiten|arbeitsrecht",
+    r"\bbevoegd\w*|\binwoner\b|\bingezetene\b|wettelijk\w*[^.?!\n]{0,40}werken",
+    r"\bbeh[öo]rig\w*|r[äa]tt\s+att\s+arbeta|\bbosatt?\b|\bvisum\w*|rett\s+til\s+[åa]\s+arbeide|"
+    r"ret\s+til\s+at\s+arbejde|brug\s+for\s+visum",
+    r"autoriza[çc][ãa]o\s+de\s+trabalho|autorizado\s+a\s+trabalhar|direito\s+(?:de|a)\s+trabalhar|patroc[ií]nio|"
+    r"\bvisto\b|cidad[ãa]o\w*|nacionalidade|licen[çc]a\s+de\s+trabalho|permiss[ãa]o\s+de\s+trabalho",
+    r"autorizado\s+para\s+trabajar|derecho\s+a\s+trabajar|permiso\s+de\s+trabajo|patrocinio|\bvisa\b|ciudadan\w+|"
+    r"nacionalidad|residencia|autorizaci[oó]n\s+(?:de|para)\s+trabaj\w+|\breside\w*|\bresid[ií]r\b",
 )
+_ELIG_MULTILINGUAL_RES = tuple(re.compile(p, re.I) for p in _ELIG_MULTILINGUAL)
 _ELIG_QUESTION_RES = tuple(re.compile(p, re.I) for p in
                            _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN + _ELIG_PRESENCE_Q + _ELIG_MULTILINGUAL
-                           + (r"\bvisas?\b",))
+                           + _ELIG_ENTITY + _ELIG_LOCAL_CREDENTIAL + (r"\bvisas?\b",))
 _ELIG_TEXT_RES = tuple(re.compile(p, re.I) for p in _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN) + (
     re.compile(r"\bmust\s+(?:reside|live|be\s+(?:located|based|resident))\b|\b(?:residents?|citizens?)\s+only\b", re.I),)
 _ELIG_TEXT_REQUIREMENT_RE = re.compile(
@@ -7312,13 +7432,25 @@ def _rank4_question_texts(job: dict) -> list[str]:
     return out
 
 
+# "Do you have experience with payroll software / immigration products / Visa or Mastercard?" is a
+# question about a TOPIC the candidate has worked on, not about the candidate's own eligibility.
+_ELIG_TOPIC_EXEMPT_RE = re.compile(
+    r"\b(?:experience\w*|familiar\w*|knowledge|expertise|exposure)\b[^?.]{0,60}\b(?:immigration|payroll|entit(?:y|ies)|"
+    r"visa|licen[cs]\w+|clearance|vetting|export|compliance|citizen\w*|nationality|employment\s+law)", re.I)
+_ELIG_COMPANY_VISA_RE = re.compile(
+    r"\bvisa\s*(?:,|/|&|and|or)\s*(?:mastercard|amex|american\s+express)|(?:mastercard|amex)\s*(?:,|/|&|and|or)\s*visa|"
+    r"\bvisa\s+(?:card|cards|payments?|inc\.?|direct|checkout)\b", re.I)
+
+
 def rank4_question_eligibility_hit(job: dict) -> str | None:
     """The first application question that is about eligibility to work/live somewhere
     (work authorization, right to work, visa/sponsorship, immigration, citizenship,
     residency, where the role is located...), named place or not; None if the form is
     silent on it."""
     for q in _rank4_question_texts(job):
-        if q and any(rx.search(q) for rx in _ELIG_QUESTION_RES):
+        if not q or _ELIG_TOPIC_EXEMPT_RE.search(q):
+            continue
+        if any(rx.search(_ELIG_COMPANY_VISA_RE.sub(" ", q)) for rx in _ELIG_QUESTION_RES):
             return q
     return None
 
