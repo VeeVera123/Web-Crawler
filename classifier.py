@@ -1854,6 +1854,23 @@ _AFRICAN_COUNTRY_RE = re.compile(
 )
 
 
+def _combined_location(job: dict) -> str:
+    """The job's location text: the location field plus its country field, WITHOUT repeating a country the
+    location already names. Ashby sets country="Global" for location "Remote, Global"; concatenating the two
+    gave "Remote, Global Global", the Global patterns stripped one "Global" and the leftover read as an
+    unexplained place, so a genuinely global job was rejected (and then re-admitted by Rank 4 as 4b)."""
+    raw_loc = job.get("location") or ""
+    raw_country = job.get("country") or ""
+    if isinstance(raw_loc, list):
+        raw_loc = ", ".join(str(x) for x in raw_loc)
+    if isinstance(raw_country, list):
+        raw_country = ", ".join(str(x) for x in raw_country)
+    loc_lower = raw_loc.lower()
+    extra = [part.strip() for part in re.split(r"[,;/|]", raw_country)
+             if part.strip() and not re.search(r"(?<!\w)" + re.escape(part.strip().lower()) + r"(?!\w)", loc_lower)]
+    return (raw_loc + " " + ", ".join(extra)).strip()
+
+
 def _with_normalized_text(job: dict) -> dict:
     """The job with title / location / description Unicode-normalised (fullwidth letters, zero-width and
     soft-hyphen characters, non-breaking spaces, wrapped question lines) so a look-alike character can't
@@ -2151,13 +2168,7 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # "unsupported operand type(s) for +: 'NoneType' and 'str'" the moment
     # either field was None. This is the same safe idiom already used
     # everywhere else in this file (see e.g. line ~1253 below).
-    raw_loc = job.get("location") or ""
-    raw_country = job.get("country") or ""
-    if isinstance(raw_loc, list):
-        raw_loc = ", ".join(str(x) for x in raw_loc)
-    if isinstance(raw_country, list):
-        raw_country = ", ".join(str(x) for x in raw_country)
-    loc = (raw_loc + " " + raw_country).strip()
+    loc = _combined_location(job)
 
     title = job.get("title", "")
     loc = _enrich_location_from_title(loc, title)
@@ -5321,13 +5332,7 @@ def has_referential_auth_question_with_named_place_signal(job: dict) -> bool:
     if not _referential_auth_hit(text):
         return False
 
-    raw_loc = job.get("location") or ""
-    raw_country = job.get("country") or ""
-    if isinstance(raw_loc, list):
-        raw_loc = ", ".join(str(x) for x in raw_loc)
-    if isinstance(raw_country, list):
-        raw_country = ", ".join(str(x) for x in raw_country)
-    loc = (raw_loc + " " + raw_country).strip()
+    loc = _combined_location(job)
     if _is_bare_location(loc):
         return False
     if STANDALONE_GLOBAL_RE.search(loc) or re.search(r"\bemea\b", loc, re.I) or re.search(r"\bafrica\b", loc, re.I):
@@ -7383,13 +7388,7 @@ def _rank4_place(job: dict) -> tuple[str | None, str | None, str | None]:
     scope is "narrow" when the job is tied to one specific country/city and "broad" when
     it is a region NAME (APAC, LATAM, Europe...) or a Global/EMEA/Africa claim; see
     classify_rank4's spec for why the form is judged differently for each."""
-    raw_loc = job.get("location") or ""
-    raw_country = job.get("country") or ""
-    if isinstance(raw_loc, list):
-        raw_loc = ", ".join(str(x) for x in raw_loc)
-    if isinstance(raw_country, list):
-        raw_country = ", ".join(str(x) for x in raw_country)
-    loc = (raw_loc + " " + raw_country).strip()
+    loc = _combined_location(job)
     title = job.get("title", "")
     loc = _enrich_location_from_title(loc, title)
     loc = _enrich_location_from_description(loc, job.get("description_snippet") or "")
