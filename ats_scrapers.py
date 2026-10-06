@@ -8139,7 +8139,7 @@ def _clean_label(text: str) -> str:
 # is an ordinary demographic dropdown (every country) and is dropped too.
 _OPTION_NOISE = {"yes", "no", "n/a", "na", "none", "select", "select...", "please select", "-", "--", "—"}
 _OPTION_LIST_KEYS = ("options", "choices", "values", "answers", "answer_options", "selectableValues",
-                     "selectable_values", "possibleAnswers")
+                     "selectable_values", "possibleAnswers", "open_question_options")
 
 
 def _option_texts(item) -> list[str]:
@@ -8153,7 +8153,8 @@ def _option_texts(item) -> list[str]:
         out = []
         for o in v:
             if isinstance(o, dict):
-                o = o.get("label") or o.get("text") or o.get("name") or o.get("title") or o.get("value") or ""
+                o = (o.get("label") or o.get("text") or o.get("name") or o.get("title") or o.get("body")
+                     or o.get("value") or "")
             t = _clean_label(str(o)) if o is not None else ""
             if t:
                 out.append(t)
@@ -8878,7 +8879,8 @@ def _fetch_recruitee_questions(job: dict) -> str:
                 for oq in (offer.get("open_questions") or []):
                     label = _clean_label(oq.get("body", ""))
                     if label:
-                        questions.append({"label": label, "required": bool(oq.get("required"))})
+                        questions.append({"label": label, "required": bool(oq.get("required")),
+                                          "options": _option_texts({"options": oq.get("open_question_options")})})
 
     if not questions:
         questions = _fetch_generic_form_questions(url)
@@ -9267,8 +9269,32 @@ def _fetch_rippling_questions(job: dict) -> str:
 # this will correctly return nothing — that's the platform's
 # architecture, not a bug here.
 
+_BAMBOOHR_JOB_RE = re.compile(r"https?://([^/.]+)\.bamboohr\.com/careers/(\d+)", re.I)
+
+
 def _fetch_bamboohr_questions(job: dict) -> str:
-    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", "")))
+    """BambooHR's careers pages are JavaScript-rendered, so parsing the page found nothing. The page's own
+    public JSON, https://{company}.bamboohr.com/careers/{id}/detail, carries the whole application form:
+    result.formFields.customQuestions is a list of {question, type, isRequired, options}. Verified live on
+    15/15 postings (7 with custom questions). A response with a customQuestions list is a form that was
+    actually READ; job["_form_status"] is set to "ok" then. A failed read leaves the flag unset (like the
+    other fetchers) so a flaky request can't drop a job -- Rank 4 needs a question line anyway."""
+    url = job.get("url", "")
+    m = _BAMBOOHR_JOB_RE.search(url)
+    if m:
+        r = _get_requests_sync(f"https://{m.group(1)}.bamboohr.com/careers/{m.group(2)}/detail",
+                               headers={"Accept": "application/json", "User-Agent": random.choice(USER_AGENTS)})
+        try:
+            form = ((r.json() if r else {}).get("result") or {}).get("formFields")
+        except Exception:
+            form = None
+        if isinstance(form, dict) and isinstance(form.get("customQuestions"), list):
+            job["_form_status"] = "ok"
+            return _format_auth_questions([
+                {"label": q.get("question") or "", "required": bool(q.get("isRequired")),
+                 "options": _option_texts({"options": q.get("options")})}
+                for q in form["customQuestions"] if isinstance(q, dict)])
+    return _format_auth_questions(_fetch_generic_form_questions_multi(url, job))
 
 
 def _fetch_icims_questions(job: dict) -> str:

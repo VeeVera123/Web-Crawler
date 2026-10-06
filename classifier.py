@@ -6233,8 +6233,10 @@ def has_non_remote_labeled_text_signal(job: dict) -> bool:
 RANK4_ELIGIBLE_ATS = {
     "Greenhouse", "Workable", "Personio", "JazzHR", "Teamtailor",
     "Recruitee", "Lever", "PageUp", "isolvedhire", "Pinpoint",
-    "Rippling", "Ashby",
+    "Rippling", "Ashby", "BambooHR",
 }
+# 2026-10: BambooHR added once its form became readable: the careers page is JavaScript-rendered, but its
+# public /careers/{id}/detail JSON carries result.formFields.customQuestions (verified live, 15/15 postings).
 # 2026-10: Ashby added once its question fetcher worked again (GraphQL; the old
 # posting API returned 401). Live probe, 30 random boards / 72 jobs: location on
 # 72/72, form fetch OK on 72/72, >=1 non-boilerplate question on 58/72.

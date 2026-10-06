@@ -309,11 +309,13 @@ otherwise drop.
 **Eligibility gate** (all four must hold before `classify_rank4()` is even
 called):
 1. `role_category` is `"CS"` or `"AM"` (never PM/OM).
-2. The job's ATS platform is in `RANK4_ELIGIBLE_ATS` — the 12 platforms
+2. The job's ATS platform is in `RANK4_ELIGIBLE_ATS` — the 13 platforms
    live-verified to reliably return **both** a location and
    application-question value on the same job: **Greenhouse, Workable,
    Personio, JazzHR, Teamtailor, Recruitee, Lever, PageUp, isolvedhire,
-   Pinpoint, Rippling, Ashby**. Eploy was removed (2026-10): it has no
+   Pinpoint, Rippling, Ashby, BambooHR**. BambooHR was added (2026-10): its
+   careers page is JavaScript-rendered, but the public `/careers/{id}/detail` JSON
+   carries `formFields.customQuestions` (15/15 sampled postings readable). Eploy was removed (2026-10): it has no
    dedicated question fetcher. Ashby was excluded in 2026-09 because its
    posting API started returning 401, and added in 2026-10 once questions
    were fetched through its GraphQL endpoint (72 sampled jobs: location on

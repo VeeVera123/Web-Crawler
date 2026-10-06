@@ -136,6 +136,37 @@ check("fetcher: options line", "Application Options: Work authorization status =
 check("fetcher: yes/no and >40 option lists dropped", out.count("Application Options:") == 1, out)
 check("fetcher: boilerplate dropped", "Name" not in out, out)
 
+# BambooHR: public /detail JSON -> custom questions + options; a read form sets _form_status
+_fake = {"result": {"formFields": {"customQuestions": [
+    {"id": "1", "isRequired": True, "question": "Which work visa do you hold?", "type": "select",
+     "options": [{"label": "H-1B"}, {"label": "TN"}]},
+    {"id": "2", "isRequired": False, "question": "Why us?", "type": "long", "options": []}]}}}
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._p = payload
+
+    def json(self):
+        return self._p
+
+
+_orig = ats_scrapers._get_requests_sync
+ats_scrapers._get_requests_sync = lambda url, **kw: _Resp(_fake)
+try:
+    j = {"url": "https://acme.bamboohr.com/careers/42", "source_ats": "BambooHR"}
+    out = ats_scrapers._fetch_bamboohr_questions(j)
+    check("bamboohr: questions", "Application Question: Which work visa do you hold?" in out and "Application Question: Why us?" in out, out)
+    check("bamboohr: options", "Application Options: Which work visa do you hold? => H-1B | TN" in out, out)
+    check("bamboohr: form_status ok", j.get("_form_status") == "ok")
+    ats_scrapers._get_requests_sync = lambda url, **kw: _Resp({"result": {"formFields": {"customQuestions": []}}})
+    j2 = {"url": "https://acme.bamboohr.com/careers/42", "source_ats": "BambooHR"}
+    check("bamboohr: read form with no custom questions", ats_scrapers._fetch_bamboohr_questions(j2) == "" and j2.get("_form_status") == "ok")
+finally:
+    ats_scrapers._get_requests_sync = _orig
+check("recruitee: option bodies", ats_scrapers._option_texts({"options": [{"body": "up to 3 years"}, {"body": "5-7 years"}]}) == ["up to 3 years", "5-7 years"])
+check("bamboohr: eligible for rank 4", "BambooHR" in classifier.RANK4_ELIGIBLE_ATS)
+
 print(f"form-field checks: {total - len(failures)}/{total} passed")
 for f in failures[: (None if VERBOSE else 15)]:
     print("  FAIL", f)
