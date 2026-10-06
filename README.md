@@ -136,8 +136,11 @@ Management roles only** one more look, under a strict gate:
 
 A job that clears the gate is re-run through step 1's full 19-check chain
 again internally (defense in depth — nothing restrictive gets a free
-pass just for being CS/AM), plus one extra check specific to Rank 4
-(a sponsorship/work-permit question tied to a named country). Only then:
+pass just for being CS/AM), plus the Rank 4 rule: the location field must itself be
+an allowed place (a region's member countries and cities do not count), and for a
+job tied to one country or city the application form must be *silent on
+eligibility* — any work-authorization, visa/sponsorship, citizenship, residency,
+relocation or commute question rejects it, named country or not. Only then:
 
 - **4a** — the location field, on its own, is made *entirely* of one or
   more names from a 15-country allowlist (US, UK, Canada, Australia,

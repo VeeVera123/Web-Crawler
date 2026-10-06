@@ -39,7 +39,11 @@ import requests as http_requests
 #   6 - 2026-10-05: Rank 4 fails closed on the location field (Bangkok / "Brasil" roles
 #       were admitted): it must resolve to a curated country, a region name, "City,
 #       <curated country>" or a known city of a curated non-US country.
-CLASSIFIER_VERSION = 6
+#   7 - 2026-10-06: Rank 4 rewritten as an explicit spec: "silent form" rule (any
+#       eligibility question rejects a job tied to one country/city, named or not), scope
+#       taken from the location field, named rejection reasons. Rows admitted before this
+#       (OpenLoop, Tenable, Mollie, Sanity...) are re-checked.
+CLASSIFIER_VERSION = 7
 
 import os
 from dotenv import load_dotenv

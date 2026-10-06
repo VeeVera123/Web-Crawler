@@ -541,14 +541,52 @@ work-authorization question" above. It has its own benefit-language guard
 so a company *offering* relocation/residency help isn't misread as
 requiring it.
 
-A country-agnostic version of the same question (no country named) is
-**not** disqualifying — that's the tier's other worked example: a
-"Customer Success Manager, EMEA" role with location "London" that asks
-"Will you now or in the future require sponsorship for a work visa?" with
-no country attached is admitted, because nothing ties that question to a
-specific place. (In practice this exact EMEA case is already caught
-earlier, at Rank 2, by the base pipeline's own EMEA handling — true new
-Rank 4 territory is non-EMEA bare regions/countries.)
+**The silent-form rule (2026-10 rewrite — supersedes the paragraph that used to
+sit here, which said a country-agnostic sponsorship question was not
+disqualifying).** Rank 4's premise is "if the form never asks, the company may let
+you work from anywhere". So a job whose location is ONE country or city is admitted
+only if its application form is *silent on eligibility*: **any** question about
+work authorization, right to work, visa/sponsorship, immigration, citizenship,
+residency, relocation, commuting or on-site presence rejects it — whether or not it
+names a country, in any phrasing, in English or the major EU languages
+(`rank4_question_eligibility_hit`, a topic list, not a phrase list) — and so does a
+title/JD sentence that *requires* eligibility, sponsorship or residency
+(`rank4_text_eligibility_requirement_hit`; a sentence that only offers help, "we offer
+visa support", is not a requirement). Real leaks this closed: OpenLoop ("Will you now
+or in the future require visa sponsorship? This includes initiating, continuing or
+transferring your visa…", location United States), Tenable ("Do you have the legal
+right to work in the country within which you are applying?", "…require
+sponsorship?", location Australia), Mollie ("Do you require visa sponsorship or a visa
+transfer?", location London), Sanity ("…require visa sponsorship… (H1B, Blue Card)",
+"Remote in the United States"). Each had been "fixed" before by adding one more
+phrase to `_REFERENTIAL_AUTH_QUESTION_RE`; the wording changed and it leaked again.
+
+The scope decides how strict the form check is: **narrow** (the location field names
+a curated country, "City, Country", or only a country-level signal) rejects every
+eligibility question; **broad** (a region NAME such as APAC/LATAM/Europe, or a bare
+city whose title/JD claims EMEA/Global) rejects only questions that name a specific
+place (the documented "CSM, EMEA" + London + bare sponsorship question stays
+admitted). A "Global" word in a title never makes a job broad when the location
+field itself names a country ("Remote in the United States" + "Global Account
+Management" is a US job). Relocation / commute / on-site / clearance questions
+reject at any scope.
+
+**The location must be an allowed place (2026-10).** The old guard was a deny-list
+(`_RANK4_ANY_NAMED_COUNTRY_RE`) followed by "admit on any title/JD regional wording",
+so "Bangkok" and "Brasil" (not in the deny-list) were admitted. Now the location
+field must positively resolve (`_rank4_location_resolves_to_allowed`): curated
+countries (plus native names such as Deutschland), region NAMES, "City, <curated
+country>", or a known city of a curated non-US country plus a regional/global signal.
+A region's member countries and cities (Thailand/Bangkok for APAC, Brazil for LATAM),
+states and provinces, foreign-city lists ("Singapore, Bangkok"), non-Latin scripts and
+workplace words in the location text (Hybrid, Office, On-site, without Remote) all
+reject. Known limit: "`<foreign city>, <curated country>`" is only caught when the
+foreign city is in `_RANK4_FOREIGN_CITIES_FRAGMENT` (about 400 cities).
+
+`rank4_rejection_reason(job)` names the requirement that failed, and revalidate logs
+it. `check_rank4.py` is the regression corpus (17,000+ generated cases: location
+shapes, eligibility questions in ~60 phrasings plus a grammar fuzz, JD sentences,
+benefit wording, ordinary questions that must still pass).
 
 ### "Informational" region mentions vs. a residency enforcement
 

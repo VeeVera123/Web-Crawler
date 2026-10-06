@@ -7006,28 +7006,25 @@ def has_rank4_region_residency_enforcement_signal(job: dict) -> bool:
     return False
 
 
-def classify_rank4(job: dict) -> tuple[str | None, str | None]:
-    """Returns (priority, reason) — priority is PRIORITY_MIXED_COUNTRY,
-    PRIORITY_MIXED_SIGNAL, or None (not eligible for this tier).
+_RANK4_COUNTRY_ONLY_RE = re.compile(r"\b(?:" + _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r")(?!\w)", re.I)
+_RANK4_REGION_ONLY_FRAGMENT = (
+    r"european\s+union|\beu\b|apac|latam|latin\s+america|mena|middle\s+east|anz|dach|benelux|nordics?|"
+    r"western\s+europe|eastern\s+europe|central\s+europe|southern\s+europe|northern\s+europe|"
+    r"gulf\s+cooperation\s+council|gcc|gulf|south[\s\-]?east\s+asia|south\s+asia|east\s+asia|central\s+asia|"
+    r"asia|oceania|pacific|north\s+america|central\s+america|south\s+america|caribbean|cee|cis|japac|apj|europe"
+)
+_RANK4_REGION_STRICT_RE = re.compile(
+    r"\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b.{0,80}\b(?:" + _RANK4_REGION_ONLY_FRAGMENT + r")\b"
+    r"|\b(?:" + _RANK4_REGION_ONLY_FRAGMENT + r")\b.{0,80}\b(?:" + _RANK4_HIRING_CONTEXT_WORDS_FRAGMENT + r")\b",
+    re.I,
+)
 
-    Caller is responsible for the eligibility gate — role_category in
-    ("CS", "AM"), job["source_ats"] in RANK4_ELIGIBLE_ATS, the
-    ENABLE_RANK4_COUNTRY_SPECIFIC config toggle, and location AND
-    application-question text both genuinely present on THIS job — this
-    function only decides the location-shape/restriction question once
-    that gate has already passed, and assumes the job already failed the
-    main _keyword_classify_location_detail pipeline above (i.e. is NOT
-    already a Rank 1/2/3 match)."""
-    for check in _RANK4_GENUINE_RESTRICTION_CHECKS:
-        if check(job):
-            return None, None
-    # Defined later in this file (after _RANK4_GENUINE_RESTRICTION_CHECKS'
-    # own definition, which it can't be folded into without reordering a
-    # lot of code it depends on) — see has_rank4_region_residency_
-    # enforcement_signal's own docstring for the policy this implements.
-    if has_rank4_region_residency_enforcement_signal(job):
-        return None, None
 
+def _rank4_place(job: dict) -> tuple[str | None, str | None, str | None]:
+    """The LOCATION half of Rank 4: (priority, reason, scope) or (None, None, None).
+    scope is "narrow" when the job is tied to one specific country/city and "broad" when
+    it is a region NAME (APAC, LATAM, Europe...) or a Global/EMEA/Africa claim; see
+    classify_rank4's spec for why the form is judged differently for each."""
     raw_loc = job.get("location") or ""
     raw_country = job.get("country") or ""
     if isinstance(raw_loc, list):
@@ -7039,13 +7036,13 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     loc = _enrich_location_from_title(loc, title)
     loc = _enrich_location_from_description(loc, job.get("description_snippet") or "")
     if not loc.strip() or PLACEHOLDER_LOC_RE.match(loc):
-        return None, None
+        return None, None, None
 
     # A workplace-type word inside the location text ("London (Hybrid)", "Berlin Office",
     # "On-site - Sydney") means physical presence. Only an explicit "Remote" alongside it
     # (a genuine remote option, like workplace_type "Hybrid, Remote") keeps the job in play.
     if _RANK4_LOC_ONSITE_RE.search(loc) and not re.search(r"\bremote\b", loc, re.I):
-        return None, None
+        return None, None, None
 
     # 4a: the location field, once every recognized place-name span is
     # removed, has nothing left over — it's ENTIRELY made of one or more
@@ -7063,11 +7060,12 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # this look like a second, un-recognized place rather than the single
     # clean country signal it actually is.
     remainder = _RANK4_PLACE_RE.sub(" ", loc)
-    remainder = re.sub(r"\b(?:and|or)\b|&", " ", remainder, flags=re.I)
+    remainder = re.sub(r"\b(?:and|or|in|within|across|from|throughout|only)\b|&", " ", remainder, flags=re.I)
     remainder = NON_GEO_WORDS_RE.sub(" ", remainder)
     remainder = re.sub(r"[,\s/|()\-–—]+", " ", remainder).strip()
     if not remainder and _RANK4_PLACE_RE.search(loc):
-        return PRIORITY_MIXED_COUNTRY, "bare_country_or_region"
+        return PRIORITY_MIXED_COUNTRY, "bare_country_or_region", (
+            "narrow" if _RANK4_COUNTRY_ONLY_RE.search(loc) else "broad")
 
     # 2026-10 POLICY CHANGE: the location field names a real country that
     # isn't on Rank 4's own curated list (see _RANK4_ANY_NAMED_COUNTRY_RE's
@@ -7085,7 +7083,7 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # "Zealand", "Isle of Man" -> "Isle Man", "New Caledonia" -> "Caledonia")
     # and let those three through at 4b.
     if _RANK4_ANY_NAMED_COUNTRY_RE.search(_RANK4_PLACE_RE.sub(" ", loc)):
-        return None, None
+        return None, None, None
 
     # 4a (city variant): "City, Country" — e.g. "Sydney, Australia",
     # "London, United Kingdom" — see _RANK4_CITY_COMMA_COUNTRY_RE's module
@@ -7095,7 +7093,7 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # city name itself is never in _RANK4_PLACE_RE's vocabulary).
     if (_RANK4_CITY_COMMA_COUNTRY_RE.match(loc.strip())
             and not _RANK4_FOREIGN_PLACE_RE.search(loc.strip().rsplit(",", 1)[0])):
-        return PRIORITY_MIXED_COUNTRY, "city_in_eligible_country"
+        return PRIORITY_MIXED_COUNTRY, "city_in_eligible_country", "narrow"
 
     # Neither 4a shape matched -- before letting 4b's title/JD-driven
     # checks have a say, rule out a location field that's already
@@ -7105,13 +7103,13 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # for the real leaked postings this closes -- no title/JD language
     # should be able to rescue a location field this specific.
     if _rank4_location_field_is_hard_disqualified(loc):
-        return None, None
+        return None, None, None
 
     # Fail closed: whatever the location still names must be an allowed place (see
     # _rank4_location_resolves_to_allowed). No title/JD wording can rescue a location
     # that names a foreign city, a region's member country, or a state/province.
     if not _rank4_location_resolves_to_allowed(loc):
-        return None, None
+        return None, None, None
 
     # 4b: the location field is something ELSE (a city, e.g.) but the
     # title/description independently name an allowed region/country — a
@@ -7135,7 +7133,9 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     # longer count as evidence.
     full_text = (job.get("title") or "") + " " + (job.get("description_snippet") or "")
     if _RANK4_4B_STRICT_PLACE_RE.search(full_text):
-        return PRIORITY_MIXED_SIGNAL, "mixed_title_or_jd_signal"
+        return PRIORITY_MIXED_SIGNAL, "mixed_title_or_jd_signal", (
+            "broad" if (_RANK4_REGION_STRICT_RE.search(full_text)
+                        and not _RANK4_COUNTRY_ONLY_RE.search(loc)) else "narrow")
 
     # 2026-09 NEW (explicit user instruction, verbatim: "if the title is:
     # CSM, EMEA or global or Africa or variations of these, and location
@@ -7196,6 +7196,179 @@ def classify_rank4(job: dict) -> tuple[str | None, str | None]:
             or _has_multi_region_breadth(loc)
             or _TITLE_MULTI_REGION_WORDS_RE.search(title)
             or full_text_has_scoped_broad_evidence):
-        return PRIORITY_MIXED_SIGNAL, "mixed_global_emea_africa_signal"
+        # A "Global"/"EMEA" word in the title/JD is a scope claim only when the location field
+        # does not itself name a country ("London" + "CSM, EMEA"); "Remote in the United
+        # States" + "Global Account Management" is a US job with a function name in its title.
+        return (PRIORITY_MIXED_SIGNAL, "mixed_global_emea_africa_signal",
+                "narrow" if _RANK4_COUNTRY_ONLY_RE.search(loc) else "broad")
 
-    return None, None
+    return None, None, None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Rank 4 — what it admits, and the "silent form" rule (2026-10 rewrite)
+#
+# Every Rank 4 leak so far (OpenLoop "Will you now or in the future require visa
+# sponsorship?", Tenable "legal right to work in the country within which you are
+# applying", Mollie "visa sponsorship or a visa transfer") was the same thing: a job
+# whose location is ONE country, whose application form asks an eligibility
+# question without naming that country. Earlier fixes added one phrase at a time
+# ("...require sponsorship... to work with us"), so each new wording leaked again.
+# The rule is about the TOPIC, not the phrasing: asking whether you may work,
+# need a visa, are a citizen or live somewhere IS the company telling you the job
+# is tied to that place; the place is the one in the location field.
+#
+# Rank 4 admits a job only if ALL of the following hold:
+#   1. Gate (callers): CS/AM role, eligible ATS, form read with >= 1 real question.
+#   2. LOCATION: the location field itself is an allowed place: a curated country,
+#      a region NAME (APAC, LATAM, Europe...), "City, <curated country>", or a known
+#      city of a curated non-US country plus a regional/global signal. A region's
+#      member countries/cities, states and provinces are not allowed (_rank4_place).
+#   3. Not on-site: no Hybrid/Office/On-site in the location, title or text.
+#   4. No restriction text anywhere (_RANK4_GENUINE_RESTRICTION_CHECKS).
+#   5. SILENT FORM, by scope:
+#        narrow (a specific country, "City, Country", or a narrow-country signal):
+#          ANY eligibility question rejects, named or not, in any phrasing, and so
+#          does a JD sentence that requires eligibility/sponsorship/residency;
+#        broad (a region name, or EMEA/Global): only questions naming a specific
+#          place reject (already covered by rule 4), because a bare question ties
+#          to a broad scope.
+# classify_rank4() = rules 2-5; rank4_rejection_reason() names the rule that fired.
+# check_rank4.py is the regression corpus for all of it.
+# ═══════════════════════════════════════════════════════════════════════════
+_ELIG_AUTH = (
+    r"\bauthori[sz](?:ed|ation|e[sd]?)\b[^.?!\n]{0,40}\b(?:work|working|employ\w*|employer|job|labou?r)\b",
+    r"\b(?:work|working|employ\w*|employer)\b[^.?!\n]{0,30}\bauthori[sz]\w*",
+    r"\blegal(?:ly)?\s+(?:allowed|entitled|permitted|eligible|authori[sz]ed|right|reside|resident|employable)\b",
+    r"\blegal(?:ly)?\s+(?:able\s+)?to\s+(?:work|be\s+employed|reside|live)\b",
+    r"\blawful(?:ly)?\s+(?:able\s+|allowed\s+|entitled\s+|permitted\s+|eligible\s+)?(?:to\s+)?"
+    r"(?:work|employ\w*|reside|resident)\b|\bwork\s+lawfully\b",
+    # a permission/entitlement word close to a work/live verb, whatever the grammar around it
+    r"\b(?:authori[sz]\w*|permit(?:ted)?|permission|entitle\w*|eligib\w*|allowed|lawful\w*)\b"
+    r"[^.?!\n]{0,40}\b(?:work|working|employ\w*|hire[dn]?|reside|resid\w+|live|living|stay|remain)\b",
+    r"\b(?:right|rights|permission|entitlement|eligibility|eligible|allowed|permitted|cleared|qualified)\s+"
+    r"(?:to|for)\s+(?:work|working|be\s+employed|employ\w*|reside|remain|live\s+and\s+work)\b",
+    r"\b(?:work|employment|working)\s+(?:authori[sz]ation|permit|visa|status|eligibility|rights?|verification|"
+    r"entitlement)\b",
+    r"\bpermit(?:ted)?\s+to\s+work\b",
+    r"\bi-?9\b|\be-?verify\b",
+)
+_ELIG_VISA = (
+    r"\bsponsor(?:s|ed|ing|ship)?\b",
+    r"\b(?:work|employment|working|student|business|skilled|temporary|dependent|spouse|h-?1b|l-?1|tn|e-?3|o-?1)"
+    r"\s+visas?\b",
+    r"\bvisas?\s+(?:sponsorship|status|requirement|support|holder|type|transfer|renewal|application|dependent|"
+    r"that|to\s+work|which|required|needed)\b",
+    r"\b(?:require|requires|need|needs|hold|holds|have|possess|obtain|transfer\w*|initiat\w*|continu\w*|renew\w*)"
+    r"\s+(?:your\s+|an?\s+|the\s+)?(?:valid\s+|current\s+)?(?:\w+\s+)?visas?\b",
+    r"\bimmigration\b|\bwork\s+permit\b|\bresidence\s+permit\b|\bresidency\s+permit\b",
+    r"\bgreen\s*card\b|\bh-?1b\b|\bstem\s+opt\b|\bpermanent\s+resid\w+|\bresident\s+status\b|"
+    r"\bsettled\s+status\b|\bindefinite\s+leave\b|\bright\s+of\s+abode\b",
+)
+_ELIG_CITIZEN = (r"\bcitizen\w*", r"\bnationalit(?:y|ies)\b", r"\bnationals?\s+of\b", r"\bpassport\b",
+                 r"\bstateless\b")
+_ELIG_PRESENCE_Q = (
+    r"\b(?:reside|resides|residing|resident|residents|residency|domicile\w*)\b",
+    r"\b(?:live|living|lives|located|based|situated)\s+(?:in|within|near|around|at)\b",
+    r"\bphysically\s+(?:located|present|based)\b",
+    r"\b(?:where|in\s+which|within\s+which)\s+(?:this|the)\s+(?:role|job|position|vacancy|posting)\b",
+    r"\b(?:where|in\s+which|within\s+which)\s+you\s+(?:are\s+|will\s+be\s+)?(?:applying|based|located|reside|working)\b",
+    r"\b(?:country|location)\s+of\s+(?:the\s+)?(?:role|job|position)\b",
+)
+_ELIG_MULTILINGUAL = (
+    r"arbeitserlaubnis|arbeitsgenehmigung|aufenthaltstitel|aufenthaltserlaubnis|arbeitsberechtigung|\bvisum\b|"
+    r"sponsoring|staatsangeh[oö]rigkeit|staatsb[uü]rger|berechtigt\w*[^.?!\n]{0,40}arbeiten|umziehen|umzu\w+|"
+    r"\bumzug\b|pendeln|wohnhaft|wohnsitz",
+    r"autorisation\s+de\s+travail|permis\s+de\s+travail|droit\s+de\s+travailler|autoris[eé]e?\s+[àa]\s+travailler|"
+    r"parrainage|citoyen\w*|nationalit[eé]|\br[eé]sident\w*|d[eé]m[eé]nager|\br[eé]sidence\b",
+    r"permesso\s+di\s+(?:lavoro|soggiorno)|autorizzat\w+\s+a\s+lavorare|diritto\s+di\s+lavorare|cittadin\w+|"
+    r"nazionalit[àa]|\bvisto\b|sponsorizzazione|residen\w+|trasferir\w+",
+    r"werkvergunning|verblijfsvergunning|(?:mag|mogen)\s+(?:u|je|jij)\b[^.?!\n]{0,40}werken|"
+    r"recht\s+om\b[^.?!\n]{0,40}werken|gerechtigd\b[^.?!\n]{0,40}werken|"
+    r"nationaliteit|verhuizen|woonachtig|woonplaats",
+    r"arbetstillst[åa]nd|uppeh[åa]llstillst[åa]nd|medborgare|medborgarskap|\bflytta\b|arbeidstillatelse|"
+    r"oppholdstillatelse|statsborger\w*|\bflytte\b|arbejdstilladelse|opholdstilladelse|bop[æa]l",
+)
+_ELIG_QUESTION_RES = tuple(re.compile(p, re.I) for p in
+                           _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN + _ELIG_PRESENCE_Q + _ELIG_MULTILINGUAL
+                           + (r"\bvisas?\b",))
+_ELIG_TEXT_RES = tuple(re.compile(p, re.I) for p in _ELIG_AUTH + _ELIG_VISA + _ELIG_CITIZEN) + (
+    re.compile(r"\bmust\s+(?:reside|live|be\s+(?:located|based|resident))\b|\b(?:residents?|citizens?)\s+only\b", re.I),)
+_ELIG_TEXT_REQUIREMENT_RE = re.compile(
+    r"\bmust\b|\brequire[sd]?\b|\bneed(?:s|ed)?\s+to\b|\bhave\s+to\b|\bonly\b|\bcannot\b|\bcan(?:'|’)?t\b|"
+    r"\bunable\b|\bnot\s+(?:able|available|offer\w*|provide\w*|eligible|permitted|sponsor\w*)\b|"
+    r"\bdo(?:es)?\s+not\b|\bdon(?:'|’)?t\b|\bwon(?:'|’)?t\b|\bwill\s+not\b|\bwithout\b|\bno\s+(?:visa\s+)?sponsorship\b|"
+    r"\bineligible\b|\bcontingent\b|\bcondition\w*\b|\bvalid\b|\bunrestricted\b|\bproof\b",
+    re.I,
+)
+
+
+def _rank4_question_texts(job: dict) -> list[str]:
+    out = []
+    for line in (job.get("description_snippet") or "").split("\n"):
+        line = line.strip()
+        if line.startswith(_APPLICATION_AUTH_QUESTION_MARKER):
+            out.append(line[len(_APPLICATION_AUTH_QUESTION_MARKER):].strip())
+    return out
+
+
+def rank4_question_eligibility_hit(job: dict) -> str | None:
+    """The first application question that is about eligibility to work/live somewhere
+    (work authorization, right to work, visa/sponsorship, immigration, citizenship,
+    residency, where the role is located...), named place or not; None if the form is
+    silent on it."""
+    for q in _rank4_question_texts(job):
+        if q and any(rx.search(q) for rx in _ELIG_QUESTION_RES):
+            return q
+    return None
+
+
+def rank4_text_eligibility_requirement_hit(job: dict) -> str | None:
+    """The first title/JD sentence that REQUIRES eligibility, sponsorship or residency
+    (e.g. "Candidates must be legally authorized to work", "We cannot provide visa
+    sponsorship"). A sentence that only offers help ("we offer visa support") is a
+    benefit, not a requirement, and is skipped."""
+    desc = "\n".join(l for l in (job.get("description_snippet") or "").split("\n")
+                     if not l.strip().startswith(_APPLICATION_AUTH_QUESTION_MARKER))
+    for sentence in _split_into_sentences(desc + "\n" + (job.get("title") or "")):
+        if not sentence.strip() or not any(rx.search(sentence) for rx in _ELIG_TEXT_RES):
+            continue
+        if not _ELIG_TEXT_REQUIREMENT_RE.search(sentence):
+            continue
+        if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not re.search(
+                r"\bmust\b|\bonly\b|\bcannot\b|\bunable\b|\bnot\s+(?:able|eligible)\b", sentence, re.I):
+            continue
+        return sentence.strip()[:200]
+    return None
+
+
+def _rank4_decide(job: dict) -> tuple[str | None, str | None, str | None]:
+    """(priority, reason, rejected_by): rejected_by is None when admitted, else the name of
+    the requirement that failed (stable codes used in logs and by revalidate)."""
+    if job.get("_form_status") == "failed":
+        return None, None, "application_form_unreadable"
+    for check in (*_RANK4_GENUINE_RESTRICTION_CHECKS, has_rank4_region_residency_enforcement_signal):
+        if check(job):
+            return None, None, check.__name__.lstrip("_")
+    priority, reason, scope = _rank4_place(job)
+    if not priority:
+        return None, None, "location_not_admissible"
+    if scope == "narrow":
+        if rank4_question_eligibility_hit(job):
+            return None, None, "narrow_scope_eligibility_question"
+        if rank4_text_eligibility_requirement_hit(job):
+            return None, None, "narrow_scope_eligibility_requirement"
+    return priority, reason, None
+
+
+def classify_rank4(job: dict) -> tuple[str | None, str | None]:
+    """Returns (priority, reason) — PRIORITY_MIXED_COUNTRY (4a), PRIORITY_MIXED_SIGNAL (4b)
+    or (None, None). The caller owns the eligibility gate (CS/AM, eligible ATS, toggle,
+    form read with real questions). The full admission spec is in the comment block above."""
+    priority, reason, _ = _rank4_decide(job)
+    return priority, reason
+
+
+def rank4_rejection_reason(job: dict) -> str | None:
+    """Why Rank 4 would not admit this job, or None when it would."""
+    return _rank4_decide(job)[2]

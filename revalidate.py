@@ -33,8 +33,7 @@ import os
 
 from classifier import (
     classify_rank4,
-    _RANK4_GENUINE_RESTRICTION_CHECKS,
-    has_rank4_region_residency_enforcement_signal,
+    rank4_rejection_reason,
     _keyword_classify_location_detail,
     _is_bare_location,
     STANDALONE_GLOBAL_RE,
@@ -82,15 +81,11 @@ def _location_is_open_shaped(job: dict) -> bool:
 
 
 def _rank4_veto_cause(job: dict) -> str:
-    """Name of the first Rank 4 restriction check that fires (for the log), or
-    the location/admission rule when none does."""
-    for check in (*_RANK4_GENUINE_RESTRICTION_CHECKS, has_rank4_region_residency_enforcement_signal):
-        try:
-            if check(job):
-                return check.__name__.lstrip("_")
-        except Exception:
-            continue
-    return "location not admissible (non-curated country / no eligible place)"
+    """Name of the Rank 4 requirement that failed (for the log)."""
+    try:
+        return rank4_rejection_reason(job) or "location not admissible"
+    except Exception:
+        return "location not admissible"
 
 
 def decide(job: dict, meta: dict) -> tuple[str, str]:
