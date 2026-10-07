@@ -1542,3 +1542,31 @@ cleanup flag is passed, and a cancelled run never reaches it — cosmetic);
 so every role-matched job rejected on an earlier run is re-enriched (this is
 the explicit "application questions for EVERY job" instruction, and the real
 runtime driver — not changed here).
+
+
+## 2026-10: the country field no longer narrows a broad location; US regions and time zones in the description
+
+Found on a real posting (Pencil, Ashby, "Account Manager, Customer Success"): location `EMEA`, but the scraper also carries
+Ashby's `addressCountry` ("European Union", the employer's postal address) and the classifier joined the two into
+"EMEA European Union", which counts as EMEA plus a place and was dropped. Its description also contained a stray
+"Candidates must be located on the East Coast and within the Eastern Time Zone.", which nothing caught.
+
+- **Country field.** If the location FIELD already states a broad scope (`classifier._location_field_states_broad_scope`:
+  Africa, bare EMEA, several regions, or a Global/Worldwide keyword with nothing else), the separate `country` value is
+  ignored. A place written inside the location field still narrows it ("EMEA, Germany", "Global (US only)").
+  Real restrictions still reject: the description and application-question detectors run independently of the country
+  field. The shared logic is `_broad_scope_check`, used by the main location stage and by `_combined_location`, and
+  `has_role_specific_place_restriction_signal` now uses it instead of its own shorter list (it used to reject
+  "EMEA-wide", "Work from anywhere" and "EMEA - All Countries" before the main stage saw them).
+- **Description.** `_Q_REGIONS` gained informal US regions (East/West/Gulf Coast, Midwest, Northeast/Southeast/...,
+  Pacific Northwest, New England, Mid-Atlantic, ...); the binding family accepts "located **on** the East Coast"; and
+  `_JD_TZ_RESIDENCE_RE` replaces the old plain time-zone family: a residence verb, up to 50 characters, then a time
+  zone. It is skipped for a sentence with Global / EMEA / Africa evidence, or with "overlap" wording around an UNNAMED
+  zone ("a time zone that overlaps with our European team"); a named zone still rejects even with "overlap" in the
+  sentence ("must reside in the Eastern or Central Time Zone to ensure adequate overlap").
+- **Measured** on 5,078 real jobs (4,625 freshly scraped from 296 boards plus 453 stored): 14 location verdicts changed, all
+  Ashby EMEA postings with a UK / European Union address country, dropped -> Rank 2; 3 description verdicts changed, all
+  the Pencil East Coast sentence. Nothing else moved. Corpus lines added to `corpus/jd_sentences.txt` and
+  `corpus/benign_look_alikes.txt`; `check_location_field.py` covers the country-field policy.
+- **Known, separate:** the country-based detector rejects "located in Europe or Africa ..." and the commuting family
+  reads "within 3 hours of <time zone>" as a drive; both predate this change and are not touched here.

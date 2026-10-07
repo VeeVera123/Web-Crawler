@@ -367,3 +367,20 @@ AMBIGUOUS [AMBIGUOUS] Do you have the right access permissions for this system?
 AMBIGUOUS [AMBIGUOUS] Do you have clearance to access this environment?
 AMBIGUOUS [AMBIGUOUS] Are you authorized to use this platform?
 AMBIGUOUS [AMBIGUOUS] Are you currently eligible for this program?
+
+# 2026-10 (same Pencil change): flexible wording that merely mentions an informal region or a time zone.
+JD_BENIGN [BENIGN] Our team is based on the East Coast, and this role is fully remote anywhere in the world.
+JD_BENIGN [BENIGN] We have offices on the East Coast and the West Coast, but you can work from wherever suits you.
+JD_BENIGN [BENIGN] Many of our customers are in the Midwest, so some experience with Midwest retailers is a plus.
+JD_BENIGN [BENIGN] Candidates should have experience selling into the Pacific Northwest market.
+JD_BENIGN [BENIGN] You must be able to overlap with the Eastern Time Zone for a few hours each day.
+JD_BENIGN [BENIGN] Candidates must be available for meetings during Eastern Time Zone business hours.
+JD_BENIGN [BENIGN] You must be comfortable working across time zones with colleagues from New England to New Zealand.
+JD_BENIGN [BENIGN] We hire worldwide; our founders are based on the West Coast and our engineers within the European time zone.
+JD_BENIGN [BENIGN] Candidates located in the Eastern time zone are preferred, but we hire anywhere.
+JD_BENIGN [AMBIGUOUS] Must be located in a time zone that overlaps with our European team.
+JD_BENIGN [AMBIGUOUS] Candidates must be located in an EMEA time zone.
+# The two [AMBIGUOUS] time-zone lines above pass on the universal path; the one-country Rank 4 harness rejects them
+# because they name another region than the job's own location, which is correct there.
+# Not added (they fail for reasons that predate and are separate from the time-zone rule): "located in Europe or Africa ..."
+# is rejected by the country-based detector, and "within 3 hours of <time zone>" by the commuting-distance family.

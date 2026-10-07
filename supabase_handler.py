@@ -59,7 +59,11 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #       requiring sponsorship" / relocation / time-zone residence), answer-option detector (closed
 #       country lists, place-bound options), experience-with-topic exemption, candidate-subject
 #       presence rule, Unicode normalisation of title/location/description at both entry points.
-CLASSIFIER_VERSION = 9
+#  10 - 2026-10-07: description detector learns informal US regions (East/West Coast, Midwest, Pacific
+#       Northwest...) and a residence verb followed by a named time zone with words in between ("must be
+#       located on the East Coast and within the Eastern Time Zone"); "overlap" exempts only an unnamed zone.
+#       (Also loosens: the separate country field no longer narrows a location that already says EMEA/Global.)
+CLASSIFIER_VERSION = 10
 
 import os
 from dotenv import load_dotenv

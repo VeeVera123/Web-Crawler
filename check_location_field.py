@@ -32,12 +32,47 @@ for loc, country in [("Remote, Global", "Global"), ("Global", "Global"), ("Remot
 n += 1
 if verdict("Remote, Global", "Global") != ("match", "1"):
     fails.append(f"Remote, Global + Global should be Rank 1, got {verdict('Remote, Global', 'Global')}")
-# a country field that adds NEW information still counts
-for loc, country in [("Remote, Global", "United States"), ("Remote", "United States"), ("Berlin", "Germany")]:
+# A location FIELD that already states a broad scope is not narrowed by the separate country field: Ashby fills
+# country from the employer's postal address (Pencil's EMEA role carries "European Union"), which is not the hiring
+# scope. Same verdict as with no country at all.
+for loc, country in [("EMEA", "European Union"), ("Remote - EMEA", "United Kingdom"), ("EMEA", "Germany"),
+                     ("EMEA", "Kenya"), ("Remote, EMEA", "France"), ("APAC, EMEA", "Singapore"),
+                     ("Remote, Global", "United States"), ("Worldwide", "Germany"), ("Africa", "European Union"),
+                     ("Remote - Global", "United Kingdom"), ("Anywhere", "Canada")]:
+    n += 1
+    got, want = verdict(loc, country), verdict(loc, "")
+    if got != want or got[0] != "match":
+        fails.append(f"{loc!r}+{country!r} should equal the verdict without a country and match, got {got} (want {want})")
+# a place written INSIDE the location field still narrows it
+for loc in ["EMEA, Germany", "EMEA / European Union", "EMEA - UK only", "Global (US only)", "Remote, European Union",
+            "Worldwide, United States only", "Europe"]:
+    n += 1
+    got = verdict(loc, "")
+    if got[0] == "match":
+        fails.append(f"{loc!r} names a place inside the location field and must not be a match, got {got}")
+# a country field still counts when the location field is NOT a broad scope
+for loc, country in [("Remote", "United States"), ("Berlin", "Germany"), ("Remote", "European Union"), ("Remote", "Kenya")]:
     n += 1
     got = verdict(loc, country)
-    if got[0] == "match" and country == "United States":
+    if got[0] == "match":
         fails.append(f"{loc!r}+{country!r} must not be a match, got {got}")
+# ignoring the country field must not hide a real restriction: the description and the form still reject
+for jd, label in [("This role is open to US residents only.", "description"),
+                  ("Candidates must be located on the East Coast and within the Eastern Time Zone.", "description"),
+                  ("We can only hire in the United States.\nApplication Question: Are you legally authorized to work in the United States?", "form")]:
+    for loc, country in [("EMEA", "European Union"), ("Remote, Global", "United States")]:
+        n += 1
+        job = dict(BASE, location=loc, country=country, description_snippet=jd)
+        got = classifier._keyword_classify_location_detail(job)[:2]
+        if got[0] == "match":
+            fails.append(f"{label} restriction {jd[:50]!r} must still reject {loc!r}+{country!r}, got {got}")
+# the broad-scope test used for the country field never claims more than the classifier itself matches
+for loc in ["EMEA", "Remote - EMEA", "Global", "Remote, Global", "Worldwide", "Anywhere", "Africa", "Remote - Africa",
+            "APAC, EMEA", "MENA, AMER, EMEA, Latam", "EMEA-wide", "Global (Remote)", "International", "Work from anywhere",
+            "EMEA, Germany", "Europe", "United States", "Remote", "Berlin", "South Africa", "Nigeria", ""]:
+    n += 1
+    if classifier._location_field_states_broad_scope(loc) and verdict(loc, "")[0] != "match":
+        fails.append(f"_location_field_states_broad_scope({loc!r}) is True but the classifier does not match it: {verdict(loc, '')}")
 n += 1
 if classifier.classify_rank4(dict(BASE, location="Remote, Global", country="Global"))[0] is not None and \
         verdict("Remote, Global", "Global")[0] != "match":

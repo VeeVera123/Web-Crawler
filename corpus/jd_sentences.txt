@@ -206,3 +206,19 @@ JD_BENIGN [BENIGN] Some meetings take place during US business hours.
 JD_BENIGN [BENIGN] We support customers across multiple time zones.
 JD_BENIGN [BENIGN] We have a global remote-first culture.
 JD_BENIGN [BENIGN] Our team spans Africa, Europe, Asia, and North America.
+
+# 2026-10 (Pencil EMEA posting: "Candidates must be located on the East Coast and within the Eastern Time Zone.").
+# Informal US regions and a time zone named after a residence verb with other words in between.
+JD_REGION [RESTRICTIVE] Candidates must be located on the East Coast and within the Eastern Time Zone.
+JD_REGION [RESTRICTIVE] Candidates must be located on the East Coast.
+JD_REGION [RESTRICTIVE] You must be based on the West Coast of the United States.
+JD_REGION [RESTRICTIVE] Applicants must reside in the Midwest.
+JD_REGION [RESTRICTIVE] This role requires you to be located in the Pacific Northwest.
+JD_REGION [RESTRICTIVE] Candidates must be located in the Northeast and work Eastern hours.
+JD_REGION [RESTRICTIVE] You must live in New England to be considered.
+JD_REGION [RESTRICTIVE] Applicants must be based in the Southeast or Mid-Atlantic.
+JD_REGION [RESTRICTIVE] Applicants must live and work within the Central Time Zone.
+JD_REGION [RESTRICTIVE] Candidates must be located somewhere within the Pacific time zone.
+JD_REGION [RESTRICTIVE] You must be physically located in the Mountain Time Zone to be eligible.
+JD_REGION [RESTRICTIVE] Location: Remote (U.S.) Time Zone Requirement: Candidates must reside in the Eastern or Central Time Zone to ensure adequate overlap with team collaboration and customer-facing activities.
+JD_REGION [RESTRICTIVE] You must live in the Pacific time zone so that your hours overlap with our customers.

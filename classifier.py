@@ -1854,17 +1854,79 @@ _AFRICAN_COUNTRY_RE = re.compile(
 )
 
 
+def _broad_scope_check(loc: str, loc_lower: str) -> tuple[str, str | None]:
+    """Steps 2.5 / 3 / 4 of _keyword_classify_location_detail, shared with _combined_location so the two can
+    never disagree about what counts as a broad hiring scope. Returns ("match", priority) when the location
+    text states one (several regions, bare EMEA, a Global/Worldwide keyword with nothing else attached),
+    ("no_match", None) when it names EMEA or a Global keyword PLUS a place (a narrowing: "EMEA, Germany",
+    "Global (US only)"), and ("none", None) when it states neither."""
+    # 2.5. Multi-region breadth in the location field itself ("APAC, EMEA", "MENA, AMER, EMEA, Latam")
+    if _has_multi_region_breadth(loc):
+        return "match", PRIORITY_AFRICA
+
+    # 3. EMEA -> match ONLY if no country/city qualifier. EMEA includes Africa but is broader than "global", so
+    # it is bucketed with Africa (PRIORITY_AFRICA), not Global.
+    if re.search(r"\bemea\b", loc_lower):
+        check = re.sub(r"\bemea\b", "", loc_lower)
+        check = NON_GEO_WORDS_RE.sub("", check)
+        # 2026-09 ROUND 5 (user-provided EMEA-wide hiring lingo list): also strip the connector/filler words that
+        # phrasing family uses ("EMEA-wide", "across EMEA", "throughout EMEA", "all EMEA countries", "any EMEA
+        # country"); without this "EMEA - All Countries" / "EMEA Wide" left "all countries"/"wide" as residue and
+        # was rejected as a qualified (non-bare) EMEA value although none of those words name a place.
+        check = _EMEA_FILLER_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
+        if not check:
+            return "match", PRIORITY_AFRICA
+        return "no_match", None
+
+    # 4. Explicit Global/Worldwide/International/Distributed/Anywhere/... keyword (see GLOBAL_KEYWORDS, ~80
+    # variants). Residue check: strip the EXACT substring(s) that matched, then confirm nothing else (a real
+    # city/country name) is left over -- "Global (Remote, US Only)" must not match just because "Global" appears.
+    if STANDALONE_GLOBAL_RE.search(loc.strip()):
+        return "match", PRIORITY_GLOBAL
+    check = loc_lower
+    matched_any = False
+    for rx in GLOBAL_RE:
+        if rx.search(check):
+            matched_any = True
+            check = rx.sub(" ", check)
+    if matched_any:
+        check = NON_GEO_WORDS_RE.sub("", check)
+        check = GLOBAL_FILLER_RE.sub("", check)
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
+        if not check:
+            return "match", PRIORITY_GLOBAL
+        return "no_match", None
+    return "none", None
+
+
+def _location_field_states_broad_scope(raw_loc: str) -> bool:
+    """True when the location FIELD alone already says Africa / EMEA / several regions / Global."""
+    loc_lower = raw_loc.lower()
+    if re.search(r"\bafrica\b", re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_lower)):
+        return True
+    return _broad_scope_check(raw_loc, loc_lower)[0] == "match"
+
+
 def _combined_location(job: dict) -> str:
     """The job's location text: the location field plus its country field, WITHOUT repeating a country the
     location already names. Ashby sets country="Global" for location "Remote, Global"; concatenating the two
     gave "Remote, Global Global", the Global patterns stripped one "Global" and the leftover read as an
-    unexplained place, so a genuinely global job was rejected (and then re-admitted by Rank 4 as 4b)."""
+    unexplained place, so a genuinely global job was rejected (and then re-admitted by Rank 4 as 4b).
+
+    A location field that already states a broad scope ("EMEA", "Global", "APAC, EMEA", "Africa") is not
+    narrowed by the separate country field. That field is structured address data from the ATS (Ashby fills
+    it from the employer's postal address: Pencil's "EMEA" role carries country="European Union"), not the
+    posting's hiring scope, and gluing it on turned "EMEA" into "EMEA European Union", an EMEA-plus-a-place
+    narrowing that was rejected. A place written INSIDE the location field ("EMEA, Germany") still narrows."""
     raw_loc = job.get("location") or ""
     raw_country = job.get("country") or ""
     if isinstance(raw_loc, list):
         raw_loc = ", ".join(str(x) for x in raw_loc)
     if isinstance(raw_country, list):
         raw_country = ", ".join(str(x) for x in raw_country)
+    if raw_loc.strip() and raw_country.strip() and _location_field_states_broad_scope(raw_loc):
+        return raw_loc.strip()
     loc_lower = raw_loc.lower()
     extra = [part.strip() for part in re.split(r"[,;/|]", raw_country)
              if part.strip() and not re.search(r"(?<!\w)" + re.escape(part.strip().lower()) + r"(?!\w)", loc_lower)]
@@ -2251,50 +2313,19 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # — broader than a single region, narrower than an explicit
     # "global"/"worldwide" claim, but a genuine MATCH, not merely
     # "uncertain, kept anyway". See PRIORITY_AFRICA's own comment above.
-    if _has_multi_region_breadth(loc):
-        return "match", PRIORITY_AFRICA, None
-
+    # ── Steps 2.5 / 3 / 4 live in _broad_scope_check() (shared with _combined_location()). Their policy notes,
+    # kept verbatim from where the code used to sit: ──
     # ── 3. EMEA → match ONLY if no country/city qualifier ─
-    if re.search(r"\bemea\b", loc_lower):
-        check = re.sub(r"\bemea\b", "", loc_lower)
-        check = NON_GEO_WORDS_RE.sub("", check)
-        # 2026-09 ROUND 5 (explicit user-provided EMEA-wide hiring lingo
-        # list): also strip the connector/filler words this project's own
-        # "EMEA-wide" phrasing family uses ("EMEA-wide", "across EMEA",
-        # "throughout EMEA", "all EMEA countries", "any EMEA country") —
-        # without this, a location FIELD value like "EMEA - All Countries"
-        # or "EMEA Wide" left "all countries"/"wide" as residue and was
-        # wrongly rejected as a qualified (non-bare) EMEA value, even
-        # though none of those words name an actual place.
-        check = _EMEA_FILLER_RE.sub("", check)
-        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
-        if not check:
-            # EMEA (Europe/Middle East/Africa) includes Africa but is
-            # broader than "global" — bucketed with Africa, not Global.
-            return "match", PRIORITY_AFRICA, None
-        return "no_match", None, None
-
     # ── 4. Explicit Global/Worldwide/International/Distributed/
     # Anywhere/... keyword (see GLOBAL_KEYWORDS, ~80 variants) ──
     # Residue check: strip out the EXACT substring(s) that matched a
     # keyword, then confirm nothing else (a real city/country name) is
     # left over — "Global (Remote, US Only)" should NOT match just
     # because "Global" appears; the leftover "us only" gives it away.
-    if STANDALONE_GLOBAL_RE.search(loc.strip()):
-        return "match", PRIORITY_GLOBAL, None
-
-    check = loc_lower
-    matched_any = False
-    for rx in GLOBAL_RE:
-        if rx.search(check):
-            matched_any = True
-            check = rx.sub(" ", check)
-    if matched_any:
-        check = NON_GEO_WORDS_RE.sub("", check)
-        check = GLOBAL_FILLER_RE.sub("", check)
-        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
-        if not check:
-            return "match", PRIORITY_GLOBAL, None
+    scope, scope_priority = _broad_scope_check(loc, loc_lower)
+    if scope == "match":
+        return "match", scope_priority, None
+    if scope == "no_match":
         return "no_match", None, None
 
     # ── 5. Positive evidence in the JD can rescue a bare Remote field ──
@@ -4550,7 +4581,10 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
         } and _loc_core not in {
             "global", "worldwide", "international", "anywhere",
             "emea", "africa", "sub saharan africa",
-        }:
+        } and not _location_field_states_broad_scope(loc):
+            # (The last condition is the classifier's own definition of a broad location, so this detector no
+            # longer keeps a second, shorter list of its own: "EMEA-wide", "Work from anywhere" and
+            # "EMEA - All Countries" were rejected here before the main location logic ever saw them.)
             # Multi-region structured locations are explicitly allowed.
             regions = {m.group(0).lower() for m in re.finditer(
                 r"\b(?:EMEA|Africa|Sub[-\s]?Saharan\s+Africa|Global|Worldwide|International|Anywhere|"
@@ -6439,7 +6473,11 @@ _Q_EXTRA_COUNTRIES = (
 )
 _Q_REGIONS = (
     r"europe|north\s+america|latin\s+america|latam|apac|asia|oceania|middle\s+east|nordics?|benelux|dach|anz|"
-    r"the\s+americas|south\s+america|central\s+america|caribbean|scandinavia|gulf|schengen"
+    r"the\s+americas|south\s+america|central\s+america|caribbean|scandinavia|gulf|schengen|"
+    # informal US regions: "must be located on the East Coast" (Pencil's EMEA posting carried that line) was
+    # not recognised as a place at all
+    r"(?:east|west|gulf)\s+coast|mid-?west(?:ern)?|(?:north|south)[\s-]?(?:east|west)(?:ern)?(?:\s+(?:us|u\.s\.|usa|united\s+states))?|"
+    r"pacific\s+north\s*west|new\s+england|mid-?atlantic|great\s+lakes|sun\s*belt|rocky\s+mountains?|deep\s+south"
 )
 _Q_PROVINCES = (
     r"ontario|quebec|qu[eé]bec|british\s+columbia|alberta|manitoba|saskatchewan|nova\s+scotia|new\s+brunswick|"
@@ -6841,7 +6879,7 @@ _JD_BINDING_FAMILIES = tuple(re.compile(pat, re.I) for pat in (
     r"\bone\s+of\s+our\s+(?:\w+\s+){0,2}offices\b",
     # "work from within <place>", present / located / based / resident in a named place
     r"\bwork\w*\s+(?:from\s+)?within\s+(?:the\s+)?" + _JD_PLACE + r"(?![\w])",
-    r"\b(?:be|remain|stay)\s+(?:\w+\s+)?(?:physically\s+)?(?:present|located|based|resident|reside)\s+(?:in|within|at)\s+(?:the\s+|a\s+)?"
+    r"\b(?:be|remain|stay)\s+(?:\w+\s+)?(?:physically\s+)?(?:present|located|based|resident|reside)\s+(?:in|within|at|on)\s+(?:the\s+|a\s+)?"
     + _JD_PLACE + r"(?![\w])",
     r"\b(?:reside|live)\s+(?:in|within)\s+(?:the\s+|a\s+)?" + _JD_PLACE + r"(?![\w])",
     r"\bphysically\s+present\b",
@@ -6867,8 +6905,8 @@ _JD_BINDING_FAMILIES = tuple(re.compile(pat, re.I) for pat in (
     r"\brequir\w+\s+(?:\w+\s+){0,2}h-?1b\b|\bunrestricted\s+(?:work\s+)?authori[sz]ation\b",
     # relocation as a condition
     r"\b(?:must|required|need|expected)\b[^.?!]{0,40}\brelocat\w+|\bwilling\s+to\s+relocate\b|\brelocation\s+(?:is\s+)?required\b",
-    # time-zone residence, local licence, dual citizenship, EU-member citizenship
-    r"\b(?:located|based|reside\w*)\s+(?:in|within)\s+(?:the\s+)?(?:\w+\s+){0,3}time\s*zones?\b",
+    # local licence, dual citizenship, EU-member citizenship (time-zone residence is _JD_TZ_RESIDENCE_RE below, which
+    # carries the overlap / EMEA / Global exemptions the old plain family here lacked)
     r"\blicen[cs]e\s+(?:in|for|valid\s+in)\s+(?:the\s+)?(?:state\s+of\s+)?" + _JD_PLACE + r"(?![\w])",
     r"\bdual\s+citizenship\b|\bcitizens?\s+of\s+(?:an?\s+)?(?:EU|EEA|European)\s+(?:member\s+state|countr)",
     # data residency / shipping / embargo gates tied to where the person lives
@@ -6882,6 +6920,14 @@ _JD_STRONG_RE = re.compile(
     r"(?-i:\bU\.?S\.?)\s+persons?\b|\bITAR\b|\bdual\s+citizenship\b|\bsponsor(?:ship)?\b|\bwithout\s+(?:requiring|needing)\b|"
     r"\b(?:TS/SCI|top[- ]secret|security\s+clearance|public[- ]trust)\b|\bwork\s+(?:authori[sz]ation|permit|visa)\b|"
     r"\bauthori[sz]ation\s+to\s+work\b|\bright\s+to\s+work\b", re.I)
+# A residence verb followed, in the same clause, by a time zone: "Candidates must be located on the East Coast and
+# within the Eastern Time Zone." The family above needs "in/within" right after the verb, so this wording slipped
+# through (Pencil's EMEA posting carried it). Guarded like has_timezone_relocation_or_hyphenated_restriction_signal:
+# a sentence with Global / EMEA / Africa evidence, or "overlap" wording around an UNNAMED zone, is left alone, because a
+# time-zone band that spans EMEA is not a restriction here.
+_JD_TZ_RESIDENCE_RE = re.compile(
+    r"\b(?:located|based|resid\w+|living|live)\b[^.?!]{0,50}?\b(?:in|within|on)\s+(?:the\s+|a\s+|an\s+)?(?:\w+\s+){0,3}"
+    r"time\s*zones?\b", re.I)
 
 
 def has_candidate_binding_jd_signal(job: dict) -> bool:
@@ -6903,6 +6949,13 @@ def has_candidate_binding_jd_signal(job: dict) -> bool:
         if not (_JD_SUBJECT_RE.search(sentence) or _JD_STRONG_RE.search(sentence)):
             continue
         if any(rx.search(sentence) for rx in _JD_BINDING_FAMILIES):
+            return True
+        # "overlap" only exempts a GENERIC zone ("a time zone that overlaps with our team"); a sentence that names a
+        # zone is still a residence requirement ("must reside in the Eastern or Central Time Zone to ensure adequate
+        # overlap")
+        if (_JD_TZ_RESIDENCE_RE.search(sentence)
+                and not ("overlap" in sentence.lower() and not _Q_ZONE_RE.search(sentence))
+                and not _text_has_global_evidence(sentence) and not _text_has_africa_or_emea_evidence(sentence)):
             return True
         # a named place together with work-authorization vocabulary ("To work in the US, candidates must
         # have authorization")
