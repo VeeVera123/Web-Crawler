@@ -40,6 +40,7 @@ sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # geo.py/discovery.py live here
 
 import geo  # noqa: E402
+from slug_case import canonical_registry_rows  # noqa: E402
 from discovery import (  # noqa: E402
     URL_TO_SLUG, extract_gh_jid_ids, extract_greenhouse_embed_token,
 )
@@ -2475,8 +2476,12 @@ async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list
     source's rows funnel through before ever reaching the database — a
     future source-specific bug elsewhere shouldn't be able to write this
     class of garbage again without also breaking this backstop."""
-    slim_rows = [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"]}
-                 for r in rows if "${" not in r["slug"]]
+    # canonical_registry_rows: lowercase the slug of ATSs whose slugs are
+    # case-insensitive and keep one row per board — see slug_case.py for why a
+    # second spelling of a board costs a duplicate scrape every run.
+    slim_rows = canonical_registry_rows(
+        [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"]}
+         for r in rows if "${" not in r["slug"]])
     if run_started_at is None:
         run_started_at = datetime.now(timezone.utc)
     return await _upsert_rows_and_count_new(session, ARCHIVE_I_TABLE, "ats,slug", slim_rows, run_started_at)

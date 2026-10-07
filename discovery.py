@@ -192,6 +192,8 @@ from urllib.parse import urlparse, parse_qs, urljoin, unquote
 import requests
 from dotenv import load_dotenv
 
+from slug_case import canonical_registry_rows
+
 load_dotenv()
 
 logging.basicConfig(
@@ -7576,7 +7578,9 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
             # here rather than sent and rejected. Slug/ATS is still the
             # part every downstream consumer (node.py's crawl) actually
             # needs; the name was never more than a nice-to-have.
-            rows = [{"ats": ats, "slug": slug, "source": source} for slug, _name in chunk]
+            # canonical_registry_rows: lowercase case-insensitive slugs and
+            # drop same-board duplicates within the chunk (slug_case.py).
+            rows = canonical_registry_rows([{"ats": ats, "slug": slug, "source": source} for slug, _name in chunk])
 
             if dry_run:
                 ats_total += len(chunk)

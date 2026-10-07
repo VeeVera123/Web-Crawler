@@ -9,9 +9,12 @@ import random
 import time
 from datetime import date, datetime, timedelta, timezone
 
+from urllib.parse import quote
+
 import requests as http_requests
 
 from job_url import UrlSet, canonical_job_url, duplicate_groups, url_key
+from slug_case import canonical_registry_rows, drop_case_twins, twin_candidates
 
 # Rules version stamped onto every row of `jobs` (jobs.classifier_version).
 # Lives here, not in config.py/classifier.py: this module must stay importable
@@ -358,7 +361,7 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
 
     for i in range(0, len(slugs), chunk_size):
         chunk = slugs[i:i + chunk_size]
-        rows = [
+        rows = canonical_registry_rows([
             {
                 "ats": ats,
                 "slug": slug,
@@ -366,7 +369,7 @@ def populate_slug_registry(slugs: list[tuple[str, str]], source: str = "seed") -
                 "last_seen": datetime.now(timezone.utc).isoformat(),
             }
             for ats, slug in chunk
-        ]
+        ])
 
         headers = {
             **HEADERS,
@@ -442,9 +445,57 @@ def resolve_oracle_slug(old_slug: str, new_slug: str) -> bool:
         return False
 
 
+def _lowercase_slugs_present(ats: str, slugs: list[str]) -> set[str]:
+    """Which of `slugs` (already lowercase) exist in archive_i for `ats`.
+    Raises SupabaseFetchError. Chunked small because the slugs travel in the
+    query string (see _touch_last_seen's note on the ~8KB URL limit)."""
+    found: set[str] = set()
+    for i in range(0, len(slugs), 40):
+        chunk = slugs[i:i + 40]
+        in_list = ",".join('"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' for s in chunk)
+        rows = _get("archive_i",
+                    f"select=slug&ats=eq.{quote(ats, safe='')}&slug=in.({quote(in_list, safe='')})",
+                    limit=len(chunk) + 1)
+        found.update(r["slug"] for r in rows)
+    return found
+
+
+def _drop_duplicate_case_boards(pairs: list[tuple[str, str]],
+                                full_table: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
+    """Drop the mixed-case spelling of a board whose lowercase spelling is also
+    in the registry (see slug_case.py): the registry holds both, they sit in
+    different shards, and each shard scraped its own copy. `full_table` is the
+    whole registry when the caller already has it (no lookups needed);
+    otherwise the lowercase twins are looked up. Fails OPEN: on a fetch error
+    every board is scraped, as before this existed."""
+    candidates = twin_candidates(pairs)
+    if not candidates:
+        return pairs
+    if full_table is not None:
+        present = set(full_table)
+    else:
+        present = set()
+        try:
+            for ats, lowered in candidates.items():
+                present |= {(ats, s) for s in _lowercase_slugs_present(ats, lowered)}
+        except SupabaseFetchError as e:
+            log.warning(f"case-twin lookup failed, scraping every spelling this run: {e}")
+            return pairs
+    kept = drop_case_twins(pairs, present)
+    if len(kept) != len(pairs):
+        log.info(f"Skipped {len(pairs) - len(kept)} boards whose lowercase twin is scraped by another shard "
+                 f"(slug-case duplicates, see slug_case.py)")
+    return kept
+
+
 def get_all_slugs(shard_index: int | None = None, shard_count: int | None = None) -> list[tuple[str, str]]:
     """
     Fetch (ats, slug) pairs from archive_i (formerly slug_registry).
+
+    2026-10: for ATSs whose slugs are case-insensitive (slug_case.py) the
+    registry holds some boards under two spellings that land in different
+    shards; the mixed-case spelling is dropped here when its lowercase twin
+    exists, so each board is scraped once per run.
 
     2026-09: when shard_index/shard_count are given, this now calls the
     archive_i_shard() Postgres RPC (see the migration that created it) so
@@ -488,7 +539,7 @@ def get_all_slugs(shard_index: int | None = None, shard_count: int | None = None
                 offset += batch_size
             log.info(f"Loaded {len(pairs)} slugs from Supabase archive_i "
                      f"(server-side sharded: {shard_index}/{shard_count})")
-            return pairs
+            return _drop_duplicate_case_boards(pairs)
         except SupabaseFetchError as e:
             log.warning(f"archive_i_shard RPC failed, falling back to full-table fetch + "
                         f"client-side sharding for this run: {e}")
@@ -510,13 +561,14 @@ def get_all_slugs(shard_index: int | None = None, shard_count: int | None = None
             break
         offset += batch_size
 
+    full_table = set(pairs)
     if sharded:
         pairs = [(a, s) for a, s in pairs if _md5_shard_of(f"{a}|{s}", shard_count) == shard_index]
         log.info(f"Loaded {len(pairs)} slugs from Supabase archive_i "
                  f"(full table, client-side sharded: {shard_index}/{shard_count})")
     else:
         log.info(f"Loaded {len(pairs)} slugs from Supabase archive_i (full table)")
-    return pairs
+    return _drop_duplicate_case_boards(pairs, full_table=full_table)
 
 
 def get_archive_ii_pages(shard_index: int | None = None, shard_count: int | None = None) -> list[dict]:
