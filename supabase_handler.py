@@ -62,7 +62,9 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #  10 - 2026-10-07: description detector learns informal US regions (East/West Coast, Midwest, Pacific
 #       Northwest...) and a residence verb followed by a named time zone with words in between ("must be
 #       located on the East Coast and within the Eastern Time Zone"); "overlap" exempts only an unnamed zone.
-#       (Also loosens: the separate country field no longer narrows a location that already says EMEA/Global.)
+#       (Also loosens: the separate country field no longer narrows a location that already says EMEA/Global;
+#       "Worldwide + a place" goes to the LLM (Rank 3b) instead of a hard reject and "Worldwide, except US" passes;
+#       Africa named only inside an exclusion no longer counts as Africa.)
 CLASSIFIER_VERSION = 10
 
 import os

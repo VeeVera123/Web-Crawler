@@ -1585,6 +1585,14 @@ def _filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 confidences.append("uncertain")
+            elif (label in ("match_global", "match_africa") and unsure_reason == "global_plus_place"
+                    and has_app_questions):
+                # 2026-10: Global/Worldwide keyword plus a place that neither narrows nor excludes cleanly
+                # ("Worldwide - US"); see crawl_i.py. Only a real AI match keeps it, at Rank 3b.
+                job["clearance"] = clearance
+                job["location_priority"] = PRIORITY_UNSURE_SILENT
+                matched.append(job)
+                confidences.append("uncertain")
             elif (label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions
                     and provider_name is not None):
                 # 2026-09 policy, refined per explicit user follow-up —

@@ -77,6 +77,78 @@ n += 1
 if classifier.classify_rank4(dict(BASE, location="Remote, Global", country="Global"))[0] is not None and \
         verdict("Remote, Global", "Global")[0] != "match":
     fails.append("Rank 4 would still catch a job the keyword stage should have matched")
+# ── "Worldwide + a place": three outcomes (reject / pass / ask the LLM) ──
+def full(loc, country=""):
+    return classifier._keyword_classify_location_detail(dict(BASE, location=loc, country=country, description_snippet=""))
+
+# contradictory or unclear -> the LLM reads it (unsure, reason global_plus_place), never a regex pass
+for loc in ["Worldwide - US", "Worldwide (US)", "Remote - Worldwide, US", "Global - United States", "US - Worldwide",
+            "Worldwide; US", "Global, Remote (US preferred)", "Global, Berlin", "Worldwide - US, except Texas",
+            "Worldwide except sanctioned countries"]:
+    n += 1
+    got = full(loc)
+    if got[:1] != ("unsure",) or got[2] != "global_plus_place":
+        fails.append(f"{loc!r} should be unsure/global_plus_place, got {got}")
+# clean exclusions of non-African places -> Rank 1
+for loc in ["Worldwide, except US", "Worldwide (excluding US)", "Global (excl. US & Canada)", "Worldwide ex-US",
+            "Worldwide, outside the US", "Global - excluding Russia and Belarus", "Anywhere except the UK"]:
+    n += 1
+    got = full(loc)
+    if got[:2] != ("match", "1"):
+        fails.append(f"{loc!r} should be Rank 1, got {got}")
+# hard narrowing, or an exclusion that touches Africa -> rejected
+for loc in ["Global (US only)", "Anywhere in the US", "Worldwide, US-based only", "Global within Germany", "Global, hybrid London",
+            "Worldwide in Germany", "Worldwide, except Africa", "Global ex-Africa", "Worldwide (excluding Nigeria)",
+            "Worldwide except EMEA", "Worldwide, excluding South Africa and Kenya"]:
+    n += 1
+    got = full(loc)
+    if got[0] == "match" or got[0] == "unsure":
+        fails.append(f"{loc!r} must be rejected, got {got}")
+# names that merely contain the word Global are not a Global location
+for loc in ["Global Business Services, Manila", "Global Technology Center - Bangalore", "Remote - US"]:
+    n += 1
+    got = full(loc)
+    if got[0] != "no_match":
+        fails.append(f"{loc!r} must stay a plain rejection, got {got}")
+# Africa named only inside an exclusion is not Africa
+n += 1
+if full("Africa (except Egypt)")[:2] != ("match", "2"):
+    fails.append(f"'Africa (except Egypt)' should stay Rank 2, got {full('Africa (except Egypt)')}")
+
+# ── tiers, with the LLM stubbed: only a real AI match + an application question reaches Rank 3b ──
+import crawl_i  # noqa: E402
+import crawl_ii  # noqa: E402
+import location_diagnostics  # noqa: E402
+location_diagnostics.report_and_update = lambda *a, **k: None  # it persists a baseline file; a test must not touch it
+
+QJD = "We hire worldwide.\nApplication Question: Why do you want to work here?"
+NOQ = "We hire worldwide."
+
+
+def run_filter(fn, loc, jd, label, ai_calls=None):
+    job = dict(BASE, title="Account Manager", location=loc, country="", description_snippet=jd, url="https://x.example/" + loc)
+    stub = lambda jobs: ai_calls.append(len(jobs)) or [(label, "stub")] * len(jobs)
+    (crawl_i if fn is crawl_i.filter_locations else crawl_ii).ai_classify_locations = stub
+    out, _ = fn([job], excluded_urls={}, new_exclusions=set())
+    return out[0]["location_priority"] if out else None
+
+
+for name, fn in (("crawl_i", crawl_i.filter_locations), ("crawl_ii", crawl_ii._filter_locations)):
+    for loc, jd, label, want in [("Worldwide - US", QJD, "match_global", classifier.PRIORITY_UNSURE_SILENT),
+                                 ("Worldwide - US", QJD, "match_africa", classifier.PRIORITY_UNSURE_SILENT),
+                                 ("Worldwide - US", NOQ, "match_global", None),      # no application question
+                                 ("Worldwide - US", QJD, "uncertain", None),         # contradictory text + AI unsure
+                                 ("Worldwide - US", QJD, "no_match", None)]:
+        n += 1
+        calls = []
+        got = run_filter(fn, loc, jd, label, calls)
+        if got != want or len(calls) != 1:
+            fails.append(f"{name}: {loc!r} label={label} jd={'with' if 'Question' in jd else 'no'} question -> {got!r} (want {want!r}), AI calls {calls}")
+    n += 1
+    calls = []
+    got = run_filter(fn, "Worldwide, except US", QJD, "no_match", calls)  # regex pass: the AI must not even be asked
+    if got != classifier.PRIORITY_GLOBAL or calls:
+        fails.append(f"{name}: 'Worldwide, except US' should be a regex Rank 1 with no AI call, got {got!r}, AI calls {calls}")
 print(f"location-field checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)

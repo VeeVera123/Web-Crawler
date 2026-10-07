@@ -1854,6 +1854,85 @@ _AFRICAN_COUNTRY_RE = re.compile(
 )
 
 
+# ── A Global/Worldwide keyword PLUS something else ("Worldwide - US", "Worldwide, except US", "Global (US only)") ──
+# Used to be one outcome (reject). It is three:
+#   * hard narrowing  -> no_match: a restriction word ("US only", "US-based", "must"), or the keyword governing a place
+#                        ("Anywhere in the US", "Global within Germany"), or an exclusion naming Africa / EMEA / an
+#                        African country ("Worldwide except Nigeria" might exclude exactly the candidate);
+#   * clean exclusion -> match (Rank 1): "Worldwide, except US", "Global (excl. US & Canada)", "Worldwide ex-US" --
+#                        everything except places that are not Africa, so Africa is still eligible;
+#   * anything else   -> "mixed": contradictory or unclear ("Worldwide - US", "Worldwide; US", "Global, Berlin"). Not
+#                        rejected and not accepted by regex: it goes to the LLM as unsure_reason "global_plus_place" and,
+#                        like bare Remote, can only land at Rank 3b with a real application-question line.
+_GLOBAL_EXCLUSION_RE = re.compile(
+    r"[\s,;:\-–—(\[]*\b(?:except(?:\s+for)?|excluding|excl\b\.?|ex\b|but\s+not|not\s+including|other\s+than|"
+    r"outside(?:\s+of)?|minus|apart\s+from|barring)(?=[\s\-–—:.,]|$)[\s.\-–—:]*(?P<tail>[^()\[\];]*)[\s)\]]*", re.I)
+# a bare Global-type word counts only as its OWN segment of the location field ("Worldwide - US", "Global, Berlin",
+# "US / Anywhere"), never inside a longer name ("Global Business Services, Manila")
+_BARE_GLOBAL_WORD_RE = re.compile(r"\b(?:global|globally|worldwide|world\s*wide|anywhere|everywhere|wfa)\b", re.I)
+_LOCATION_SEGMENT_SPLIT_RE = re.compile(r"[\-–—/,;|()·•:\[\]]+|\s+(?:and|or|&)\s+", re.I)
+_GLOBAL_NARROWING_CUE_RE = re.compile(
+    r"\b(?:only|exclusively|solely|based|residents?|citizens?|nationals?|must|required|requires?|"
+    r"office|hybrid|on-?site|in-?office)\b", re.I)
+_GLOBAL_PLACE_CONNECTOR_RE = re.compile(
+    r"\b(?:worldwide|global(?:ly)?|anywhere|international|everywhere)\s+(?:in|within|across|throughout|inside|from|to|around)\b",
+    re.I)
+_EXCLUDED_AFRICA_RE = re.compile(r"\b(?:africa\w*|emea|mena|sub[\s\-]?saharan)\b", re.I)
+
+
+def _has_bare_global_segment(text: str) -> bool:
+    """A Global-type word standing alone as one segment of a multi-segment location ("Worldwide - US")."""
+    segs = [x.strip() for x in _LOCATION_SEGMENT_SPLIT_RE.split(text) if x.strip()]
+    if len(segs) < 2:
+        return False
+    return any(_BARE_GLOBAL_WORD_RE.fullmatch(NON_GEO_WORDS_RE.sub("", x).strip()) for x in segs)
+
+
+def _bare_global_in_location(loc: str) -> bool:
+    """A bare Global-type word that is not in GLOBAL_KEYWORDS (too ambiguous in free text) but is clearly the
+    location's own statement: standing alone as a segment ("Worldwide - US"), or heading an exclusion ("Anywhere
+    except the UK")."""
+    head = _GLOBAL_EXCLUSION_RE.sub(" ", loc)
+    if _has_bare_global_segment(head):
+        return True
+    if head != loc and _BARE_GLOBAL_WORD_RE.search(head):
+        leftover = GLOBAL_FILLER_RE.sub("", NON_GEO_WORDS_RE.sub("", _BARE_GLOBAL_WORD_RE.sub(" ", head.lower())))
+        return not re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", leftover).strip()
+    return False
+
+
+def _global_scope_with_extras(loc: str) -> tuple[str, str | None]:
+    """`loc` holds a Global-type word together with something else. Returns ("match", PRIORITY_GLOBAL),
+    ("no_match", None) or ("mixed", None) -- see the comment above."""
+    exclusions = list(_GLOBAL_EXCLUSION_RE.finditer(loc))
+    head = _GLOBAL_EXCLUSION_RE.sub(" ", loc) if exclusions else loc
+    rest = head.lower()
+    for rx in GLOBAL_RE:
+        rest = rx.sub(" ", rest)
+    rest = _BARE_GLOBAL_WORD_RE.sub(" ", rest)
+    rest = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", GLOBAL_FILLER_RE.sub("", NON_GEO_WORDS_RE.sub("", rest))).strip()
+    if _GLOBAL_PLACE_CONNECTOR_RE.search(loc) or _GLOBAL_NARROWING_CUE_RE.search(rest):
+        return "no_match", None
+    if rest:
+        return "mixed", None  # a place beside the keyword ("Worldwide - US", "Global, Berlin")
+    if not exclusions:
+        return "match", PRIORITY_GLOBAL
+    tokens = []
+    for m in exclusions:
+        for tok in re.split(r"\s*(?:,|/|&|\+|\band\b|\bor\b)\s*", m.group("tail")):
+            tok = NON_GEO_WORDS_RE.sub("", tok).strip()
+            tok = re.sub(r"^(?:the|any|all)\s+", "", tok, flags=re.I).strip(" .")
+            if tok:
+                tokens.append(tok)
+    if not tokens:
+        return "mixed", None
+    if any(_EXCLUDED_AFRICA_RE.search(t) or _AFRICAN_COUNTRY_RE.search(t) for t in tokens):
+        return "no_match", None  # excludes Africa / EMEA / an African country (it might be the candidate's own)
+    if all(_Q_PLACE_RE.fullmatch(t) for t in tokens):
+        return "match", PRIORITY_GLOBAL
+    return "mixed", None  # "Worldwide except sanctioned countries": the LLM reads it
+
+
 def _broad_scope_check(loc: str, loc_lower: str) -> tuple[str, str | None]:
     """Steps 2.5 / 3 / 4 of _keyword_classify_location_detail, shared with _combined_location so the two can
     never disagree about what counts as a broad hiring scope. Returns ("match", priority) when the location
@@ -1896,16 +1975,24 @@ def _broad_scope_check(loc: str, loc_lower: str) -> tuple[str, str | None]:
         check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&]+", " ", check).strip()
         if not check:
             return "match", PRIORITY_GLOBAL
-        return "no_match", None
+        return _global_scope_with_extras(loc)
+    if _bare_global_in_location(loc):
+        return _global_scope_with_extras(loc)
     return "none", None
+
+
+def _location_field_broad_verdict(raw_loc: str) -> str:
+    """"match" / "mixed" / "no_match" / "none" for the location FIELD alone (see _broad_scope_check)."""
+    loc_lower = raw_loc.lower()
+    included = _GLOBAL_EXCLUSION_RE.sub(" ", loc_lower)
+    if re.search(r"\bafrica\b", re.sub(r"\bsouth[\s\-]+africa\b", " ", included)):
+        return "match"
+    return _broad_scope_check(raw_loc, loc_lower)[0]
 
 
 def _location_field_states_broad_scope(raw_loc: str) -> bool:
     """True when the location FIELD alone already says Africa / EMEA / several regions / Global."""
-    loc_lower = raw_loc.lower()
-    if re.search(r"\bafrica\b", re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_lower)):
-        return True
-    return _broad_scope_check(raw_loc, loc_lower)[0] == "match"
+    return _location_field_broad_verdict(raw_loc) == "match"
 
 
 def _combined_location(job: dict) -> str:
@@ -1974,6 +2061,12 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
                       doesn't say which region — kept at the same
                       benefit-of-the-doubt policy as before (AI-uncertain
                       still survives at PRIORITY_UNSURE).
+      'global_plus_place' — a Global/Worldwide keyword together with a place that
+                      neither narrows it ("US only", "Anywhere in the US") nor
+                      cleanly excludes ("Worldwide, except US"): "Worldwide - US",
+                      "Global, Berlin". Contradictory, so the LLM reads it; only a
+                      real match verdict plus an application-question line keeps
+                      it (Rank 3b). See _global_with_place_verdict.
 
     STRICT ALLOWLIST, rewritten 2026-08. The only ways a job can survive
     this filter:
@@ -2262,11 +2355,13 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # (Remote)") still counts as the continent signal. "South Africa" the
     # country still gets its fair shot at matching below via the 2+
     # distinct-countries rule, same as any other single African country.
-    africa_continent_check = re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_lower)
+    # Africa named only inside an exclusion ("Worldwide, except Africa") is the opposite of Africa-eligible
+    loc_included = _GLOBAL_EXCLUSION_RE.sub(" ", loc)
+    africa_continent_check = re.sub(r"\bsouth[\s\-]+africa\b", " ", loc_included.lower())
     if re.search(r"\bafrica\b", africa_continent_check):
         return "match", PRIORITY_AFRICA, None
 
-    african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc)}
+    african_hits = {m.group(1).lower() for m in _AFRICAN_COUNTRY_RE.finditer(loc_included)}
     if len(african_hits) >= 2:
         # 2026-10: 2+ African countries alone isn't enough — require a
         # remote signal to confirm this is an Africa-wide remote role, not
@@ -2325,6 +2420,10 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     scope, scope_priority = _broad_scope_check(loc, loc_lower)
     if scope == "match":
         return "match", scope_priority, None
+    if scope == "mixed":
+        # A Global keyword plus a place that neither narrows nor excludes cleanly ("Worldwide - US"): not rejected
+        # outright, not accepted by regex either -- the LLM reads it (Rank 3b only, with an application question).
+        return "unsure", PRIORITY_UNSURE, "global_plus_place"
     if scope == "no_match":
         return "no_match", None, None
 
@@ -4581,7 +4680,7 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
         } and _loc_core not in {
             "global", "worldwide", "international", "anywhere",
             "emea", "africa", "sub saharan africa",
-        } and not _location_field_states_broad_scope(loc):
+        } and _location_field_broad_verdict(loc) not in ("match", "mixed"):
             # (The last condition is the classifier's own definition of a broad location, so this detector no
             # longer keeps a second, shorter list of its own: "EMEA-wide", "Work from anywhere" and
             # "EMEA - All Countries" were rejected here before the main location logic ever saw them.)

@@ -729,6 +729,16 @@ def filter_locations(jobs: list[dict], excluded_urls: dict | None = None,
                 job["location_priority"] = PRIORITY_UNSURE_SILENT
                 matched.append(job)
                 matched_confidences.append("uncertain")
+            elif (label in ("match_global", "match_africa") and unsure_reason == "global_plus_place"
+                    and has_app_questions):
+                # 2026-10: a Global/Worldwide keyword PLUS a place that neither narrows nor excludes cleanly
+                # ("Worldwide - US"). Same tier and same application-question requirement as bare Remote, but
+                # stricter: only a real match_global/match_africa verdict keeps it. "uncertain" does NOT (the
+                # location text itself is contradictory), it falls to the drop below, where Rank 4 gets its look.
+                job["clearance"] = provider_name or "ai"
+                job["location_priority"] = PRIORITY_UNSURE_SILENT
+                matched.append(job)
+                matched_confidences.append("uncertain")
             elif (label == "uncertain" and unsure_reason == "bare_remote" and has_app_questions
                     and provider_name is not None):
                 # 2026-09 policy change (refined per explicit user

@@ -1570,3 +1570,29 @@ Ashby's `addressCountry` ("European Union", the employer's postal address) and t
   `corpus/benign_look_alikes.txt`; `check_location_field.py` covers the country-field policy.
 - **Known, separate:** the country-based detector rejects "located in Europe or Africa ..." and the commuting family
   reads "within 3 hours of <time zone>" as a drive; both predate this change and are not touched here.
+
+
+## 2026-10: "Worldwide + a place" is asked, not rejected; "Worldwide, except X" passes
+
+A Global/Worldwide keyword together with a place used to be one outcome: reject. It is now three
+(`classifier._global_scope_with_extras`, reached from `_broad_scope_check`):
+
+| Location field | Result | Why |
+|---|---|---|
+| `Worldwide - US`, `Worldwide (US)`, `Global, Berlin`, `Global - United States`, `Worldwide; US`, `Global, Remote (US preferred)` | **unsure, reason `global_plus_place`** | Contradictory or unclear. The LLM reads it. |
+| `Worldwide, except US`, `Worldwide (excluding US)`, `Global (excl. US & Canada)`, `Worldwide ex-US`, `Anywhere except the UK`, `Worldwide, outside the US` | **match, Rank 1** | Everything except places that are not Africa, so Africa is still eligible. |
+| `Global (US only)`, `Anywhere in the US`, `Worldwide, US-based only`, `Global within Germany`, `Global, hybrid London` | reject | A restriction word (`only`, `based`, `must`, `office`, `hybrid`, ...) or the keyword governing a place (`in`, `within`, `across`, ...). |
+| `Worldwide, except Africa`, `Global ex-Africa`, `Worldwide (excluding Nigeria)`, `Worldwide except EMEA` | reject | The exclusion names Africa, EMEA or an African country (it could be the candidate's own). |
+
+- **Tier.** `global_plus_place` is handled in `crawl_i.filter_locations` and `crawl_ii._filter_locations` like bare Remote
+  (Rank 3b, application-question line required) but stricter: only a real AI `match_global`/`match_africa` verdict keeps
+  it. `uncertain` does not, because the location text itself is contradictory. Rank 4 still gets its last look.
+- **Bare "Global".** `Global`/`Anywhere`/`Worldwide` that is not in `GLOBAL_KEYWORDS` (too ambiguous in free text) counts only
+  as its own segment of the location ("Worldwide - US") or heading an exclusion ("Anywhere except the UK"); a name that
+  contains it ("Global Business Services, Manila") is still an ordinary place.
+- **Africa inside an exclusion.** `Worldwide, except Africa` used to match Rank 2 because the Africa test fired on the word
+  anywhere in the field. It now ignores Africa (and African countries) named inside an exclusion clause.
+- **Unrecognised exclusion tail** (`Worldwide except sanctioned countries`) -> asked, not passed.
+- **Measured:** 5,078 real jobs contained no "Worldwide + place" location (25 had a Global word, all plain), so no real
+  verdict moved. The rule is covered by `check_location_field.py` (107 checks, including the tier behaviour of both
+  crawlers with the LLM stubbed).
