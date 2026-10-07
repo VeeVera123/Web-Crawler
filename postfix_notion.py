@@ -89,8 +89,13 @@ def main() -> None:
     log.info(f"  {push_summary['created']}/{push_summary['attempted']} "
               f"new jobs created in Notion")
 
-    log.info("── Step 1b: purging jobs vetoed by re-validation ──")
+    log.info("── Step 1b: purging duplicate postings + jobs vetoed by re-validation ──")
     import supabase_handler
+    # Same posting stored under two job_url spellings (e.g. a board registered as
+    # both /ashby/ and /Ashby/, scraped by two shards in one run): veto the extra
+    # row here so the purge below archives its Notion page and deletes it.
+    dupes = supabase_handler.mark_duplicate_jobs_vetoed()
+    log.info(f"  {dupes['groups']} duplicate postings, {dupes['vetoed']} extra rows vetoed")
     purge = supabase_handler.purge_vetoed_jobs(
         archive_notion_fn=notion_sync.archive_notion_pages_for_supabase_ids)
     log.info(f"  {purge['deleted']}/{purge['vetoed']} vetoed jobs deleted "

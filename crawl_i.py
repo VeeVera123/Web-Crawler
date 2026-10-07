@@ -68,6 +68,7 @@ from supabase_handler import (
     log_egress_summary,
 )
 from supabase_handler import CLASSIFIER_VERSION  # noqa: E402
+from job_url import UrlSet, split_known_jobs  # noqa: E402
 import revalidate
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
@@ -921,14 +922,8 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
         # revalidate.py's module docstring for why (a classifier fix used to
         # never reach jobs that were already stored).
         known_meta = get_known_jobs_meta()
-        existing_urls = set(known_meta) if known_meta else get_existing_urls()
-        new_jobs, already_seen = [], []
-        for job in all_jobs:
-            url = job.get("url", "")
-            if url and url in existing_urls:
-                already_seen.append(job)
-            else:
-                new_jobs.append(job)
+        existing_urls = UrlSet(known_meta) if known_meta else get_existing_urls()
+        new_jobs, already_seen = split_known_jobs(all_jobs, existing_urls)
         if already_seen:
             log.info(f"  {len(already_seen)}/{raw_scraped_count} jobs already known — "
                      f"skipping LLM classification, just refreshing last_seen")

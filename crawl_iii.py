@@ -157,6 +157,7 @@ from supabase_handler import (
     cleanup_stale_jobs, get_stale_job_ids,
     log_egress_summary,
 )
+from job_url import split_known_jobs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -384,12 +385,7 @@ def _run_pipeline(shard: int, total_shards: int) -> None:
         # before; just refresh last_seen rather than re-spending LLM calls.
         log.info("── Deduplication ──")
         existing_urls = get_existing_urls()
-        new_jobs, already_seen = [], []
-        for job in all_jobs:
-            if job["url"] in existing_urls:
-                already_seen.append(job)
-            else:
-                new_jobs.append(job)
+        new_jobs, already_seen = split_known_jobs(all_jobs, existing_urls)
         if already_seen:
             log.info(f"  {len(already_seen)}/{raw_count} jobs already known — "
                      f"skipping LLM classification, just refreshing last_seen")

@@ -11,6 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
 
+from job_url import UrlSet, canonical_job_url, duplicate_groups, url_key
+
 # Rules version stamped onto every row of `jobs` (jobs.classifier_version).
 # Lives here, not in config.py/classifier.py: this module must stay importable
 # with only the Supabase secrets (config.py hard-requires every provider key at
@@ -205,11 +207,14 @@ def _dedupe_rows_by_job_url(rows: list[dict]) -> list[dict]:
     for all 500 rows, not just the duplicate). Deduping here, right
     before any upsert POST, is cheap and makes every upsert path in this
     file safe regardless of what duplicates the caller's own list holds."""
+    # Keyed by job_url identity (job_url.url_key), not the raw string: the
+    # same posting under two spellings (board-slug case, trailing slash,
+    # tracking params) would otherwise both be sent and inserted as two rows.
     by_url: dict[str, dict] = {}
     for row in rows:
         url = row.get("job_url")
         if url:
-            by_url[url] = row
+            by_url[url_key(url)] = row
     return list(by_url.values())
 
 
@@ -583,22 +588,26 @@ def get_archive_ii_pages(shard_index: int | None = None, shard_count: int | None
 
 # ── Deduplication ────────────────────────────────────────
 
-def get_existing_urls() -> set[str]:
+def get_existing_urls() -> UrlSet:
     """
     Pull all job URLs already in the database to avoid duplicates.
+
+    Returns a UrlSet: membership is by job_url IDENTITY (job_url.url_key), so
+    a posting stored as .../Ashby/<id> is recognised when a shard scrapes
+    .../ashby/<id> (see job_url.py for the spellings seen in production).
 
     Unlike get_all_slugs(), a fetch failure here is tolerated: worst case
     we treat a few already-known jobs as "new" and re-upsert them, which is
     harmless (upserts are idempotent). Failing the whole shard over a
     dedup-list fetch would be a much worse trade than that.
     """
-    urls = set()
+    urls = UrlSet()
     offset = 0
     batch_size = 1000  # Supabase default max per response
 
     try:
         while True:
-            rows = _get("jobs", f"select=job_url&offset={offset}", limit=batch_size)
+            rows = _get("jobs", f"select=job_url&order=id&offset={offset}", limit=batch_size)
             if not rows:
                 break
             for row in rows:
@@ -690,6 +699,74 @@ def mark_jobs_vetoed(jobs: list[dict]) -> int:
             log.error(f"Supabase veto-mark upsert failed for chunk of {len(rows)}: {e}")
     log.info(f"Marked {marked}/{len(jobs)} jobs as vetoed (re-validation)")
     return marked
+
+
+def mark_duplicate_jobs_vetoed(max_fraction: float = 0.10) -> dict:
+    """Self-healing duplicate sweep, run once per crawl by postfix_notion.py
+    right BEFORE purge_vetoed_jobs(): finds stored rows that are the same
+    posting under different job_url spellings (job_url.url_key — board-slug
+    case, trailing slash, tracking params), keeps one and marks the others
+    clearance='vetoed' / is_active=false so the purge step archives their
+    Notion pages and deletes them.
+
+    Why a sweep as well as the matching fixes in get_existing_urls()/
+    add_jobs_batch(): two shards that scrape the same board under two slug
+    spellings in the SAME run both pass their own "already known?" check
+    (neither row exists yet) and both insert; only a pass over the finished
+    table can see the pair. It also clears pairs written before the fix.
+
+    Which row survives: any row the user is tracking (application_status other
+    than not_applied) is never touched; otherwise the active, lowest-id (first
+    inserted, so it already has its Notion page) row is kept.
+
+    Safety: if the sweep would remove more than `max_fraction` of the table it
+    does nothing and logs loudly — a bad url_key must not be able to wipe the
+    table. Returns {"groups", "vetoed"}."""
+    summary = {"groups": 0, "vetoed": 0}
+    rows: list[dict] = []
+    offset = 0
+    try:
+        while True:
+            page = _get("jobs",
+                        "select=id,job_url,application_status,is_active"
+                        f"&or=(clearance.is.null,clearance.neq.vetoed)&order=id&offset={offset}",
+                        limit=1000)
+            if not page:
+                break
+            rows.extend(page)
+            if len(page) < 1000:
+                break
+            offset += 1000
+    except SupabaseFetchError as e:
+        log.warning(f"mark_duplicate_jobs_vetoed: could not read jobs, skipping sweep: {e}")
+        return summary
+
+    def tracked(r: dict) -> bool:
+        return (r.get("application_status") or "not_applied").lower() != "not_applied"
+
+    losers: list[int] = []
+    groups = duplicate_groups(rows)
+    for group in groups:
+        keep = next((r for r in group if tracked(r)), None)
+        if keep is None:
+            keep = min(group, key=lambda r: (not r.get("is_active"), r["id"]))
+        losers += [r["id"] for r in group if r is not keep and not tracked(r)]
+    summary["groups"] = len(groups)
+    if not losers:
+        log.info("mark_duplicate_jobs_vetoed: no duplicate postings")
+        return summary
+    if rows and len(losers) > max_fraction * len(rows):
+        log.error(f"mark_duplicate_jobs_vetoed: {len(losers)} duplicates is more than "
+                  f"{max_fraction:.0%} of {len(rows)} rows — refusing to act, check url_key")
+        return summary
+    for i in range(0, len(losers), 200):
+        chunk = losers[i:i + 200]
+        if _patch("jobs", "id=in.(" + ",".join(str(x) for x in chunk) + ")",
+                  {"clearance": "vetoed", "is_active": False}):
+            summary["vetoed"] += len(chunk)
+    log.info(f"mark_duplicate_jobs_vetoed: {summary['groups']} duplicate postings, "
+             f"{summary['vetoed']} extra rows vetoed (purged next)")
+    return summary
 
 
 def purge_vetoed_jobs(archive_notion_fn=None) -> dict:
@@ -1136,7 +1213,7 @@ def update_archive_ii_career_pages(updates: list[dict]) -> int:
 
 def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
                     source_pipeline: str = "crawl_i",
-                    existing_urls: set[str] | None = None) -> tuple[int, list[dict]]:
+                    existing_urls: "UrlSet | set[str] | None" = None) -> tuple[int, list[dict]]:
     """
     Upsert jobs in bulk. New jobs are inserted; existing jobs get
     last_seen and is_active updated.
@@ -1164,7 +1241,12 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
     fetching it here (backward compatible) when the caller doesn't have
     one — e.g. any direct/manual call to this function.
     """
-    existing = existing_urls if existing_urls is not None else get_existing_urls()
+    if existing_urls is None:
+        existing = get_existing_urls()
+    elif isinstance(existing_urls, UrlSet):
+        existing = existing_urls
+    else:
+        existing = UrlSet(existing_urls)
     today = date.today().isoformat()
 
     new_rows = []
@@ -1174,11 +1256,20 @@ def add_jobs_batch(jobs: list[dict], location_confidences: list[str],
         url = job.get("url", "")
         if not url:
             continue
-        if url in existing:
+        stored = existing.stored(url)
+        if stored is not None:
+            # Known posting: touch the row under the spelling it is STORED as,
+            # or the on_conflict=job_url upsert would not match it and would
+            # insert a second row for the same job.
+            if stored != url:
+                job = {**job, "url": stored}
             seen_jobs.append((job, confidence))
         else:
-            new_rows.append(_build_row(job, confidence, source_pipeline))
-            existing.add(url)  # prevent dupes within this batch
+            # New row: store the canonical spelling so two shards racing on the
+            # same posting under different spellings write the same job_url.
+            canon = canonical_job_url(url)
+            new_rows.append(_build_row({**job, "url": canon}, confidence, source_pipeline))
+            existing.add(canon)  # prevent dupes within this batch
 
     # ── Bulk insert new jobs (chunks of 100) ──────────────
     # 2026-09: switched from a plain _post() INSERT to an explicit

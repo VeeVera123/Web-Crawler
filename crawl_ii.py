@@ -128,6 +128,7 @@ from supabase_handler import (  # noqa: E402
     log_egress_summary, bump_scan_report, finish_scan_report_for_pipeline,
 )
 from supabase_handler import CLASSIFIER_VERSION  # noqa: E402
+from job_url import UrlSet, split_known_jobs  # noqa: E402
 import revalidate  # noqa: E402
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
 # prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
@@ -1759,14 +1760,8 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     # revalidate.py's module docstring — already-stored rows classified
     # under older rules get one deterministic, veto-only re-check.
     known_meta = get_known_jobs_meta()
-    existing_urls = set(known_meta) if known_meta else get_existing_urls()
-    new_jobs, already_seen = [], []
-    for job in all_candidate_jobs:
-        url = job.get("url", "")
-        if url and url in existing_urls:
-            already_seen.append(job)
-        else:
-            new_jobs.append(job)
+    existing_urls = UrlSet(known_meta) if known_meta else get_existing_urls()
+    new_jobs, already_seen = split_known_jobs(all_candidate_jobs, existing_urls)
     if already_seen:
         stale, rest = revalidate.select_stale(already_seen, known_meta, CLASSIFIER_VERSION)
         if stale:
