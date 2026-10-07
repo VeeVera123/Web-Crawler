@@ -1,0 +1,15 @@
+name: probe_hiringcafe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Plain requests to hiringcafe.com
+        run: |
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
+          for u in https://hiringcafe.com/robots.txt https://hiringcafe.com/ https://hiringcafe.com/sitemap.xml https://hiringcafe.com/terms-and-conditions; do
+            echo "=== $u"
+            curl -s -m 30 -A "$UA" -D /tmp/h.txt -o /tmp/b.txt -w 'HTTP %{http_code} size=%{size_download}\n' "$u"
+            grep -iE '^(server|cf-mitigated|content-type|location):' /tmp/h.txt || true
+            head -c 300 /tmp/b.txt | tr '\n' ' '; echo
+          done
