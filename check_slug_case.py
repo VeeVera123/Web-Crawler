@@ -189,6 +189,39 @@ sh._get = lambda table, params="", limit=10000: [{"slug": "a|wd1|site"}] if "ats
 check(sh.get_all_slugs(0, 2) == [("ashby", "x")], "shard 0 skips the mixed-case twin owned by shard 1")
 check(sh.get_all_slugs(1, 2) == [("workday", "a|wd1|site")], "shard 1 keeps the lowercase board")
 
+# ── every registry writer stores the canonical spelling ──
+importlib.reload(sh)
+posted = []
+
+
+class _Ok:
+    def raise_for_status(self):
+        pass
+
+
+sh.http_requests.post = lambda url, headers=None, json=None, timeout=None, params=None: posted.append((url, json)) or _Ok()
+sh.http_requests.delete = lambda *a, **k: _Ok()
+sh.resolve_oracle_slug("eeho|CX_1", "eeho.fa.us2|CX_1")
+check(posted and posted[-1][1][0]["slug"] == "eeho.fa.us2|cx_1", f"resolve_oracle_slug stores lowercase: {posted[-1:]}")
+posted.clear()
+sh.populate_slug_registry([("workday", "A|wd1|Site"), ("workday", "a|wd1|site"), ("lever", "Foo")])
+sent = [(r["ats"], r["slug"]) for _, rows in posted for r in rows]
+check(sent == [("workday", "a|wd1|site"), ("lever", "Foo")], f"populate_slug_registry canonicalises + de-duplicates: {sent}")
+
+# static guard: any module that upserts into archive_i on (ats, slug) must use the canonical helpers,
+# so a new writer cannot quietly start creating case variants again
+import glob
+root = os.path.dirname(os.path.abspath(__file__))
+for path in glob.glob(os.path.join(root, "**", "*.py"), recursive=True):
+    name = os.path.relpath(path, root)
+    if name.startswith("check_") or name == "slug_case.py":
+        continue
+    src = open(path, encoding="utf-8", errors="replace").read()
+    writes = ("on_conflict" in src and "ats,slug" in src and ("archive_i" in src or "ARCHIVE_I_TABLE" in src))
+    if writes:
+        check("canonical_registry_rows" in src or "canonical_slug" in src,
+              f"{name} upserts into archive_i but does not use slug_case's canonical helpers")
+
 print(f"{checks - len(failures)}/{checks} checks passed")
 for f in failures:
     print("FAIL:", f)

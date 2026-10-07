@@ -14,7 +14,7 @@ from urllib.parse import quote
 import requests as http_requests
 
 from job_url import UrlSet, canonical_job_url, duplicate_groups, url_key
-from slug_case import canonical_registry_rows, drop_case_twins, twin_candidates
+from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, twin_candidates
 
 # Rules version stamped onto every row of `jobs` (jobs.classifier_version).
 # Lives here, not in config.py/classifier.py: this module must stay importable
@@ -411,6 +411,10 @@ def resolve_oracle_slug(old_slug: str, new_slug: str) -> bool:
     Best-effort: any failure is logged and swallowed so a Supabase hiccup
     never breaks the actual scrape that's already in progress.
     """
+    # Same canonical spelling every other registry writer stores (slug_case.py):
+    # Oracle's site code arrives as "CX_1"/"cx_1" depending on the tenant, and a
+    # second spelling of the resolved board would be scraped twice per run.
+    new_slug = canonical_slug("oracle_cloud_hcm", new_slug)
     if not old_slug or not new_slug or old_slug == new_slug:
         return False
     try:
