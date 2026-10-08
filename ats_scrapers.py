@@ -4010,6 +4010,69 @@ def scrape_paylocity(slug: str) -> list[dict]:
 
 # ── Eploy ───────────────────────────────────────────────
 
+# Eploy job cards list their fields as <li id="li_VacV_AllLocations_{id}"> with a LABEL ("All Locations:") followed by
+# the VALUE ("Cardiff"). _bs4_find_location_near returned the label for every job, and "All Locations" is one of the
+# classifier's Global phrases, so all 43 stored Eploy jobs were ranked 1 with the location "All Locations" while their
+# titles and pages said Leeds, Cardiff, Selby, ... The value is read from the card's own location field instead.
+_EPLOY_FIELD_LABEL_RE = re.compile(r"(?:all\s+)?locations?:?", re.I)
+
+
+def _eploy_card_location(anchor) -> tuple[str, str]:
+    """(location, status) from the job card holding `anchor`. status is "extracted", "marker_found_empty" (the card has
+    a location field with no value) or "marker_not_found" (no recognisable card: use the generic lookup)."""
+    id_re = re.compile(r"^li_VacV_(?:All)?Locations?(?:_|$)", re.I)
+    li = None
+    for node in list(anchor.parents)[:8]:  # the title box is a SIBLING of the field list: climb to the card
+        li = node.find("li", id=id_re)
+        if li is not None:
+            if len(node.find_all("a", href=re.compile(r"vacancies?/(?:[^/]+/)?\d+|^\d+/"))) > 3:
+                li = None  # climbed past the card into the whole results list: this li belongs to another job
+            break
+    if li is None:
+        return "", "marker_not_found"
+    content = li.select_one("div.content") or li
+    for junk in content.find_all(["script", "style"]):
+        junk.decompose()
+    for junk in content.select(".error-message, .its-u-visually-hidden"):
+        junk.decompose()
+    value = unescape(re.sub(r"\s+", " ", content.get_text(" ", strip=True))).strip(" ,;")
+    if not value or _EPLOY_FIELD_LABEL_RE.fullmatch(value):
+        return "", "marker_found_empty"
+    return value, "extracted"
+
+
+_EPLOY_MAX_PAGES = 40
+_EPLOY_POSTBACK_RE = re.compile(r"__doPostBack\('([^']*Pager[^']*)','(\d+)'\)")
+
+
+def _eploy_next_page_form(html: str, page: int) -> tuple[dict, str] | None:
+    """The pager of an Eploy board is an ASP.NET postback ("javascript:__doPostBack('...VacancyPager','2')"), not a
+    URL, so only the first page (12 jobs) was ever read. Builds the form data a browser would POST for page+1 from the
+    page's own form fields; None when there is no such page link."""
+    target = next((t for t, arg in _EPLOY_POSTBACK_RE.findall(unescape(html)) if arg == str(page + 1)), None)
+    if not target:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.find("form")
+    if form is None:
+        return None
+    data: dict[str, str] = {}
+    for inp in form.find_all("input"):
+        name, itype = inp.get("name"), (inp.get("type") or "text").lower()
+        if not name or itype in ("submit", "button", "image", "file", "reset"):
+            continue
+        if itype in ("checkbox", "radio") and not inp.has_attr("checked"):
+            continue
+        data[name] = inp.get("value") or ""
+    for sel in form.find_all("select"):
+        name = sel.get("name")
+        opt = sel.find("option", selected=True) or sel.find("option")
+        if name and opt is not None:
+            data[name] = opt.get("value") or ""
+    data["__EVENTTARGET"], data["__EVENTARGUMENT"] = target, str(page + 1)
+    return data, str(page + 1)
+
+
 async def scrape_eploy(slug: str) -> list[dict]:
     """Eploy public job-board scraper with host discovery and pagination.
 
@@ -4052,7 +4115,11 @@ async def scrape_eploy(slug: str) -> list[dict]:
             if abs_url in seen:
                 continue
             seen.add(abs_url)
-            location, location_status = _bs4_find_location_near(anchor, class_substrings=("location", "vacancy-location"))
+            location, location_status = _eploy_card_location(anchor)
+            if location_status == "marker_not_found":
+                location, location_status = _bs4_find_location_near(anchor, class_substrings=("location", "vacancy-location"))
+                if _EPLOY_FIELD_LABEL_RE.fullmatch(location or ""):
+                    location, location_status = "", "marker_found_empty"  # a field label, not a place
             jobs.append({
                 "title": title, "url": abs_url, "company": company_name,
                 "location": location, "location_status": location_status,
@@ -4083,6 +4150,22 @@ async def scrape_eploy(slug: str) -> list[dict]:
                 continue
             seen_jobs = {j["url"] for j in jobs}
             seen_pages = {str(r.url)}
+            # numbered pager = ASP.NET postbacks: POST the board's own form for page 2, 3, ... until a page adds nothing
+            cur, page_no = r, 1
+            while page_no < _EPLOY_MAX_PAGES:
+                nxt_form = _eploy_next_page_form(cur.text, page_no)
+                if not nxt_form:
+                    break
+                pr = await _post(str(cur.url), data=nxt_form[0], headers=headers)
+                if not pr:
+                    break
+                more, _ = await parse_page(pr, str(pr.url))
+                fresh = [j for j in more if j["url"] not in seen_jobs]
+                if not fresh:
+                    break
+                for j in fresh:
+                    seen_jobs.add(j["url"]); jobs.append(j)
+                cur, page_no = pr, page_no + 1
             queue = next_urls[:]
             # Follow only same-host pagination URLs and stop on repeats.
             while queue:

@@ -65,7 +65,9 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #       (Also loosens: the separate country field no longer narrows a location that already says EMEA/Global;
 #       "Worldwide + a place" goes to the LLM (Rank 3b) instead of a hard reject and "Worldwide, except US" passes;
 #       Africa named only inside an exclusion no longer counts as Africa.)
-CLASSIFIER_VERSION = 10
+#  11 - 2026-10-08: Eploy scraper stored the field LABEL ("All Locations") as the job's location, which the
+#       classifier rightly read as Global (Rank 1) for UK-only roles; bumped so revalidation re-checks stored rows.
+CLASSIFIER_VERSION = 11
 
 import os
 from dotenv import load_dotenv
