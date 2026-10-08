@@ -37,6 +37,7 @@ robots-allowed job API before being added to Crawl I:
 | Manatal (`careers-page.com`) | **Added** (`scrape_manatal`): paginated server-rendered board HTML (`/{slug}?page=N`, 10 per page, two themes handled) gives title/location/short job code; JD from the detail page's `redactor-styles` block. Not the JSON API: it has no job-URL code and 404s for many live boards. 2,481 live slugs via openroles |
 | JobScore | **Added** (`scrape_jobscore`): public `careers.jobscore.com/jobs/{slug}/feed.json` (full JD, location, remote flag); robots only blocks `/apply_flow/`. 171 openroles + 49 open-jobs slugs |
 | Crelate | **Added** (`scrape_crelate`): the portal is a JS shell, but every portal publishes `jobs.crelate.com/portal/{slug}/rss` (permalink, full JD, location); robots only blocks static dirs. 367 open-jobs slugs |
+| Comeet | **Added** (`scrape_comeet`): slug `{name}\|{uid}` from `comeet.com/jobs/{name}/{uid}`; the page embeds the company token, then the public `comeet.co/careers-api/2.0/company/{uid}/positions?details=true` gives full JDs, location and workplace type; robots allows `/jobs/`. Found via unmatched hosts in `archive_ii` (76 pages). |
 | Eightfold | Not added — public `/api/apply/v2/jobs` returns 403 "Not authorized for PCSX" |
 | UKG / UltiPro | Not added — robots.txt disallows `JobBoardView` (the search endpoint) |
 | Dover | Not added — robots.txt disallows `/api/` |

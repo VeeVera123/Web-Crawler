@@ -586,6 +586,8 @@ SUPPORTED_ATS = {
     # JobScore (public feed.json) and Crelate (public per-portal RSS). See
     # each scraper's block comment in ats_scrapers.py for the evidence.
     "manatal", "jobscore", "crelate",
+    # 2026-10: Comeet (startup ATS; slug "{name}|{uid}" from comeet.com/jobs/{name}/{uid}, public careers API).
+    "comeet",
     # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
     # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
     # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
@@ -2073,6 +2075,22 @@ def _url_to_slug_crelate(url: str) -> str | None:
     return slug
 
 
+def _url_to_slug_comeet(url: str) -> str | None:
+    """Extract "{name}|{uid}" from Comeet URLs (2026-10, new platform). Pattern (confirmed live):
+    www.comeet.com/jobs/{name}/{uid}[/{position-slug}/{position-uid}], also www.comeet.co/jobs/... (301s to .com).
+    Name and uid are case-insensitive; stored as lowercase name + uppercase uid."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() not in ("www.comeet.com", "comeet.com", "www.comeet.co", "comeet.co"):
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 3 or parts[0].lower() != "jobs":
+        return None
+    name, uid = parts[1].lower(), parts[2].upper()
+    if name in SKIP_SLUGS or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name) or not re.fullmatch(r"[0-9A-Z]{2,3}\.[0-9A-Z]{3}", uid):
+        return None
+    return f"{name}|{uid}"
+
+
 def _url_to_slug_isolvedhire(url: str) -> str | None:
     """Extract slug from isolvedhire (iSolved Hire) URLs (2026-09, new
     platform). Pattern: {slug}.isolvedhire.com/... — subdomain-per-tenant,
@@ -2466,6 +2484,7 @@ URL_TO_SLUG = {
     "manatal": _url_to_slug_manatal,
     "jobscore": _url_to_slug_jobscore,
     "crelate": _url_to_slug_crelate,
+    "comeet": _url_to_slug_comeet,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3167,6 +3186,7 @@ CC_PLATFORM_PATTERNS = {
     "manatal": ["www.careers-page.com/*"],
     "jobscore": ["careers.jobscore.com/*"],
     "crelate": ["jobs.crelate.com/portal/*"],
+    "comeet": ["www.comeet.com/jobs/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3248,6 +3268,7 @@ CC_EXTRACTORS = {
     "manatal": _url_to_slug_manatal,
     "jobscore": _url_to_slug_jobscore,
     "crelate": _url_to_slug_crelate,
+    "comeet": _url_to_slug_comeet,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3506,6 +3527,20 @@ def _cc_check_crelate(slug: str) -> bool | None:
     except Exception:
         return None
     if r.status_code == 404:
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_comeet(slug: str) -> bool | None:
+    """Fallback copy of verification.py's _verify_comeet (2026-10): a real company's careers page 200s, an unknown
+    name/uid 302s to the comeet.com home page."""
+    name, _, uid = slug.partition("|")
+    try:
+        r = requests.get(f"https://www.comeet.com/jobs/{name}/{uid}", timeout=10, allow_redirects=False,
+                          headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code in (301, 302, 303, 307, 308, 404):
         return False
     return True if r.status_code == 200 else None
 
@@ -3911,6 +3946,7 @@ _CC_LIVE_CHECK = {
     "manatal": _via_verification("manatal", _cc_check_manatal),
     "jobscore": _via_verification("jobscore", _cc_check_jobscore),
     "crelate": _via_verification("crelate", _cc_check_crelate),
+    "comeet": _via_verification("comeet", _cc_check_comeet),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,
@@ -3996,7 +4032,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
-    "manatal", "jobscore", "crelate",
+    "manatal", "jobscore", "crelate", "comeet",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -6830,6 +6866,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     # 2026-10: Dayforce / HireHive (new scrapers).
     "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
     "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
+    "comeet": "comeet",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -6847,7 +6884,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("recruiterbox.com", "recruiterbox"), ("trakstar.com", "recruiterbox"),
     ("jobs.dayforcehcm.com", "dayforce"), ("hirehive.com", "hirehive"),
     ("careers-page.com", "manatal"), ("careers.jobscore.com", "jobscore"),
-    ("jobs.crelate.com", "crelate"),
+    ("jobs.crelate.com", "crelate"), ("comeet.com", "comeet"),
 )
 
 

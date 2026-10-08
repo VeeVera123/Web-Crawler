@@ -211,6 +211,7 @@ PLATFORM_WORKERS = {
     "manatal": 8,
     "jobscore": 12,
     "crelate": 12,
+    "comeet": 12,  # 2026-10: page + one API call per tenant
 }
 
 

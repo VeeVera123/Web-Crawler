@@ -853,6 +853,19 @@ async def _verify_crelate(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_comeet(session: aiohttp.ClientSession, slug: str) -> bool:
+    """Comeet (2026-10, new platform). slug is "{name}|{uid}". GET the careers page WITHOUT following redirects:
+    a real company 200s, an unknown name/uid 302s to the comeet.com home page. Anything else stays ambiguous."""
+    name, _, uid = slug.partition("|")
+    url = f"https://www.comeet.com/jobs/{name}/{uid}"
+    async with session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT},
+                           allow_redirects=False) as r:
+        if r.status in (301, 302, 303, 307, 308, 404):
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool:
     """isolvedhire (2026-09, new platform — see discovery.py's
     SUPPORTED_ATS comment). GET the tenant's /jobs/ board page and follow
@@ -1010,6 +1023,7 @@ ARCHIVE_II_VERIFIERS = {
     "manatal": _verify_manatal,
     "jobscore": _verify_jobscore,
     "crelate": _verify_crelate,
+    "comeet": _verify_comeet,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full
     # live-confirmed evidence, including finding and ruling out its own

@@ -6043,6 +6043,111 @@ def scrape_jobscore(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Comeet ─────────────────────────────────────────────
+# 2026-10: found by looking at which hosts our unmatched career pages / "in_house" jobs sit on (76 comeet.com
+# pages in archive_ii, none scraped). Comeet is a startup-heavy ATS. Slug = "{name}|{uid}" taken from
+# https://www.comeet.com/jobs/{name}/{uid} (e.g. "liveu|90.00C"). Both parts are case-insensitive (verified: a
+# lower-cased uid and a differently cased name both return the same 200 page) and an unknown tenant 302s to the
+# comeet.com home page. The careers page embeds COMPANY_DATA (company_uid, token, name, logos) and
+# COMPANY_POSITIONS_DATA; the token unlocks Comeet's documented public API
+#   GET https://www.comeet.co/careers-api/2.0/company/{uid}/positions?token={token}&details=true
+# which adds the full description. If the API call fails the embedded positions are used (no description).
+# robots.txt on comeet.com only blocks WordPress/marketing paths, not /jobs/.
+_COMEET_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\|[0-9A-Z]{2,3}\.[0-9A-Z]{3}")
+
+
+def _comeet_embedded(html: str, name: str):
+    m = re.search(r"\b" + name + r"\s*=\s*", html)
+    if not m:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(html[m.end():])[0]
+    except ValueError:
+        return None
+
+
+def _comeet_location(p: dict) -> tuple[str, str]:
+    """(location text, workplace type). Comeet's location object has a display name (usually the country), a city
+    and an ISO country code; the code is left out because "IL" reads as Illinois to the classifier."""
+    loc = p.get("location") or {}
+    if isinstance(loc, str):
+        loc = {"name": loc}
+    workplace = _text(p.get("workplace_type"))
+    if not workplace and loc.get("is_remote") is True:
+        workplace = "Remote"
+    parts: list[str] = []
+    for key in ("city", "name"):
+        v = _text(loc.get(key))
+        if v.lower() in ("remote", "hybrid", "on-site", "onsite"):
+            continue  # Comeet sometimes puts the work mode in the city field
+        if v and v.lower() not in (x.lower() for x in parts):
+            parts.append(v)
+    text = ", ".join(parts)
+    if workplace.lower() == "remote":
+        text = f"Remote, {text}" if text else "Remote"
+    return text, workplace
+
+
+def scrape_comeet(slug: str) -> list[dict]:
+    slug = (slug or "").strip()
+    name, _, uid = slug.partition("|")
+    name, uid = name.lower(), uid.upper()
+    if not _COMEET_SLUG_RE.fullmatch(f"{name}|{uid}"):
+        return []
+    r = _get_requests_sync(f"https://www.comeet.com/jobs/{name}/{uid}",
+                           headers={"User-Agent": random.choice(USER_AGENTS)}, allow_redirects=False)
+    if not r or r.status_code != 200:
+        return []  # an unknown tenant 302s to the home page
+    html = r.text
+    company = _comeet_embedded(html, "COMPANY_DATA") or {}
+    positions = None
+    token, cuid = company.get("token"), company.get("company_uid") or uid
+    if token:
+        api = _get_requests_sync(
+            f"https://www.comeet.co/careers-api/2.0/company/{cuid}/positions?token={token}&details=true",
+            headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+        try:
+            data = api.json() if api else None
+        except Exception as e:
+            log.debug(f"Comeet: API JSON parse failed for {slug}: {e}")
+            data = None
+        if isinstance(data, list):
+            positions = data
+    if not positions:
+        positions = _comeet_embedded(html, "COMPANY_POSITIONS_DATA")
+    if not isinstance(positions, list):
+        return []
+    company_name = _text(company.get("name")) or name.replace("-", " ").title()
+    jobs: list[dict] = []
+    seen: set = set()
+    for p in positions:
+        if not isinstance(p, dict) or p.get("is_internal"):
+            continue
+        title = _text(p.get("name"))
+        url = (p.get("url_active_page") or p.get("url_comeet_hosted_page") or "").split("?")[0]
+        if not title or not url or url in seen:
+            continue
+        seen.add(url)
+        location, workplace = _comeet_location(p)
+        desc = _snippet(" ".join(f"<p><b>{_text(d.get('name'))}</b></p>{d.get('value') or ''}"
+                                 for d in (p.get("details") or []) if isinstance(d, dict)))
+        jobs.append({
+            "title": title,
+            "url": url,
+            "company": _text(p.get("company_name")) or company_name,
+            "location": location,
+            "country": "",
+            "department": _text(p.get("department")),
+            "workplace_type": workplace,
+            "employment_type": _text(p.get("employment_type")),
+            "salary": _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Comeet",
+            "slug": slug,
+        })
+    return jobs
+
+
 # ── Crelate ────────────────────────────────────────────
 # 2026-10: added at explicit user request. The Crelate candidate portal
 # (jobs.crelate.com/portal/{slug}) is a JS shell, but every portal links its
@@ -6595,6 +6700,7 @@ SCRAPERS = {
     "manatal": scrape_manatal,
     "jobscore": scrape_jobscore,
     "crelate": scrape_crelate,
+    "comeet": scrape_comeet,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
