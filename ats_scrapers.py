@@ -20,7 +20,13 @@ from html import unescape
 from urllib.parse import unquote, urljoin, urlparse
 import httpx
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+import warnings
+
+# The generic application-question fallback fetches arbitrary career URLs, and some answer with XML (feeds,
+# sitemaps). They are parsed with the HTML parser and yield no form fields either way; bs4 warned once per page,
+# which flooded the Crawl II log (hundreds of identical multi-line warnings) without ever indicating a failure.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 import geo
 from discovery import _GH_JID_RE, extract_greenhouse_embed_token
