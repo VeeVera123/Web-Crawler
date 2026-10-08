@@ -187,6 +187,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, urljoin, unquote
 
 import requests
@@ -7485,9 +7486,24 @@ def _filter_oracle_slugs(slug_dict: dict[str, str]) -> dict[str, str]:
     return filtered
 
 
+# (ats, slug) rows an earlier upsert_to_supabase() call in THIS process already inserted, so a later source that
+# lists the same slug is counted as "already present" rather than "new" (first_seen alone cannot tell them apart
+# when two sources run seconds apart).
+_INSERTED_THIS_RUN: set[tuple[str, str]] = set()
+_NEW_ROW_CLOCK_SKEW_SECONDS = 5
+
+
 def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
-                        dry_run: bool = False, skip_live_check: bool = False) -> int:
-    """Upsert slugs to Supabase archive_i. Returns total upserted.
+                        dry_run: bool = False, skip_live_check: bool = False,
+                        stats: dict | None = None) -> int:
+    """Upsert slugs to Supabase archive_i. Returns the number of rows written (new + already present).
+
+    `stats`, when given, is filled with what ACTUALLY happened, per ATS and in total, so a log can say how many
+    of a source's slugs were genuinely new: fetched (what the source returned), dead (dropped by the live check),
+    filtered (Oracle legacy slugs), collapsed (merged away as the same board, e.g. Tempo/tempo), written, new,
+    present (already in archive_i; includes rows another source inserted earlier in this run). `new` is None on a
+    dry run. A row is new when its first_seen (archive_i's DEFAULT now(), never sent by us) is at or after this
+    call's start, which only an INSERT made moments ago can satisfy; that needs return=representation.
 
     slugs_by_ats values can be:
       - set[str]          → slugs only (no company name)
@@ -7534,6 +7550,8 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
     own incremental per-platform upload path) — re-running the exact same
     live HTTP checks a second time here would just be wasted network
     calls against the same hosts, not a correctness issue."""
+    started_at = datetime.now(timezone.utc).timestamp() - _NEW_ROW_CLOCK_SKEW_SECONDS
+    fetched_by_ats = {a: len(v) for a, v in slugs_by_ats.items() if v}
     if not skip_live_check:
         slugs_by_ats = _drop_dead_cc_slugs(slugs_by_ats, source)
 
@@ -7545,13 +7563,21 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=minimal,resolution=merge-duplicates",
+        # representation: the response carries each row's first_seen, which is how "new" is told from "present"
+        "Prefer": ("return=minimal,resolution=merge-duplicates" if dry_run
+                   else "return=representation,resolution=merge-duplicates"),
     }
 
     total = 0
     chunk_size = 500
+    totals = {"fetched": 0, "dead": 0, "filtered": 0, "collapsed": 0, "written": 0, "new": 0, "present": 0}
+    by_ats: dict[str, dict] = {}
 
-    for ats, slugs in slugs_by_ats.items():
+    for ats, fetched in fetched_by_ats.items():
+        slugs = slugs_by_ats.get(ats) or {}
+        row_stats = {"fetched": fetched, "dead": fetched - len(slugs), "filtered": 0, "collapsed": 0,
+                     "written": 0, "new": 0, "present": 0}
+        by_ats[ats] = row_stats
         if not slugs:
             continue
 
@@ -7564,26 +7590,23 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
         # Oracle Cloud HCM: don't re-add a legacy tenant slug that's already
         # been resolved to its real domain — see _filter_oracle_slugs.
         if ats == "oracle_cloud_hcm" and not dry_run:
+            before = len(slug_dict)
             slug_dict = _filter_oracle_slugs(slug_dict)
+            row_stats["filtered"] = before - len(slug_dict)
             if not slug_dict:
                 continue
 
-        items = list(slug_dict.items())
-        ats_total = 0
+        # name (company name, when a source has one) has nowhere to go -- archive_i has no such column -- so it is
+        # dropped here. canonical_registry_rows lowercases case-insensitive slugs and merges same-board spellings
+        # (slug_case.py); done for the whole ATS at once so the merge is counted, not just done per chunk.
+        all_rows = canonical_registry_rows([{"ats": ats, "slug": slug, "source": source} for slug in slug_dict])
+        row_stats["collapsed"] = len(slug_dict) - len(all_rows)
 
-        for i in range(0, len(items), chunk_size):
-            chunk = items[i:i + chunk_size]
-            # name (company name, when a source has one) has nowhere to
-            # go — archive_i doesn't carry that column — so it's dropped
-            # here rather than sent and rejected. Slug/ATS is still the
-            # part every downstream consumer (node.py's crawl) actually
-            # needs; the name was never more than a nice-to-have.
-            # canonical_registry_rows: lowercase case-insensitive slugs and
-            # drop same-board duplicates within the chunk (slug_case.py).
-            rows = canonical_registry_rows([{"ats": ats, "slug": slug, "source": source} for slug, _name in chunk])
+        for i in range(0, len(all_rows), chunk_size):
+            rows = all_rows[i:i + chunk_size]
 
             if dry_run:
-                ats_total += len(chunk)
+                row_stats["written"] += len(rows)
                 continue
 
             r = None
@@ -7596,7 +7619,26 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                     params={"on_conflict": "ats,slug"},
                 )
                 r.raise_for_status()
-                ats_total += len(chunk)
+                try:
+                    returned = r.json()
+                except Exception:
+                    returned = None  # written, but new/present can't be told apart for this chunk
+                if returned is None:
+                    row_stats["written"] += len(rows)
+                    continue
+                row_stats["written"] += len(returned)
+                for row in returned:
+                    key = (row.get("ats"), row.get("slug"))
+                    try:
+                        is_new = (datetime.fromisoformat(str(row.get("first_seen")).replace("Z", "+00:00")).timestamp()
+                                  >= started_at)
+                    except (ValueError, TypeError):
+                        is_new = False
+                    if is_new and key not in _INSERTED_THIS_RUN:
+                        _INSERTED_THIS_RUN.add(key)
+                        row_stats["new"] += 1
+                    else:
+                        row_stats["present"] += 1
             except Exception as e:
                 # requests' own exception message ("400 Client Error: Bad
                 # Request for url: ...") never includes PostgREST's actual
@@ -7606,10 +7648,21 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                 body = f" — response: {r.text[:500]}" if r is not None else ""
                 log.error(f"Supabase upsert failed for {ats}: {e}{body}")
 
-        if ats_total:
-            log.info(f"  {ats}: upserted {ats_total} slugs ({source})")
-        total += ats_total
+        if row_stats["written"]:
+            tail = ("" if dry_run else f", {row_stats['new']} new, {row_stats['present']} already present")
+            log.info(f"  {ats}: {fetched} fetched, {row_stats['dead']} dead, {row_stats['filtered']} filtered, "
+                     f"{row_stats['collapsed']} merged as duplicates, {row_stats['written']} written{tail} ({source})")
+        total += row_stats["written"]
 
+    for rs in by_ats.values():
+        for k in totals:
+            totals[k] += rs[k]
+    if dry_run:
+        totals["new"] = None
+        totals["present"] = None
+    if stats is not None:
+        stats.update(totals)
+        stats["by_ats"] = by_ats
     return total
 
 
@@ -7829,7 +7882,7 @@ def main():
     # still shows the breakdown the separate source labels used to give for
     # free. See github_repo_summary below and its printout at the end of
     # main().
-    github_repo_summary: dict[str, tuple[int, int | None]] = {}
+    github_repo_summary: dict[str, dict] = {}
 
     # Source 1: Feashliaa (50k+ slugs for 6 platforms)
     if args.source in ("feashliaa", "github_combined", "all"):
@@ -7838,13 +7891,14 @@ def main():
         fa_total = sum(len(s) for s in fa_slugs.values())
 
         if not args.dry_run:
+            st: dict = {}
             upserted = upsert_to_supabase(fa_slugs, source="Github",
-                                           dry_run=args.dry_run)
+                                           dry_run=args.dry_run, stats=st)
             grand_total += upserted
-            github_repo_summary["Feashliaa"] = (fa_total, upserted)
+            github_repo_summary["Feashliaa"] = st
         else:
             grand_total += fa_total
-            github_repo_summary["Feashliaa"] = (fa_total, None)
+            github_repo_summary["Feashliaa"] = {"fetched": fa_total, "new": None}
 
     # Source 2: kalil0321/ats-scrapers (26 platforms, CSV inventories)
     if args.source in ("kalil", "github_combined", "all"):
@@ -7853,13 +7907,14 @@ def main():
         ka_total = sum(len(s) for s in ka_slugs.values())
 
         if not args.dry_run:
+            st = {}
             upserted = upsert_to_supabase(ka_slugs, source="Github",
-                                           dry_run=args.dry_run)
+                                           dry_run=args.dry_run, stats=st)
             grand_total += upserted
-            github_repo_summary["Kalil"] = (ka_total, upserted)
+            github_repo_summary["Kalil"] = st
         else:
             grand_total += ka_total
-            github_repo_summary["Kalil"] = (ka_total, None)
+            github_repo_summary["Kalil"] = {"fetched": ka_total, "new": None}
 
     # Source 3: OpenPostings (110k+ companies across 80+ ATSs)
     if args.source in ("openpostings", "github_combined", "all"):
@@ -7870,13 +7925,14 @@ def main():
                  f"{sum(1 for s in op_slugs.values() if s)} platforms")
 
         if not args.dry_run:
+            st = {}
             upserted = upsert_to_supabase(op_slugs, source="Github",
-                                           dry_run=args.dry_run)
+                                           dry_run=args.dry_run, stats=st)
             grand_total += upserted
-            github_repo_summary["OpenPostings"] = (op_total, upserted)
+            github_repo_summary["OpenPostings"] = st
         else:
             grand_total += op_total
-            github_repo_summary["OpenPostings"] = (op_total, None)
+            github_repo_summary["OpenPostings"] = {"fetched": op_total, "new": None}
 
     # Source 4: Common Crawl (ongoing discovery for 27 platforms — run as
     # 2 shards in discovery.yml, see fetch_commoncrawl_slugs docstring)
@@ -8032,13 +8088,14 @@ def main():
             csod_resolve_time_budget_minutes=args.csod_resolve_budget_minutes)
         gr_total = sum(len(s) for s in gr_slugs.values())
         if not args.dry_run:
+            st = {}
             upserted = upsert_to_supabase(gr_slugs, source="Github",
-                                           dry_run=args.dry_run)
+                                           dry_run=args.dry_run, stats=st)
             grand_total += upserted
-            github_repo_summary["GitHub registries"] = (gr_total, upserted)
+            github_repo_summary["GitHub registries"] = st
         else:
             grand_total += gr_total
-            github_repo_summary["GitHub registries"] = (gr_total, None)
+            github_repo_summary["GitHub registries"] = {"fetched": gr_total, "new": None}
 
     # Source 8: Edward H.F (huggingface.co/datasets/edwarddgao/open-apply-jobs
     # — 31M+ individual job postings, apply_url resolved through URL_TO_SLUG)
@@ -8132,9 +8189,13 @@ def main():
     # single consolidated "Github" archive_i.source value.
     if github_repo_summary:
         log.info("\n--- GITHUB (consolidated source) BREAKDOWN ---")
-        for label, (total, new) in github_repo_summary.items():
-            new_str = f"{new} new" if new is not None else "new: n/a (dry run)"
-            log.info(f"  {label} — {total} slugs, {new_str}")
+        for label, st in github_repo_summary.items():
+            if st.get("new") is None:
+                log.info(f"  {label} — {st.get('fetched', 0)} fetched, new: n/a (dry run)")
+                continue
+            log.info(f"  {label} — {st['fetched']} fetched, {st['dead']} dead, {st['filtered']} filtered, "
+                     f"{st['collapsed']} merged as duplicates, {st['present']} already in archive_i, "
+                     f"{st['new']} NEW")
 
     action = "would upsert" if args.dry_run else "upserted"
     log.info(f"\nDone! {action} {grand_total} total slugs to Supabase.")

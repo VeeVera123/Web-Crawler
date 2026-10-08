@@ -222,6 +222,59 @@ for path in glob.glob(os.path.join(root, "**", "*.py"), recursive=True):
         check("canonical_registry_rows" in src or "canonical_slug" in src,
               f"{name} upserts into archive_i but does not use slug_case's canonical helpers")
 
+# ── discovery.upsert_to_supabase reports what REALLY went in (new vs already present vs merged) ──
+os.environ.setdefault("SUPABASE_URL", "https://example.invalid")
+os.environ.setdefault("SUPABASE_KEY", "x")
+import datetime as _dt  # noqa: E402
+import discovery  # noqa: E402
+
+_now = _dt.datetime.now(_dt.timezone.utc)
+_old = (_now - _dt.timedelta(days=30)).isoformat()
+EXISTING = {("workday", "a|wd1|site"), ("greenhouse", "oldco")}  # already in archive_i
+
+
+class _R:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._rows
+
+
+def _fake_post(url, headers=None, json=None, timeout=None, params=None):
+    out = []
+    for r in json:  # what PostgREST returns with return=representation: one row per input, first_seen per row
+        seen = (r["ats"], r["slug"]) in EXISTING
+        out.append({"ats": r["ats"], "slug": r["slug"], "first_seen": _old if seen else _dt.datetime.now(_dt.timezone.utc).isoformat()})
+    return _R(out)
+
+
+discovery.requests.post = _fake_post
+discovery._drop_dead_cc_slugs = lambda d, label: {a: {s: n for s, n in (v.items() if isinstance(v, dict) else {x: "" for x in v}.items()) if s != "deadco"}
+                                                  for a, v in d.items()}
+discovery._INSERTED_THIS_RUN.clear()
+st = {}
+written = discovery.upsert_to_supabase(
+    {"workday": {"A|wd1|Site", "a|wd1|site", "b|wd1|new"},   # two spellings of an existing board + one new
+     "greenhouse": {"OldCo", "oldco", "newco", "deadco"}},    # a case twin of an existing slug, a new one, a dead one
+    source="Github", stats=st)
+wd, gh = st["by_ats"]["workday"], st["by_ats"]["greenhouse"]
+check((wd["fetched"], wd["collapsed"], wd["written"], wd["new"], wd["present"]) == (3, 1, 2, 1, 1), f"workday accounting: {wd}")
+check((gh["fetched"], gh["dead"], gh["collapsed"], gh["written"], gh["new"], gh["present"]) == (4, 1, 1, 2, 1, 1), f"greenhouse accounting: {gh}")
+check(written == 4 and st["new"] == 2 and st["present"] == 2 and st["collapsed"] == 2 and st["dead"] == 1 and st["fetched"] == 7,
+      f"totals: {written} {({k: v for k, v in st.items() if k != 'by_ats'})}")
+# the same slug offered again by a LATER source in the same run is present, not new
+st2 = {}
+discovery.upsert_to_supabase({"workday": {"b|wd1|new"}}, source="Github", stats=st2)
+check(st2["new"] == 0 and st2["present"] == 1, f"a slug inserted earlier in this run must not be new again: {st2}")
+# dry run: nothing is claimed as new
+st3 = {}
+discovery.upsert_to_supabase({"workday": {"zz|wd1|x"}}, source="Github", dry_run=True, stats=st3)
+check(st3["new"] is None and st3["written"] == 1, f"dry run: {st3}")
+
 print(f"{checks - len(failures)}/{checks} checks passed")
 for f in failures:
     print("FAIL:", f)
