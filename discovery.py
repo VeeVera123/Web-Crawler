@@ -588,6 +588,9 @@ SUPPORTED_ATS = {
     "manatal", "jobscore", "crelate",
     # 2026-10: Comeet (startup ATS; slug "{name}|{uid}" from comeet.com/jobs/{name}/{uid}, public careers API).
     "comeet",
+    # 2026-10: Emply (Nordic ATS, vacancy API), CATS (staffing), Elmo (Australia), Easy Apply (Canada/US): found
+    # by counting tenant subdomains per domain in archive_ii; see each scraper's block comment in ats_scrapers.py.
+    "emply", "cats", "elmo", "easyapply",
     # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
     # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
     # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
@@ -2091,6 +2094,51 @@ def _url_to_slug_comeet(url: str) -> str | None:
     return f"{name}|{uid}"
 
 
+def _tenant_of(host: str, suffix: str) -> str | None:
+    host = (host or "").lower()
+    if not host.endswith(suffix):
+        return None
+    tenant = host[: -len(suffix)]
+    if tenant and tenant not in SKIP_SLUGS and tenant not in ("www", "app") and re.fullmatch(r"[a-z0-9][a-z0-9-]*", tenant):
+        return tenant
+    return None
+
+
+def _url_to_slug_emply(url: str) -> str | None:
+    """Emply (2026-10): {tenant}.career.emply.com/... -> tenant. Subdomain-per-tenant."""
+    return _tenant_of(urlparse(url).hostname, ".career.emply.com")
+
+
+def _url_to_slug_cats(url: str) -> str | None:
+    """CATS (2026-10): {tenant}.catsone.com/careers/{id}[-name]/... -> "{tenant}|{id}" (the numeric portal id is part
+    of every list URL: /careers/{id}/jobs)."""
+    parsed = urlparse(url)
+    tenant = _tenant_of(parsed.hostname, ".catsone.com")
+    parts = [p for p in parsed.path.split("/") if p]
+    if not tenant or len(parts) < 2 or parts[0].lower() != "careers":
+        return None
+    m = re.match(r"(\d+)", parts[1])
+    return f"{tenant}|{m.group(1)}" if m else None
+
+
+def _url_to_slug_elmo(url: str) -> str | None:
+    """Elmo Talent (2026-10): {tenant}.elmotalent.com.au/careers/{board}/... -> "{tenant}|{board}" (the board is
+    "default", the tenant name, "careers", ... and is in every list URL: /careers/{board}/jobs)."""
+    parsed = urlparse(url)
+    tenant = _tenant_of(parsed.hostname, ".elmotalent.com.au")
+    parts = [p for p in parsed.path.split("/") if p]
+    if not tenant or len(parts) < 2 or parts[0].lower() != "careers":
+        return None
+    board = parts[1].lower()
+    return f"{tenant}|{board}" if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", board) else None
+
+
+def _url_to_slug_easyapply(url: str) -> str | None:
+    """Easy Apply (2026-10): {tenant}.easyapply.co -> tenant. Job pages live on easyapply.co/job/{slug} (no tenant),
+    so only the subdomain form identifies a company."""
+    return _tenant_of(urlparse(url).hostname, ".easyapply.co")
+
+
 def _url_to_slug_isolvedhire(url: str) -> str | None:
     """Extract slug from isolvedhire (iSolved Hire) URLs (2026-09, new
     platform). Pattern: {slug}.isolvedhire.com/... — subdomain-per-tenant,
@@ -2485,6 +2533,10 @@ URL_TO_SLUG = {
     "jobscore": _url_to_slug_jobscore,
     "crelate": _url_to_slug_crelate,
     "comeet": _url_to_slug_comeet,
+    "emply": _url_to_slug_emply,
+    "cats": _url_to_slug_cats,
+    "elmo": _url_to_slug_elmo,
+    "easyapply": _url_to_slug_easyapply,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3187,6 +3239,10 @@ CC_PLATFORM_PATTERNS = {
     "jobscore": ["careers.jobscore.com/*"],
     "crelate": ["jobs.crelate.com/portal/*"],
     "comeet": ["www.comeet.com/jobs/*"],
+    "emply": ["*.career.emply.com/*"],
+    "cats": ["*.catsone.com/careers/*"],
+    "elmo": ["*.elmotalent.com.au/careers/*"],
+    "easyapply": ["*.easyapply.co/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3269,6 +3325,10 @@ CC_EXTRACTORS = {
     "jobscore": _url_to_slug_jobscore,
     "crelate": _url_to_slug_crelate,
     "comeet": _url_to_slug_comeet,
+    "emply": _url_to_slug_emply,
+    "cats": _url_to_slug_cats,
+    "elmo": _url_to_slug_elmo,
+    "easyapply": _url_to_slug_easyapply,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3543,6 +3603,42 @@ def _cc_check_comeet(slug: str) -> bool | None:
     if r.status_code in (301, 302, 303, 307, 308, 404):
         return False
     return True if r.status_code == 200 else None
+
+
+def _alive_by_status(url: str, follow_to_suffix: str | None = None) -> bool | None:
+    """Shared liveness test for the 2026-10 per-tenant platforms: a real tenant answers 200, an unknown one answers
+    404 or redirects to the vendor's marketing site. With follow_to_suffix the redirects are followed and the tenant
+    is gone when the final host no longer ends with that suffix (Emply sends /vacancies to a language path)."""
+    try:
+        r = requests.get(url, timeout=10, allow_redirects=follow_to_suffix is not None,
+                          headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if follow_to_suffix is not None:
+        if (urlparse(r.url).hostname or "").endswith(follow_to_suffix) and r.status_code == 200:
+            return True
+        return False if r.status_code in (200, 404) else None
+    if r.status_code in (301, 302, 303, 307, 308, 404):
+        return False
+    return True if r.status_code == 200 else None
+
+
+def _cc_check_emply(slug: str) -> bool | None:
+    return _alive_by_status(f"https://{slug}.career.emply.com/vacancies", follow_to_suffix=".career.emply.com")
+
+
+def _cc_check_cats(slug: str) -> bool | None:
+    tenant, _, cid = slug.partition("|")
+    return _alive_by_status(f"https://{tenant}.catsone.com/careers/{cid}/jobs")
+
+
+def _cc_check_elmo(slug: str) -> bool | None:
+    tenant, _, board = slug.partition("|")
+    return _alive_by_status(f"https://{tenant}.elmotalent.com.au/careers/{board}/jobs")
+
+
+def _cc_check_easyapply(slug: str) -> bool | None:
+    return _alive_by_status(f"https://{slug}.easyapply.co/")
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -3947,6 +4043,10 @@ _CC_LIVE_CHECK = {
     "jobscore": _via_verification("jobscore", _cc_check_jobscore),
     "crelate": _via_verification("crelate", _cc_check_crelate),
     "comeet": _via_verification("comeet", _cc_check_comeet),
+    "emply": _via_verification("emply", _cc_check_emply),
+    "cats": _via_verification("cats", _cc_check_cats),
+    "elmo": _via_verification("elmo", _cc_check_elmo),
+    "easyapply": _via_verification("easyapply", _cc_check_easyapply),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,
@@ -4032,7 +4132,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
-    "manatal", "jobscore", "crelate", "comeet",
+    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -6866,7 +6966,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     # 2026-10: Dayforce / HireHive (new scrapers).
     "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
     "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
-    "comeet": "comeet",
+    "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -6885,6 +6985,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("jobs.dayforcehcm.com", "dayforce"), ("hirehive.com", "hirehive"),
     ("careers-page.com", "manatal"), ("careers.jobscore.com", "jobscore"),
     ("jobs.crelate.com", "crelate"), ("comeet.com", "comeet"),
+    ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"),
 )
 
 

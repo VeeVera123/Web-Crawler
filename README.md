@@ -38,6 +38,11 @@ robots-allowed job API before being added to Crawl I:
 | JobScore | **Added** (`scrape_jobscore`): public `careers.jobscore.com/jobs/{slug}/feed.json` (full JD, location, remote flag); robots only blocks `/apply_flow/`. 171 openroles + 49 open-jobs slugs |
 | Crelate | **Added** (`scrape_crelate`): the portal is a JS shell, but every portal publishes `jobs.crelate.com/portal/{slug}/rss` (permalink, full JD, location); robots only blocks static dirs. 367 open-jobs slugs |
 | Comeet | **Added** (`scrape_comeet`): slug `{name}\|{uid}` from `comeet.com/jobs/{name}/{uid}`; the page embeds the company token, then the public `comeet.co/careers-api/2.0/company/{uid}/positions?details=true` gives full JDs, location and workplace type; robots allows `/jobs/`. Found via unmatched hosts in `archive_ii` (76 pages). |
+| Emply | **Added** (`scrape_emply`): `{tenant}.career.emply.com`; `/vacancies` embeds a sectionId and the page's own anonymous `POST /api/integration/vacancy/get-page` returns every vacancy with its full description. robots allows all. 27 `archive_ii` tenants. |
+| CATS (`catsone.com`) | **Added** (`scrape_cats`): slug `{tenant}\|{id}`; `/careers/{id}/jobs` lists every job on one page (title, location); descriptions via `_fetch_cats_description` (`div.job-description`). Mostly staffing / local US roles. |
+| Elmo Talent (`elmotalent.com.au`) | **Added** (`scrape_elmo`): slug `{tenant}\|{board}`; `/careers/{board}/jobs?page=N` (10 per page); robots explicitly allows `/careers/*/job*`; descriptions via `_fetch_elmo_description`. Australian employers. |
+| Easy Apply (`easyapply.co`) | **Added** (`scrape_easyapply`): `{tenant}.easyapply.co` lists all jobs in one page; job pages `easyapply.co/job/{slug}` through the generic description fetcher. Canadian / US local roles. |
+| Paycor (`recruitingbypaycor.com`) | Not added — robots.txt is `Disallow: /` for all agents |
 | Eightfold | Not added — public `/api/apply/v2/jobs` returns 403 "Not authorized for PCSX" |
 | UKG / UltiPro | Not added — robots.txt disallows `JobBoardView` (the search endpoint) |
 | Dover | Not added — robots.txt disallows `/api/` |

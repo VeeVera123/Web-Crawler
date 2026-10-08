@@ -866,6 +866,41 @@ async def _verify_comeet(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_by_status(session: aiohttp.ClientSession, url: str, follow_to_suffix: str | None = None) -> bool:
+    """Shared liveness test for the 2026-10 per-tenant platforms (Emply, CATS, Elmo, Easy Apply): a real tenant
+    answers 200; an unknown one answers 404 or redirects to the vendor's marketing site (confirmed live). With
+    follow_to_suffix, redirects are followed and the tenant is gone when the final host leaves that suffix."""
+    async with session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT},
+                           allow_redirects=follow_to_suffix is not None) as r:
+        if follow_to_suffix is not None:
+            if r.status == 200 and (r.url.host or "").endswith(follow_to_suffix):
+                return True
+            if r.status in (200, 404):
+                return False
+        elif r.status in (301, 302, 303, 307, 308, 404):
+            return False
+        r.raise_for_status()
+        return True
+
+
+async def _verify_emply(session: aiohttp.ClientSession, slug: str) -> bool:
+    return await _verify_by_status(session, f"https://{slug}.career.emply.com/vacancies", ".career.emply.com")
+
+
+async def _verify_cats(session: aiohttp.ClientSession, slug: str) -> bool:
+    tenant, _, cid = slug.partition("|")
+    return await _verify_by_status(session, f"https://{tenant}.catsone.com/careers/{cid}/jobs")
+
+
+async def _verify_elmo(session: aiohttp.ClientSession, slug: str) -> bool:
+    tenant, _, board = slug.partition("|")
+    return await _verify_by_status(session, f"https://{tenant}.elmotalent.com.au/careers/{board}/jobs")
+
+
+async def _verify_easyapply(session: aiohttp.ClientSession, slug: str) -> bool:
+    return await _verify_by_status(session, f"https://{slug}.easyapply.co/")
+
+
 async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool:
     """isolvedhire (2026-09, new platform — see discovery.py's
     SUPPORTED_ATS comment). GET the tenant's /jobs/ board page and follow
@@ -1024,6 +1059,10 @@ ARCHIVE_II_VERIFIERS = {
     "jobscore": _verify_jobscore,
     "crelate": _verify_crelate,
     "comeet": _verify_comeet,
+    "emply": _verify_emply,
+    "cats": _verify_cats,
+    "elmo": _verify_elmo,
+    "easyapply": _verify_easyapply,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full
     # live-confirmed evidence, including finding and ruling out its own

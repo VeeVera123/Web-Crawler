@@ -212,6 +212,8 @@ PLATFORM_WORKERS = {
     "jobscore": 12,
     "crelate": 12,
     "comeet": 12,  # 2026-10: page + one API call per tenant
+    # 2026-10: Emply = 2 calls per tenant; CATS / Easy Apply = 1 page; Elmo = 1 page per 10 jobs.
+    "emply": 12, "cats": 12, "easyapply": 12, "elmo": 8,
 }
 
 

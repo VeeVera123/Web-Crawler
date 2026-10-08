@@ -6148,6 +6148,200 @@ def scrape_comeet(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Emply / CATS / Elmo / Easy Apply ───────────────────
+# 2026-10: four platforms found by counting tenant subdomains per domain in archive_ii (44 / 27 / 27 / 30 tenants,
+# none scraped). All four robots.txt files allow the pages used here (Elmo explicitly allows /careers/*/job* and
+# /careers/*/jobs, which is all this touches). None has JSON-LD; none is read through a login or an application path.
+#
+#   Emply    slug "{tenant}"            {tenant}.career.emply.com. /vacancies embeds a sectionId; the page's own anonymous
+#                                       XHR POST /api/integration/vacancy/get-page {sectionId, count, offset, ...} returns
+#                                       every vacancy WITH its full description in one call. Job URL /ad/{titleAsUrl}/{shortId}.
+#                                       Unknown tenant -> 302 to emply.com.
+#   CATS     slug "{tenant}|{id}"       {tenant}.catsone.com/careers/{id}/jobs: ONE page lists every job (title, category,
+#                                       location); descriptions come from the detail page later (DESCRIPTION_FETCHERS).
+#                                       Unknown tenant/id -> 404.
+#   Elmo     slug "{tenant}|{board}"    {tenant}.elmotalent.com.au/careers/{board}/jobs?page=N, 10 per page; title, location
+#                                       and employment type in the list. Unknown tenant -> 302 to elmosoftware.com.au.
+#   EasyApply slug "{tenant}"           {tenant}.easyapply.co/ lists all jobs in one page (paging is client-side); job pages live
+#                                       on easyapply.co/job/{slug}. Unknown tenant -> 302 to /employers.
+_EMPLY_TENANT_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+_UA_HEADERS = lambda: {"User-Agent": random.choice(USER_AGENTS)}
+
+
+def scrape_emply(slug: str) -> list[dict]:
+    tenant = (slug or "").strip().lower()
+    if not _EMPLY_TENANT_RE.fullmatch(tenant):
+        return []
+    base = f"https://{tenant}.career.emply.com"
+    r = _get_requests_sync(f"{base}/vacancies", headers=_UA_HEADERS())
+    if not r or r.status_code != 200 or not (urlparse(r.url).hostname or "").endswith(".career.emply.com"):
+        return []  # unknown tenant -> 302 to emply.com
+    m = re.search(r"sectionId:\s*'([0-9a-f-]{36})'", r.text)
+    if not m:
+        return []
+    cfg = {"count": 1000, "filters": [], "langCode": "en-GB", "offset": 0, "searchText": "", "sectionId": m.group(1),
+           "sortByProjectDataId": "", "sortAscending": False, "light": False, "isJobAgent": False, "siteId": None}
+    try:
+        resp = _get_session().post(f"{base}/api/integration/vacancy/get-page", json=cfg, headers=_UA_HEADERS(),
+                                   timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        vacancies = resp.json().get("vacancies") or []
+    except Exception as e:
+        log.debug(f"Emply: vacancy API failed for {tenant}: {e}")
+        return []
+    # the <title> is the page/board name ("Career - BWS"); the footer carries "(c) 2020 Semco Maritime A/S. All rights ..."
+    footer = re.search(r"©\s*\d{4}\s+([^<.]{2,60}?(?:\.[A-Za-z]{1,3}\.?)?)\s*[.\s]\s*(?:All\s+rights|Alle\s+rettigheder|Alle\s+rechten|Tous\s+droits)", r.text)
+    company = _text(unescape(footer.group(1))) if footer else tenant.replace("-", " ").title()
+    jobs: list[dict] = []
+    seen: set = set()
+    for v in vacancies:
+        if not isinstance(v, dict) or v.get("talentPool"):
+            continue  # talent pools are "unsolicited application" pages, not openings
+        title, short_id = _text(v.get("title")), _text(v.get("shortId"))
+        if not title or not short_id or short_id in seen:
+            continue
+        seen.add(short_id)
+        tr = next((t for t in (v.get("translations") or []) if isinstance(t, dict) and t.get("content")), {})
+        desc = _snippet(tr.get("content") or "")
+        jobs.append({
+            "title": title,
+            "url": f"{base}/ad/{_text(v.get('titleAsUrl')) or 'job'}/{short_id}",
+            "company": company,
+            "location": _text(v.get("location")),
+            "country": "",
+            "department": _text(v.get("department")),
+            "workplace_type": "",
+            "employment_type": "",
+            "salary": _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Emply",
+            "slug": tenant,
+        })
+    return jobs
+
+
+def _html_cell_text(fragment: str) -> str:
+    return _text(unescape(re.sub(r"<[^>]+>", " ", fragment or "")).replace("\xa0", " "))
+
+
+_CATS_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*\|\d+")
+_CATS_ROW_RE = re.compile(r'<a class="table-row" href="(/careers/\d+/jobs/(\d+)[^"]*)"[^>]*>(.*?)</a>', re.S)
+
+
+def scrape_cats(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not _CATS_SLUG_RE.fullmatch(slug):
+        return []
+    tenant, cid = slug.split("|")
+    base = f"https://{tenant}.catsone.com"
+    r = _get_requests_sync(f"{base}/careers/{cid}/jobs", headers=_UA_HEADERS())
+    if not r or r.status_code != 200:
+        return []
+    t = re.search(r"<title>(.*?)</title>", r.text, re.S)
+    company = _html_cell_text(t.group(1)) if t else ""
+    company = re.sub(r"^\s*Careers\s*[|\-–]\s*", "", company) or tenant.replace("-", " ").title()
+    jobs: list[dict] = []
+    seen: set = set()
+    for href, jid, inner in _CATS_ROW_RE.findall(r.text):
+        if jid in seen:
+            continue
+        seen.add(jid)
+        title = _html_cell_text((re.search(r'title-cell">(.*?)</div>', inner, re.S) or [None, ""])[1])
+        location = _html_cell_text((re.search(r'data-label="Location">(.*?)</div>', inner, re.S) or [None, ""])[1])
+        category = _html_cell_text((re.search(r'data-label="Category">(.*?)</div>', inner, re.S) or [None, ""])[1])
+        if not title:
+            continue
+        jobs.append({
+            "title": title, "url": f"{base}{href}", "company": company, "location": location, "country": "",
+            "department": category, "workplace_type": "", "employment_type": "", "salary": "",
+            "description_snippet": "", "source_ats": "CATS", "slug": slug,
+        })
+    return jobs
+
+
+_ELMO_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*\|[a-z0-9][a-z0-9_-]*")
+_ELMO_EMPLOYMENT_RE = re.compile(r"\b(?:Permanent|Contract(?:or)?|Casual|Temporary|Fixed[- ]Term|Part[- ]Time|Full[- ]Time|Internship|Graduate)\b[^<|]{0,30}", re.I)
+_ELMO_MAX_PAGES = 30
+
+
+def scrape_elmo(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not _ELMO_SLUG_RE.fullmatch(slug):
+        return []
+    tenant, board = slug.split("|")
+    base = f"https://{tenant}.elmotalent.com.au"
+    jobs: list[dict] = []
+    seen: set = set()
+    company = ""
+    for page in range(1, _ELMO_MAX_PAGES + 1):
+        r = _get_requests_sync(f"{base}/careers/{board}/jobs" + (f"?page={page}" if page > 1 else ""),
+                               headers=_UA_HEADERS(), allow_redirects=False)
+        if not r or r.status_code != 200:
+            break
+        if not company:
+            company = tenant.replace("-", " ").title()  # the page title names the job BOARD, not the employer
+        parts = re.split(r'(?=<a class="e-clickable redirect_elmo_link")', r.text)
+        fresh = 0
+        for chunk in parts:
+            m = re.match(r'<a class="e-clickable redirect_elmo_link"[^>]*href="(/careers/[^"/]+/job/view/(\d+))"[^>]*>(.*?)</a>', chunk, re.S)
+            if not m or m.group(2) in seen:
+                continue
+            seen.add(m.group(2))
+            fresh += 1
+            title = _html_cell_text(m.group(3))
+            rest = chunk[m.end(): m.end() + 2500]
+            pin = rest.find("glyphicon-map-marker")
+            after = rest[pin:].split(">", 1)[-1] if pin >= 0 else rest
+            segs = [s for s in (_html_cell_text(x) for x in re.split(r"<[^>]+>", after)) if s and s != "&nbsp;"]
+            location = next((s for s in segs if not _ELMO_EMPLOYMENT_RE.fullmatch(s)), "")
+            emp = _ELMO_EMPLOYMENT_RE.search(" | ".join(segs))
+            if not title:
+                continue
+            jobs.append({
+                "title": title, "url": f"{base}{m.group(1)}", "company": company, "location": location, "country": "",
+                "department": "", "workplace_type": "", "employment_type": _text(emp.group(0)) if emp else "",
+                "salary": "", "description_snippet": "", "source_ats": "Elmo", "slug": slug,
+            })
+        if not fresh:
+            break
+    return jobs
+
+
+_EASYAPPLY_TENANT_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def scrape_easyapply(slug: str) -> list[dict]:
+    tenant = (slug or "").strip().lower()
+    if not _EASYAPPLY_TENANT_RE.fullmatch(tenant) or tenant == "www":
+        return []
+    r = _get_requests_sync(f"https://{tenant}.easyapply.co/", headers=_UA_HEADERS(), allow_redirects=False)
+    if not r or r.status_code != 200:
+        return []  # unknown tenant -> 302 to /employers
+    t = re.search(r"Jobs at ([^<\n]+)", r.text)
+    company = _text(unescape(t.group(1))) if t else tenant.replace("-", " ").title()
+    jobs: list[dict] = []
+    seen: set = set()
+    parts = re.split(r'(?=<a class="job_apply_link)', r.text)
+    for chunk in parts:
+        m = re.match(r'<a class="job_apply_link[^"]*"[^>]*href="(https://easyapply\.co/job/[^"]+)"[^>]*>(.*?)</a>', chunk, re.S)
+        if not m or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        title = _html_cell_text(m.group(2))
+        block = chunk[m.end(): m.end() + 1800]
+        loc = re.search(r'fa-map-marker"></i>(.*?)</span>', block, re.S)
+        emp = re.search(r'fa-clock-o"></i>(.*?)</span>', block, re.S)
+        if not title:
+            continue
+        jobs.append({
+            "title": title, "url": m.group(1), "company": company,
+            "location": _html_cell_text(loc.group(1)) if loc else "", "country": "", "department": "",
+            "workplace_type": "", "employment_type": _html_cell_text(emp.group(1)) if emp else "", "salary": "",
+            "description_snippet": "", "source_ats": "EasyApply", "slug": tenant,
+        })
+    return jobs
+
+
 # ── Crelate ────────────────────────────────────────────
 # 2026-10: added at explicit user request. The Crelate candidate portal
 # (jobs.crelate.com/portal/{slug}) is a JS shell, but every portal links its
@@ -6701,6 +6895,10 @@ SCRAPERS = {
     "jobscore": scrape_jobscore,
     "crelate": scrape_crelate,
     "comeet": scrape_comeet,
+    "emply": scrape_emply,
+    "cats": scrape_cats,
+    "elmo": scrape_elmo,
+    "easyapply": scrape_easyapply,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -7503,6 +7701,35 @@ _CONTAINER_RE = re.compile(
 )
 
 
+async def _fetch_cats_description(job: dict) -> str:
+    """CATS job page: the description sits in div.job-description (the generic fetcher returned only the page
+    header, 86 characters)."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    r = await _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return ""
+    _enrich_cache_put(job, url, r.text)
+    node = BeautifulSoup(r.text, "html.parser").select_one(".job-description")
+    return _snippet(str(node)) if node else ""
+
+
+async def _fetch_elmo_description(job: dict) -> str:
+    """Elmo job page: introduction + body live in div.job-ad-introduction / div.job-ad-description (both
+    rt-editor); the generic fetcher found nothing."""
+    url = job.get("url", "")
+    if not url:
+        return ""
+    r = await _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r:
+        return ""
+    _enrich_cache_put(job, url, r.text)
+    soup = BeautifulSoup(r.text, "html.parser")
+    parts = [str(n) for n in soup.select(".job-ad-introduction, .job-ad-description")]
+    return _snippet(" ".join(parts)) if parts else ""
+
+
 async def _fetch_generic_description(job: dict) -> str:
     """Generic description fetcher — loads the job URL and tries, IN
     ORDER, every extraction method that's useful across real career-page
@@ -7810,6 +8037,10 @@ DESCRIPTION_FETCHERS = {
     # fetcher (JSON-LD → meta description → common JD containers) covers
     # all of them since they're plain server-rendered HTML.
     "Softgarden": _fetch_generic_description,
+    # 2026-10: CATS / Elmo / Easy Apply list pages carry no description (Emply returns it in its API call).
+    "CATS": _fetch_cats_description,
+    "Elmo": _fetch_elmo_description,
+    "EasyApply": _fetch_generic_description,
     "Eploy": _fetch_generic_description,
     "FolksHR": _fetch_generic_description,
     "JobAdder": _fetch_generic_description,
