@@ -44,6 +44,25 @@ check(f is not None and f[0]["__EVENTTARGET"] == "ctl00$C$VacancyPager" and f[0]
       and f[0]["__VIEWSTATE"] == "vs", f"form {f}")
 check(A._eploy_next_page_form(page, 2) is None, "no page 3 link")
 
+import json  # noqa: E402
+
+_off = {"offers": [{"title": "PM", "slug": "pm", "remote": True, "city": "Warsaw", "country": "Poland", "location": "Remote job",
+                    "locations": [{"city": "Warsaw", "name": "Warsaw", "state": "Mazowieckie", "country": "Poland"}]},
+                   {"title": "X", "slug": "x", "remote": True, "location": "Remote job", "locations": []}]}
+
+
+class _R:
+    def json(self):
+        return _off
+
+
+_orig = A._get_requests_sync
+A._get_requests_sync = lambda *a, **k: _R()
+_jobs = A.scrape_recruitee("t")
+A._get_requests_sync = _orig
+check(_jobs[0]["location"] == "Warsaw, Mazowieckie, Poland" and _jobs[0]["workplace_type"] == "Remote", f"recruitee {_jobs[0]['location']}")
+check(_jobs[1]["location"] == "Remote", f"recruitee bare {_jobs[1]['location']}")
+
 print(f"{n} checks, {len(fails)} failures")
 for m in fails:
     print("FAIL", m)

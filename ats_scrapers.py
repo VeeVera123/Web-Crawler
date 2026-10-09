@@ -1690,6 +1690,9 @@ async def scrape_workable(slug: str) -> list[dict]:
 
 # ── Recruitee ─────────────────────────────────────────
 
+_RECRUITEE_LABEL_LOCATION_RE = re.compile(r"(?:remote|hybrid|on-?site)(?:\s+(?:job|position|role))?", re.I)
+
+
 def scrape_recruitee(slug: str) -> list[dict]:
     """Recruitee Careers Site API — no auth, returns all offers at once."""
     url = f"https://{slug}.recruitee.com/api/offers/"
@@ -1714,6 +1717,17 @@ def scrape_recruitee(slug: str) -> list[dict]:
         city = offer.get("city", "")
         country = offer.get("country", "")
         location = offer.get("location", "") or ", ".join(filter(None, [city, country]))
+        # Recruitee's `location` is the literal label "Remote job" for remote postings, even ones pinned to a city
+        # (intent: "Warsaw, Mazowieckie, Poland"). Stored as-is it read as bare Remote and ranked Global. The real
+        # places live in `locations[]`; remote-ness is carried by workplace_type below.
+        if not location or _RECRUITEE_LABEL_LOCATION_RE.fullmatch(location.strip()):
+            places = []
+            for loc in offer.get("locations") or []:
+                if isinstance(loc, dict):
+                    place = ", ".join(dict.fromkeys(filter(None, [loc.get("city") or loc.get("name"), loc.get("state"), loc.get("country")])))
+                    if place and place not in places:
+                        places.append(place)
+            location = "; ".join(places) or ", ".join(filter(None, [city, country])) or ("Remote" if offer.get("remote") else "")
 
         # 2026-09 BUG FIX (explicit user report, real posting: Peripass'
         # "Customer Success Manager Benelux" — the live page shows

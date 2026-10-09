@@ -67,7 +67,9 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #       Africa named only inside an exclusion no longer counts as Africa.)
 #  11 - 2026-10-08: Eploy scraper stored the field LABEL ("All Locations") as the job's location, which the
 #       classifier rightly read as Global (Rank 1) for UK-only roles; bumped so revalidation re-checks stored rows.
-CLASSIFIER_VERSION = 11
+#  12 - 2026-10-09: Recruitee scraper stored the label "Remote job" instead of the offer's real city/country
+#       (remote postings pinned to e.g. Warsaw read as bare Remote and ranked Global); bumped to re-check stored rows.
+CLASSIFIER_VERSION = 12
 
 import os
 from dotenv import load_dotenv
