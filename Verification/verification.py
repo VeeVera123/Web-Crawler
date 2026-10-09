@@ -299,16 +299,19 @@ async def _verify_zoho(session: aiohttp.ClientSession, slug: str) -> bool:
     real /jobs/Careers path (the one ats_scrapers.scrape_zoho actually
     uses, not the bare subdomain root) and treats the error template as
     dead."""
-    url = f"https://{slug}.zohorecruit.com/jobs/Careers"
-    async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
-                            headers={"User-Agent": USER_AGENT}) as r:
-        final_host = urlparse(str(r.url)).hostname or ""
-        if final_host != f"{slug}.zohorecruit.com":
-            return False
-        if r.status != 200:
-            return False
-        text = await r.text()
-        return "cl-error-block" not in text and "cl-error-content" not in text
+    for host in ("zohorecruit.com", "zohorecruit.eu", "zohorecruit.com.au"):
+        url = f"https://{slug}.{host}/jobs/Careers"
+        try:
+            async with session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                                    headers={"User-Agent": USER_AGENT}) as r:
+                if (urlparse(str(r.url)).hostname or "") != f"{slug}.{host}" or r.status != 200:
+                    continue
+                text = await r.text()
+                if "cl-error-block" not in text and "cl-error-content" not in text:
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 async def _verify_hrmdirect(session: aiohttp.ClientSession, slug: str) -> bool:

@@ -63,6 +63,25 @@ A._get_requests_sync = _orig
 check(_jobs[0]["location"] == "Warsaw, Mazowieckie, Poland" and _jobs[0]["workplace_type"] == "Remote", f"recruitee {_jobs[0]['location']}")
 check(_jobs[1]["location"] == "Remote", f"recruitee bare {_jobs[1]['location']}")
 
+_blob = ('[{&#34;Posting_Title&#34;:&#34;Head of Ops&#34;,&#34;id&#34;:&#34;1&#34;,&#34;Remote_Job&#34;:true,&#34;City&#34;:null,'
+         '&#34;Country&#34;:null,&#34;Job_Description&#34;:&#34;We&#39;re hiring; it\'s great&#34;,'
+         '&#34;Department_Name&#34;:{&#34;name&#34;:&#34;Ops&#34;,&#34;id&#34;:&#34;9&#34;},&#34;Publish&#34;:true},'
+         '{&#34;Posting_Title&#34;:&#34;Rep&#34;,&#34;id&#34;:&#34;2&#34;,&#34;Remote_Job&#34;:false,&#34;City&#34;:&#34;Leeds&#34;,'
+         '&#34;State&#34;:null,&#34;Country&#34;:&#34;UK&#34;,&#34;Publish&#34;:true}]')
+
+
+class _Z:
+    text = f'<html><input type="hidden" value="{_blob}" id="jobs"></html>'
+
+
+A._get_requests_sync = lambda *a, **k: _Z()
+_zj = A.scrape_zoho("acme")
+A._get_requests_sync = _orig
+check(len(_zj) == 2, f"zoho count {len(_zj)}")
+if len(_zj) == 2:
+    check(_zj[0]["location"] == "Remote" and _zj[0]["workplace_type"] == "Remote" and _zj[0]["department"] == "Ops", f"zoho0 {_zj[0]}")
+    check(_zj[1]["location"] == "Leeds" and _zj[1]["workplace_type"] == "" and _zj[1]["country"] == "UK", f"zoho1 {_zj[1]}")
+
 print(f"{n} checks, {len(fails)} failures")
 for m in fails:
     print("FAIL", m)

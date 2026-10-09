@@ -3596,60 +3596,63 @@ async def scrape_softgarden(slug: str) -> list[dict]:
 
 # ── Zoho Recruit ────────────────────────────────────────
 
+_ZOHO_HOSTS = ("zohorecruit.com", "zohorecruit.eu", "zohorecruit.com.au")
+_ZOHO_JOBS_INPUT_RE = re.compile(r'<input\b[^>]*?\bvalue="([^"]*)"[^>]*?\b(?:id|name)="jobs"', re.I)
+
+
+def _zoho_text(v) -> str:
+    """Zoho's JSON mixes strings, nulls, booleans and {"name":..,"id":..} lookups."""
+    if isinstance(v, dict):
+        v = v.get("name") or v.get("value") or ""
+    return v.strip() if isinstance(v, str) else ""
+
+
 def scrape_zoho(slug: str) -> list[dict]:
     """Zoho Recruit — HTML scrape with embedded JSON.
-    Slug is the company subdomain (e.g. 'acme').
-    Parses hidden input#jobs JSON data."""
+    Slug is the company subdomain (e.g. 'acme'); the region (.com/.eu/.com.au) isn't part of the slug, so each is
+    tried in turn (a missing tenant answers 200 with a small error page, not a 404).
+    The jobs live in a hidden input#jobs whose value is HTML-escaped JSON (&#34; quotes, ~650KB on big boards).
+
+    2026-10 BUG FIX: returned 0 jobs for every board. The old regex `value=["']([^"']+)["']` stopped at the first
+    apostrophe in the blob, only `&quot;` was unescaped (Zoho sends `&#34;`), and Remote_Job (a bool) / Department_Name
+    (a dict) would have crashed `.strip()` had the JSON ever parsed."""
     company_name = slug.replace("-", " ").title()
-    url = f"https://{slug}.zohorecruit.com/jobs/Careers"
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
-    r = _get_requests_sync(url, headers=headers)
+    r, host = None, "zohorecruit.com"
+    for host in _ZOHO_HOSTS:
+        r = _get_requests_sync(f"https://{slug}.{host}/jobs/Careers", headers=headers)
+        if r and "cl-error-block" not in r.text and "cl-error-content" not in r.text:
+            break
+        r = None
     if not r:
         return []
 
     jobs = []
 
-    # Primary: Parse hidden input with jobs JSON
-    # Try id="jobs" and name="jobs", both attribute orders
-    jobs_input = None
-    for attr in ('id', 'name'):
-        if jobs_input:
-            break
-        # attr before value
-        jobs_input = re.search(
-            rf'<input[^>]*{attr}=["\']jobs["\'][^>]*value=["\']([^"\']+)["\']',
-            r.text, re.I
-        )
-        if not jobs_input:
-            # value before attr
-            jobs_input = re.search(
-                rf'<input[^>]*value=["\']([^"\']+)["\'][^>]*{attr}=["\']jobs["\']',
-                r.text, re.I
-            )
-    if jobs_input:
+    m = _ZOHO_JOBS_INPUT_RE.search(r.text)
+    if m:
         import json
         try:
-            raw = jobs_input.group(1)
-            # Unescape HTML entities
-            raw = raw.replace("&quot;", '"').replace("&amp;", "&")
-            raw = raw.replace("&lt;", "<").replace("&gt;", ">")
-            raw = raw.replace("&#39;", "'")
-            job_data = json.loads(raw)
-
+            job_data = json.loads(unescape(m.group(1)))
             if isinstance(job_data, list):
                 for item in job_data:
-                    title = item.get("Posting_Title") or item.get("Job_Opening_Name") or ""
+                    if not isinstance(item, dict) or item.get("Publish") is False:
+                        continue
+                    title = _zoho_text(item.get("Posting_Title") or item.get("Job_Opening_Name"))
                     job_id = item.get("id") or item.get("Job Opening Id") or ""
-                    job_url_val = item.get("$url") or ""
+                    job_url_val = _zoho_text(item.get("$url"))
                     if not job_url_val and job_id:
-                        job_url_val = f"https://{slug}.zohorecruit.com/jobs/Careers/{job_id}"
+                        job_url_val = f"https://{slug}.{host}/jobs/Careers/{job_id}"
+                    if not title or not job_url_val:
+                        continue
 
-                    loc = item.get("City") or item.get("city") or ""
-                    state = item.get("State") or ""
-                    country = item.get("Country") or ""
-                    if state and loc:
-                        loc = f"{loc}, {state}"
+                    city, state, country = (_zoho_text(item.get(k)) for k in ("City", "State", "Country"))
+                    loc = ", ".join(dict.fromkeys(filter(None, [city, state])))
+                    remote = item.get("Remote_Job")
+                    remote = remote if isinstance(remote, bool) else _zoho_text(remote).lower() in ("true", "yes", "remote")
+                    if not loc and not country and remote:
+                        loc = "Remote"
 
                     salary = item.get("Salary") or ""
                     desc = _snippet(item.get("Job_Description") or item.get("description") or "")
@@ -3657,26 +3660,20 @@ def scrape_zoho(slug: str) -> list[dict]:
                         salary = _extract_salary(desc)
 
                     jobs.append({
-                        "title": title.strip(),
+                        "title": title,
                         "url": job_url_val,
                         "company": company_name,
-                        "location": loc.strip(),
-                        "country": country.strip() if isinstance(country, str) else "",
-                        # 2026-09: live-verified against a real Zoho Recruit
-                        # career site (ziplyfiber.zohorecruit.com, 74 real
-                        # openings) that the embedded input#jobs JSON uses
-                        # "Department_Name", not "Department" — the field
-                        # previously looked up doesn't exist in current
-                        # payloads, so department was always blank.
-                        "department": (item.get("Department_Name") or item.get("Department") or "").strip(),
-                        "workplace_type": (item.get("Remote_Job") or item.get("Work_Mode") or "").strip(),
-                        "employment_type": (item.get("Job_Type") or item.get("jobtype") or "").strip(),
+                        "location": loc,
+                        "country": country,
+                        "department": _zoho_text(item.get("Department_Name") or item.get("Department")),
+                        "workplace_type": "Remote" if remote else "",
+                        "employment_type": _zoho_text(item.get("Job_Type") or item.get("jobtype")),
                         "salary": str(salary).strip() if salary else "",
                         "description_snippet": desc,
                         "source_ats": "Zoho",
                         "slug": slug,
                     })
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             log.debug(f"Zoho: JSON parse failed for {slug}: {e}")
 
     # Fallback: Parse JSON-LD structured data
