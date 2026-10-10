@@ -110,6 +110,14 @@ A._get_requests_sync = lambda url, **kw: R(EA) if "upstreamdata.easyapply.co" in
 jobs = A.scrape_easyapply("UpstreamData")
 check(len(jobs) == 2 and jobs[0]["location"] == "Lloydminster, AB" and jobs[0]["employment_type"] == "Full-time" and jobs[0]["company"] == "Upstream Data Inc", f"easyapply: {jobs}")
 check(jobs[1]["title"] == "Account & Sales Manager" and jobs[1]["url"] == "https://easyapply.co/job/account-manager-2", f"easyapply row 2: {jobs[1]}")
+# EasyApply current markup (2026-10): row anchor wraps the row, title in span.font_18, icon-* classes
+_EA_NEW = ('<h1>View jobs at ACME (X)</h1><div id="list"><a class="border_bottom font_6_grey job_row job_apply_link" target="_blank" href="https://easyapply.co/job/front-desk-1" style="display:block">'
+           '<div class="no_word_break"><span class="font_18 vega-default-link" href="#">Front Desk</span></div>'
+           '<p><i class="icon-map-marker"></i><span class="padding_left_5">New Orleans, LA</span></p><p>blurb</p></a></div>')
+A._get_requests_sync = lambda url, **kw: R(_EA_NEW) if "newlayout.easyapply.co" in url else R("", 302)
+_nj = A.scrape_easyapply("newlayout")
+check(len(_nj) == 1 and _nj[0]["title"] == "Front Desk" and _nj[0]["location"] == "New Orleans, LA" and _nj[0]["url"].endswith("front-desk-1") and _nj[0]["company"] == "ACME (X)",
+      f"easyapply: current wrapped-anchor markup {_nj}")
 check(A.scrape_easyapply("nobody") == [] and A.scrape_easyapply("www") == [] and A.scrape_easyapply("") == [], "easyapply unknown tenant / bad slug")
 
 # ── Emply: sectionId page + vacancy API ──

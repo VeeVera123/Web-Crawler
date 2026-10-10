@@ -6464,8 +6464,10 @@ def scrape_easyapply(slug: str) -> list[dict]:
         body = chunk[m.end(): end if end > 0 else m.end() + 1800]
         t_el = re.search(r'<span class="font_18[^"]*"[^>]*>(.*?)</span>', body, re.S)
         title = _html_cell_text(t_el.group(1)) if t_el else _html_cell_text(body)
-        loc = re.search(r'(?:fa|icon)-map-marker"></i>\s*<span[^>]*>(.*?)</span>', body, re.S)
-        emp = re.search(r'(?:fa|icon)-(?:clock-o|time)"></i>\s*<span[^>]*>(.*?)</span>', body, re.S)
+        # old layout: the anchor holds only the title and the tags follow it; new layout: everything is inside the anchor
+        scope = body if t_el else chunk[m.end(): m.end() + 1800]
+        loc = re.search(r'(?:fa|icon)-map-marker"></i>\s*(?:<span[^>]*>)?(.*?)</', scope, re.S)
+        emp = re.search(r'(?:fa|icon)-(?:clock-o|time)"></i>\s*(?:<span[^>]*>)?(.*?)</', scope, re.S)
         if not title:
             continue
         jobs.append({
