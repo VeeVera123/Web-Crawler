@@ -315,6 +315,57 @@ for kind in HTMLS:
         check(len(hj) == 1 and hj[0]["url"] == "https://app.loxo.co/job/MzE0NzMtM3ppaWd0eGJvaHl4cDF5ag==" and hj[0]["title"].endswith("Pipefitter"), f"loxo {hj}")
     check(asyncio.run(getattr(A, "scrape_" + kind)("Bad Slug!")) == [], f"{kind}: bad slug")
 
+# ── Recruiterflow / Homerun (2026-10) ──
+for fn, url, want in [
+    (D._url_to_slug_recruiterflow, "https://recruiterflow.com/acme-corp/jobs/12", "acme-corp"), (D._url_to_slug_recruiterflow, "https://recruiterflow.com/acme/jobs", "acme"),
+    (D._url_to_slug_recruiterflow, "https://recruiterflow.com/blog/jobs", None), (D._url_to_slug_recruiterflow, "https://recruiterflow.com/pricing", None),
+    (D._url_to_slug_recruiterflow, "https://example.com/acme/jobs", None),
+    (D._url_to_slug_homerun, "https://chillhop-music.homerun.co/", "chillhop-music"), (D._url_to_slug_homerun, "https://jobs.homerun.co/sales-exec", None),
+    (D._url_to_slug_homerun, "https://www.homerun.co/", None),
+]:
+    check(fn(url) == want, f"{fn.__name__}({url}) = {fn(url)!r}, want {want!r}")
+for ats in ("recruiterflow", "homerun"):
+    check(ats in D.URL_TO_SLUG and ats in D.SUPPORTED_ATS and ats in A.SCRAPERS and ats in D._CC_LIVE_CHECK, f"{ats} registered")
+RFJ = {"department": [["Admin", [{"apply_link": "acme/jobs/1", "details": "Gotham", "employment_type": "Full time", "job_id": 1, "job_name": "Security Specialist", "remote_type": None}]],
+                      ["Support", [{"apply_link": "acme/jobs/9", "details": "Remote - EMEA", "employment_type": "Full time", "job_id": 9, "job_name": "Customer Success Manager", "remote_type": "Remote"},
+                                   {"job_name": "broken"}]]]}
+RF = "<html><script>window.jobsList = " + json.dumps(RFJ) + ";\nvar other = {a: 1};</script></html>"
+
+
+async def fake_rf(url, **kw):
+    return R(RF, 200, url)
+
+
+A._get = fake_rf
+rfj = asyncio.run(A.scrape_recruiterflow("Acme"))
+check(len(rfj) == 2 and rfj[1]["url"] == "https://recruiterflow.com/acme/jobs/9" and rfj[1]["location"] == "Remote - EMEA" and rfj[1]["workplace_type"] == "Remote"
+      and rfj[1]["department"] == "Support" and rfj[0]["title"] == "Security Specialist", f"recruiterflow {rfj}")
+A._get = fake_ap_none
+check(asyncio.run(A.scrape_recruiterflow("acme")) == [] and asyncio.run(A.scrape_recruiterflow("Bad Slug!")) == [], "recruiterflow: no embed / bad slug")
+HRP = {"content": {"vacancies": [{"id": 1, "title": "Open application", "location_id": 5, "department_id": None, "url": "https://jobs.homerun.co/open/en"},
+                                 {"id": 2, "title": "Customer Success Specialist", "location_id": 5, "department_id": 7, "url": "https://jobs.homerun.co/customer-success-specialist"}],
+                  "departments": [{"id": 7, "name": "Customer"}], "locations": [{"id": 5, "name": "Amsterdam"}], "job_types": []}}
+import html as _html  # noqa: E402
+HR = '<section id="job-list"><job-list v-bind="' + _html.escape(json.dumps(HRP), quote=True) + '"></job-list></section>'
+
+
+async def fake_hr(url, **kw):
+    return R(HR, 200, "https://acme.homerun.co/")
+
+
+A._get = fake_hr
+hrj = asyncio.run(A.scrape_homerun("Acme"))
+check(len(hrj) == 1 and hrj[0]["title"] == "Customer Success Specialist" and hrj[0]["location"] == "Amsterdam" and hrj[0]["department"] == "Customer"
+      and hrj[0]["url"] == "https://jobs.homerun.co/customer-success-specialist", f"homerun {hrj}")
+
+
+async def fake_hr404(url, **kw):
+    return R(HR, 200, "https://404.homerun.co/working_at/acme")
+
+
+A._get = fake_hr404
+check(asyncio.run(A.scrape_homerun("acme")) == [] and asyncio.run(A.scrape_homerun("Bad Slug!")) == [], "homerun: unknown tenant / bad slug")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

@@ -7457,6 +7457,80 @@ async def scrape_loxo(slug: str) -> list[dict]:
     return await _scrape_html_board("loxo", slug)
 
 
+# ── Recruiterflow ─────────────────────────────────────────────────────────────
+# 2026-10, verified live on recruiterflow.com/recruiterflow/jobs (the vendor's own board; an unknown tenant answers 404).
+# The board page embeds the whole list in raw HTML as `window.jobsList = {"department": [[name, [jobs...]], ...]}`; each
+# job has job_id, job_name, details (location), employment_type, remote_type and apply_link ("{slug}/jobs/{id}"). The
+# paid REST API needs a key, but this embed is what the public board itself renders. Description: the job page's JSON-LD.
+async def scrape_recruiterflow(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        return []
+    r = await _get(f"https://recruiterflow.com/{slug}/jobs", headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r or r.status_code != 200:
+        return []
+    m = re.search(r"window\.jobsList\s*=\s*", r.text)
+    if not m:
+        return []
+    try:
+        data, _ = json.JSONDecoder().raw_decode(r.text, m.end())
+        groups = data.get("department") or []
+    except Exception:
+        return []
+    company = slug.replace("-", " ").replace("_", " ").title()
+    jobs = []
+    for group in groups:
+        if not (isinstance(group, list) and len(group) == 2 and isinstance(group[1], list)):
+            continue
+        for j in group[1]:
+            if not isinstance(j, dict) or not j.get("job_name") or not j.get("apply_link"):
+                continue
+            remote = _text(j.get("remote_type"))
+            jobs.append({
+                "title": _text(j["job_name"]),
+                "url": f"https://recruiterflow.com/{str(j['apply_link']).lstrip('/')}",
+                "company": company,
+                "location": _text(j.get("details")),
+                "country": "",
+                "department": _text(group[0]),
+                "workplace_type": "Remote" if remote.lower() == "remote" else remote,
+                "employment_type": _text(j.get("employment_type")),
+                "salary": "",
+                "description_snippet": "",
+                "source_ats": "Recruiterflow",
+                "slug": slug,
+            })
+    return jobs
+
+
+# ── Homerun ───────────────────────────────────────────────────────────────────
+# 2026-10, verified live on homerun.homerun.co (4 jobs). The 2026-09 removal (see above) was right about the old
+# "jobs.*" slug guess, but real `{tenant}.homerun.co` boards are fine: the list is the `<job-list v-bind="{...}">` Vue
+# props (vacancies + id-keyed departments / locations / job types), which page_extract.extract_state_jobs already
+# resolves; job pages live on jobs.homerun.co/{job-slug}. A tenant with no openings has `"vacancies":[]`, which is why
+# the tenants tried earlier "showed no jobs". An unknown tenant redirects to 404.homerun.co.
+async def scrape_homerun(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        return []
+    r = await _get(f"https://{slug}.homerun.co/", headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r or r.status_code != 200 or "404.homerun.co" in str(r.url):
+        return []
+    company = slug.replace("-", " ").replace("_", " ").title()
+    jobs, seen = [], set()
+    for it in page_extract.extract_state_jobs(r.text, str(r.url), company):
+        url = it.get("url") or ""
+        if not url or url in seen or "/open/" in url:  # "Open application" is a standing form, not a vacancy
+            continue
+        seen.add(url)
+        jobs.append({
+            "title": it["title"], "url": url, "company": company, "location": it.get("location", ""), "country": "",
+            "department": it.get("department", ""), "workplace_type": it.get("workplace_type", ""), "employment_type": "",
+            "salary": "", "description_snippet": "", "source_ats": "Homerun", "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7491,8 +7565,7 @@ SCRAPERS = {
     # root cause (missing session priming, not JS-rendering/auth/robots).
     "brassring": scrape_brassring,
     # ── New (2026-09): PageUp / Pinpoint / Flatchr / Jobylon ──
-    # (Homerun removed 2026-09 — see the removal comment above scrape_homerun's
-    # former location for the verified evidence.)
+    # (Homerun removed 2026-09, then re-added 2026-10 for real {tenant}.homerun.co boards — see scrape_homerun.)
     "pageup": scrape_pageup,
     "pinpoint": scrape_pinpoint,
     "flatchr": scrape_flatchr,
@@ -7548,6 +7621,8 @@ SCRAPERS = {
     "peopleforce": scrape_peopleforce,
     "factorial": scrape_factorial,
     "loxo": scrape_loxo,
+    "recruiterflow": scrape_recruiterflow,
+    "homerun": scrape_homerun,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -8740,6 +8815,8 @@ DESCRIPTION_FETCHERS = {
     "PeopleForce": _fetch_generic_description,
     "Factorial": _fetch_generic_description,
     "Loxo": _fetch_generic_description,
+    "Recruiterflow": _fetch_generic_description,
+    "Homerun": _fetch_generic_description,
     "BambooHR": _fetch_generic_description,
     # 2026-09: Paycom — the search endpoint's description field is
     # truncated; the real full text (plus salary/category) only comes

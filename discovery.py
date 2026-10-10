@@ -599,6 +599,8 @@ SUPPORTED_ATS = {
     "traffit",
     # 2026-10: Freshteam / PeopleForce / Factorial / Loxo: server-rendered HTML boards read by ats_scrapers._scrape_html_board.
     "freshteam", "peopleforce", "factorial", "loxo",
+    # 2026-10: Recruiterflow (recruiterflow.com/{tenant}/jobs, list embedded in the page) and Homerun ({tenant}.homerun.co).
+    "recruiterflow", "homerun",
     # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
     # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
     "getro",
@@ -2194,6 +2196,29 @@ def _url_to_slug_factorial(url: str) -> str | None:
     return _html_board_tenant(url, ".factorial.com")
 
 
+def _url_to_slug_homerun(url: str) -> str | None:
+    """Homerun (2026-10): {tenant}.homerun.co -> tenant. jobs.homerun.co/{job} (the shared host job pages live on) and
+    the vendor's own www/app/404 hosts are not tenants."""
+    return _html_board_tenant(url, ".homerun.co")
+
+
+_RECRUITERFLOW_NON_SLUGS = frozenset({"jobs", "blog", "pricing", "features", "login", "signup", "api", "about", "contact", "careers", "customers",
+                                      "integrations", "resources", "demo", "partners", "support", "legal", "privacy", "terms", "company"})
+
+
+def _url_to_slug_recruiterflow(url: str) -> str | None:
+    """Recruiterflow (2026-10): recruiterflow.com/{tenant}/jobs[/{id}] -> tenant. Only URLs that carry /jobs identify a board;
+    the vendor's own marketing paths (blog, pricing ...) are excluded."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() not in ("recruiterflow.com", "www.recruiterflow.com"):
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2 or parts[1].lower() != "jobs":
+        return None
+    slug = parts[0].lower()
+    return slug if slug not in _RECRUITERFLOW_NON_SLUGS and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug) else None
+
+
 def _url_to_slug_loxo(url: str) -> str | None:
     """Loxo (2026-10): app.loxo.co/{tenant}[/...] -> tenant. Job pages are app.loxo.co/job/{id} (no tenant), so only the
     board URL identifies a company."""
@@ -2630,6 +2655,8 @@ URL_TO_SLUG = {
     "peopleforce": _url_to_slug_peopleforce,
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
+    "recruiterflow": _url_to_slug_recruiterflow,
+    "homerun": _url_to_slug_homerun,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3344,6 +3371,8 @@ CC_PLATFORM_PATTERNS = {
     "peopleforce": ["*.peopleforce.io/careers*"],
     "factorial": ["*.factorial.com/job_posting/*"],
     "loxo": ["app.loxo.co/*"],
+    "recruiterflow": ["recruiterflow.com/*/jobs*"],
+    "homerun": ["*.homerun.co/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3438,6 +3467,8 @@ CC_EXTRACTORS = {
     "peopleforce": _url_to_slug_peopleforce,
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
+    "recruiterflow": _url_to_slug_recruiterflow,
+    "homerun": _url_to_slug_homerun,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3822,6 +3853,21 @@ def _cc_check_factorial(slug: str) -> bool | None:
 
 def _cc_check_loxo(slug: str) -> bool | None:
     return _cc_check_html_board(f"https://app.loxo.co/{slug}")
+
+
+def _cc_check_recruiterflow(slug: str) -> bool | None:
+    return _cc_check_html_board(f"https://recruiterflow.com/{slug}/jobs")
+
+
+def _cc_check_homerun(slug: str) -> bool | None:
+    """An unknown Homerun tenant redirects to 404.homerun.co; a live one answers 200 (possibly after a language redirect)."""
+    try:
+        r = requests.get(f"https://{slug}.homerun.co/", timeout=10, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if "404.homerun.co" in r.url:
+        return False
+    return True if r.status_code == 200 else (False if r.status_code == 404 else None)
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -4241,6 +4287,8 @@ _CC_LIVE_CHECK = {
     "peopleforce": _via_verification("peopleforce", _cc_check_peopleforce),
     "factorial": _via_verification("factorial", _cc_check_factorial),
     "loxo": _via_verification("loxo", _cc_check_loxo),
+    "recruiterflow": _via_verification("recruiterflow", _cc_check_recruiterflow),
+    "homerun": _via_verification("homerun", _cc_check_homerun),
     "getro": _via_verification("getro", _cc_check_getro),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
@@ -4327,7 +4375,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
-    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel", "getro", "loxo",
+    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel", "getro", "loxo", "recruiterflow",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -7164,6 +7212,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply", "hibob": "hibob", "deel": "deel",
     "applicantpro": "applicantpro", "traffit": "traffit",
     "freshteam": "freshteam", "peopleforce": "peopleforce", "factorial": "factorial", "loxo": "loxo",
+    "recruiterflow": "recruiterflow", "homerun": "homerun",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7185,6 +7234,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"), ("careers.hibob.com", "hibob"), ("jobs.deel.com", "deel"),
     ("applicantpro.com", "applicantpro"), ("traffit.com", "traffit"),
     ("freshteam.com", "freshteam"), ("peopleforce.io", "peopleforce"), ("factorial.com", "factorial"), ("app.loxo.co", "loxo"),
+    ("recruiterflow.com", "recruiterflow"), ("homerun.co", "homerun"),
 )
 
 
