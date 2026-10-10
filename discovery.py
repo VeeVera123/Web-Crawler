@@ -2718,6 +2718,26 @@ URL_TO_SLUG = {
 }
 
 
+def _safe_converter(fn):
+    """URL -> slug converters all start with urlparse(), which raises
+    ValueError on a malformed URL (an unterminated IPv6 bracket,
+    `http://[::1`, turns up in scraped pages and registry dumps). Every
+    bulk caller (registry loops, Common Crawl, HF datasets, node's page
+    detection) wants "not a board" for those, never an exception that
+    aborts the batch — so the shared dict returns None instead."""
+    def wrapper(url):
+        try:
+            return fn(url)
+        except (ValueError, AttributeError, TypeError):
+            return None
+    wrapper.__name__ = getattr(fn, "__name__", "converter")
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+URL_TO_SLUG = {_ats: _safe_converter(_fn) for _ats, _fn in URL_TO_SLUG.items()}
+
+
 # ══════════════════════════════════════════════════════════
 # SOURCE 1: Feashliaa GitHub
 # ══════════════════════════════════════════════════════════
