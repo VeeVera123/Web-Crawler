@@ -7042,6 +7042,97 @@ async def scrape_deel(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Getro (VC portfolio job boards) ───────────────────────────────────────────
+# 2026-10. Getro powers the talent-network job boards of ~hundreds of VC funds (jobs.<fund>.com, careers.<fund>.com):
+# one "network" = every open job across a fund's portfolio, 2k-20k jobs each. The boards' own search API is public:
+#     POST https://api.getro.com/api/v2/collections/{network_id}/search/jobs      (Accept: application/json is mandatory)
+#     body {"hitsPerPage":20,"page":N,"query":"customer success","filters":{"work_mode":["remote"]}}
+#     -> {"results":{"jobs":[...],"count":N}}   (page size is hard-capped at 20; paginate on count)
+# Each job carries the company's own apply URL (a Greenhouse/Ashby/... link, or an in-house careers page that no ATS
+# scraper reaches: Stripe, Revolut, Databricks...), a work_mode flag and structured locations, but no description
+# (the description fetchers read it from the apply URL). slug = the numeric network id. Contract confirmed against
+# colophon-group/jobseek and jddavenportOpen/vc-job-board, and verified live (atomico 36986: 2,403 jobs, 332 remote).
+_GETRO_API = "https://api.getro.com/api/v2/collections"
+# What we keep asking each network for: the same role families classifier.keyword_classify_role accepts. Searching per
+# term + the remote filter turns a 20k-job network into a few hundred relevant jobs (a handful of pages).
+_GETRO_QUERIES = ("customer success", "account manager", "client success", "project manager", "program manager",
+                  "operations manager", "customer support", "customer experience", "implementation", "onboarding",
+                  "head of operations", "technical account")
+_GETRO_MAX_PAGES = 8
+
+
+_GETRO_NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
+_getro_network_ids: dict[str, str | None] = {}
+
+
+async def _getro_network_id(tenant: str) -> str | None:
+    """{tenant}.getro.com -> numeric network id, read from the board page's __NEXT_DATA__ (props.pageProps.network.id).
+    Cached per process."""
+    if tenant in _getro_network_ids:
+        return _getro_network_ids[tenant]
+    nid = None
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", tenant):
+        r = await _get(f"https://{tenant}.getro.com/jobs", headers={"User-Agent": random.choice(USER_AGENTS)})
+        m = _GETRO_NEXT_DATA_RE.search(r.text) if r and r.status_code == 200 else None
+        if m:
+            try:
+                got = ((json.loads(m.group(1)).get("props") or {}).get("pageProps") or {}).get("network") or {}
+                nid = str(got["id"]) if got.get("id") is not None else None
+            except Exception:
+                nid = None
+    _getro_network_ids[tenant] = nid
+    return nid
+
+
+async def scrape_getro(slug: str) -> list[dict]:
+    nid = (slug or "").strip().lower()
+    if not nid.isdigit():
+        nid = await _getro_network_id(nid) or ""
+        if not nid:
+            return []
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json", "Content-Type": "application/json"}
+    seen: dict = {}
+    for query in _GETRO_QUERIES:
+        for page in range(_GETRO_MAX_PAGES):
+            r = await _post(f"{_GETRO_API}/{nid}/search/jobs", headers=headers,
+                            json={"hitsPerPage": 20, "page": page, "query": query, "filters": {"work_mode": ["remote"]}})
+            if not r or r.status_code != 200:
+                break
+            try:
+                results = r.json().get("results") or {}
+            except Exception:
+                break
+            batch = results.get("jobs") or []
+            for j in batch:
+                if isinstance(j, dict) and j.get("url") and j.get("title"):
+                    seen.setdefault(j.get("id") or j["url"], j)
+            if len(batch) < 20:
+                break
+    jobs = []
+    for j in seen.values():
+        org = j.get("organization") if isinstance(j.get("organization"), dict) else {}
+        locs = [l for l in (j.get("searchable_locations") or j.get("locations") or []) if isinstance(l, str) and l]
+        salary = ""
+        if j.get("compensation_public") and (j.get("compensation_amount_min_cents") or j.get("compensation_amount_max_cents")):
+            lo, hi = (j.get("compensation_amount_min_cents") or 0) // 100, (j.get("compensation_amount_max_cents") or 0) // 100
+            salary = f"{j.get('compensation_currency') or ''} {lo}-{hi}" + (f" per {j['compensation_period']}" if j.get("compensation_period") else "")
+        jobs.append({
+            "title": _text(j["title"]),
+            "url": j["url"],
+            "company": _text(org.get("name")) or "Portfolio company",
+            "location": ", ".join(dict.fromkeys(locs)),
+            "country": "",
+            "department": "",
+            "workplace_type": {"remote": "Remote", "hybrid": "Hybrid", "on_site": "On-site"}.get(_text(j.get("work_mode")), ""),
+            "employment_type": "",
+            "salary": salary.strip(),
+            "description_snippet": "",
+            "source_ats": "Getro",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7124,6 +7215,7 @@ SCRAPERS = {
     "elmo": scrape_elmo,
     "easyapply": scrape_easyapply,
     "hibob": scrape_hibob,
+    "getro": scrape_getro,
     "deel": scrape_deel,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or

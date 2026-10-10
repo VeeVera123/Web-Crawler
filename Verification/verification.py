@@ -914,6 +914,29 @@ async def _verify_hibob(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_getro(session: aiohttp.ClientSession, slug: str) -> bool:
+    """A Getro board is live when its network has jobs. slug is a {tenant} (read the network id from the board page) or
+    a numeric network id."""
+    nid = slug
+    if not slug.isdigit():
+        async with session.get(f"https://{slug}.getro.com/jobs", timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
+            if r.status == 404:
+                return False
+            r.raise_for_status()
+            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', await r.text(), re.S)
+        try:
+            nid = str(json.loads(m.group(1))["props"]["pageProps"]["network"]["id"])
+        except Exception:
+            return False
+    async with session.post(f"https://api.getro.com/api/v2/collections/{nid}/search/jobs", timeout=REQUEST_TIMEOUT,
+                            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                            json={"hitsPerPage": 1, "page": 0, "query": "", "filters": {}}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return bool(((await r.json()).get("results") or {}).get("count"))
+
+
 async def _verify_deel(session: aiohttp.ClientSession, slug: str) -> bool:
     async with session.get(f"https://api-prod.letsdeel.com/guest/ats/organizations/{slug}/career_page_settings",
                            timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
@@ -1087,6 +1110,7 @@ ARCHIVE_II_VERIFIERS = {
     "easyapply": _verify_easyapply,
     "hibob": _verify_hibob,
     "deel": _verify_deel,
+    "getro": _verify_getro,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full
     # live-confirmed evidence, including finding and ruling out its own

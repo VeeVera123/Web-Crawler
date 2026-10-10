@@ -517,7 +517,12 @@ def _extract_jsonld_jobs(html: str, page_url: str, company: str) -> list[dict]:
 
 _JOB_HREF_RE = re.compile(
     r"/(?:job|jobs|career|careers|position|positions|opening|openings|"
-    r"vacanc(?:y|ies)|opportunit(?:y|ies)|role|roles)/[\w\-./%]+", re.I)
+    r"vacanc(?:y|ies)|opportunit(?:y|ies)|role|roles|"
+    # 2026-10: Factorial (/job_posting/<slug>-<id>), Gusto (/postings/), requisitions, DACH / FR / ES vocabulary
+    r"job[_-]?postings?|postings?|requisitions?|vacatures?|stellen(?:angebote)?|offres?|empleos?|ofertas?)/[\w\-./%]+", re.I)
+_GENERIC_LINK_TEXT_RE = re.compile(
+    r"^(apply( now| here| today| online)?|view( job| details| position| role| opening)?|read more|learn more|details?|"
+    r"more( info(rmation)?)?|see (details|role|more)|open|more|angebot ansehen|voir l.offre|ver oferta|bekijk vacature)$", re.I)
 
 _NAV_TEXT_BLOCKLIST_RE = re.compile(
     r"^(home|about( us)?|contact( us)?|blog|news|press|privacy( policy)?|terms"
@@ -577,6 +582,36 @@ def _find_next_page_url(html: str, page_url: str) -> str | None:
     return None
 
 
+_HEADING_SELECTOR = "h1,h2,h3,h4,h5,h6,[class*=title],[class*=heading],[class*=job-name],[class*=jobname],strong"
+
+
+def _card_title(a) -> str:
+    """Best title for a job link whose own text is not a title: a heading / title element INSIDE the link (cards that
+    wrap everything in one <a>: Freshteam, onlyfy, ...), else the first one in the nearest enclosing card (title in a
+    sibling element, link text just "Apply now": Factorial, ...). "" when nothing plausible (2-12 words)."""
+    def pick(node) -> str:
+        try:
+            for h in node.css(_HEADING_SELECTOR):
+                t = re.sub(r"\s+", " ", h.text(deep=True, separator=" ", strip=True))
+                if t and 2 <= len(t.split()) <= 12 and not _NAV_TEXT_BLOCKLIST_RE.match(t) and not _GENERIC_LINK_TEXT_RE.match(t):
+                    return t
+        except Exception:
+            pass
+        return ""
+    t = pick(a)
+    if t:
+        return t
+    node = a.parent
+    for _ in range(4):
+        if node is None or node.tag in ("body", "html", "main"):
+            break
+        t = pick(node)
+        if t:
+            return t
+        node = node.parent
+    return ""
+
+
 def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
     try:
         tree = LexborHTMLParser(html)
@@ -593,12 +628,28 @@ def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
         text = a.text(deep=True, separator=" ").strip()
         text = re.sub(r"\s+", " ", text)
         word_count = len(text.split())
+        slug_guess = False
         # A real job title reads like a short phrase, not a single nav word
         # and not a whole sentence/paragraph — 2-12 words in practice.
-        if not text or word_count < 2 or word_count > 12:
-            continue
-        if _NAV_TEXT_BLOCKLIST_RE.match(text.strip()):
-            continue
+        if not text or word_count < 2 or word_count > 12 or _NAV_TEXT_BLOCKLIST_RE.match(text.strip()) \
+                or _GENERIC_LINK_TEXT_RE.match(text.strip()):
+            # 2026-10: but a link that is clearly a JOB url (/jobs/<id>/<slug>, /job_posting/<slug>) is kept when its
+            # text is a button label ("Apply now"), a whole card (> 12 words), or empty: the title then comes from a
+            # heading in the card, else from the URL slug. Class-level fix for card layouts (Freshteam, Factorial,
+            # onlyfy ...) where the link text is never the title.
+            if not _JOB_HREF_RE.search(href):
+                continue
+            card = _card_title(a)
+            if card:
+                text = card
+            else:
+                try:
+                    guess = PE.slug_title(urljoin(page_url, href))
+                except Exception:
+                    guess = ""
+                if not guess:
+                    continue
+                text, slug_guess = guess, True
 
         # 2026-09: a real crash killed a whole crawl_ii.py shard —
         # urljoin/urlparse can raise ValueError on a malformed href (seen
@@ -615,7 +666,10 @@ def _find_heuristic_candidates(html: str, page_url: str) -> list[dict]:
             continue
 
         if _JOB_HREF_RE.search(href):
-            candidates.setdefault(full_url, {"title": text[:300], "url": full_url})
+            cand = {"title": text[:300], "url": full_url}
+            if slug_guess:
+                cand["_slug_title"] = True
+            candidates.setdefault(full_url, cand)
             continue
 
         parent = a.parent

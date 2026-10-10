@@ -146,6 +146,22 @@ cands = P.sitemap_job_candidates(["https://a.com/jobs/customer-success-manager-1
 check([c["title"] for c in cands] == ["Customer Success Manager"], f"sitemap job candidates {cands}")
 check(P.slug_title("https://a.com/job/1234/project-manager.html") == "Project Manager", "slug title strips ids/extension")
 
+# --- link candidates for card layouts (Freshteam / Factorial / onlyfy style) ---
+CARDS_WRAP = ('<div class="list"><a href="/jobs/19bWX1DPimOv/hands-on-architect"><h3>Hands-on Architect</h3><p>About fintastic: we are on a mission to '
+              'reinvent financial planning and analysis for the modern enterprise and we have built the most scalable platform on the market today</p></a>'
+              '<a href="/jobs/z3mqH41psUXs/senior-backend-engineer"><h3>Senior Backend Engineer</h3><p>' + "More words here " * 12 + '</p></a>'
+              '<a href="/jobs/dWSuSeMjv7Qi/customer-success-manager"><h3>Customer Success Manager</h3><p>' + "Even more words " * 12 + '</p></a></div>')
+cands = C._find_heuristic_candidates(CARDS_WRAP, "https://x.freshteam.com/jobs")
+check([c["title"] for c in cands] == ["Hands-on Architect", "Senior Backend Engineer", "Customer Success Manager"], f"whole-card links -> heading titles {cands}")
+CARDS_APPLY = ('<div class="row"><div class="t"><div class="heading">Account Manager</div><span>Remote</span></div><a href="/job_posting/account-manager-325008">Apply now</a></div>'
+               '<div class="row"><div class="t"><div class="heading">Platform Support Engineer</div></div><a href="/job_posting/platform-support-engineer-325009">Apply now</a></div>')
+cands = C._find_heuristic_candidates(CARDS_APPLY, "https://x.factorial.com/")
+check([c["title"] for c in cands] == ["Account Manager", "Platform Support Engineer"], f"'Apply now' links -> sibling heading titles {cands}")
+SLUG_ONLY = '<ul><li><a href="/jobs/senior-customer-success-manager-4821">Apply now</a></li><li><a href="/jobs/project-manager-4822">Apply now</a></li></ul>'
+cands = C._find_heuristic_candidates(SLUG_ONLY, "https://x.com/")
+check([c["title"] for c in cands] == ["Senior Customer Success Manager", "Project Manager"] and all(c.get("_slug_title") for c in cands), f"slug fallback {cands}")
+check(C._find_heuristic_candidates('<nav><a href="/about">Apply now</a><a href="/blog/post-1">Read more</a></nav>', "https://x.com/") == [], "non-job 'Apply now' / 'Read more' links ignored")
+
 print(f"page_extract checks: {n - len(fails)}/{n} passed")
 for m in fails:
     print("FAIL", m)

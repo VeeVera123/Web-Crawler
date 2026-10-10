@@ -207,6 +207,39 @@ async def fake_404(url, **kw):
 A._get = fake_404
 check(asyncio.run(A.scrape_deel("nobody")) == [] and asyncio.run(A.scrape_hibob("nobody")) == [], "unknown tenants -> []")
 
+# ── Getro (2026-10) ──
+GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
+GJOBS = {"results": {"count": 3, "jobs": [
+    {"id": 1, "title": "Customer Success Manager", "url": "https://boards.greenhouse.io/pelago/jobs/1", "work_mode": "remote",
+     "organization": {"name": "Pelago"}, "searchable_locations": ["Remote", "Europe"], "compensation_public": True,
+     "compensation_amount_min_cents": 10000000, "compensation_amount_max_cents": 11500000, "compensation_currency": "USD", "compensation_period": "year"},
+    {"id": 2, "title": "Account Manager", "url": "https://stripe.com/jobs/listing/2", "work_mode": "remote", "organization": {"name": "Stripe"}, "searchable_locations": ["United States"]},
+    {"id": 1, "title": "Dup of 1", "url": "https://x.com/dup", "work_mode": "remote", "organization": {}},
+    {"title": "no url"}]}}
+posted = []
+
+
+async def fake_getro_get(url, **kw):
+    return R(GP["tenant_page"], 200, url) if url.startswith("https://mayfield.getro.com/") else R("", 404, url)
+
+
+async def fake_getro_post(url, **kw):
+    posted.append((url, kw["json"]))
+    return R("", 200, url, GJOBS if kw["json"]["page"] == 0 else {"results": {"jobs": []}})
+
+
+A._get, A._post = fake_getro_get, fake_getro_post
+A._getro_network_ids.clear()
+gj = asyncio.run(A.scrape_getro("Mayfield"))
+check(all(u.endswith("/collections/36986/search/jobs") and b["filters"] == {"work_mode": ["remote"]} for u, b in posted) and len(posted) == len(A._GETRO_QUERIES),
+      f"getro: tenant resolved to network id, one remote-filtered search per query term ({len(posted)} calls)")
+check(len(gj) == 2 and gj[0]["company"] == "Pelago" and gj[0]["workplace_type"] == "Remote" and gj[0]["location"] == "Remote, Europe"
+      and gj[0]["salary"] == "USD 100000-115000 per year" and gj[0]["slug"] == "Mayfield" and gj[0]["source_ats"] == "Getro", f"getro fields {gj}")
+posted.clear()
+check(len(asyncio.run(A.scrape_getro("36986"))) == 2 and "mayfield" in " ".join(A._getro_network_ids), "getro: numeric id used directly")
+check(asyncio.run(A.scrape_getro("nobody-here")) == [] and asyncio.run(A.scrape_getro("")) == [], "getro: unknown tenant / empty -> []")
+check("getro" in A.SCRAPERS and "getro" in D.SUPPORTED_ATS and D._url_to_slug_getro("https://mayfield.getro.com/jobs") == "mayfield", "getro registered")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)

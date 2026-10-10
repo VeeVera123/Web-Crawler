@@ -593,6 +593,9 @@ SUPPORTED_ATS = {
     "emply", "cats", "elmo", "easyapply",
     # 2026-10: HiBob and Deel (public career APIs), found by reading colophon-group/jobseek's monitors.
     "hibob", "deel",
+    # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
+    # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
+    "getro",
     # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
     # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
     # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
@@ -3987,6 +3990,9 @@ def _cc_check_getro(slug: str) -> bool | None:
     /jobs 200s with real listings for a real tenant and cleanly 404s for
     a fabricated one — no DNS-wildcard ambiguity like applytojob.com/
     Workday, so status code alone is a safe signal here."""
+    if slug.isdigit():  # a numeric network id (--source getro sweep): ask the search API instead
+        n = _getro_probe(int(slug))
+        return True if n else False
     try:
         r = requests.get(f"https://{slug}.getro.com/jobs", timeout=10,
                           headers={"User-Agent": _ROBOTS_UA})
@@ -4099,6 +4105,7 @@ _CC_LIVE_CHECK = {
     "easyapply": _via_verification("easyapply", _cc_check_easyapply),
     "hibob": _via_verification("hibob", _cc_check_hibob),
     "deel": _via_verification("deel", _cc_check_deel),
+    "getro": _via_verification("getro", _cc_check_getro),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,
@@ -4184,7 +4191,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
-    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel",
+    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel", "getro",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -7683,6 +7690,65 @@ _INSERTED_THIS_RUN: set[tuple[str, str]] = set()
 _NEW_ROW_CLOCK_SKEW_SECONDS = 5
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# SOURCE 17: Getro VC-network id sweep (--source getro; 2026-10)
+# ──────────────────────────────────────────────────────────────────────────────
+_GETRO_SEARCH = "https://api.getro.com/api/v2/collections/{nid}/search/jobs"
+_GETRO_SEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "getro_networks.json")
+_GETRO_SWEEP_HEADROOM = 10_000
+
+
+def _getro_probe(nid: int) -> int | None:
+    """Job count of Getro network `nid` (None when there is no such network or the call failed). A real network answers
+    200 even when empty; an unused id answers 404."""
+    for attempt in range(3):
+        try:
+            r = requests.post(_GETRO_SEARCH.format(nid=nid), json={"hitsPerPage": 1, "page": 0, "query": "", "filters": {}},
+                              headers={"Accept": "application/json", "User-Agent": _ROBOTS_UA}, timeout=20)
+        except Exception:
+            time.sleep(1)
+            continue
+        if r.status_code == 404:
+            return None
+        if r.status_code == 429:
+            time.sleep(3 * (attempt + 1))
+            continue
+        if r.status_code != 200:
+            return None
+        try:
+            return int((r.json().get("results") or {}).get("count") or 0)
+        except Exception:
+            return None
+    return None
+
+
+def fetch_getro_networks(workers: int = 25, hi: int | None = None) -> dict[str, set]:
+    """Getro (https://www.getro.com) runs the talent-network job boards of hundreds of VC funds; one numeric `network id`
+    is one board, and its public search API lists every job across the fund's portfolio (see ats_scrapers.scrape_getro).
+    There is no public list of networks, but the ids are plain integers and the API answers 404 for unused ones, so this
+    probes 1..(highest known id + headroom). getro_networks.json (committed) is both the floor for that upper bound and
+    the fallback if the sweep is partly blocked. Networks with at least one job are registered as ats="getro",
+    slug=<network id>; Crawl I then scrapes them like any other board."""
+    known: dict[str, int] = {}
+    try:
+        with open(_GETRO_SEED_FILE) as f:
+            known = {str(k): int(v) for k, v in json.load(f).items()}
+    except Exception:
+        pass
+    top = max((int(k) for k in known), default=0)
+    hi = hi or max(top + _GETRO_SWEEP_HEADROOM, 70_000)
+    found: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for nid, count in zip(range(1, hi + 1), ex.map(_getro_probe, range(1, hi + 1))):
+            if count:
+                found[str(nid)] = count
+    if not found and known:
+        log.warning("getro: sweep found nothing (API blocked?) - falling back to the committed seed list")
+        found = known
+    log.info(f"getro: {len(found)} networks with jobs (swept 1..{hi}; seed had {len(known)})")
+    return {"getro": set(found)}
+
+
 def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                         dry_run: bool = False, skip_live_check: bool = False,
                         stats: dict | None = None) -> int:
@@ -7869,7 +7935,7 @@ def main():
         choices=["feashliaa", "kalil", "openpostings", "github_combined",
                  "commoncrawl", "wayback", "ct_logs", "theirstack",
                  "httparchive", "latmay", "edwarddgao", "openjobsdaily",
-                 "icims_hrjobs", "github", "welcometothejungle", "all"],
+                 "icims_hrjobs", "github", "welcometothejungle", "getro", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
              "2026-09 — see the module docstring. 'wayback_adp' renamed "
@@ -8268,6 +8334,17 @@ def main():
             grand_total += upserted
         else:
             grand_total += wttj_total
+
+    # Source 17: Getro VC-network id sweep (manual only: `--source getro`, not part of "all" -- ~70k light requests; the
+    # 1,892 {tenant}.getro.com boards other sources already found cover most networks, this adds custom-domain ones)
+    if args.source == "getro":
+        log.info("\n--- GETRO (network id sweep) ---")
+        getro_slugs = fetch_getro_networks()
+        getro_total = sum(len(v) for v in getro_slugs.values())
+        if not args.dry_run:
+            grand_total += upsert_to_supabase(getro_slugs, source="getro_sweep", dry_run=args.dry_run)
+        else:
+            grand_total += getro_total
 
     # Source 11: GitHub repo registries (pre-built ATS slug files from
     # known public repos, e.g. datascry/openroles — see
