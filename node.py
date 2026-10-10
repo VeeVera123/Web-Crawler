@@ -1753,7 +1753,7 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict,
     try:
         async with session.get(url, timeout=REQUEST_TIMEOUT,
                                 headers={"User-Agent": USER_AGENT},
-                                allow_redirects=True, max_redirects=5, ssl=False) as r:
+                                allow_redirects=True, max_redirects=5) as r:  # TLS verified (2026-10: was ssl=False)
             if r.status >= 400:
                 stats["http_error"] += 1
                 if r.status == 404:
