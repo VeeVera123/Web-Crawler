@@ -1559,6 +1559,11 @@ PLACEHOLDER_LOC_RE = re.compile(
     r"^\s*(not\s*specified|n/?a|tbd|to\s*be\s*determined|"
     r"unspecified|see\s*description|see\s*below|"
     r"multiple\s*locations?|various\s*locations?|"
+    # 2026-10 (classifier v14): more ways an employer writes "no location given". Each used to read as a real place that
+    # is not an allowed one, so the job missed the blank-location path (description / AI check) entirely.
+    r"various|varies|varied|multiple|several\s*locations?|unknown|other|none|undisclosed|not\s*(?:applicable|available|provided|disclosed|stated)|"
+    r"tb[cda]|to\s*be\s*(?:confirmed|announced|advised|agreed)|location\s*(?:tb[cda]|not\s*(?:specified|provided|stated)|unknown)|"
+    r"flexible(?:\s*location)?|open(?:\s*location)?|"
     r"[—\-–\.]+)\s*$",
     re.I,
 )

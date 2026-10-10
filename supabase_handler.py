@@ -72,7 +72,10 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #  13 - 2026-10-10: audit of employer-declared-worldwide jobs (Himalayas). Loosened: a pin emoji before a non-location
 #       "Label: value" (Team: Sales) is not a named place; pay-band sentences ("salary range ... for US-based employees")
 #       are not hiring restrictions. Tightened: the plain "must be / need to be US-based" phrasing now rejects.
-CLASSIFIER_VERSION = 13
+#  14 - 2026-10-10: location placeholders widened ("Various", "Unknown", "Other", "Not applicable", "Location TBD",
+#       "To be confirmed", "Flexible"...): they now take the blank-location path (description / AI check) instead of reading
+#       as a real, unallowed place; bumped so revalidation re-checks stored rows.
+CLASSIFIER_VERSION = 14
 
 import os
 from dotenv import load_dotenv

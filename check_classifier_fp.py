@@ -53,6 +53,13 @@ for t, why in (("This role requires candidates to be based in the APAC region.",
                ("You must work from our Berlin office three days a week.", "office days")):
     check(res(BASE + t) == "no_match", f"still rejects: {why}")
 
+# 5. placeholder locations (v14) take the blank-location path, real places do not
+for loc in ("Various", "Unknown", "Other", "Not applicable", "Location TBD", "To be confirmed", "Flexible", "TBC", "Varies", "Several locations", "N/A"):
+    check(res("", loc=loc) == "unsure", f"placeholder {loc!r} is blank-like")
+for loc in ("Berlin", "Other, Germany", "Open Space, Berlin", "Lagos, Nigeria"):
+    check(res("", loc=loc) == "no_match" or C.PLACEHOLDER_LOC_RE.match(loc) is None, f"{loc!r} is not a placeholder")
+check(C.PLACEHOLDER_LOC_RE.match("Other, Germany") is None and C.PLACEHOLDER_LOC_RE.match("Open Space, Berlin") is None, "placeholder regex only matches the whole value")
+
 print(f"classifier false-reject checks: {n - len(fails)}/{n} passed")
 for m in fails: print("FAIL", m)
 sys.exit(1 if fails else 0)
