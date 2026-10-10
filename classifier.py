@@ -7976,6 +7976,11 @@ def location_prefilter_keep(job: dict, rank4_enabled: bool | None = None) -> boo
         role = job.get("role_category") or classify_role_category(job.get("title", ""))
         if role not in ("CS", "AM") or job.get("source_ats") not in RANK4_ELIGIBLE_ATS:
             return False
+        # Rank 4's own location half admits it (4a: every place named is an allowed country / region / city) ...
+        if _rank4_place(stripped)[0]:
+            return True
+        # ... or it clears every location precondition of 4b, whose last step reads the title / JD we have not
+        # fetched yet.
         loc = (job.get("location") or "").strip()
         return bool(loc) and not _rank4_location_field_is_hard_disqualified(loc) and _rank4_location_resolves_to_allowed(loc)
     except Exception:
