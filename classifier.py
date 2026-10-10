@@ -7947,6 +7947,47 @@ def _rank4_decide(job: dict) -> tuple[str | None, str | None, str | None]:
     return priority, reason, None
 
 
+def location_prefilter_keep(job: dict, rank4_enabled: bool | None = None) -> bool:
+    """COST GATE, run before the two expensive per-job HTTP fetches (description + application questions).
+
+    Almost every role-matched job is rejected on its structured location alone: crawl_i sees ~130k role matches
+    per run and ~100 of them survive, and each one used to cost two page/API fetches before that verdict. The
+    verdict for a NAMED place never depends on the description (§2 step 3 of RANKING_REFERENCE: only a bare /
+    blank location gets the loose title+JD scan), so a job can only succeed if
+
+      * the keyword location stage, run WITHOUT any description, says 'match' or 'unsure' (broad/bare/blank
+        locations are exactly the ones whose fate the description or the LLM decides), or
+      * Rank 4 could still admit it: CS/AM role, RANK4_ELIGIBLE_ATS, location resolving to an allowed place and
+        not hard-disqualified (Rank 4 additionally needs the application questions, so those jobs stay).
+
+    Everything else is a certain reject, so fetching its description / questions is pure waste. Verified on live
+    boards: the pre-gate and the full-information keyword stage agreed on every job (0 jobs the pre-gate dropped
+    that the full stage would have kept), keeping ~18% of role matches, i.e. ~80% fewer enrichment fetches.
+    Fails open (True) on any error."""
+    try:
+        stripped = {**job, "description_snippet": "", "description": ""}
+        if _keyword_classify_location_detail(stripped)[0] != "no_match":
+            return True
+        if rank4_enabled is None:
+            import config as _cfg
+            rank4_enabled = getattr(_cfg, "ENABLE_RANK4_COUNTRY_SPECIFIC", False)
+        if not rank4_enabled:
+            return False
+        role = job.get("role_category") or classify_role_category(job.get("title", ""))
+        if role not in ("CS", "AM") or job.get("source_ats") not in RANK4_ELIGIBLE_ATS:
+            return False
+        loc = (job.get("location") or "").strip()
+        return bool(loc) and not _rank4_location_field_is_hard_disqualified(loc) and _rank4_location_resolves_to_allowed(loc)
+    except Exception:
+        return True
+
+
+def prefilter_jobs_by_location(jobs: list[dict]) -> tuple[list[dict], int]:
+    """(jobs worth enriching, number dropped). See location_prefilter_keep."""
+    kept = [j for j in jobs if location_prefilter_keep(j)]
+    return kept, len(jobs) - len(kept)
+
+
 def classify_rank4(job: dict) -> tuple[str | None, str | None]:
     """Returns (priority, reason) — PRIORITY_MIXED_COUNTRY (4a), PRIORITY_MIXED_SIGNAL (4b)
     or (None, None). The caller owns the eligibility gate (CS/AM, eligible ATS, toggle,

@@ -55,7 +55,7 @@ from classifier import (
     detect_visa_sponsorship,
     _keyword_classify_location_detail,
     classify_role_category,
-    classify_rank4, RANK4_ELIGIBLE_ATS,
+    classify_rank4, RANK4_ELIGIBLE_ATS, prefilter_jobs_by_location,
     PRIORITY_GLOBAL, PRIORITY_AFRICA,
     PRIORITY_UNSURE_BLANK, PRIORITY_UNSURE_SILENT,
 )
@@ -974,6 +974,20 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
             )
             return
 
+        # Cost gate: a job whose structured location already settles it (no broad / blank / bare location,
+        # no Rank 4 chance) is a certain reject -- skip its description + application-question fetches.
+        csm_total = len(csm_jobs)
+        csm_jobs, gated = prefilter_jobs_by_location(csm_jobs)
+        log.info(f"  location pre-gate: {gated}/{csm_total} role matches are certain rejects on their location "
+                 f"alone -- skipping their description/question fetches ({len(csm_jobs)} left to enrich)")
+        if not csm_jobs:
+            log.info("No CSM/AM role can still qualify by location.")
+            bump_scan_report(
+                SOURCE_PIPELINE, boards_scanned=boards_ok, boards_failed=boards_failed,
+                total_jobs_raw=raw_scraped_count, csm_roles=csm_total,
+            )
+            return
+
         log.info("── Location check (open to global/Africa hires?) ──")
         # Enrich descriptions for platforms that lack them
         log.info("  fetching descriptions for jobs missing them...")
@@ -994,7 +1008,7 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
             log.info("No global/Africa-eligible CSM/AM roles found.")
             bump_scan_report(
                 SOURCE_PIPELINE, boards_scanned=boards_ok, boards_failed=boards_failed,
-                total_jobs_raw=raw_scraped_count, csm_roles=len(csm_jobs),
+                total_jobs_raw=raw_scraped_count, csm_roles=csm_total,
             )
             return
 
@@ -1021,7 +1035,7 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
             boards_scanned=boards_ok,
             boards_failed=boards_failed,
             total_jobs_raw=raw_scraped_count,
-            csm_roles=len(csm_jobs),
+            csm_roles=csm_total,
             global_jobs=len(global_jobs),
             new_jobs_added=added,
             duplicates=duplicates,
@@ -1030,7 +1044,7 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
         log.info("── Summary ──")
         log.info(f"  {added} new jobs added to Supabase.")
         log.info(f"  Pipeline: {raw_scraped_count} scraped ({len(already_seen)} already known, "
-                 f"skipped) -> {len(all_jobs)} new -> {len(csm_jobs)} CSM/AM -> "
+                 f"skipped) -> {len(all_jobs)} new -> {csm_total} CSM/AM -> "
                  f"{len(global_jobs)} global -> {added} new")
 
     except Exception as e:

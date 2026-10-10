@@ -106,7 +106,7 @@ from classifier import (  # noqa: E402
     _keyword_classify_location_detail, ai_classify_locations,
     detect_visa_sponsorship, PLACEHOLDER_LOC_RE,
     classify_role_category,
-    classify_rank4, RANK4_ELIGIBLE_ATS,
+    classify_rank4, RANK4_ELIGIBLE_ATS, prefilter_jobs_by_location,
     PRIORITY_GLOBAL, PRIORITY_AFRICA,
     PRIORITY_UNSURE_BLANK, PRIORITY_UNSURE_SILENT,
 )
@@ -2092,6 +2092,14 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     role_matched = _filter_roles(new_jobs)
     report_stats["csm_roles"] = len(role_matched)
     log.info(f"  {len(new_jobs)} postings checked → {len(role_matched)} are CSM/AM roles")
+    if not role_matched:
+        return pages_done, 0, time_budget_hit, report_stats
+
+    # Cost gate (see classifier.location_prefilter_keep): skip the application-question fetch for jobs whose
+    # structured location already makes them certain rejects.
+    role_matched, gated = prefilter_jobs_by_location(role_matched)
+    log.info(f"  location pre-gate: {gated} role matches are certain rejects on their location alone "
+             f"-- skipping their question fetch ({len(role_matched)} left)")
     if not role_matched:
         return pages_done, 0, time_budget_hit, report_stats
 
