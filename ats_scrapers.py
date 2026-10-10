@@ -7387,12 +7387,30 @@ def _card_factorial(a) -> dict:
     return out
 
 
+def _careerplug_place(raw: str) -> str:
+    """CareerPlug writes a place as STATE-City-ZIP ("SC-Columbia-29205"); return "Columbia, SC". Anything else is kept as is."""
+    raw = re.sub(r"\s+", " ", raw or "").strip()
+    m = re.fullmatch(r"([A-Za-z]{2,3})-(.+?)-[A-Za-z0-9 ]{3,10}", raw)
+    return f"{m.group(2).strip()}, {m.group(1).upper()}" if m else raw
+
+
+def _card_careerplug(a) -> dict:
+    row = a.css_first(".row") or _ancestor(a, 2)
+    loc = row.css_first(".job-location") if row is not None else None
+    loc_text = re.sub(r"^\s*Location:\s*", "", re.sub(r"\s+", " ", loc.text(deep=True, separator=" ", strip=True))) if loc is not None else ""
+    return {"title": _card_text(row, ".name") or _card_text(row, ".job-title"), "location": _careerplug_place(loc_text),
+            "employment_type": re.sub(r"^\s*(?:Full\s*/\s*Part\s*Time|Type):\s*", "", _card_text(row, ".job-type"))}
+
+
 _HTML_BOARDS = {
     # kind: (display name, list URL, job-link href regex, card reader, hosts the job links may use)
     "freshteam": ("Freshteam", "https://{slug}.freshteam.com/jobs", r"^/jobs/[A-Za-z0-9_-]{6,}(?:/|$)", _card_freshteam),
     "peopleforce": ("PeopleForce", "https://{slug}.peopleforce.io/careers", r"/careers/v/\d+", _card_peopleforce),
     "factorial": ("Factorial", "https://{slug}.factorial.com/", r"/job_posting/", _card_factorial),
     "loxo": ("Loxo", "https://app.loxo.co/{slug}", r"^/job/[A-Za-z0-9=_-]+$", lambda a: {}),
+    # 2026-10: CareerPlug (small-business ATS; mostly local US roles, so few survive the location filter). Two list layouts exist
+    # (the link wraps the row, or sits in .job-title); both are read from the row. A dead tenant 302s to app.careerplug.com.
+    "careerplug": ("CareerPlug", "https://{slug}.careerplug.com/jobs", r"^/jobs/\d+/?$", _card_careerplug),
 }
 
 
@@ -7453,6 +7471,10 @@ async def scrape_factorial(slug: str) -> list[dict]:
 
 async def scrape_loxo(slug: str) -> list[dict]:
     return await _scrape_html_board("loxo", slug)
+
+
+async def scrape_careerplug(slug: str) -> list[dict]:
+    return await _scrape_html_board("careerplug", slug)
 
 
 # ── Recruiterflow ─────────────────────────────────────────────────────────────
@@ -7831,6 +7853,7 @@ SCRAPERS = {
     "peopleforce": scrape_peopleforce,
     "factorial": scrape_factorial,
     "loxo": scrape_loxo,
+    "careerplug": scrape_careerplug,
     "recruiterflow": scrape_recruiterflow,
     "homerun": scrape_homerun,
     "keka": scrape_keka,
@@ -9028,6 +9051,7 @@ DESCRIPTION_FETCHERS = {
     "PeopleForce": _fetch_generic_description,
     "Factorial": _fetch_generic_description,
     "Loxo": _fetch_generic_description,
+    "CareerPlug": _fetch_generic_description,
     "Recruiterflow": _fetch_generic_description,
     "Homerun": _fetch_generic_description,
     "Keka": _fetch_generic_description,

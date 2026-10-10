@@ -628,6 +628,26 @@ check("Application Question: Are you legally authorized to work in the United St
 check(A._fetch_csod_questions({"url": "https://example.com/x"}) == "" and "Cornerstone OnDemand" in A.QUESTION_FETCHERS, "csod: other url / registered")
 A._get_requests_sync = _orig_sync
 
+# ── CareerPlug (2026-10) ──
+for url, want in [("https://iaqa-careers.careerplug.com/jobs/123", "iaqa-careers"), ("https://app.careerplug.com/", None), ("https://support.careerplug.com/x", None), ("https://www.careerplug.com/careers/", None)]:
+    check(D._url_to_slug_careerplug(url) == want, f"careerplug slug {url} -> {D._url_to_slug_careerplug(url)!r}")
+check("careerplug" in D.URL_TO_SLUG and "careerplug" in D.SUPPORTED_ATS and "careerplug" in A.SCRAPERS and "careerplug" in D._CC_LIVE_CHECK, "careerplug registered")
+check(A._careerplug_place("SC-Columbia-29205") == "Columbia, SC" and A._careerplug_place("Remote") == "Remote" and A._careerplug_place("ON-Toronto-M5V 2T6") == "Toronto, ON", "careerplug place format")
+CPH = ('<div id="job_table"><div><a aria-label="Pool Design Consultant" href="/jobs/3382940"><div class="row"><div class="job-title col-sm-7"><span class="name">Pool Design Consultant</span></div>'
+       '<div class="job-location"><div><span class="job-row-title">Location:</span> SC-Columbia-29205 </div></div></div></a></div>'
+       '<div class="row"><div class="job-title"><a href="/jobs/3633705"><span class="name">Account Manager</span></a></div><div class="job-location">TX-Austin-78701</div><div class="job-type">Full Time</div></div>'
+       '<a href="/jobs/3382940/apps/new">Apply</a></div>')
+
+
+async def fake_cp(url, **kw):
+    return R(CPH, 200, url)
+
+
+A._get = fake_cp
+cpj = asyncio.run(A.scrape_careerplug("Acme"))
+check(len(cpj) == 2 and cpj[0]["title"] == "Pool Design Consultant" and cpj[0]["location"] == "Columbia, SC" and cpj[0]["url"] == "https://acme.careerplug.com/jobs/3382940"
+      and cpj[1]["location"] == "Austin, TX" and cpj[1]["employment_type"] == "Full Time", f"careerplug {cpj}")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

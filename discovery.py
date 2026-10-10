@@ -598,7 +598,7 @@ SUPPORTED_ATS = {
     # 2026-10: Traffit (Polish/CEE ATS): {tenant}.traffit.com, public /public/job_posts/published JSON.
     "traffit",
     # 2026-10: Freshteam / PeopleForce / Factorial / Loxo: server-rendered HTML boards read by ats_scrapers._scrape_html_board.
-    "freshteam", "peopleforce", "factorial", "loxo",
+    "freshteam", "peopleforce", "factorial", "loxo", "careerplug",
     # 2026-10: Recruiterflow (recruiterflow.com/{tenant}/jobs, list embedded in the page) and Homerun ({tenant}.homerun.co).
     "recruiterflow", "homerun",
     # 2026-10: Keka Hire (India): {tenant}.keka.com/careers, public embedjobs JSON.
@@ -2177,7 +2177,7 @@ def _url_to_slug_traffit(url: str) -> str | None:
 
 _HTML_BOARD_NON_TENANTS = frozenset({"support", "developers", "api", "help", "docs", "blog", "status", "community", "learn", "marketplace",
                                      "partners", "careers", "jobs", "go", "info", "mail", "email", "admin", "login", "my", "static", "assets",
-                                     "cdn", "app", "apps", "demo", "sandbox", "staging", "test", "resources", "helpcenter", "portal", "kb", "learn"})
+                                     "cdn", "app", "apps", "demo", "sandbox", "staging", "test", "resources", "helpcenter", "portal", "kb", "learn", "adpsupport"})
 
 
 def _html_board_tenant(url: str, suffix: str) -> str | None:
@@ -2235,6 +2235,11 @@ def _url_to_slug_keka(url: str) -> str | None:
 def _url_to_slug_jobsoid(url: str) -> str | None:
     """Jobsoid (2026-10): {tenant}.jobsoid.com -> tenant (resources./helpcenter./portal. are the vendor's own hosts)."""
     return _html_board_tenant(url, ".jobsoid.com")
+
+
+def _url_to_slug_careerplug(url: str) -> str | None:
+    """CareerPlug (2026-10): {tenant}.careerplug.com -> tenant (app./support. are the vendor's own hosts)."""
+    return _html_board_tenant(url, ".careerplug.com")
 
 
 def _url_to_slug_loxo(url: str) -> str | None:
@@ -2673,6 +2678,7 @@ URL_TO_SLUG = {
     "peopleforce": _url_to_slug_peopleforce,
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
+    "careerplug": _url_to_slug_careerplug,
     "keka": _url_to_slug_keka,
     "jobsoid": _url_to_slug_jobsoid,
     "recruiterflow": _url_to_slug_recruiterflow,
@@ -3391,6 +3397,7 @@ CC_PLATFORM_PATTERNS = {
     "peopleforce": ["*.peopleforce.io/careers*"],
     "factorial": ["*.factorial.com/job_posting/*"],
     "loxo": ["app.loxo.co/*"],
+    "careerplug": ["*.careerplug.com/jobs*"],
     "keka": ["*.keka.com/careers*"],
     "jobsoid": ["*.jobsoid.com/*"],
     "recruiterflow": ["recruiterflow.com/*/jobs*"],
@@ -3489,6 +3496,7 @@ CC_EXTRACTORS = {
     "peopleforce": _url_to_slug_peopleforce,
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
+    "careerplug": _url_to_slug_careerplug,
     "keka": _url_to_slug_keka,
     "jobsoid": _url_to_slug_jobsoid,
     "recruiterflow": _url_to_slug_recruiterflow,
@@ -3873,6 +3881,10 @@ def _cc_check_peopleforce(slug: str) -> bool | None:
 
 def _cc_check_factorial(slug: str) -> bool | None:
     return _cc_check_html_board(f"https://{slug}.factorial.com/")
+
+
+def _cc_check_careerplug(slug: str) -> bool | None:
+    return _cc_check_html_board(f"https://{slug}.careerplug.com/jobs")
 
 
 def _cc_check_loxo(slug: str) -> bool | None:
@@ -4331,6 +4343,7 @@ _CC_LIVE_CHECK = {
     "peopleforce": _via_verification("peopleforce", _cc_check_peopleforce),
     "factorial": _via_verification("factorial", _cc_check_factorial),
     "loxo": _via_verification("loxo", _cc_check_loxo),
+    "careerplug": _via_verification("careerplug", _cc_check_careerplug),
     "keka": _via_verification("keka", _cc_check_keka),
     "jobsoid": _via_verification("jobsoid", _cc_check_jobsoid),
     "recruiterflow": _via_verification("recruiterflow", _cc_check_recruiterflow),
@@ -7274,7 +7287,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "applicantpro": "applicantpro", "traffit": "traffit",
     "freshteam": "freshteam", "peopleforce": "peopleforce", "factorial": "factorial", "loxo": "loxo",
     "recruiterflow": "recruiterflow", "homerun": "homerun",
-    "keka": "keka", "jobsoid": "jobsoid",
+    "keka": "keka", "jobsoid": "jobsoid", "careerplug": "careerplug",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7297,7 +7310,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("applicantpro.com", "applicantpro"), ("traffit.com", "traffit"),
     ("freshteam.com", "freshteam"), ("peopleforce.io", "peopleforce"), ("factorial.com", "factorial"), ("app.loxo.co", "loxo"),
     ("recruiterflow.com", "recruiterflow"), ("homerun.co", "homerun"),
-    ("keka.com", "keka"), ("jobsoid.com", "jobsoid"),
+    ("keka.com", "keka"), ("jobsoid.com", "jobsoid"), ("careerplug.com", "careerplug"),
 )
 
 

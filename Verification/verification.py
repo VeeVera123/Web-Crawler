@@ -946,6 +946,11 @@ async def _verify_factorial(session: aiohttp.ClientSession, slug: str) -> bool:
     return await _verify_by_status(session, f"https://{slug}.factorial.com/")
 
 
+async def _verify_careerplug(session: aiohttp.ClientSession, slug: str) -> bool:
+    """A dead tenant 302s to app.careerplug.com."""
+    return await _verify_by_status(session, f"https://{slug}.careerplug.com/jobs")
+
+
 async def _verify_loxo(session: aiohttp.ClientSession, slug: str) -> bool:
     return await _verify_by_status(session, f"https://app.loxo.co/{slug}")
 
@@ -1179,6 +1184,7 @@ ARCHIVE_II_VERIFIERS = {
     "peopleforce": _verify_peopleforce,
     "factorial": _verify_factorial,
     "loxo": _verify_loxo,
+    "careerplug": _verify_careerplug,
     "recruiterflow": _verify_recruiterflow,
     "homerun": _verify_homerun,
     "keka": _verify_keka,

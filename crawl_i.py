@@ -221,7 +221,7 @@ PLATFORM_WORKERS = {
     # 2026-10: Traffit = one JSON call per 100 jobs.
     "traffit": 12,
     # 2026-10: HTML boards = 1 list page per tenant (plus pagination); descriptions come from one fetch per kept job.
-    "freshteam": 12, "peopleforce": 12, "factorial": 12, "loxo": 8,
+    "freshteam": 12, "peopleforce": 12, "factorial": 12, "loxo": 8, "careerplug": 12,
     # 2026-10: Recruiterflow / Homerun = 1 page per tenant.
     "recruiterflow": 12, "homerun": 12,
     # 2026-10: Keka = 2 calls per tenant (page for the org id, then the jobs JSON with full descriptions).
