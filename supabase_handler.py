@@ -75,7 +75,10 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #  14 - 2026-10-10: location placeholders widened ("Various", "Unknown", "Other", "Not applicable", "Location TBD",
 #       "To be confirmed", "Flexible"...): they now take the blank-location path (description / AI check) instead of reading
 #       as a real, unallowed place; bumped so revalidation re-checks stored rows.
-CLASSIFIER_VERSION = 14
+#  15 - 2026-10-10: global-hiring language widened (globe emoji, "Virtual/Telecommute - Worldwide", "Remote - open to all",
+#       "Anywhere on Earth", "not location-bound", "location agnostic", "don't care where you work from", "hire across the
+#       globe", "you choose where you work"); bumped so revalidation re-checks stored rows.
+CLASSIFIER_VERSION = 15
 
 import os
 from dotenv import load_dotenv

@@ -1375,6 +1375,16 @@ GLOBAL_KEYWORDS = [
     r"\bcross[\-\s]*border\s*hiring\b",
     r"\bborder[\-\s]*free\s*hiring\b",
     r"\bborderless\s*employment\b",
+    # 2026-10 (classifier v15, "expand our global hiring language so we miss nothing"): ways an employer says the
+    # role has no location tie that the lists above did not cover. Checked against a 100-phrase corpus first; only
+    # these gaps were left, and each pattern states eligibility (not merely that the company is international).
+    r"\bnot\s*(?:location|geography)[\-\s]*bound\b",
+    r"\b(?:location|geography|geographically)[\-\s]*(?:independent|agnostic)\b",
+    r"\bdon'?t\s*care\s*where\s*you\s*(?:work|live|are|are\s*based)\b",
+    r"\b(?:location|where\s*you\s*(?:live|work|are\s*based))\s*(?:doesn'?t|does\s*not)\s*(?:really\s*)?matter\b",
+    r"\bhir(?:e|es|ing)\s*(?:talent\s*)?across\s*the\s*(?:globe|world)\b",
+    r"\b(?:you\s*)?(?:choose|decide|pick)\s*where\s*you\s*(?:work|live)\b",
+    r"\blocation\s*:\s*wherever\s*you\s*(?:are|live|want|like)\b",
 ]
 
 GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS]
@@ -1490,9 +1500,19 @@ _SAFETY_NET_GLOBAL_RE = [re.compile(kw, re.I) for kw in GLOBAL_KEYWORDS
                          if kw not in _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS]
 
 STANDALONE_GLOBAL_RE = re.compile(
-    r"^\s*(global|worldwide|world\s*wide|anywhere|international|wfa|earth|planet\s*earth|"
+    # 2026-10 (v15): a globe emoji alone or with "remote" ("🌍 Remote", "🌎 Worldwide"), more remote-like prefixes
+    # (virtual, telecommute, home based, 100% / fully remote) and more ways to say "no restriction" ("Anywhere on
+    # Earth", "Remote - World", "Remote - open to all (locations)", "Remote - not location specific").
+    r"^\s*(?:"
+    r"[\U0001F30D\U0001F30E\U0001F30F\U0001F310]\uFE0F?\s*(?:(?:fully\s*)?remote|virtual)?"
+    r"|(?:[\U0001F30D\U0001F30E\U0001F30F\U0001F310]\uFE0F?\s*)?(?:"
+    r"global|worldwide|world\s*wide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|earth|planet\s*earth|"
     r"distributed|borderless|everywhere|"
-    r"remote\s*[\-–—/,()]?\s*(global|worldwide|anywhere|international|wfa|distributed|everywhere))\s*$", re.I
+    r"(?:(?:100\s*%|fully|completely)\s*)?(?:remote|virtual|telecommute|telework|home[\-\s]*based)\s*[\-–—/,|:()]?\s*"
+    r"(?:global(?:\s+remote)?|worldwide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|distributed|everywhere|world|"
+    r"open\s*to\s*all(?:\s*(?:locations?|countries|regions))?|not\s*location[\-\s]*specific|location[\-\s]*agnostic|any\s*(?:location|country))"
+    r")"
+    r")\s*\)?\s*$", re.I
 )
 
 # ── Non-geographic words in location fields ──────────
@@ -2185,6 +2205,8 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     # of a deterministic no_match for every job outside Rank 4's narrow
     # gate. ──
     if has_country_tied_sponsorship_permit_residency_signal(job):
+        return "no_match", None, None
+    if has_citizenship_or_residency_only_signal(job):
         return "no_match", None, None
 
     # ── 0.77. HARD OVERRIDE (2026-09, explicit user report, real posting:
@@ -5473,7 +5495,16 @@ def has_hard_country_specific_auth_signal(job: dict) -> bool:
     text = desc + " " + (job.get("title") or "")
     if _has_multi_region_breadth(text):
         return False
-    return bool(_COUNTRY_AUTH_RE.search(text))
+    # 2026-10 (v15): "US citizenship is not required", "We do not require US citizenship" and "No work authorization in the US
+    # needed" name the country and the status but say the opposite of a restriction; they were hard-rejected. A match only counts
+    # when the sentence around it is not such a negated requirement.
+    for m in _COUNTRY_AUTH_RE.finditer(text):
+        lo = max(text.rfind(c, 0, m.start()) for c in ".!?\n") + 1
+        ends = [e for e in (text.find(c, m.end()) for c in ".!?\n") if e != -1]
+        window = text[lo:(min(ends) if ends else len(text))]
+        if not _REQUIREMENT_NEGATED_RE.search(window):
+            return True
+    return False
 
 
 def _referential_auth_hit(text: str) -> bool:
@@ -6621,6 +6652,72 @@ def has_country_tied_sponsorship_permit_residency_signal(job: dict) -> bool:
     return False
 
 
+# ── 2026-10 (classifier v15): citizenship / residency "only" wording ──────────────────────────────────────────────
+# Found while widening the global-hiring language: with a global claim in front ("We hire globally."), phrasings such as
+# "Canadian citizens only", "This role requires US residency", "open to UK residents" and "Only applicants within the US will be
+# considered" were not hard-rejected by any check and auto-matched as Rank 1 (without the global claim they only reached the AI
+# stage). The existing families need a verb + preposition ("authorized to work in", "residence in <country>"); these name the
+# status itself (citizens / residents / residency / citizenship) next to the country.
+_NATIONALITY_ADJ_FRAGMENT = (
+    r"(?:American|(?-i:U\.S\.?|US)|Canadian|British|Australian|German|French|Irish|Indian|Mexican|Brazilian|Spanish|Italian|Dutch|Polish|"
+    r"Singaporean|Japanese|Chinese|Filipino|Philippine|Nigerian|South\s+African|Kenyan|Emirati|New\s+Zealand|Swiss|Swedish|Danish|Norwegian)"
+)
+_STATUS_COUNTRY_FRAGMENT = r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _NATIONALITY_ADJ_FRAGMENT + r")"
+_CITIZEN_RESIDENT_ONLY_RES = [re.compile(p, re.I) for p in (
+    # "requires US residency", "must have Canadian citizenship"
+    r"\b(?:requires?|required|must\s+(?:have|hold|maintain|be\s+a)|needs?\s+(?:to\s+(?:have|hold)\s+|a\s+)?|mandatory)\b[^.?!]{0,30}\b"
+    + _STATUS_COUNTRY_FRAGMENT + r"\s+(?:residency|residence|citizenship|nationality)\b",
+    # "US residency is required"
+    r"\b" + _STATUS_COUNTRY_FRAGMENT + r"\s+(?:residency|residence|citizenship|nationality)\s+(?:is\s+|are\s+)?(?:required|mandatory|needed|necessary)\b",
+    # "open to UK residents", "limited to residents of Brazil"
+    r"\b(?:open|available|limited|restricted|reserved|eligible)\s+(?:only\s+)?(?:to|for)\s+" + _STATUS_COUNTRY_FRAGMENT + r"\s+(?:residents|citizens|nationals)\b",
+    r"\b(?:open|available|limited|restricted|reserved|eligible)\s+(?:only\s+)?(?:to|for)\s+(?:residents|citizens|nationals)\s+of\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT + r"\b",
+    # "Canadian citizens only", "U.S. citizens or permanent residents only", "US persons only"
+    r"\b" + _STATUS_COUNTRY_FRAGMENT + r"\s+(?:citizens|residents|nationals|persons|passport\s+holders)\b(?:\s+(?:or|and|/)\s+(?:permanent\s+)?(?:residents|citizens|nationals))?\s+only\b",
+    # "Only applicants within the US will be considered"
+    r"\bonly\s+(?:applicants|candidates|people|individuals|persons)\b[^.?!]{0,40}\b(?:within|in|from)\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT
+    + r"\b[^.?!]{0,30}\b(?:will\s+be\s+considered|are\s+eligible|can\s+apply|may\s+apply|are\s+considered)\b",
+    # "Our team is US-based and so is this role."
+    r"\b" + _STATUS_COUNTRY_FRAGMENT + r"[\s\-]*based\b[^.?!]{0,50}\b(?:so\s+is|as\s+is)\s+this\s+(?:role|position|job)\b",
+    # "Limited to candidates in North America" (non-target regions only; EMEA / Africa / Europe are handled elsewhere)
+    r"\b(?:limited|restricted)\s+to\s+(?:candidates|applicants|people)\s+(?:located\s+|based\s+|living\s+|residing\s+)?(?:in|within)\s+(?:the\s+)?"
+    r"(?:north\s+america|latin\s+america|latam|apac|americas)\b",
+)]
+# A statement that a status is NOT required ("US citizenship is not required", "No work authorization in the US needed", "We do not
+# require US citizenship", "regardless of citizenship"). Deliberately narrow: the negation has to sit right next to the status word
+# and the "required" word, so "Applicants not authorized to work in the US will not be considered; authorization is required" is
+# not mistaken for one.
+_REQUIREMENT_NEGATED_RE = re.compile(
+    r"\b(?:citizenship|authori[sz]ation|residency|residence|work\s+permit|permit|visa)\b[^.?!;,]{0,25}\b(?:is|are)?\s*not\s+(?:required|needed|necessary|mandatory)\b"
+    r"|\b(?:no|without)\s+(?:[\w.\-]+\s+){0,3}(?:citizenship|authori[sz]ation|residency|residence|work\s+permit)\b[^.?!;,]{0,30}\b(?:required|needed|necessary|mandatory)\b"
+    r"|\b(?:do(?:es)?\s+not|don'?t|doesn'?t|won'?t|will\s+not)\s+(?:require|need)\s+(?:a\s+|an\s+|any\s+)?(?:[\w.\-]+\s+){0,2}(?:citizenship|authori[sz]ation|residency|residence|work\s+permit|citizen)\b"
+    r"|\b(?:do(?:es)?\s+not|don'?t)\s+need\s+to\s+be\s+(?:a\s+)?(?:[\w.\-]+\s+){0,2}(?:citizen|resident)\b"
+    r"|\b(?:regardless|irrespective)\s+of\b[^.?!;,]{0,30}\b(?:citizenship|residency|residence|nationality|location)\b", re.I)
+_CITIZEN_RESIDENT_NEGATION_RE = _REQUIREMENT_NEGATED_RE
+
+
+def has_citizenship_or_residency_only_signal(job: dict) -> bool:
+    """Universal hard override: the posting says only citizens / residents / nationals of a named country qualify, in wording the
+    verb-plus-preposition detectors do not reach (see the block comment above). Sentence by sentence; a sentence that is negated
+    ("no US residency required", "regardless of citizenship"), an offer ("we can sponsor US residency") or names several business
+    regions together is skipped."""
+    desc = job.get("description_snippet") or ""
+    text = desc + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    for sentence in _split_into_sentences(text):
+        if not sentence.strip() or _has_multi_region_breadth(sentence):
+            continue
+        if not any(rx.search(sentence) for rx in _CITIZEN_RESIDENT_ONLY_RES):
+            continue
+        if _CITIZEN_RESIDENT_NEGATION_RE.search(sentence):
+            continue
+        if re.search(r"\b(?:we|company|employer)\b[^.?!]{0,30}\b(?:can|may|will|could)\b[^.?!]{0,25}\b(?:sponsor|assist|help|support)\b", sentence, re.I):
+            continue
+        return True
+    return False
+
+
 def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     """Rank-4-only guard — see has_country_tied_sponsorship_permit_
     residency_signal (the universal version, applied to every rank) for
@@ -7193,6 +7290,7 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
     has_timezone_relocation_or_hyphenated_restriction_signal,
     has_extra_restrictive_geography_signal,
     _rank4_has_country_tied_restrictive_question,
+    has_citizenship_or_residency_only_signal,
     has_state_specific_license_signal,
     has_language_fluency_restriction_signal,
 )

@@ -60,6 +60,29 @@ for loc in ("Berlin", "Other, Germany", "Open Space, Berlin", "Lagos, Nigeria"):
     check(res("", loc=loc) == "no_match" or C.PLACEHOLDER_LOC_RE.match(loc) is None, f"{loc!r} is not a placeholder")
 check(C.PLACEHOLDER_LOC_RE.match("Other, Germany") is None and C.PLACEHOLDER_LOC_RE.match("Open Space, Berlin") is None, "placeholder regex only matches the whole value")
 
+# 6. global-hiring language (v15)
+for loc in ("🌍 Remote", "🌎 Worldwide", "Virtual - Worldwide", "Telecommute - Worldwide", "100% Remote - Worldwide", "Anywhere on Earth", "Remote - Open to all locations",
+            "Remote - Not location specific", "Remote - World", "Home based - worldwide", "Remote – Everywhere", "Remote (Worldwide)"):
+    check(res("", loc=loc) == "match", f"global location {loc!r}")
+for loc in ("Remote - Germany", "🌍 Berlin", "Remote - Rest of World", "Virtual - Berlin"):
+    check(res("", loc=loc) != "match", f"not global: {loc!r}")
+for t in ("The position is not location-bound.", "We don't care where you work from.", "Location doesn't matter to us.", "We hire across the globe.", "You choose where you work.",
+          "This role is location agnostic.", "Location: Wherever you are"):
+    check(res(BASE + t, loc="Remote") == "match", f"global sentence {t!r}")
+check(res(BASE + "Candidates must be US-based. Location doesn't matter within the US.", loc="Remote") == "no_match", "location-doesn't-matter inside a US-only role still rejects")
+
+# 7. citizenship / residency "only" wording is a hard restriction even next to a global claim (v15), and a NEGATED requirement is not
+GL = "We hire globally. "
+for t in ("This role requires US residency.", "US residency is required.", "Must have US residency.", "This role is open to UK residents.", "Canadian citizens only.",
+          "U.S. citizenship or permanent residency only.", "Limited to residents of Brazil.", "Only applicants within the US will be considered.",
+          "Our team is US-based and so is this role.", "Limited to candidates in North America.", "We do not require a degree, but US citizenship is required.",
+          "No degree needed, but US citizenship is required."):
+    check(res(BASE + GL + t, loc="Remote") == "no_match", f"restriction next to a global claim rejects: {t!r}")
+for t in ("US citizenship is not required.", "No US citizenship required.", "We do not require US citizenship.", "You do not need to be a US citizen.",
+          "Authorization to work in the US is not required.", "We welcome candidates regardless of citizenship.", "No US residency required.",
+          "We can sponsor US residency for the right candidate.", "We are open to candidates in EMEA or North America."):
+    check(res(BASE + GL + t, loc="Remote") == "match", f"negated / offered / multi-region statement is not a restriction: {t!r}")
+
 print(f"classifier false-reject checks: {n - len(fails)}/{n} passed")
 for m in fails: print("FAIL", m)
 sys.exit(1 if fails else 0)
