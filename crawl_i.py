@@ -214,6 +214,8 @@ PLATFORM_WORKERS = {
     "comeet": 12,  # 2026-10: page + one API call per tenant
     # 2026-10: Emply = 2 calls per tenant; CATS / Easy Apply = 1 page; Elmo = 1 page per 10 jobs.
     "emply": 12, "cats": 12, "easyapply": 12, "elmo": 8,
+    # 2026-10: HiBob = 1 call per tenant; Deel = 2 calls per tenant.
+    "hibob": 12, "deel": 12,
 }
 
 

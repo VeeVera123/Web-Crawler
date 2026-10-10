@@ -42,6 +42,9 @@ robots-allowed job API before being added to Crawl I:
 | CATS (`catsone.com`) | **Added** (`scrape_cats`): slug `{tenant}\|{id}`; `/careers/{id}/jobs` lists every job on one page (title, location); descriptions via `_fetch_cats_description` (`div.job-description`). Mostly staffing / local US roles. |
 | Elmo Talent (`elmotalent.com.au`) | **Added** (`scrape_elmo`): slug `{tenant}\|{board}`; `/careers/{board}/jobs?page=N` (10 per page); robots explicitly allows `/careers/*/job*`; descriptions via `_fetch_elmo_description`. Australian employers. |
 | Easy Apply (`easyapply.co`) | **Added** (`scrape_easyapply`): `{tenant}.easyapply.co` lists all jobs in one page; job pages `easyapply.co/job/{slug}` through the generic description fetcher. Canadian / US local roles. |
+| HiBob (`careers.hibob.com`) | **Added** (`scrape_hibob`): `{tenant}.careers.hibob.com/api/job-ad` returns every open job with full description, but only answers (else 401) when the board's own origin is sent as `Referer`; found by reading colophon-group/jobseek's monitor, verified live |
+| Deel (`jobs.deel.com`) | **Added** (`scrape_deel`): anonymous `api-prod.letsdeel.com/guest/ats` — `organizations/{slug}/career_page_settings` gives the org + board id, then `job_postings` lists everything with rich-text descriptions; verified live (klarna 101 jobs) |
+| Freshteam, Factorial, PeopleForce, Bullhorn, Loxo, Fountain, TalentLyft, iSmartRecruit, Recruiterflow, HiringThing | Not added — their job APIs need a per-customer key / bearer token (GitHub survey of ever-jobs, freehire, jobseek, 2026-10); revisit if a public board feed is found |
 | Paycor (`recruitingbypaycor.com`) | Not added — robots.txt is `Disallow: /` for all agents |
 | Eightfold | Not added — public `/api/apply/v2/jobs` returns 403 "Not authorized for PCSX" |
 | UKG / UltiPro | Not added — robots.txt disallows `JobBoardView` (the search endpoint) |

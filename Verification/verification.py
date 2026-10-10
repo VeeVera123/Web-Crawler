@@ -904,6 +904,25 @@ async def _verify_easyapply(session: aiohttp.ClientSession, slug: str) -> bool:
     return await _verify_by_status(session, f"https://{slug}.easyapply.co/")
 
 
+async def _verify_hibob(session: aiohttp.ClientSession, slug: str) -> bool:
+    origin = f"https://{slug}.careers.hibob.com"
+    async with session.get(f"{origin}/api/job-ad", timeout=REQUEST_TIMEOUT,
+                           headers={"User-Agent": USER_AGENT, "Referer": f"{origin}/"}) as r:
+        if r.status in (401, 403, 404):
+            return False
+        r.raise_for_status()
+        return True
+
+
+async def _verify_deel(session: aiohttp.ClientSession, slug: str) -> bool:
+    async with session.get(f"https://api-prod.letsdeel.com/guest/ats/organizations/{slug}/career_page_settings",
+                           timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_isolvedhire(session: aiohttp.ClientSession, slug: str) -> bool:
     """isolvedhire (2026-09, new platform — see discovery.py's
     SUPPORTED_ATS comment). GET the tenant's /jobs/ board page and follow
@@ -1066,6 +1085,8 @@ ARCHIVE_II_VERIFIERS = {
     "cats": _verify_cats,
     "elmo": _verify_elmo,
     "easyapply": _verify_easyapply,
+    "hibob": _verify_hibob,
+    "deel": _verify_deel,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full
     # live-confirmed evidence, including finding and ruling out its own

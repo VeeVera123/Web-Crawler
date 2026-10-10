@@ -6919,6 +6919,129 @@ async def scrape_isolvedhire(slug: str) -> list[dict]:
     return jobs
 
 
+# ── HiBob (careers.hibob.com) ─────────────────────────────────────────────────
+# 2026-10 (found by reading colophon-group/jobseek's hibob monitor, verified live: onwardmedical -> 13 jobs).
+# {slug}.careers.hibob.com/api/job-ad returns EVERY open job with its full description, but answers 401 unless the
+# request carries the board's own origin as Referer (the public career app sends it). slug = the subdomain label
+# (may carry a hash suffix, e.g. "swissto12-b67d359b42").
+_HIBOB_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+_WORKSPACE_LABELS = {"on_site": "On-site", "on site": "On-site", "onsite": "On-site", "hybrid": "Hybrid", "remote": "Remote"}
+
+
+async def scrape_hibob(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not _HIBOB_SLUG_RE.fullmatch(slug):
+        return []
+    origin = f"https://{slug}.careers.hibob.com"
+    r = await _get(f"{origin}/api/job-ad", headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json",
+                                                    "Referer": f"{origin}/"})
+    if not r or r.status_code != 200:
+        return []
+    try:
+        ads = r.json().get("jobAdDetails")
+    except Exception as e:
+        log.debug(f"HiBob: JSON parse failed for {slug}: {e}")
+        return []
+    if not isinstance(ads, list):
+        return []
+    company = re.sub(r"-[0-9a-f]{8,}$", "", slug).replace("-", " ").title()
+    jobs = []
+    for ad in ads:
+        if not isinstance(ad, dict) or not ad.get("id") or not ad.get("title"):
+            continue
+        parts = "".join(f"<h3>{label}</h3>{ad[key]}" if key != "description" else ad[key]
+                        for key, label in (("description", ""), ("responsibilities", "Responsibilities"),
+                                           ("requirements", "Requirements"), ("benefits", "Benefits"))
+                        if isinstance(ad.get(key), str) and ad[key].strip())
+        desc = _snippet(parts)
+        site, country = _text(ad.get("site")), _text(ad.get("country"))
+        location = site if (not country or country.lower() in site.lower()) else ", ".join(p for p in (site, country) if p)
+        ws_raw = _text(ad.get("workspaceTypeId") or ad.get("workspaceType")).lower()
+        salary = ""
+        if ad.get("payTransparencyMinSalary") or ad.get("payTransparencyMaxSalary"):
+            salary = f"{ad.get('payTransparencySalaryCurrency') or ''} {ad.get('payTransparencyMinSalary') or ''}-{ad.get('payTransparencyMaxSalary') or ''}".strip()
+        jobs.append({
+            "title": _text(ad["title"]),
+            "url": f"{origin}/jobs/{ad['id']}",
+            "company": company,
+            "location": location,
+            "country": country,
+            "department": _text(ad.get("department")),
+            "workplace_type": _WORKSPACE_LABELS.get(ws_raw, _text(ad.get("workspaceType"))),
+            "employment_type": _text(ad.get("employmentType") or ad.get("employmentTypeId")),
+            "salary": salary or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "HiBob",
+            "slug": slug,
+        })
+    return jobs
+
+
+# ── Deel (jobs.deel.com) ──────────────────────────────────────────────────────
+# 2026-10 (jobseek's deel monitor, verified live: klarna 101 jobs, dott 20, domyn-spa 13). Two anonymous calls on
+# api-prod.letsdeel.com/guest/ats: organizations/{slug}/career_page_settings -> organizationId + jobBoard.id, then
+# organizations/{org}/job_boards/{board}/job_postings -> a plain list of postings with full rich-text descriptions.
+_DEEL_API = "https://api-prod.letsdeel.com/guest/ats/organizations"
+_DEEL_ARRANGEMENT = {"ON_SITE": "On-site", "HYBRID": "Hybrid", "REMOTE": "Remote"}
+
+
+async def scrape_deel(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        return []
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    r = await _get(f"{_DEEL_API}/{slug}/career_page_settings", headers=headers)
+    if not r or r.status_code != 200:
+        return []
+    try:
+        settings = r.json()
+        org_id, board_id = settings["organizationId"], (settings.get("jobBoard") or {})["id"]
+    except Exception:
+        return []
+    r2 = await _get(f"{_DEEL_API}/{org_id}/job_boards/{board_id}/job_postings", headers=headers)
+    if not r2 or r2.status_code != 200:
+        return []
+    try:
+        data = r2.json()
+    except Exception:
+        return []
+    postings = data if isinstance(data, list) else (data.get("jobPostings") if isinstance(data, dict) else None)
+    if not isinstance(postings, list):
+        return []
+    company = _text(settings.get("preferredOrganizationName")) or slug.replace("-", " ").title()
+    jobs = []
+    for p in postings:
+        if not isinstance(p, dict) or not p.get("id") or not p.get("title"):
+            continue
+        job = p.get("job") or {}
+        names = [(jl.get("location") or {}).get("name") for jl in (job.get("jobLocations") or []) if isinstance(jl, dict)]
+        location = "; ".join(dict.fromkeys(n for n in names if n))
+        emp = next((((jt.get("employmentType") or {}).get("name")) for jt in (job.get("jobEmploymentTypes") or [])
+                    if isinstance(jt, dict) and (jt.get("employmentType") or {}).get("name")), "")
+        dept = next((((jd.get("department") or {}).get("name")) for jd in (job.get("jobDepartments") or [])
+                     if isinstance(jd, dict) and (jd.get("department") or {}).get("name")), "")
+        comp = job.get("currentCompensation") or {}
+        salary = ""
+        if p.get("isCompensationVisible") and (comp.get("minAmount") or comp.get("maxAmount")):
+            salary = f"{comp.get('currencyIsoCode') or ''} {comp.get('minAmount') or ''}-{comp.get('maxAmount') or ''}".strip()
+        desc = _snippet(p.get("richtextDescription") or "")
+        jobs.append({
+            "title": _text(p["title"]),
+            "url": f"https://jobs.deel.com/{slug}/job-details/{p['id']}/overview",
+            "company": company,
+            "location": location,
+            "country": "",
+            "department": _text(dept),
+            "workplace_type": _DEEL_ARRANGEMENT.get(_text(job.get("workArrangementEnum")).upper(), ""),
+            "employment_type": _text(emp),
+            "salary": salary or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Deel",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7000,6 +7123,8 @@ SCRAPERS = {
     "cats": scrape_cats,
     "elmo": scrape_elmo,
     "easyapply": scrape_easyapply,
+    "hibob": scrape_hibob,
+    "deel": scrape_deel,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for

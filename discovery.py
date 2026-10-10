@@ -591,6 +591,8 @@ SUPPORTED_ATS = {
     # 2026-10: Emply (Nordic ATS, vacancy API), CATS (staffing), Elmo (Australia), Easy Apply (Canada/US): found
     # by counting tenant subdomains per domain in archive_ii; see each scraper's block comment in ats_scrapers.py.
     "emply", "cats", "elmo", "easyapply",
+    # 2026-10: HiBob and Deel (public career APIs), found by reading colophon-group/jobseek's monitors.
+    "hibob", "deel",
     # 2026-09: Gem — a Relay/GraphQL-rendered per-company job board at
     # jobs.gem.com/{slug} (no robots.txt at all — confirmed 404 on
     # jobs.gem.com/robots.txt). Confirmed live via real Chrome browser
@@ -2139,6 +2141,28 @@ def _url_to_slug_easyapply(url: str) -> str | None:
     return _tenant_of(urlparse(url).hostname, ".easyapply.co")
 
 
+def _url_to_slug_hibob(url: str) -> str | None:
+    """HiBob (2026-10): {tenant}.careers.hibob.com -> tenant (may carry a hash suffix, e.g. swissto12-b67d359b42)."""
+    return _tenant_of(urlparse(url).hostname, ".careers.hibob.com")
+
+
+_DEEL_NON_SLUGS = frozenset({"auth", "login", "signup", "guest", "api", "deelapi", "job-boards", "job-details"})
+
+
+def _url_to_slug_deel(url: str) -> str | None:
+    """Deel (2026-10): jobs.deel.com/{slug}[/job-details/...] (and the legacy jobs.deel.com/job-boards/{slug}) -> slug."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() != "jobs.deel.com":
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if parts and parts[0].lower() == "job-boards":
+        parts = parts[1:]
+    if not parts:
+        return None
+    slug = parts[0].lower()
+    return slug if slug not in _DEEL_NON_SLUGS and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug) else None
+
+
 def _url_to_slug_isolvedhire(url: str) -> str | None:
     """Extract slug from isolvedhire (iSolved Hire) URLs (2026-09, new
     platform). Pattern: {slug}.isolvedhire.com/... — subdomain-per-tenant,
@@ -2537,6 +2561,8 @@ URL_TO_SLUG = {
     "cats": _url_to_slug_cats,
     "elmo": _url_to_slug_elmo,
     "easyapply": _url_to_slug_easyapply,
+    "hibob": _url_to_slug_hibob,
+    "deel": _url_to_slug_deel,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3243,6 +3269,8 @@ CC_PLATFORM_PATTERNS = {
     "cats": ["*.catsone.com/careers/*"],
     "elmo": ["*.elmotalent.com.au/careers/*"],
     "easyapply": ["*.easyapply.co/*"],
+    "hibob": ["*.careers.hibob.com/*"],
+    "deel": ["jobs.deel.com/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3329,6 +3357,8 @@ CC_EXTRACTORS = {
     "cats": _url_to_slug_cats,
     "elmo": _url_to_slug_elmo,
     "easyapply": _url_to_slug_easyapply,
+    "hibob": _url_to_slug_hibob,
+    "deel": _url_to_slug_deel,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3639,6 +3669,26 @@ def _cc_check_elmo(slug: str) -> bool | None:
 
 def _cc_check_easyapply(slug: str) -> bool | None:
     return _alive_by_status(f"https://{slug}.easyapply.co/")
+
+
+def _cc_check_hibob(slug: str) -> bool | None:
+    """A real HiBob board answers 200 on /api/job-ad (with its own origin as Referer); an unknown tenant, or a request
+    without the Referer, answers 401."""
+    origin = f"https://{slug}.careers.hibob.com"
+    try:
+        r = requests.get(f"{origin}/api/job-ad", timeout=10, headers={"User-Agent": _ROBOTS_UA, "Referer": f"{origin}/"})
+    except Exception:
+        return None
+    return True if r.status_code == 200 else (False if r.status_code in (401, 403, 404) else None)
+
+
+def _cc_check_deel(slug: str) -> bool | None:
+    try:
+        r = requests.get(f"https://api-prod.letsdeel.com/guest/ats/organizations/{slug}/career_page_settings",
+                         timeout=10, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    return True if r.status_code == 200 else (False if r.status_code == 404 else None)
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -4047,6 +4097,8 @@ _CC_LIVE_CHECK = {
     "cats": _via_verification("cats", _cc_check_cats),
     "elmo": _via_verification("elmo", _cc_check_elmo),
     "easyapply": _via_verification("easyapply", _cc_check_easyapply),
+    "hibob": _via_verification("hibob", _cc_check_hibob),
+    "deel": _via_verification("deel", _cc_check_deel),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,
@@ -4132,7 +4184,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
-    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply",
+    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -6966,7 +7018,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     # 2026-10: Dayforce / HireHive (new scrapers).
     "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
     "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
-    "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply",
+    "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply", "hibob": "hibob", "deel": "deel",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -6985,7 +7037,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("jobs.dayforcehcm.com", "dayforce"), ("hirehive.com", "hirehive"),
     ("careers-page.com", "manatal"), ("careers.jobscore.com", "jobscore"),
     ("jobs.crelate.com", "crelate"), ("comeet.com", "comeet"),
-    ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"),
+    ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"), ("careers.hibob.com", "hibob"), ("jobs.deel.com", "deel"),
 )
 
 

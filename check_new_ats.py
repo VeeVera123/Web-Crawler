@@ -140,6 +140,73 @@ check(A.scrape_emply("nobody") == [], "emply: redirect to emply.com is an unknow
 A._get_requests_sync = lambda url, **kw: R("<html>no section</html>", 200, "https://x.career.emply.com/vacancies")
 check(A.scrape_emply("x") == [] and A.scrape_emply("Bad_Slug!") == [], "emply: no sectionId / bad slug")
 
+# ── HiBob / Deel (2026-10) ──
+for fn, url, want in [
+    (D._url_to_slug_hibob, "https://onwardmedical.careers.hibob.com/jobs/abc", "onwardmedical"),
+    (D._url_to_slug_hibob, "https://swissto12-b67d359b42.careers.hibob.com", "swissto12-b67d359b42"),
+    (D._url_to_slug_hibob, "https://careers.hibob.com/", None), (D._url_to_slug_hibob, "https://www.hibob.com/", None),
+    (D._url_to_slug_deel, "https://jobs.deel.com/klarna", "klarna"),
+    (D._url_to_slug_deel, "https://jobs.deel.com/dott/job-details/bb68d5b5-7e05/overview", "dott"),
+    (D._url_to_slug_deel, "https://jobs.deel.com/job-boards/Domyn-SPA", "domyn-spa"),
+    (D._url_to_slug_deel, "https://jobs.deel.com/", None), (D._url_to_slug_deel, "https://jobs.deel.com/login", None),
+    (D._url_to_slug_deel, "https://www.deel.com/jobs/x", None),
+]:
+    check(fn(url) == want, f"{fn.__name__}({url}) = {fn(url)!r}, want {want!r}")
+for ats in ("hibob", "deel"):
+    check(ats in D.URL_TO_SLUG and ats in D.SUPPORTED_ATS and ats in A.SCRAPERS and ats in D._CC_LIVE_CHECK, f"{ats} registered")
+
+import asyncio  # noqa: E402
+
+HB = {"jobAdDetails": [
+    {"id": "11", "title": "Customer Success Manager", "department": "CS", "employmentType": "Permanent", "site": "Remote", "country": "Portugal",
+     "description": "<p>Own renewals.</p>", "responsibilities": "<ul><li>QBRs</li></ul>", "requirements": None, "benefits": "",
+     "workspaceTypeId": "remote", "workspaceType": "Remote", "payTransparencyMinSalary": 50000, "payTransparencyMaxSalary": 70000,
+     "payTransparencySalaryCurrency": "EUR"},
+    {"id": "12", "title": "Office Manager", "site": "Lausanne", "country": "Switzerland", "description": "x", "workspaceTypeId": "on_site"},
+    {"title": "no id"}]}
+seen_headers = {}
+
+
+async def fake_get(url, **kw):
+    seen_headers.update(kw.get("headers") or {})
+    return R("", 200, url, HB)
+
+
+A._get = fake_get
+hj = asyncio.run(A.scrape_hibob("Acme-Corp-0123456789"))
+check(len(hj) == 2 and seen_headers.get("Referer") == "https://acme-corp-0123456789.careers.hibob.com/", f"hibob referer/count {seen_headers} {len(hj)}")
+check(hj[0]["location"] == "Remote, Portugal" and hj[0]["workplace_type"] == "Remote" and "QBRs" in hj[0]["description_snippet"]
+      and hj[0]["salary"].startswith("EUR 50000") and hj[0]["company"] == "Acme Corp", f"hibob fields {hj[0]}")
+check(hj[1]["location"] == "Lausanne, Switzerland" and hj[1]["workplace_type"] == "On-site" and hj[1]["url"].endswith("/jobs/12"), f"hibob 2 {hj[1]}")
+check(asyncio.run(A.scrape_hibob("Bad_Slug!")) == [], "hibob: bad slug")
+
+DS = {"organizationId": "org1", "jobBoard": {"id": "board1"}, "preferredOrganizationName": "Klarna"}
+DP = [{"id": "p1", "title": "Incident Manager", "richtextDescription": "<p>Run incidents.</p>", "isCompensationVisible": True,
+       "job": {"workArrangementEnum": "HYBRID", "jobLocations": [{"location": {"name": "Stockholm"}}, {"location": {"name": "Berlin"}}],
+               "jobEmploymentTypes": [{"employmentType": {"name": "Full-time"}}], "jobDepartments": [{"department": {"name": "Ops"}}],
+               "currentCompensation": {"currencyIsoCode": "SEK", "minAmount": 1, "maxAmount": 2}}}, {"title": "no id"}]
+
+
+async def fake_get2(url, **kw):
+    if url.endswith("/career_page_settings"):
+        return R("", 200, url, DS)
+    assert "/org1/job_boards/board1/job_postings" in url
+    return R("", 200, url, DP)
+
+
+A._get = fake_get2
+dj = asyncio.run(A.scrape_deel("Klarna"))
+check(len(dj) == 1 and dj[0]["url"] == "https://jobs.deel.com/klarna/job-details/p1/overview" and dj[0]["location"] == "Stockholm; Berlin"
+      and dj[0]["workplace_type"] == "Hybrid" and dj[0]["company"] == "Klarna" and dj[0]["department"] == "Ops" and "Run incidents" in dj[0]["description_snippet"], f"deel {dj}")
+
+
+async def fake_404(url, **kw):
+    return R("", 404, url, {})
+
+
+A._get = fake_404
+check(asyncio.run(A.scrape_deel("nobody")) == [] and asyncio.run(A.scrape_hibob("nobody")) == [], "unknown tenants -> []")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)
