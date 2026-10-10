@@ -765,6 +765,16 @@ check({("greenhouse", "acme1"), ("lever", "acme2"), ("ashby", "acme3"), ("greenh
 check(D._url_to_slug_rippling("https://ats.rippling.com/en-GB/acme/jobs") == "acme" and D._url_to_slug_rippling("https://ats.rippling.com/en-US/jobs") is None,
       "rippling: locale-prefixed board URL resolves to the company; bare locale/jobs does not")
 
+
+# ── location regressions found in the 2026-10 live audit ──
+check(A._flatchr_location({"address": {"locality": "Vincennes", "administrative_area_level_1": "Île-de-France", "country": "France"}}, {}) == "Vincennes, Île-de-France, France"
+      and A._flatchr_location({"address": {}, "company": {"address": {"locality": "Lyon", "country": "France"}}}, {}) == "Lyon, France"
+      and A._flatchr_location({}, {}) == "", "flatchr: location read from vacancy.address (was always blank), company address fallback")
+from selectolax.lexbor import LexborHTMLParser as _LP
+_t = _LP('<div class="jobs-listing-card"><div><a class="job-title" href="/job/abc=">T</a></div><div class="job-type"> Contract </div>'
+         '<div class="job-location"><i class="material-icons">location_on</i> Grande Prairie, Alberta, Canada </div></div>')
+check(A._card_loxo(_t.css_first("a.job-title")) == {"location": "Grande Prairie, Alberta, Canada", "employment_type": "Contract"}, "loxo: card reader returns place and type")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)

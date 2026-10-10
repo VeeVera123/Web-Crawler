@@ -4844,6 +4844,23 @@ async def scrape_pinpoint(slug: str) -> list[dict]:
 
 # ── Flatchr ─────────────────────────────────────────────
 
+def _flatchr_location(vacancy: dict, item: dict) -> str:
+    """The posting's place lives under vacancy.address (locality, region,
+    country) — NOT at the item's top level, which carries none of those
+    keys, so every Flatchr job used to come out with a blank location.
+    Falls back to the company's own address, then the legacy item keys."""
+    for addr in (vacancy.get("address"), (vacancy.get("company") or {}).get("address")):
+        if isinstance(addr, dict):
+            parts = []
+            for k in ("locality", "administrative_area_level_1", "country"):
+                v = str(addr.get(k) or "").strip()
+                if v and v not in parts:
+                    parts.append(v)
+            if parts:
+                return ", ".join(parts)
+    return str(item.get("locality") or item.get("administrative_area_level_1") or "")
+
+
 def scrape_flatchr(slug: str) -> list[dict]:
     """Flatchr (France) — public unauthenticated JSON API.
     Slug is the company identifier used on careers.flatchr.io.
@@ -4882,9 +4899,9 @@ def scrape_flatchr(slug: str) -> list[dict]:
             "title": str(title).strip(),
             "url": job_url,
             "company": company_name,
-            "location": item.get("locality", "") or item.get("administrative_area_level_1", ""),
-            "country": "",
-            "department": item.get("metier", ""),
+            "location": _flatchr_location(vacancy, item),
+            "country": str(((vacancy.get("address") or {}).get("country")) or "").strip(),
+            "department": vacancy.get("metier") or item.get("metier", ""),
             "workplace_type": "",
             "employment_type": vacancy.get("contract_type", ""),
             "salary": salary,
@@ -6429,24 +6446,30 @@ def scrape_easyapply(slug: str) -> list[dict]:
     r = _get_requests_sync(f"https://{tenant}.easyapply.co/", headers=_UA_HEADERS(), allow_redirects=False)
     if not r or r.status_code != 200:
         return []  # unknown tenant -> 302 to /employers
-    t = re.search(r"Jobs at ([^<\n]+)", r.text)
+    t = re.search(r"(?i)jobs at ([^<\n]+)", r.text)
     company = _text(unescape(t.group(1))) if t else tenant.replace("-", " ").title()
     jobs: list[dict] = []
     seen: set = set()
-    parts = re.split(r'(?=<a class="job_apply_link)', r.text)
+    # 2026-10: the row anchor is now `<a class="border_bottom font_6_grey job_row job_apply_link" href=...>` wrapping the whole
+    # row (title in span.font_18, place after an `icon-map-marker`); the older markup put job_apply_link first and used
+    # fa-* icons. Both are read: split on any anchor carrying the class, take href from anywhere in the tag.
+    parts = re.split(r'(?=<a\b[^>]*class="[^"]*\bjob_apply_link)', r.text)
     for chunk in parts:
-        m = re.match(r'<a class="job_apply_link[^"]*"[^>]*href="(https://easyapply\.co/job/[^"]+)"[^>]*>(.*?)</a>', chunk, re.S)
-        if not m or m.group(1) in seen:
+        m = re.match(r'<a\b[^>]*class="[^"]*\bjob_apply_link[^"]*"[^>]*>', chunk)
+        h = re.search(r'href="(https://easyapply\.co/job/[^"]+)"', m.group(0)) if m else None
+        if not h or h.group(1) in seen:
             continue
-        seen.add(m.group(1))
-        title = _html_cell_text(m.group(2))
-        block = chunk[m.end(): m.end() + 1800]
-        loc = re.search(r'fa-map-marker"></i>(.*?)</span>', block, re.S)
-        emp = re.search(r'fa-clock-o"></i>(.*?)</span>', block, re.S)
+        seen.add(h.group(1))
+        end = chunk.find("</a>", m.end())
+        body = chunk[m.end(): end if end > 0 else m.end() + 1800]
+        t_el = re.search(r'<span class="font_18[^"]*"[^>]*>(.*?)</span>', body, re.S)
+        title = _html_cell_text(t_el.group(1)) if t_el else _html_cell_text(body)
+        loc = re.search(r'(?:fa|icon)-map-marker"></i>\s*<span[^>]*>(.*?)</span>', body, re.S)
+        emp = re.search(r'(?:fa|icon)-(?:clock-o|time)"></i>\s*<span[^>]*>(.*?)</span>', body, re.S)
         if not title:
             continue
         jobs.append({
-            "title": title, "url": m.group(1), "company": company,
+            "title": title, "url": h.group(1), "company": company,
             "location": _html_cell_text(loc.group(1)) if loc else "", "country": "", "department": "",
             "workplace_type": "", "employment_type": _html_cell_text(emp.group(1)) if emp else "", "salary": "",
             "description_snippet": "", "source_ats": "EasyApply", "slug": tenant,
@@ -7397,6 +7420,15 @@ def _card_factorial(a) -> dict:
     return out
 
 
+def _card_loxo(a) -> dict:
+    """Loxo list card: .job-title link, .job-type, and .job-location (whose text starts with the "location_on" icon ligature)."""
+    card = _ancestor(a, 3)
+    if card is None or card.css_first(".job-location") is None:
+        return {}
+    loc = re.sub(r"^\s*location_on\s*", "", re.sub(r"\s+", " ", card.css_first(".job-location").text(deep=True, separator=" ", strip=True)))
+    return {"location": loc.strip(), "employment_type": _card_text(card, ".job-type")}
+
+
 def _careerplug_place(raw: str) -> str:
     """CareerPlug writes a place as STATE-City-ZIP ("SC-Columbia-29205"); return "Columbia, SC". Anything else is kept as is."""
     raw = re.sub(r"\s+", " ", raw or "").strip()
@@ -7417,7 +7449,7 @@ _HTML_BOARDS = {
     "freshteam": ("Freshteam", "https://{slug}.freshteam.com/jobs", r"^/jobs/[A-Za-z0-9_-]{6,}(?:/|$)", _card_freshteam),
     "peopleforce": ("PeopleForce", "https://{slug}.peopleforce.io/careers", r"/careers/v/\d+", _card_peopleforce),
     "factorial": ("Factorial", "https://{slug}.factorial.com/", r"/job_posting/", _card_factorial),
-    "loxo": ("Loxo", "https://app.loxo.co/{slug}", r"^/job/[A-Za-z0-9=_-]+$", lambda a: {}),
+    "loxo": ("Loxo", "https://app.loxo.co/{slug}", r"^/job/[A-Za-z0-9=_-]+$", _card_loxo),
     # 2026-10: CareerPlug (small-business ATS; mostly local US roles, so few survive the location filter). Two list layouts exist
     # (the link wraps the row, or sits in .job-title); both are read from the row. A dead tenant 302s to app.careerplug.com.
     "careerplug": ("CareerPlug", "https://{slug}.careerplug.com/jobs", r"^/jobs/\d+/?$", _card_careerplug),
@@ -9004,6 +9036,27 @@ async def _fetch_avature_description(job: dict) -> str:
 
 
 # Platforms that need description enrichment
+_FACTORIAL_PLACE_RE = re.compile(r"\b(?:Hybrid|Remote|On[- ]?site)\s*\(([^()]{3,90})\)", re.I)
+
+
+async def _fetch_factorial_description(job: dict) -> str:
+    """Factorial's list rows carry no place; the job page states it as "Hybrid (Iasi, Iasi, Romania)" (work mode + place in
+    brackets). Reuses the generic fetch (cached page) and fills the location from that bracket when still blank."""
+    desc = await _fetch_generic_description(job)
+    if not job.get("location"):
+        html = _enrich_cache_get(job, job.get("url", ""))
+        m = next((x for x in _FACTORIAL_PLACE_RE.finditer(html or "")
+                  if not re.search(r"(?i)depend|location|various|multiple|tbc|tba|office|per ", x.group(1))), None)
+        if m:
+            seen, parts = set(), []
+            for p in (x.strip() for x in m.group(1).split(",")):
+                if p and p.lower() not in seen:
+                    seen.add(p.lower())
+                    parts.append(p)
+            job["location"] = ", ".join(parts)
+    return desc
+
+
 DESCRIPTION_FETCHERS = {
     "iCIMS": _fetch_icims_description,
     "Workday": _fetch_workday_description,
@@ -9059,7 +9112,7 @@ DESCRIPTION_FETCHERS = {
     "ApplicantPro": _fetch_generic_description,
     "Freshteam": _fetch_generic_description,
     "PeopleForce": _fetch_generic_description,
-    "Factorial": _fetch_generic_description,
+    "Factorial": _fetch_factorial_description,
     "Loxo": _fetch_generic_description,
     "CareerPlug": _fetch_generic_description,
     "Recruiterflow": _fetch_generic_description,
