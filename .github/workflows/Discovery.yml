@@ -242,6 +242,15 @@ jobs:
           - source: openjobsdaily
             name: Open Jobs Daily H.F 3
             extra_args: "--hf-shard 2 --hf-total-shards 3"
+          # 2026-10: Scholarweave H.F (64 Parquet files, file-sharded) and HireHeat H.F (one weekly file)
+          - source: scholarweave
+            name: Scholarweave H.F 1
+            extra_args: "--hf-shard 0 --hf-total-shards 2"
+          - source: scholarweave
+            name: Scholarweave H.F 2
+            extra_args: "--hf-shard 1 --hf-total-shards 2"
+          - source: hireheat
+            name: HireHeat H.F
 
     steps:
       - name: Checkout
