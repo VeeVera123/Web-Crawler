@@ -1092,6 +1092,20 @@ GLOBAL_KEYWORDS = [
     r"\bremote\s*[\-–—/,()]?\s*distributed\b",
     r"\bremote\s*[\-–—/,()]?\s*(all|any)\s*location\b",
     r"\bremote\s*[\-–—/,()]?\s*(all|any)\s*countr\w*\b",
+    # 2026-10 vocabulary pass: "Remote - Multiple Countries", "Various countries", "Rest of World" / "Remote - RoW"
+    r"\b(?:multiple|various|several|many|different|numerous)\s+countries\b",
+    r"\bcountries\s+worldwide\b",
+    # 2026-10 vocabulary pass: pan-African / MEA scope, "WFH Global", and "worldwide" in the other major posting languages
+    r"\bpan[\-\s]*africa(?:n)?\b",
+    r"\bmea\b",
+    r"\bwfh\s*[\-–—/,()]?\s*(?:global|worldwide|anywhere)\b",
+    r"\b(?:monde\s+entier|partout\s+dans\s+le\s+monde|dans\s+le\s+monde|mondial(?:e|ement)?)\b",
+    r"\b(?:todo\s+el\s+mundo|mundo\s+entero|cualquier\s+(?:lugar|parte|pa[ií]s)|a\s+nivel\s+mundial|mundial(?:mente)?|mundo)\b",
+    r"\b(?:weltweit|[uü]berall|ueberall)\b",
+    r"\b(?:todo\s+o\s+mundo|qualquer\s+lugar|mundo\s+inteiro)\b",
+    r"\b(?:in\s+tutto\s+il\s+mondo|ovunque|mondiale)\b",
+    r"\b(?:wereldwijd|overal)\b",
+    r"\b(?:all|every)\s+(?:time\s*zones?|timezones?)\b",
     # Qualifier + remote (handles "Global (Remote)", "Worldwide - Remote", etc.)
     r"\bglobal\s*[\-–—/,()]?\s*remote\b",
     r"\bworldwide\s*[\-–—/,()]?\s*remote\b",
@@ -1444,6 +1458,19 @@ _EXTRA_GLOBAL_HIRING_RE = [re.compile(p, re.I) for p in _EXTRA_GLOBAL_HIRING_PAT
 # "work from anywhere," "no location restriction," "time zone agnostic,"
 # etc. all stay — those remain unambiguous hiring-policy statements).
 _SAFETY_NET_EXCLUDED_GLOBAL_KEYWORDS = {
+    # 2026-10: company-descriptive / ambiguous in prose ("customers in multiple countries"), fine in a location FIELD
+    r"\b(?:multiple|various|several|many|different|numerous)\s+countries\b",
+    r"\bcountries\s+worldwide\b",
+    # 2026-10 vocabulary pass: pan-African / MEA scope, "WFH Global", and "worldwide" in the other major posting languages
+    r"\bpan[\-\s]*africa(?:n)?\b",
+    r"\bmea\b",
+    r"\bwfh\s*[\-–—/,()]?\s*(?:global|worldwide|anywhere)\b",
+    r"\b(?:monde\s+entier|partout\s+dans\s+le\s+monde|dans\s+le\s+monde|mondial(?:e|ement)?)\b",
+    r"\b(?:todo\s+el\s+mundo|mundo\s+entero|cualquier\s+(?:lugar|parte|pa[ií]s)|a\s+nivel\s+mundial|mundial(?:mente)?|mundo)\b",
+    r"\b(?:weltweit|[uü]berall|ueberall)\b",
+    r"\b(?:todo\s+o\s+mundo|qualquer\s+lugar|mundo\s+inteiro)\b",
+    r"\b(?:in\s+tutto\s+il\s+mondo|ovunque|mondiale)\b",
+    r"\b(?:wereldwijd|overal)\b",
     r"\bworld\s*[\-\s]*wide\b",
     r"\baround\s+the\s+(?:world|globe)\b",
     r"\baround\s*the\s*(world|globe)\b",
@@ -1506,7 +1533,7 @@ STANDALONE_GLOBAL_RE = re.compile(
     r"^\s*(?:"
     r"[\U0001F30D\U0001F30E\U0001F30F\U0001F310]\uFE0F?\s*(?:(?:fully\s*)?remote|virtual)?"
     r"|(?:[\U0001F30D\U0001F30E\U0001F30F\U0001F310]\uFE0F?\s*)?(?:"
-    r"global|worldwide|world\s*wide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|earth|planet\s*earth|"
+    r"global(?:ly)?|worldwide|world\s*wide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|earth|planet\s*earth|"
     r"distributed|borderless|everywhere|"
     r"(?:(?:100\s*%|fully|completely)\s*)?(?:remote|virtual|telecommute|telework|home[\-\s]*based)\s*[\-–—/,|:()]?\s*"
     r"(?:global(?:\s+remote)?|worldwide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|distributed|everywhere|world|"
@@ -1519,6 +1546,7 @@ STANDALONE_GLOBAL_RE = re.compile(
 NON_GEO_WORDS_RE = re.compile(
     r"\b("
     r"remote|fully|completely|"                             # remote modifiers
+    r"remot[oa]|t[eé]l[eé]travail|teletrabajo|teletrabalho|fernarbeit|thuiswerk|lavoro|trabajo|trabalho|travail|arbeit|"
     r"full[\-\s]*time|part[\-\s]*time|"                     # employment types
     r"contract(?:or|ual)?|permanent|temporary|temp|"
     r"freelance|intern(?:ship)?|hourly|salaried|"
@@ -1986,7 +2014,7 @@ def _broad_scope_check(loc: str, loc_lower: str) -> tuple[str, str | None]:
     # 4. Explicit Global/Worldwide/International/Distributed/Anywhere/... keyword (see GLOBAL_KEYWORDS, ~80
     # variants). Residue check: strip the EXACT substring(s) that matched, then confirm nothing else (a real
     # city/country name) is left over -- "Global (Remote, US Only)" must not match just because "Global" appears.
-    if STANDALONE_GLOBAL_RE.search(loc.strip()):
+    if STANDALONE_GLOBAL_RE.search(loc.strip()) or _tz_range_is_global(loc):
         return "match", PRIORITY_GLOBAL
     check = loc_lower
     matched_any = False
@@ -2045,6 +2073,40 @@ def _combined_location(job: dict) -> str:
     return (raw_loc + " " + ", ".join(extra)).strip()
 
 
+# 2026-10: legal / privacy-notice boilerplate ("Pursuant to the California Consumer Privacy Act ... job applicants residing in
+# California", "GDPR: applicants located in the EEA ...") names places without restricting who may apply - a real worldwide
+# Himalayas posting was dropped over a CCPA notice. Such sentences are removed before the detectors run, unless the same
+# sentence also states an eligibility rule.
+_PRIVACY_NOTICE_MARKER_RE = re.compile(
+    r"\b(?:CCPA|CPRA|GDPR|UK\s+GDPR|PIPEDA|LGPD|California\s+Consumer\s+Privacy|California\s+Privacy\s+Rights|privacy\s+(?:notice|policy|statement)|"
+    r"data\s+protection\s+(?:notice|law|regulation)|personal\s+(?:information|data)\s+(?:we\s+)?collect)", re.I)
+_PRIVACY_ELIGIBILITY_RE = re.compile(
+    r"\b(?:must|requires?|required|requirement|citizens?|citizenship|nationals?|mandatory|need(?:s)?\s+to|have\s+to|restricted\s+to|limited\s+to|"
+    r"eligible|eligibility|only\s+(?:open|available|accepting|considering)|not\s+eligible|cannot\s+apply|authori[sz]ed\s+to\s+work|"
+    r"work\s+authori[sz]ation|right\s+to\s+work)\b", re.I)
+
+
+def _strip_privacy_notice_sentences(text: str) -> str:
+    kept = [s for s in _split_into_sentences(text)
+            if not (len(s) <= 600 and _PRIVACY_NOTICE_MARKER_RE.search(s) and not _PRIVACY_ELIGIBILITY_RE.search(s))]
+    return "\n".join(kept)
+
+
+_TZ_RANGE_RE = re.compile(r"(?:utc|gmt)\s*([+\-−]\s*\d{1,2})(?::\d{2})?\s*(?:to|through|[\-–—])\s*(?:utc|gmt)?\s*([+\-−]\s*\d{1,2})", re.I)
+
+
+def _tz_range_is_global(loc: str) -> bool:
+    """A time-zone range wide enough to cover every inhabited zone ("UTC-10 to UTC+14", "GMT-12 - GMT+12") is no restriction."""
+    for m in _TZ_RANGE_RE.finditer(loc or ""):
+        try:
+            lo, hi = (int(g.replace("−", "-").replace(" ", "")) for g in m.groups())
+        except ValueError:
+            continue
+        if hi - lo >= 20:
+            return True
+    return False
+
+
 def _with_normalized_text(job: dict) -> dict:
     """The job with title / location / description Unicode-normalised (fullwidth letters, zero-width and
     soft-hyphen characters, non-breaking spaces, wrapped question lines) so a look-alike character can't
@@ -2054,6 +2116,10 @@ def _with_normalized_text(job: dict) -> dict:
         v = job.get(key)
         if isinstance(v, str) and v:
             n = _normalize_form_text(v)
+            if key == "description_snippet" and _PRIVACY_NOTICE_MARKER_RE.search(n):
+                n = _strip_privacy_notice_sentences(n)
+            if key == "location" and "_" in n:
+                n = n.replace("_", " ")  # "Remote_Worldwide" is an ATS slug-style separator
             if n != v:
                 changed[key] = n
     return dict(job, **changed) if changed else job
@@ -2207,6 +2273,8 @@ def _keyword_classify_location_detail(job: dict) -> tuple[str, int | None, str |
     if has_country_tied_sponsorship_permit_residency_signal(job):
         return "no_match", None, None
     if has_citizenship_or_residency_only_signal(job):
+        return "no_match", None, None
+    if has_nonenglish_or_explicit_onsite_signal(job):
         return "no_match", None, None
 
     # ── 0.77. HARD OVERRIDE (2026-09, explicit user report, real posting:
@@ -3692,6 +3760,14 @@ _VISA_YES_RE = re.compile(
 )
 
 
+_SPONSOR_NOT_NEEDED_REMOTE_RE = re.compile(
+    r"\b(?:no|not)\b[^.?!;]{0,40}\b(?:visa|sponsorship|work\s+permit|relocation)\b[^.?!;]{0,30}\b(?:necessary|needed|required|an?\s+issue)\b"
+    r"[^.?!;]{0,60}\b(?:because|since|as|given|when)\b[^.?!;]{0,40}\b(?:remote(?:ly)?|from\s+(?:your\s+)?(?:own\s+)?(?:home|country)|home\s+country)\b"
+    r"|\b(?:because|since|as|given)\b[^.?!;]{0,40}\b(?:remote(?:ly)?|from\s+(?:your\s+)?(?:own\s+)?(?:home|country)|home\s+country)\b"
+    r"[^.?!;]{0,60}\b(?:no|not)\b[^.?!;]{0,40}\b(?:visa|sponsorship|work\s+permit|relocation)\b[^.?!;]{0,30}\b(?:necessary|needed|required)\b",
+    re.I)
+
+
 def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
     """True if any sentence/CLAUSE in `text` mentions the sponsorship/
     work-permit topic (in a genuine visa/immigration sense — see
@@ -3729,6 +3805,10 @@ def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
             # dropping legitimate "work without a visa" statements. A
             # direct hit on the "without <topic>" pattern is enough on
             # its own.
+            # 2026-10: "No visa sponsorship is necessary because you work remotely from your home country" says the
+            # opposite of a restriction (nothing to sponsor - nobody is relocating).
+            if _SPONSOR_NOT_NEEDED_REMOTE_RE.search(clause):
+                continue
             if _SPONSOR_WITHOUT_TOPIC_RE.search(clause):
                 return True
             has_genuine_topic = False
@@ -4535,7 +4615,14 @@ _CANDIDATE_WORD_RE = re.compile(r"\b(?:candidates?|applicants?|residents?)\b", r
 _ANY_RESIDENCE_PLACE_RE = re.compile(r"\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")\b", re.I)
 
 _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
-    r"\b(?:teams?|offices?|headquarters|hq|compan(?:y|ies)|organizations?|"
+    # 2026-10: who the company SELLS TO / serves is not where the candidate must live ("our customers are mostly based in the
+    # US and Canada"), and a negated requirement is not a requirement ("there is no requirement to be located in the US").
+    r"\b(?:customers?|clients?|users?|prospects?|partners?|audience|accounts?|members?|patients?|students?|merchants?|"
+    r"subscribers?|vendors?|suppliers?)\b[^.?!]{0,60}\b(?:based|located|headquartered|situated|residing|living)\s+(?:in|across|throughout)\b"
+    r"|\b(?:no|not|without)\s+(?:(?:a|any)\s+)?(?:requirements?|need|obligation|necessity|mandate)\s+(?:for\s+you\s+)?to\s+(?:be\s+)?"
+    r"(?:located|based|living|resid\w+|live|reside|work\s+from)\b"
+    r"|\b(?:is|are)\s+not\s+(?:required|necessary|needed|mandatory)\s+to\s+(?:be\s+)?(?:located|based|living|resid\w+|live|reside)\b"
+    r"|\b(?:teams?|offices?|headquarters|hq|compan(?:y|ies)|organizations?|"
     r"organisations?|orgs?|departments?|divisions?|studios?|founders?)\b"
     # 2026-10: other ways a posting describes ITS OWN location: "a law firm based in California", "an innovation platform
     # based in Amsterdam", "our startup is headquartered in Berlin" (found auditing employer-declared-worldwide jobs).
@@ -6728,6 +6815,127 @@ def has_citizenship_or_residency_only_signal(job: dict) -> bool:
     return False
 
 
+
+# ── 2026-10 vocabulary pass: explicit on-site / not-remote statements, passport & timezone-only gates, and the residency /
+# work-permit / in-office wording of the major non-English posting languages (es, fr, pt, de, it, nl). Found by a stress corpus
+# of ~380 phrasings: every one of these passed as "global" before. Sentence by sentence; a sentence that is negated ("no es
+# necesario residir en ..."), names a global / EMEA / Africa scope, or several business regions together is skipped.
+_NX_PLACE = (
+    r"(?-i:(?!(?:Europ[ae]|Europe|Afri[ck]a|Afrique|Afrika|EMEA|EMOA|Mund[oi]|Monde|Welt|Wereld|World|Global|Worldwide|Remote|Remoto|"
+    r"Home|Casa|Hause|Haus|Office|Oficina|Bureau|Büro|Escritório)\b)"
+    r"[A-ZÀ-ÖØ-Þ][\wÀ-ÿ'’.-]+(?:\s+(?:(?:de|del|la|los|las|of|the|do|da|dos|das|des|du|di|van|der|den)\s+)?[A-ZÀ-ÖØ-Þ][\wÀ-ÿ'’.-]+){0,2})"
+)
+_NX_LOC = r"(?:en|in|im|em|no|na|nos|nas|au|aux|à|a|dans|nel|nell['’]|nella|nello|van|im\s+Raum|in\s+der|en\s+el|en\s+la)\s+(?:el\s+|la\s+|le\s+|les\s+|o\s+|a\s+)?"
+_NONENGLISH_AND_ONSITE_RES = [re.compile(p, re.I) for p in (
+    # ── English: explicit "this is not remote" / on-site wording
+    r"\b(?:this\s+(?:is|role\s+is|position\s+is|job\s+is)|is|are)\s+not\s+(?:a\s+|an\s+)?(?:fully\s+|100\s*%\s*)?remote(?:\s+(?:position|role|job|opportunity|work|friendly|eligible))?\b",
+    r"\bremote\s+(?:work|working|options?)\s+(?:is\s+|are\s+)?(?:not\s+(?:available|possible|offered|permitted|allowed|an\s+option)|unavailable)\b",
+    r"\bno\s+remote\s+(?:work|working|options?|opportunities)\b",
+    r"\b(?:100\s*%|fully|entirely|completely|strictly)\s+(?:on[\-\s]?site|in[\-\s]?office|in[\-\s]?person)\b",
+    r"\b(?:on[\-\s]?site|in[\-\s]?office|in[\-\s]?person)\s+(?:role|position|job)\b",
+    r"\b(?:hybrid|in[\-\s]?office|on[\-\s]?site)\s+(?:work\s+)?(?:schedule|model|arrangement|policy)\b",
+    r"\bin[\-\s]?person\s+(?:presence|attendance)\b[^.?!]{0,60}\b(?:required|mandatory|expected|necessary)\b",
+    r"\b(?:presence|attendance)\s+(?:in|at)\s+(?:the|our)\s+(?:\w+\s+){0,3}(?:office|headquarters|hq|site|premises)\b[^.?!]{0,40}\b(?:required|mandatory|expected)\b",
+    r"\b(?:expected|required)\s+(?:to\s+be\s+|to\s+work\s+)?(?:in|at|from)\s+(?:the|our)\s+(?:\w+\s+){0,3}(?:office|headquarters|site|premises)\b",
+    # ── English: nationality / passport gates
+    r"\b(?:must|need(?:s)?\s+to|required\s+to|have\s+to)\s+(?:hold|have|possess|carry|obtain)\s+(?:a\s+|an\s+|valid\s+|current\s+)*(?:" + _STATUS_COUNTRY_FRAGMENT
+    + r"|eu|european)\s+(?:passport|national\s+id|id\s+card|work\s+visa|work\s+permit)\b",
+    r"\b(?:settled\s+status|indefinite\s+leave\s+to\s+remain|permanent\s+residen(?:cy|t)\s+(?:status|card)|green\s*card)\b[^.?!]{0,30}\b(?:required|mandatory|needed|necessary)\b",
+    r"\b(?:must|need(?:s)?\s+to)\s+(?:have|hold)\b[^.?!]{0,20}\b(?:settled\s+status|indefinite\s+leave\s+to\s+remain|green\s*card)\b",
+    # ── English: a single named time zone as the ONLY eligible zone
+    r"\bonly\s+(?:considering|accepting|hiring|looking\s+at|open\s+to)\s+(?:candidates|applicants|people)\b[^.?!]{0,30}\b(?:in|within|on|from)\s+(?:the\s+)?"
+    r"(?:pacific|eastern|central|mountain|est|edt|cst|cdt|mst|mdt|pst|pdt|cet|cest|gmt|bst|ist|aest|jst)\b(?:\s+(?:time|timezone|time\s+zone|standard\s+time))?\b",
+    r"\bmust\s+(?:be\s+)?(?:located|based|working|live|living|reside|residing)\s+(?:in|within|on)\s+(?:the\s+)?(?:pacific|eastern|central|mountain)\s+(?:time\s*zone|timezone|time)\b",
+    # ── English: "must be a California / UK resident", "Texas residents only"
+    r"\b(?:must|need(?:s)?\s+to|have\s+to|should)\s+be\s+(?:a\s+|an\s+)?(?:current\s+|legal\s+|permanent\s+|full[\-\s]time\s+)*(?:" + _US_STATE_FULL_NAMES_FRAGMENT
+    + r"|" + _STATUS_COUNTRY_FRAGMENT + r")\s+(?:resident|residents|citizen|citizens)\b",
+    r"\b(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s+residents?\s+(?:only|are\s+(?:eligible|required|preferred)|can\s+apply|will\s+be\s+considered)\b",
+    # ── English: only for people who need NO sponsorship / entity-bound eligibility
+    r"\b(?:only|must)\b[^.?!]{0,40}\b(?:do(?:es)?\s+not|don'?t|not)\s+(?:currently\s+|now\s+|in\s+the\s+future\s+)?(?:require|need)\b[^.?!]{0,30}\b(?:h-?1b|visa|sponsorship|work\s+permit|immigration)\b",
+    r"\b(?:located|based|reside|residing|live|living)\s+in\s+(?:a\s+)?countr(?:y|ies)\s+where\s+we\s+(?:have|operate|maintain|own|are\s+registered)\b[^.?!]{0,40}\b(?:subsidiar(?:y|ies)|entity|entities|offices?|presence|incorporated)\b",
+    # ── Spanish
+    r"\b(?:deben|debes|debe|tienes\s+que|tiene\s+que|es\s+necesario|es\s+obligatorio|necesario|obligatorio|se\s+requiere|requerimos|exigimos|imprescindible)\b"
+    r"[^.?!]{0,30}\b(?:residir|vivir|radicar|residencia|domicilio|estar\s+(?:ubicad[oa]s?|basad[oa]s?|domiciliad[oa]s?))\b[^.?!]{0,12}\b" + _NX_LOC + _NX_PLACE,
+    r"\b(?:residentes?|radicad[oa]s?|domiciliad[oa]s?)\s+(?:en|de)\s+" + _NX_PLACE + r"\s+(?:únicamente|solamente|solo|exclusivamente)\b",
+    r"\b(?:autorizaci[oó]n|permiso)\s+(?:de\s+trabajo|para\s+trabajar|de\s+residencia)\b[^.?!]{0,25}\b" + _NX_LOC + _NX_PLACE,
+    r"\b(?:derecho|permiso|autorizaci[oó]n)\s+(?:a|para)\s+trabajar\s+" + _NX_LOC + _NX_PLACE,
+    r"\bpresencia\s+(?:en\s+(?:la\s+)?oficina|presencial)\b[^.?!]{0,50}\b(?:obligatori\w+|requerid\w+|necesari\w+)\b",
+    r"\b(?:presencial|trabajo\s+presencial|modalidad\s+presencial|sin\s+teletrabajo|no\s+es\s+remoto|no\s+remoto)\b",
+    # ── French
+    r"\b(?:doivent|devez|doit|obligatoire|n[eé]cessaire|requis[e]?|exig[eé]e?)\b[^.?!]{0,30}\b(?:r[eé]sider|habiter|vivre|r[eé]sidence|domicili[eé]\w*|[eê]tre\s+(?:bas[eé]\w*|situ[eé]\w*|localis[eé]\w*))\b"
+    r"[^.?!]{0,12}\b" + _NX_LOC + _NX_PLACE,
+    r"\br[eé]sidence\s+(?:en|au|aux|dans)\s+" + _NX_PLACE + r"\s+(?:obligatoire|requise|exig[eé]e|n[eé]cessaire)\b",
+    r"\b(?:autorisation|permis)\s+de\s+travail(?:ler)?\b[^.?!]{0,25}\b" + _NX_LOC + _NX_PLACE,
+    r"\bdroit\s+de\s+travailler\s+" + _NX_LOC + _NX_PLACE,
+    r"\bpr[eé]sence\s+(?:au\s+bureau|sur\s+site|en\s+pr[eé]sentiel)\b[^.?!]{0,50}\b(?:obligatoire|requise|n[eé]cessaire)\b",
+    r"\b(?:pas\s+de\s+t[eé]l[eé]travail|t[eé]l[eé]travail\s+(?:non\s+(?:possible|autoris[eé])|impossible)|sur\s+site\s+uniquement|poste\s+(?:100\s*%\s*)?pr[eé]sentiel)\b",
+    # ── Portuguese
+    r"\b(?:devem|deve|precisa(?:m)?|necess[aá]rio|obrigat[oó]rio|exigimos|[eé]\s+preciso)\b[^.?!]{0,30}\b(?:residir|morar|viver|resid[eê]ncia|domic[ií]lio|estar\s+(?:localizad[oa]s?|basead[oa]s?))\b"
+    r"[^.?!]{0,12}\b" + _NX_LOC + _NX_PLACE,
+    r"\bresid[eê]ncia\s+(?:em|no|na|nos|nas)\s+" + _NX_PLACE + r"\s+(?:obrigat[oó]ria|necess[aá]ria|exigida)\b",
+    r"\b(?:autoriza[cç][aã]o|permiss[aã]o)\s+de\s+trabalho\b[^.?!]{0,25}\b" + _NX_LOC + _NX_PLACE,
+    r"\bpresen[cç]a\s+(?:no\s+escrit[oó]rio|presencial)\b[^.?!]{0,50}\b(?:obrigat[oó]ri\w+|necess[aá]ri\w+|exigid\w+)\b",
+    r"\b(?:n[aã]o\s+[eé]\s+remot[oa]|sem\s+trabalho\s+remoto|apenas\s+presencial|vaga\s+presencial|trabalho\s+presencial)\b",
+    # ── German
+    r"\b(?:wohnhaft|ansässig|wohnsitz|ans[aä]ssig|ansaessig)\b[^.?!]{0,10}\b(?:in|im)\s+(?:der\s+|dem\s+|den\s+|die\s+)?" + _NX_PLACE + r"(?=[^.?!]{0,50}\b(?:erforderlich|notwendig|zwingend|voraussetzung|muss|müssen|vorausgesetzt)\b)",
+    r"\b(?:muss|müssen|sollten|sollen)\b[^.?!]{0,30}\b(?:in|im)\s+(?:der\s+|dem\s+|den\s+|die\s+)?" + _NX_PLACE + r"\s+(?:leben|wohnen|ans[aä]ssig\s+sein|wohnhaft\s+sein|ihren\s+wohnsitz\s+haben)\b",
+    r"\bwohnsitz\s+(?:in|im)\s+" + _NX_PLACE + r"\s+(?:ist\s+)?(?:erforderlich|notwendig|zwingend|voraussetzung|pflicht)\b",
+    r"\b(?:arbeitserlaubnis|arbeitsgenehmigung|aufenthaltserlaubnis|arbeitsberechtigung)\b[^.?!]{0,25}\b(?:für|fuer|in)\s+" + _NX_PLACE,
+    r"\b(?:pr[aä]senz|anwesenheit)\s+(?:im|vor\s+ort|in\s+(?:unserem|unserer)?\s*)\s*(?:b[uü]ro|unternehmen|standort)?\b[^.?!]{0,50}\b(?:erforderlich|notwendig|pflicht|zwingend|erwartet)\b",
+    r"\b(?:vor\s+ort\s+(?:erforderlich|pflicht|zwingend)|kein\s+(?:home\s*office|remote)|keine\s+remote[\-\s]?arbeit|nicht\s+remote|ausschlie[sß]lich\s+vor\s+ort)\b",
+    # ── Italian
+    r"\b(?:devi|devono|deve|necessario|obbligatorio|richiesto|richiesta)\b[^.?!]{0,30}\b(?:risiedere|vivere|abitare|residenza|domicilio|essere\s+(?:residente|domiciliato\w*|basato|ubicato))\b"
+    r"[^.?!]{0,12}\b" + _NX_LOC + _NX_PLACE,
+    r"\bresidenza\s+(?:in|a|nel|nella)\s+" + _NX_PLACE + r"\s+(?:obbligatoria|richiesta|necessaria)\b",
+    r"\b(?:permesso|autorizzazione)\s+di\s+lavoro\b[^.?!]{0,25}\b(?:per|in)\s+(?:l['’]\s*)?" + _NX_PLACE,
+    r"\bpresenza\s+(?:in\s+ufficio|fisica|in\s+sede)\b[^.?!]{0,50}\b(?:obbligatoria|richiesta|necessaria)\b",
+    r"\b(?:non\s+[eè]\s+(?:una\s+posizione\s+)?remot[oa]|nessun\s+lavoro\s+da\s+remoto|solo\s+in\s+sede|posizione\s+in\s+sede)\b",
+    # ── Dutch
+    r"\b(?:moet|moeten|dient|dienen|verplicht)\b[^.?!]{0,30}\b(?:wonen|woonachtig\s+zijn|gevestigd\s+zijn|verblijven)\b[^.?!]{0,12}\b(?:in|te)\s+" + _NX_PLACE,
+    r"\b(?:moet|moeten|dient|dienen)\b[^.?!]{0,12}\b(?:in|te)\s+" + _NX_PLACE + r"\s+(?:wonen|verblijven|gevestigd\s+zijn|woonachtig\s+zijn)\b",
+    r"\bwoonachtig\s+(?:in|te)\s+" + _NX_PLACE + r"\s+(?:vereist|verplicht|noodzakelijk)\b",
+    r"\b(?:werkvergunning|verblijfsvergunning)\b[^.?!]{0,25}\b(?:voor|in)\s+" + _NX_PLACE,
+    r"\b(?:aanwezigheid\s+op\s+kantoor|op\s+kantoor\s+aanwezig)\b[^.?!]{0,40}\b(?:vereist|verplicht)\b",
+    r"\b(?:geen\s+thuiswerk|niet\s+remote|alleen\s+op\s+locatie)\b",
+)]
+# Negations in the same languages: "no es necesario residir", "pas besoin d'habiter", "nicht erforderlich", "não é obrigatório" ...
+_NONENGLISH_NEGATION_RE = re.compile(
+    r"\b(?:no\s+(?:es\s+)?(?:necesario|obligatorio|requerid\w+|imprescindible|importa)|sin\s+(?:necesidad|importar|requisitos?)|"
+    r"pas\s+(?:de\s+)?(?:besoin|n[eé]cessaire|obligatoire|exig\w+)|sans\s+(?:condition|obligation)|n['’]est\s+pas\s+(?:n[eé]cessaire|requis\w*|obligatoire)|"
+    r"n[aã]o\s+(?:[eé]\s+)?(?:necess[aá]ri\w+|obrigat[oó]ri\w+|exigid\w+|precisa)|sem\s+(?:necessidade|exig[eê]ncia)|"
+    r"nicht\s+(?:erforderlich|notwendig|n[oö]tig|zwingend|vorausgesetzt)|kein(?:e)?\s+(?:wohnsitz|pr[aä]senz|anwesenheit)|unabh[aä]ngig\s+(?:vom|von)|"
+    r"non\s+(?:[eè]\s+)?(?:necessari\w+|obbligatori\w+|richiest\w+)|senza\s+(?:obbligo|vincoli)|"
+    r"niet\s+(?:vereist|verplicht|nodig|noodzakelijk)|geen\s+(?:vereiste|verplichting))\b", re.I)
+_NX_GLOBAL_SCOPE_RE = re.compile(
+    r"\b(?:eor|employer\s+of\s+record|contractors?|cualquier\s+(?:lugar|parte|pa[ií]s)|todo\s+el\s+mundo|mundo\s+entero|worldwide|world|globally|global|anywhere|"
+    r"n['’]importe\s+o[uù]|partout|monde\s+entier|qualquer\s+(?:lugar|pa[ií]s)|todo\s+o\s+mundo|"
+    r"überall|weltweit|von\s+(?:überall|zu\s+hause)|ovunque|in\s+tutto\s+il\s+mondo|overal|wereldwijd)\b", re.I)
+
+
+def has_nonenglish_or_explicit_onsite_signal(job: dict) -> bool:
+    """Universal hard override for restriction wording the English-only detectors never saw: explicit "not a remote position" /
+    "100% on-site" / "in-person presence required", nationality-passport gates, a lone eligible time zone, and the residency /
+    work-permit / office-presence phrasing of Spanish, French, Portuguese, German, Italian and Dutch postings."""
+    text = (job.get("description_snippet") or "") + " " + (job.get("title") or "")
+    if not text.strip():
+        return False
+    for sentence in _split_into_sentences(text):
+        if not sentence.strip() or len(sentence) > 600:
+            continue
+        if not any(rx.search(sentence) for rx in _NONENGLISH_AND_ONSITE_RES):
+            continue
+        if _NONENGLISH_NEGATION_RE.search(sentence) or _NX_GLOBAL_SCOPE_RE.search(sentence) or _CITIZEN_RESIDENT_NEGATION_RE.search(sentence):
+            continue
+        if _has_multi_region_breadth(sentence):
+            continue
+        # "Hybrid schedule" etc. in a sentence that also says the role is fully remote / office optional is not an on-site rule
+        if re.search(r"\b(?:remote[\-\s]first|fully\s+remote|100\s*%\s*remote|office\s+is\s+optional|optional\s+(?:office|in[\-\s]person)|no\s+office|"
+                     r"not\s+required\s+to\s+(?:come|be)\s+in)\b", sentence, re.I):
+            continue
+        return True
+    return False
+
+
 def _rank4_has_country_tied_restrictive_question(job: dict) -> bool:
     """Rank-4-only guard — see has_country_tied_sponsorship_permit_
     residency_signal (the universal version, applied to every rank) for
@@ -7277,7 +7485,10 @@ def has_candidate_binding_jd_signal(job: dict) -> bool:
         if (sentence.strip() and len(sentence) <= 400 and not _Q_ENGLISH_MARKER_RE.search(sentence)
                 and _JD_MULTI_REQUIREMENT_RE.search(sentence)
                 and (_Q_PLACE_RE.search(sentence) or _Q_LOCAL_PLACES_RE.search(sentence))
-                and any(rx.search(sentence) for rx in _ELIG_MULTILINGUAL_RES)):
+                and any(rx.search(sentence) for rx in _ELIG_MULTILINGUAL_RES)
+                # 2026-10: "No es necesario residir en España" / "Wohnsitz in Deutschland ist nicht erforderlich" /
+                # "Pas besoin de résider en France" are the opposite of a requirement
+                and not _NONENGLISH_NEGATION_RE.search(sentence) and not _NX_GLOBAL_SCOPE_RE.search(sentence)):
             return True
     return False
 
@@ -7301,6 +7512,7 @@ _RANK4_GENUINE_RESTRICTION_CHECKS = (
     has_extra_restrictive_geography_signal,
     _rank4_has_country_tied_restrictive_question,
     has_citizenship_or_residency_only_signal,
+    has_nonenglish_or_explicit_onsite_signal,
     has_state_specific_license_signal,
     has_language_fluency_restriction_signal,
 )

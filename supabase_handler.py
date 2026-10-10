@@ -78,7 +78,14 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #  15 - 2026-10-10: global-hiring language widened (globe emoji, "Virtual/Telecommute - Worldwide", "Remote - open to all",
 #       "Anywhere on Earth", "not location-bound", "location agnostic", "don't care where you work from", "hire across the
 #       globe", "you choose where you work"); bumped so revalidation re-checks stored rows.
-CLASSIFIER_VERSION = 15
+#  16 - 2026-10-10: vocabulary pass. Loosened: "no requirement to be located in the US", "our customers are based in
+#       the US", "no visa sponsorship is necessary because you work remotely", legal/privacy-notice sentences (CCPA/GDPR)
+#       naming a state, "Remote - Multiple/Various Countries", pan-African / MEA, "WFH Global", "Globally", "Remote_Worldwide",
+#       "worldwide" in French/Spanish/German/Portuguese/Italian/Dutch, a time-zone range spanning every zone, negated
+#       residency statements in those languages. Tightened: explicit "not a remote position" / "100% on-site" / "in-person
+#       presence required", passport and "must be a California/UK resident" gates, a lone eligible time zone, entity-bound
+#       eligibility, and the residency / work-permit / office-presence wording of es/fr/pt/de/it/nl postings.
+CLASSIFIER_VERSION = 16
 
 import os
 from dotenv import load_dotenv
