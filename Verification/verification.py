@@ -972,6 +972,11 @@ async def _verify_keka(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_jobsoid(session: aiohttp.ClientSession, slug: str) -> bool:
+    """An unknown tenant 301-redirects its board page to portal.jobsoid.com/?notfound=true."""
+    return await _verify_by_status(session, f"https://{slug}.jobsoid.com/")
+
+
 async def _verify_getro(session: aiohttp.ClientSession, slug: str) -> bool:
     """A Getro board is live when its network has jobs. slug is a {tenant} (read the network id from the board page) or
     a numeric network id."""
@@ -1177,6 +1182,7 @@ ARCHIVE_II_VERIFIERS = {
     "recruiterflow": _verify_recruiterflow,
     "homerun": _verify_homerun,
     "keka": _verify_keka,
+    "jobsoid": _verify_jobsoid,
     "getro": _verify_getro,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full

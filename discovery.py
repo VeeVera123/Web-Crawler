@@ -603,6 +603,8 @@ SUPPORTED_ATS = {
     "recruiterflow", "homerun",
     # 2026-10: Keka Hire (India): {tenant}.keka.com/careers, public embedjobs JSON.
     "keka",
+    # 2026-10: Jobsoid: {tenant}.jobsoid.com, public /api/v1/jobs JSON with full descriptions.
+    "jobsoid",
     # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
     # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
     "getro",
@@ -2175,7 +2177,7 @@ def _url_to_slug_traffit(url: str) -> str | None:
 
 _HTML_BOARD_NON_TENANTS = frozenset({"support", "developers", "api", "help", "docs", "blog", "status", "community", "learn", "marketplace",
                                      "partners", "careers", "jobs", "go", "info", "mail", "email", "admin", "login", "my", "static", "assets",
-                                     "cdn", "app", "apps", "demo", "sandbox", "staging", "test"})
+                                     "cdn", "app", "apps", "demo", "sandbox", "staging", "test", "resources", "helpcenter", "portal", "kb", "learn"})
 
 
 def _html_board_tenant(url: str, suffix: str) -> str | None:
@@ -2228,6 +2230,11 @@ def _url_to_slug_keka(url: str) -> str | None:
     if not parsed.path.lower().startswith("/careers"):
         return None
     return _html_board_tenant(url, ".keka.com")
+
+
+def _url_to_slug_jobsoid(url: str) -> str | None:
+    """Jobsoid (2026-10): {tenant}.jobsoid.com -> tenant (resources./helpcenter./portal. are the vendor's own hosts)."""
+    return _html_board_tenant(url, ".jobsoid.com")
 
 
 def _url_to_slug_loxo(url: str) -> str | None:
@@ -2667,6 +2674,7 @@ URL_TO_SLUG = {
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
     "keka": _url_to_slug_keka,
+    "jobsoid": _url_to_slug_jobsoid,
     "recruiterflow": _url_to_slug_recruiterflow,
     "homerun": _url_to_slug_homerun,
     "isolvedhire": _url_to_slug_isolvedhire,
@@ -3384,6 +3392,7 @@ CC_PLATFORM_PATTERNS = {
     "factorial": ["*.factorial.com/job_posting/*"],
     "loxo": ["app.loxo.co/*"],
     "keka": ["*.keka.com/careers*"],
+    "jobsoid": ["*.jobsoid.com/*"],
     "recruiterflow": ["recruiterflow.com/*/jobs*"],
     "homerun": ["*.homerun.co/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
@@ -3481,6 +3490,7 @@ CC_EXTRACTORS = {
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
     "keka": _url_to_slug_keka,
+    "jobsoid": _url_to_slug_jobsoid,
     "recruiterflow": _url_to_slug_recruiterflow,
     "homerun": _url_to_slug_homerun,
     "isolvedhire": _url_to_slug_isolvedhire,
@@ -3893,6 +3903,15 @@ def _cc_check_keka(slug: str) -> bool | None:
     if "TenantNotFound" in r.url:
         return False
     return True if r.status_code == 200 else (False if r.status_code == 404 else None)
+
+
+def _cc_check_jobsoid(slug: str) -> bool | None:
+    """An unknown tenant 301-redirects its board page to portal.jobsoid.com/?notfound=true; a live one answers 200."""
+    try:
+        r = requests.get(f"https://{slug}.jobsoid.com/", timeout=10, allow_redirects=False, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    return True if r.status_code == 200 else (False if r.status_code in (301, 302, 404) else None)
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -4313,6 +4332,7 @@ _CC_LIVE_CHECK = {
     "factorial": _via_verification("factorial", _cc_check_factorial),
     "loxo": _via_verification("loxo", _cc_check_loxo),
     "keka": _via_verification("keka", _cc_check_keka),
+    "jobsoid": _via_verification("jobsoid", _cc_check_jobsoid),
     "recruiterflow": _via_verification("recruiterflow", _cc_check_recruiterflow),
     "homerun": _via_verification("homerun", _cc_check_homerun),
     "getro": _via_verification("getro", _cc_check_getro),
@@ -7239,7 +7259,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "applicantpro": "applicantpro", "traffit": "traffit",
     "freshteam": "freshteam", "peopleforce": "peopleforce", "factorial": "factorial", "loxo": "loxo",
     "recruiterflow": "recruiterflow", "homerun": "homerun",
-    "keka": "keka",
+    "keka": "keka", "jobsoid": "jobsoid",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7262,7 +7282,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("applicantpro.com", "applicantpro"), ("traffit.com", "traffit"),
     ("freshteam.com", "freshteam"), ("peopleforce.io", "peopleforce"), ("factorial.com", "factorial"), ("app.loxo.co", "loxo"),
     ("recruiterflow.com", "recruiterflow"), ("homerun.co", "homerun"),
-    ("keka.com", "keka"),
+    ("keka.com", "keka"), ("jobsoid.com", "jobsoid"),
 )
 
 

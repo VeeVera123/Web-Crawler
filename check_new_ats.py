@@ -395,6 +395,25 @@ async def fake_keka_nf(url, **kw):
 A._get = fake_keka_nf
 check(asyncio.run(A.scrape_keka("acme")) == [] and asyncio.run(A.scrape_keka("Bad Slug!")) == [], "keka: unknown tenant / bad slug")
 
+# ── Jobsoid (2026-10) ──
+for url, want in [("https://music-ministry.jobsoid.com/j/1/x", "music-ministry"), ("https://www.jobsoid.com/", None), ("https://resources.jobsoid.com/a", None), ("https://portal.jobsoid.com/", None)]:
+    check(D._url_to_slug_jobsoid(url) == want, f"jobsoid slug {url} -> {D._url_to_slug_jobsoid(url)!r}")
+check("jobsoid" in D.URL_TO_SLUG and "jobsoid" in D.SUPPORTED_ATS and "jobsoid" in A.SCRAPERS and "jobsoid" in D._CC_LIVE_CHECK, "jobsoid registered")
+JS = [{"id": "86833", "title": "Protestant Coordinator", "description": "<p>Lead worship.</p>", "location": {"title": "NSA Naples", "city": "Gricignano", "state": "", "country": "Italy"},
+       "department": {"title": "Religious Education"}, "type": "Contract", "salary": "", "hostedUrl": "https://mm.jobsoid.com/j/86833/x", "company": "Music Ministry"},
+      {"id": "2", "title": "No url"}, {"id": "3", "title": "Remote Coordinator", "description": "x", "location": {"title": "Remote"}, "hostedUrl": "https://mm.jobsoid.com/j/3/y"}]
+
+
+async def fake_js(url, **kw):
+    return R("", 200, url, JS)
+
+
+A._get = fake_js
+jj = asyncio.run(A.scrape_jobsoid("MM"))
+check(len(jj) == 2 and jj[0]["location"] == "Gricignano, Italy" and jj[0]["department"] == "Religious Education" and jj[0]["company"] == "Music Ministry"
+      and "Lead worship" in jj[0]["description_snippet"] and jj[1]["location"] == "Remote", f"jobsoid {jj}")
+check(asyncio.run(A.scrape_jobsoid("Bad Slug!")) == [], "jobsoid: bad slug")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

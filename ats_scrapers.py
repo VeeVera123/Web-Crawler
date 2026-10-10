@@ -7594,6 +7594,48 @@ async def scrape_keka(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Jobsoid ───────────────────────────────────────────────────────────────────
+# 2026-10, verified live on music-ministry.jobsoid.com (42 jobs). {slug}.jobsoid.com/api/v1/jobs is the keyless JSON the
+# board itself loads: a plain list with the full HTML description, location {title, city, state, country}, department,
+# hostedUrl. An unknown tenant answers [] on the API but 301-redirects its board page to portal.jobsoid.com/?notfound=true.
+async def scrape_jobsoid(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+        return []
+    r = await _get(f"https://{slug}.jobsoid.com/api/v1/jobs", headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+    if not r or r.status_code != 200:
+        return []
+    try:
+        items = r.json()
+    except Exception:
+        return []
+    if not isinstance(items, list):
+        return []
+    jobs = []
+    for it in items:
+        if not isinstance(it, dict) or not it.get("title") or not it.get("hostedUrl"):
+            continue
+        loc = it.get("location") if isinstance(it.get("location"), dict) else {}
+        place = ", ".join(p for p in (_text(loc.get("city")), _text(loc.get("state")), _text(loc.get("country"))) if p) or _text(loc.get("title"))
+        dept = it.get("department") if isinstance(it.get("department"), dict) else {}
+        desc = _snippet(it.get("description") or "")
+        jobs.append({
+            "title": _text(it["title"]),
+            "url": it["hostedUrl"],
+            "company": _text(it.get("company")) or slug.replace("-", " ").title(),
+            "location": place,
+            "country": _text(loc.get("country")),
+            "department": _text(dept.get("title")),
+            "workplace_type": "",
+            "employment_type": _text(it.get("type")),
+            "salary": _text(it.get("salary")) or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Jobsoid",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7687,6 +7729,7 @@ SCRAPERS = {
     "recruiterflow": scrape_recruiterflow,
     "homerun": scrape_homerun,
     "keka": scrape_keka,
+    "jobsoid": scrape_jobsoid,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -8882,6 +8925,7 @@ DESCRIPTION_FETCHERS = {
     "Recruiterflow": _fetch_generic_description,
     "Homerun": _fetch_generic_description,
     "Keka": _fetch_generic_description,
+    "Jobsoid": _fetch_generic_description,
     "BambooHR": _fetch_generic_description,
     # 2026-09: Paycom — the search endpoint's description field is
     # truncated; the real full text (plus salary/category) only comes
