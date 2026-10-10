@@ -919,6 +919,16 @@ async def _verify_applicantpro(session: aiohttp.ClientSession, slug: str) -> boo
     return await _verify_by_status(session, f"https://{slug}.applicantpro.com/jobs/")
 
 
+async def _verify_traffit(session: aiohttp.ClientSession, slug: str) -> bool:
+    """A live tenant (even with no jobs) answers 200 on the public list; an unknown one answers a 503 HTML page."""
+    async with session.get(f"https://{slug}.traffit.com/public/job_posts/published", timeout=REQUEST_TIMEOUT,
+                           headers={"User-Agent": USER_AGENT, "X-Request-Page-Size": "1"}) as r:
+        if r.status == 503 and "text/html" in r.headers.get("content-type", ""):
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_getro(session: aiohttp.ClientSession, slug: str) -> bool:
     """A Getro board is live when its network has jobs. slug is a {tenant} (read the network id from the board page) or
     a numeric network id."""
@@ -1116,6 +1126,7 @@ ARCHIVE_II_VERIFIERS = {
     "hibob": _verify_hibob,
     "deel": _verify_deel,
     "applicantpro": _verify_applicantpro,
+    "traffit": _verify_traffit,
     "getro": _verify_getro,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full

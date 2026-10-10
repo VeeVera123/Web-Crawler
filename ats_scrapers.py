@@ -7266,6 +7266,79 @@ async def scrape_applicantpro(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Traffit (Poland / CEE) ────────────────────────────────────────────────────
+# 2026-10 (jobseek's traffit monitor; verified live on bat.traffit.com): GET {slug}.traffit.com/public/job_posts/published
+# returns a JSON list of full postings; paging is by REQUEST headers (X-Request-Page-Size / X-Request-Current-Page) and the
+# response says how many pages exist (x-result-total-pages). The rich-text sections arrive as advert.values entries.
+_TRAFFIT_MAX_PAGES = 40
+
+
+async def scrape_traffit(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+        return []
+    url = f"https://{slug}.traffit.com/public/job_posts/published"
+    items: list = []
+    page, pages = 1, 1
+    while page <= min(pages, _TRAFFIT_MAX_PAGES):
+        r = await _get(url, headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json",
+                                     "X-Request-Page-Size": "100", "X-Request-Current-Page": str(page)})
+        if not r or r.status_code != 200:
+            break
+        try:
+            batch = r.json()
+        except Exception:
+            break
+        if not isinstance(batch, list):
+            break
+        items.extend(batch)
+        try:
+            pages = int(r.headers.get("x-result-total-pages") or 1)
+        except ValueError:
+            pages = 1
+        page += 1
+    company = slug.replace("-", " ").title()
+    jobs = []
+    for it in items:
+        if not isinstance(it, dict) or not it.get("url"):
+            continue
+        advert = it.get("advert") or {}
+        title = _text(advert.get("name"))
+        if not title:
+            continue
+        sections = {v.get("field_id"): v for v in (advert.get("values") or []) if isinstance(v, dict)}
+        html = "".join((f"<h3>{_text(sections[k].get('name'))}</h3>" if k != "description" and sections[k].get("name") else "") + str(sections[k].get("value") or "")
+                       for k in ("description", "requirements", "responsibilities", "benefits") if k in sections)
+        desc = _snippet(html)
+        locs = []
+        for loc in advert.get("locations") or []:
+            if isinstance(loc, dict) and loc.get("locality"):
+                locs.append(", ".join(p for p in (_text(loc["locality"]), _text(loc.get("country"))) if p))
+        opts = it.get("options") or {}
+        model = _text(opts.get("_work_model")).lower()
+        workplace = "Remote" if (opts.get("remote") == "1" or model == "remote") else ("Hybrid" if model == "hybrid" else "")
+        job_type = opts.get("job_type")
+        salary = ""
+        if opts.get("_Salary_MIN") or opts.get("_Salary_MAX"):
+            salary = f"{opts.get('_Salary_Currency') or ''} {opts.get('_Salary_MIN') or ''}-{opts.get('_Salary_MAX') or ''} {_text(opts.get('_Salary_Rate'))}".strip()
+        branches = opts.get("branches")
+        jobs.append({
+            "title": title,
+            "url": it["url"],
+            "company": company,
+            "location": "; ".join(locs),
+            "country": "",
+            "department": _text(branches[0] if isinstance(branches, list) and branches else branches),
+            "workplace_type": workplace,
+            "employment_type": _text(job_type[0] if isinstance(job_type, list) and job_type else job_type),
+            "salary": salary or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Traffit",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7352,6 +7425,7 @@ SCRAPERS = {
     "himalayas": scrape_himalayas,
     "deel": scrape_deel,
     "applicantpro": scrape_applicantpro,
+    "traffit": scrape_traffit,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for

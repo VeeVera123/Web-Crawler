@@ -595,6 +595,8 @@ SUPPORTED_ATS = {
     "hibob", "deel",
     # 2026-10: ApplicantPro (isolved Talent Acquisition): {tenant}.applicantpro.com, public /core/jobs JSON.
     "applicantpro",
+    # 2026-10: Traffit (Polish/CEE ATS): {tenant}.traffit.com, public /public/job_posts/published JSON.
+    "traffit",
     # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
     # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
     "getro",
@@ -2156,6 +2158,15 @@ def _url_to_slug_applicantpro(url: str) -> str | None:
     return _tenant_of(urlparse(url).hostname, ".applicantpro.com")
 
 
+_TRAFFIT_NON_TENANTS = frozenset({"api", "cdn", "cdn3", "help", "knowledge"})
+
+
+def _url_to_slug_traffit(url: str) -> str | None:
+    """Traffit (2026-10): {tenant}.traffit.com -> tenant (the vendor's own api/cdn/help hosts are not tenants)."""
+    tenant = _tenant_of(urlparse(url).hostname, ".traffit.com")
+    return None if tenant in _TRAFFIT_NON_TENANTS else tenant
+
+
 _DEEL_NON_SLUGS = frozenset({"auth", "login", "signup", "guest", "api", "deelapi", "job-boards", "job-details"})
 
 
@@ -2574,6 +2585,7 @@ URL_TO_SLUG = {
     "hibob": _url_to_slug_hibob,
     "deel": _url_to_slug_deel,
     "applicantpro": _url_to_slug_applicantpro,
+    "traffit": _url_to_slug_traffit,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3283,6 +3295,7 @@ CC_PLATFORM_PATTERNS = {
     "hibob": ["*.careers.hibob.com/*"],
     "deel": ["jobs.deel.com/*"],
     "applicantpro": ["*.applicantpro.com/*"],
+    "traffit": ["*.traffit.com/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3372,6 +3385,7 @@ CC_EXTRACTORS = {
     "hibob": _url_to_slug_hibob,
     "deel": _url_to_slug_deel,
     "applicantpro": _url_to_slug_applicantpro,
+    "traffit": _url_to_slug_traffit,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3712,6 +3726,18 @@ def _cc_check_applicantpro(slug: str) -> bool | None:
     except Exception:
         return None
     return True if r.status_code == 200 else (False if r.status_code in (301, 302, 404) else None)
+
+
+def _cc_check_traffit(slug: str) -> bool | None:
+    """A live tenant (even one with no jobs) answers 200 on the public list; an unknown one answers a 503 HTML page."""
+    try:
+        r = requests.get(f"https://{slug}.traffit.com/public/job_posts/published", timeout=10,
+                         headers={"User-Agent": _ROBOTS_UA, "X-Request-Page-Size": "1"})
+    except Exception:
+        return None
+    if r.status_code == 200:
+        return True
+    return False if r.status_code == 503 and "text/html" in r.headers.get("content-type", "") else None
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -4126,6 +4152,7 @@ _CC_LIVE_CHECK = {
     "hibob": _via_verification("hibob", _cc_check_hibob),
     "deel": _via_verification("deel", _cc_check_deel),
     "applicantpro": _via_verification("applicantpro", _cc_check_applicantpro),
+    "traffit": _via_verification("traffit", _cc_check_traffit),
     "getro": _via_verification("getro", _cc_check_getro),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
@@ -7047,7 +7074,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
     "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
     "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply", "hibob": "hibob", "deel": "deel",
-    "applicantpro": "applicantpro",
+    "applicantpro": "applicantpro", "traffit": "traffit",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7067,7 +7094,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("careers-page.com", "manatal"), ("careers.jobscore.com", "jobscore"),
     ("jobs.crelate.com", "crelate"), ("comeet.com", "comeet"),
     ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"), ("careers.hibob.com", "hibob"), ("jobs.deel.com", "deel"),
-    ("applicantpro.com", "applicantpro"),
+    ("applicantpro.com", "applicantpro"), ("traffit.com", "traffit"),
 )
 
 

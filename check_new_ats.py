@@ -243,6 +243,33 @@ async def fake_ap_none(url, **kw):
 A._get = fake_ap_none
 check(asyncio.run(A.scrape_applicantpro("acme")) == [] and asyncio.run(A.scrape_applicantpro("Bad_Slug!")) == [], "applicantpro: no domain id / bad slug")
 
+# ── Traffit (2026-10) ──
+for url, want in [("https://bat.traffit.com/career/", "bat"), ("https://www.traffit.com/", None), ("https://cdn3.traffit.com/x.js", None)]:
+    check(D._url_to_slug_traffit(url) == want, f"traffit slug {url} -> {D._url_to_slug_traffit(url)!r}")
+check("traffit" in D.URL_TO_SLUG and "traffit" in D.SUPPORTED_ATS and "traffit" in A.SCRAPERS and "traffit" in D._CC_LIVE_CHECK, "traffit registered")
+TF = [{"url": "https://bat.traffit.com/public/an/abc?source=career_page", "advert": {"name": "Customer Success Manager",
+      "values": [{"field_id": "description", "value": "<p>Own renewals.</p>"}, {"field_id": "requirements", "name": "Requirements:", "value": "<ul><li>QBRs</li></ul>"}],
+      "locations": [{"locality": "Poznan", "country": "Polska"}]}, "options": {"_work_model": "Hybrid", "job_type": ["Full time"], "branches": ["Support"],
+      "_Salary_MIN": "5000", "_Salary_MAX": "7000", "_Salary_Currency": "PLN", "_Salary_Rate": "Monthly"}},
+      {"url": "https://bat.traffit.com/public/an/def", "advert": {"name": "Remote AM", "values": [], "locations": []}, "options": {"remote": "1"}}, {"advert": {"name": "no url"}}]
+tf_pages = []
+
+
+async def fake_tf(url, **kw):
+    page = int((kw.get("headers") or {}).get("X-Request-Current-Page"))
+    tf_pages.append(page)
+    resp = R("", 200, url, TF[:2] if page == 1 else TF[1:2])
+    resp.headers = {"x-result-total-pages": "2"}
+    return resp
+
+
+A._get = fake_tf
+tfj = asyncio.run(A.scrape_traffit("BAT"))
+check(tf_pages == [1, 2] and len(tfj) == 3 and tfj[0]["location"] == "Poznan, Polska" and tfj[0]["workplace_type"] == "Hybrid"
+      and tfj[0]["department"] == "Support" and "QBRs" in tfj[0]["description_snippet"] and tfj[0]["salary"] == "PLN 5000-7000 Monthly"
+      and tfj[1]["workplace_type"] == "Remote", f"traffit {tf_pages} {tfj}")
+check(asyncio.run(A.scrape_traffit("Bad_Slug!")) == [], "traffit: bad slug")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [
