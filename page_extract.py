@@ -876,3 +876,197 @@ def sitemap_job_candidates(urls: list[str], limit: int = 400) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+# ── job-link candidates on a listing page (moved here from crawl_ii.py so Crawl I's generic board scraper can share it) ──
+
+NEXT_PAGE_TEXT_RE = re.compile(
+    r"^\s*(next(\s*page)?|older\s*(jobs|postings|roles)?|"
+    r"more\s*(jobs|roles|postings)?|show\s*more|load\s*more|view\s*more|"
+    r"»|>|›)\s*$",
+    re.I,
+)
+
+JOB_HREF_RE = re.compile(
+    r"/(?:job|jobs|career|careers|position|positions|opening|openings|"
+    r"vacanc(?:y|ies)|opportunit(?:y|ies)|role|roles|"
+    # 2026-10: Factorial (/job_posting/<slug>-<id>), Gusto (/postings/), requisitions, DACH / FR / ES vocabulary
+    r"job[_-]?postings?|postings?|requisitions?|vacatures?|stellen(?:angebote)?|offres?|empleos?|ofertas?)/[\w\-./%]+", re.I)
+GENERIC_LINK_TEXT_RE = re.compile(
+    r"^(apply( now| here| today| online)?|view( job| details| position| role| opening)?|read more|learn more|details?|"
+    r"more( info(rmation)?)?|see (details|role|more)|open|more|angebot ansehen|voir l.offre|ver oferta|bekijk vacature)$", re.I)
+
+NAV_TEXT_BLOCKLIST_RE = re.compile(
+    r"^(home|about( us)?|contact( us)?|blog|news|press|privacy( policy)?|terms"
+    r"( (of|and) (service|conditions|use))?|cookies?( policy)?|"
+    r"sign[\s-]?in|log[\s-]?in|sign[\s-]?up|register|faq|help|support|our team|"
+    r"careers?|open positions?|current openings?|view all( jobs)?|see all|"
+    r"learn more|read more|apply( now)?|search|filter|next|previous|"
+    r"load more|back to (search|jobs|careers)|share this job)$", re.I)
+
+
+def find_next_page_url(html: str, page_url: str) -> str | None:
+    """Best-effort 'next page' detection for a paginated job-listing page.
+
+    Two signals, in order of confidence:
+      1. <link rel="next" href="..."> in <head> — the standards-based
+         signal, when a site bothers to emit it.
+      2. An <a> whose rel="next", OR whose visible text/aria-label matches
+         a common 'next page' phrasing (NEXT_PAGE_TEXT_RE — the same
+         phrase list NAV_TEXT_BLOCKLIST_RE already recognizes as non-job
+         nav chrome, just used here as the positive signal it actually is).
+
+    Deliberately NEVER constructs or guesses a URL (e.g. incrementing a
+    ?page=N query param) — only a link that actually appears as a real
+    href in this page's own HTML is ever returned, so a company using a
+    URL scheme this project hasn't seen before can't cause a fabricated
+    fetch. Returns an absolute URL, or None if no next-page signal found.
+    """
+    try:
+        tree = LexborHTMLParser(html)
+    except Exception:
+        return None
+
+    link_next = tree.css_first('link[rel="next"]')
+    if link_next is not None:
+        href = link_next.attributes.get("href")
+        if href:
+            try:
+                return urljoin(page_url, href)
+            except ValueError:
+                pass
+
+    for a in tree.css("a[href]"):
+        href = a.attributes.get("href") or ""
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        rel = (a.attributes.get("rel") or "").lower().split()
+        text = a.text(deep=True, separator=" ").strip()
+        aria = (a.attributes.get("aria-label") or "").strip()
+        if "next" in rel or NEXT_PAGE_TEXT_RE.match(text) or NEXT_PAGE_TEXT_RE.match(aria):
+            try:
+                resolved = urljoin(page_url, href)
+                parsed = urlparse(resolved)
+            except ValueError:
+                continue
+            if parsed.scheme in ("http", "https") and resolved != page_url:
+                return resolved
+    return None
+
+
+HEADING_SELECTOR = "h1,h2,h3,h4,h5,h6,[class*=title],[class*=heading],[class*=job-name],[class*=jobname],strong"
+
+
+def card_title(a) -> str:
+    """Best title for a job link whose own text is not a title: a heading / title element INSIDE the link (cards that
+    wrap everything in one <a>: Freshteam, onlyfy, ...), else the first one in the nearest enclosing card (title in a
+    sibling element, link text just "Apply now": Factorial, ...). "" when nothing plausible (2-12 words)."""
+    def pick(node) -> str:
+        try:
+            for h in node.css(HEADING_SELECTOR):
+                t = re.sub(r"\s+", " ", h.text(deep=True, separator=" ", strip=True))
+                if t and 2 <= len(t.split()) <= 12 and not NAV_TEXT_BLOCKLIST_RE.match(t) and not GENERIC_LINK_TEXT_RE.match(t):
+                    return t
+        except Exception:
+            pass
+        return ""
+    t = pick(a)
+    if t:
+        return t
+    node = a.parent
+    for _ in range(4):
+        if node is None or node.tag in ("body", "html", "main"):
+            break
+        t = pick(node)
+        if t:
+            return t
+        node = node.parent
+    return ""
+
+
+def find_job_link_candidates(html: str, page_url: str) -> list[dict]:
+    try:
+        tree = LexborHTMLParser(html)
+    except Exception:
+        return []
+
+    candidates: dict[str, dict] = {}
+    fingerprint_groups: dict[tuple, list] = {}
+
+    for a in tree.css("a[href]"):
+        href = a.attributes.get("href") or ""
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        text = a.text(deep=True, separator=" ").strip()
+        text = re.sub(r"\s+", " ", text)
+        word_count = len(text.split())
+        slug_guess = False
+        # A real job title reads like a short phrase, not a single nav word
+        # and not a whole sentence/paragraph — 2-12 words in practice.
+        if not text or word_count < 2 or word_count > 12 or NAV_TEXT_BLOCKLIST_RE.match(text.strip()) \
+                or GENERIC_LINK_TEXT_RE.match(text.strip()):
+            # 2026-10: but a link that is clearly a JOB url (/jobs/<id>/<slug>, /job_posting/<slug>) is kept when its
+            # text is a button label ("Apply now"), a whole card (> 12 words), or empty: the title then comes from a
+            # heading in the card, else from the URL slug. Class-level fix for card layouts (Freshteam, Factorial,
+            # onlyfy ...) where the link text is never the title.
+            if not JOB_HREF_RE.search(href):
+                continue
+            card = card_title(a)
+            if card:
+                text = card
+            else:
+                try:
+                    guess = slug_title(urljoin(page_url, href))
+                except Exception:
+                    guess = ""
+                if not guess:
+                    continue
+                text, slug_guess = guess, True
+
+        # 2026-09: a real crash killed a whole crawl_ii.py shard —
+        # urljoin/urlparse can raise ValueError on a malformed href (seen
+        # live: an href attribute value of 'sjm code="11" ', almost
+        # certainly a parser mis-grab from broken/non-HTML markup on some
+        # page, not a real URL at all). One bad <a> tag on one page must
+        # not take down the whole batch — skip just that link.
+        try:
+            full_url = urljoin(page_url, href)
+            parsed = urlparse(full_url)
+        except ValueError:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+
+        if JOB_HREF_RE.search(href):
+            cand = {"title": text[:300], "url": full_url}
+            if slug_guess:
+                cand["_slug_title"] = True
+            candidates.setdefault(full_url, cand)
+            continue
+
+        parent = a.parent
+        if parent is None:
+            continue
+        fp = (parent.tag, parent.attributes.get("class") or "")
+        fingerprint_groups.setdefault(fp, []).append((full_url, text))
+
+    for (tag, cls), items in fingerprint_groups.items():
+        # A shared class is a strong repetition signal (3+ siblings); with
+        # no class to key on at all, require a bigger group (5+) since
+        # tag-only repetition (e.g. every <li> on the page) is much weaker.
+        min_group = 3 if cls else 5
+        seen_in_group = set()
+        unique_items = []
+        for url, text in items:
+            if url in seen_in_group:
+                continue
+            seen_in_group.add(url)
+            unique_items.append((url, text))
+        if len(unique_items) < min_group:
+            continue
+        for url, text in unique_items:
+            candidates.setdefault(url, {"title": text[:300], "url": url})
+
+    return list(candidates.values())
+
+
