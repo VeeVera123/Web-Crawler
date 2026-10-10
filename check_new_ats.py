@@ -505,6 +505,49 @@ check(set(tx.get("greenhouse", {})) == {"acme", "beta-co"} and "lever" not in tx
 D._github_registry_fetch = _orig_fetch
 check(any(r.get("format") == "url_records" for r in D.GITHUB_REGISTRY_REPOS) and any(r.get("format") == "txt_slugs" for r in D.GITHUB_REGISTRY_REPOS), "new registries listed")
 
+# ── Remote.com virtual board (2026-10) ──
+RC = [
+    {"status": "published", "title": "Customer Success Manager", "slug": "csm-j1", "department": {"name": "Support"}, "employment_type": "full_time",
+     "company_profile": {"name": "Acme", "slug": "acme-c1"}, "workplace_location": {"type": "remote"},
+     "hiring_location": {"type": "location", "included_locations": [{"type": "country", "value": {"name": "South Africa"}}, {"type": "country", "value": {"name": "Kenya"}}]},
+     "compensation": {"minimum": 1100000, "maximum": 1600000, "frequency": "yearly", "currency": {"code": "USD"}}},
+    {"status": "published", "title": "Account Manager", "slug": "am-j2", "company_profile": {"name": "Beta", "slug": "beta-c2"}, "workplace_location": {"type": "remote"},
+     "hiring_location": {"type": "global"}},
+    {"status": "published", "title": "Sales Ops", "slug": "so-j3", "company_profile": {"name": "Gamma", "slug": "gamma-c3"}, "workplace_location": {"type": "remote"},
+     "hiring_location": {"type": "timezone", "timezone": {"offset": -6.0}, "timezone_range": 2}},
+    {"status": "published", "title": "Engineer", "slug": "en-j4", "company_profile": {"name": "Delta", "slug": "delta-c4"}, "hiring_location": {},
+     "workplace_location": {"type": "hybrid", "city": "Hanoi", "country": {"name": "Vietnam"}}},
+    {"status": "draft", "title": "Hidden", "slug": "h-j5", "company_profile": {"name": "E", "slug": "e-c5"}}]
+rc_calls = []
+
+
+async def fake_rc(url, **kw):
+    rc_calls.append((kw.get("params") or {}).get("page"))
+    return R("", 200, url, {"data": {"jobs": RC, "total_pages": 1, "total_count": 5, "current_page": 1}})
+
+
+A._get = fake_rc
+rcj = {j["title"]: j for j in asyncio.run(A.scrape_remote("global"))}
+check(len(rcj) == 4 and "Hidden" not in rcj, f"remote.com: drafts dropped {list(rcj)}")
+check(rcj["Customer Success Manager"]["location"] == "Remote - South Africa, Kenya" and rcj["Customer Success Manager"]["salary"] == "USD 11,000-16,000 yearly"
+      and rcj["Customer Success Manager"]["url"] == "https://remote.com/jobs/acme-c1/csm-j1" and rcj["Customer Success Manager"]["employment_type"] == "Full time", f"remote.com fields {rcj['Customer Success Manager']}")
+check(rcj["Account Manager"]["location"] == "Remote - Worldwide", "remote.com: global -> Remote - Worldwide")
+check(rcj["Sales Ops"]["location"] == "Remote (time zones UTC-8 to UTC-4 only)", f"remote.com tz {rcj['Sales Ops']['location']}")
+check(rcj["Engineer"]["location"] == "Hanoi, Vietnam" and rcj["Engineer"]["workplace_type"] == "Hybrid", f"remote.com hybrid {rcj['Engineer']}")
+check(asyncio.run(A.scrape_remote("other")) == [] and ("remote", "global") in A.VIRTUAL_BOARDS and "Remote.com" in A.DESCRIPTION_FETCHERS, "remote.com registered as a virtual board")
+
+
+async def fake_rc_detail(url, **kw):
+    assert url.endswith("/public/jobs/acme-c1/csm-j1"), url
+    return R("", 200, url, {"data": {"description": "<p>Own renewals for customers.</p>"}})
+
+
+A._get = fake_rc_detail
+check("Own renewals" in asyncio.run(A._fetch_remote_com_description({"url": "https://remote.com/jobs/acme-c1/csm-j1"})), "remote.com description fetch")
+# Rank 4 eligibility list (2026-10 probe)
+import classifier as _C  # noqa: E402
+check({"Gem", "HiBob", "Deel"} <= _C.RANK4_ELIGIBLE_ATS and "SmartRecruiters" not in _C.RANK4_ELIGIBLE_ATS, "rank 4: Gem/HiBob/Deel eligible, SmartRecruiters not")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

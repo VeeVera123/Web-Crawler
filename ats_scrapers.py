@@ -7144,7 +7144,7 @@ async def scrape_getro(slug: str) -> list[dict]:
 _HIMALAYAS_SEARCH = "https://himalayas.app/jobs/api/search"
 _HIMALAYAS_AFRICA = ("NG", "KE", "ZA", "GH", "EG", "MA", "TZ", "UG", "RW", "ET", "SN", "CI")
 _HIMALAYAS_MAX_PAGES = {"worldwide": 12, "africa": 4}
-VIRTUAL_BOARDS: list[tuple[str, str]] = [("himalayas", "worldwide"), ("himalayas", "africa")]
+VIRTUAL_BOARDS: list[tuple[str, str]] = [("himalayas", "worldwide"), ("himalayas", "africa"), ("remote", "global")]
 
 
 def _himalayas_location(job: dict) -> str:
@@ -7634,6 +7634,113 @@ async def scrape_jobsoid(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Remote.com job board (virtual board) ──────────────────────────────────────
+# 2026-10 (a Deel competitor: employer-of-record platform whose public job board lists its customers' global hires).
+# The board's own keyless API, seen in a real browser: GET talent-api.remote.com/api/v1/public/jobs?page=N&query=<term>
+# -> data.{jobs,total_count,total_pages}, 20 per page (6,046 jobs). Each job has the employer-declared hiring_location:
+# {"type":"global"} | {"type":"location","included_locations":[country...]} | {"type":"timezone","timezone":{offset},
+# "timezone_range":N} and, for hybrid / on-site jobs, workplace_location {city, country}. The description is one more call:
+# GET .../public/jobs/{company_slug}/{job_slug}. Not an ATS: a virtual board (see VIRTUAL_BOARDS), no archive_i row.
+_REMOTE_COM_API = "https://talent-api.remote.com/api/v1/public/jobs"
+_REMOTE_COM_MAX_PAGES = 10
+_REMOTE_COM_JOB_RE = re.compile(r"https?://remote\.com/jobs/([^/?#]+)/([^/?#]+)", re.I)
+
+
+def _remote_com_location(job: dict) -> tuple[str, str]:
+    """(location, workplace_type) from the employer-declared hiring_location / workplace_location."""
+    hiring = job.get("hiring_location") if isinstance(job.get("hiring_location"), dict) else {}
+    work = job.get("workplace_location") if isinstance(job.get("workplace_location"), dict) else {}
+    wtype = _text(work.get("type")).lower()
+    if wtype in ("hybrid", "on_site", "onsite"):
+        city = _text(work.get("city"))
+        country = _text((work.get("country") or {}).get("name")) if isinstance(work.get("country"), dict) else ""
+        return ", ".join(p for p in (city, country) if p), ("Hybrid" if wtype == "hybrid" else "On-site")
+    htype = _text(hiring.get("type")).lower()
+    if htype == "location":
+        names = []
+        for loc in hiring.get("included_locations") or []:
+            val = loc.get("value") if isinstance(loc, dict) else None
+            name = _text(val.get("name")) if isinstance(val, dict) else ""
+            if name and name not in names:
+                names.append(name)
+        return ("Remote - " + ", ".join(names) if names else "Remote"), "Remote"
+    if htype == "timezone":
+        tz = hiring.get("timezone") if isinstance(hiring.get("timezone"), dict) else {}
+        try:
+            off, rng = float(tz.get("offset")), float(hiring.get("timezone_range") or 0)
+            fmt = lambda v: f"UTC{'+' if v >= 0 else '-'}{abs(v):g}"
+            return f"Remote (time zones {fmt(off - rng)} to {fmt(off + rng)} only)", "Remote"
+        except (TypeError, ValueError):
+            return "Remote (time zone restricted)", "Remote"
+    if htype == "global":
+        return "Remote - Worldwide", "Remote"
+    return "Remote", "Remote"
+
+
+def _remote_com_salary(comp) -> str:
+    if not isinstance(comp, dict) or not (comp.get("minimum") or comp.get("maximum")):
+        return ""
+    cur = _text((comp.get("currency") or {}).get("code")) if isinstance(comp.get("currency"), dict) else ""
+    lo, hi = (comp.get("minimum") or 0) / 100, (comp.get("maximum") or 0) / 100  # amounts are in minor units
+    return f"{cur} {lo:,.0f}-{hi:,.0f} {_text(comp.get('frequency'))}".strip()
+
+
+async def scrape_remote(slug: str) -> list[dict]:
+    if (slug or "").strip().lower() != "global":
+        return []
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    seen: dict = {}
+    for term in _GETRO_QUERIES:
+        for page in range(1, _REMOTE_COM_MAX_PAGES + 1):
+            r = await _get(_REMOTE_COM_API, headers=headers, params={"page": page, "query": term})
+            if not r or r.status_code != 200:
+                break
+            try:
+                data = r.json()["data"]
+                batch = data.get("jobs") or []
+                total_pages = int(data.get("total_pages") or 1)
+            except Exception:
+                break
+            for j in batch:
+                co = (j.get("company_profile") or {}).get("slug") if isinstance(j, dict) else None
+                if isinstance(j, dict) and co and j.get("slug") and j.get("title") and j.get("status", "published") == "published":
+                    seen.setdefault((co, j["slug"]), j)
+            if page >= total_pages or not batch:
+                break
+    jobs = []
+    for (co, job_slug), j in seen.items():
+        location, workplace = _remote_com_location(j)
+        emp = _text(j.get("employment_type")).replace("_", " ").capitalize()
+        jobs.append({
+            "title": _text(j["title"]),
+            "url": f"https://remote.com/jobs/{co}/{job_slug}",
+            "company": _text((j.get("company_profile") or {}).get("name")) or co,
+            "location": location,
+            "country": "",
+            "department": _text((j.get("department") or {}).get("name")) if isinstance(j.get("department"), dict) else "",
+            "workplace_type": workplace,
+            "employment_type": emp,
+            "salary": _remote_com_salary(j.get("compensation")),
+            "description_snippet": "",
+            "source_ats": "Remote.com",
+            "slug": "global",
+        })
+    return jobs
+
+
+async def _fetch_remote_com_description(job: dict) -> str:
+    m = _REMOTE_COM_JOB_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    r = await _get(f"{_REMOTE_COM_API}/{m.group(1)}/{m.group(2)}", headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+    if not r or r.status_code != 200:
+        return ""
+    try:
+        return _snippet((r.json().get("data") or {}).get("description") or "")
+    except Exception:
+        return ""
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7728,6 +7835,7 @@ SCRAPERS = {
     "homerun": scrape_homerun,
     "keka": scrape_keka,
     "jobsoid": scrape_jobsoid,
+    "remote": scrape_remote,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -8924,6 +9032,7 @@ DESCRIPTION_FETCHERS = {
     "Homerun": _fetch_generic_description,
     "Keka": _fetch_generic_description,
     "Jobsoid": _fetch_generic_description,
+    "Remote.com": _fetch_remote_com_description,
     "BambooHR": _fetch_generic_description,
     # 2026-09: Paycom — the search endpoint's description field is
     # truncated; the real full text (plus salary/category) only comes

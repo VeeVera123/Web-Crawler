@@ -47,6 +47,7 @@ robots-allowed job API before being added to Crawl I:
 | Getro (`{tenant}.getro.com`, custom VC-board domains) | **Added** (`scrape_getro`): ~hundreds of VC-fund talent networks, each listing every job across the fund's portfolio. Public `POST api.getro.com/api/v2/collections/{network id}/search/jobs` (needs `Accept: application/json`; 20 per page); the scraper asks each network for our role families with `filters.work_mode=remote` (a few pages instead of 20k jobs). slug = the `{tenant}` (1,892 already in `archive_i` from earlier discovery, never scraped before) or a numeric network id (`discovery.py --source getro` sweeps ids; manual). Adds jobs on in-house careers sites no ATS scraper reaches (Stripe, Revolut, Databricks...). Descriptions come from the apply URL via the generic fetcher |
 | Freshteam, Factorial, PeopleForce, Loxo | **Added** (`_scrape_html_board`): no public JSON feed, but each tenant's list page is plain HTML with one link per job; the shared link/next-page finders in `page_extract` plus a small per-platform card reader read title/location/department, and the job page supplies description (and location where the list shows none). Live-verified on 6 tenants. An unknown Freshteam tenant answers 200 with an `invalid-domain-wrapper` page, so liveness reads the body |
 | Jobsoid (`{tenant}.jobsoid.com`) | **Added** (`scrape_jobsoid`): keyless `/api/v1/jobs` JSON with full descriptions and structured location; live-verified (music-ministry, 42 jobs). A dead tenant redirects its board page to `portal.jobsoid.com/?notfound=true` |
+| Remote.com (job board) | **Added as a virtual board** (`scrape_remote`): the board's own keyless API `talent-api.remote.com/api/v1/public/jobs` (6k jobs) with the employer-declared hiring location (global / country list / time-zone window) and a per-job description call. A Deel competitor (employer of record); the other EOR vendors (Oyster, Multiplier, Papaya, Velocity Global, Omnipresent) have no public job board or career-page product |
 | Keka Hire (`{tenant}.keka.com/careers`) | **Added** (`scrape_keka`): the board page's raw HTML holds the org id, then `/careers/api/embedjobs/default/active/{id}` returns every job with its description; pattern from rishilahoti/ashby-job-scraper, live-verified on inc42 / mosaicwellness. Mostly India-based roles |
 | Recruiterflow (`recruiterflow.com/{tenant}/jobs`) | **Added** (`scrape_recruiterflow`): the board page embeds the full list as `window.jobsList` JSON; the REST API itself needs a key. Live-verified on the vendor's own board |
 | Homerun (`{tenant}.homerun.co`) | **Re-added** (`scrape_homerun`): list = Vue `<job-list v-bind>` props resolved by `page_extract.extract_state_jobs`; the 2026-09 removal was about a wrong `jobs.*` slug guess, not the platform. Tenants with no openings return `vacancies: []` (why earlier tries "showed no jobs") |
@@ -62,6 +63,12 @@ robots-allowed job API before being added to Crawl I:
 | Comeet | Not added — the careers API needs a per-company `uid` + token that the 73-slug registry doesn't carry; `comeet.com/jobs/{name}` 404s |
 | ApplicantPro (`applicantpro.com`) | **Added** (`scrape_applicantpro`): the tenant id sits in the board page's raw HTML, then `/core/jobs/{id}` returns every job as JSON; live-verified on 4 tenants. (An earlier "no jobs" result came from tenants with nothing open.) |
 | CareerPlug | Not added yet — HTML-only, mostly local/hourly US roles |
+
+**Slug sources added 2026-10** (discovery's GitHub-registry list; all read through jsDelivr, no tokens): colophon-group/jobseek
+`boards.csv` (7.9k boards), outscal/OpenJobs `companies_v2.json` (12k gaming companies, ~2.5k on a supported ATS),
+crypto-jobs-fyi/crawler (~530 crypto/AI boards) and ElliotGbaum/upstreamit's `*-live.txt` lists (Greenhouse, Lever, Ashby slugs its
+own probe confirmed live). A generic parser (`_parse_url_records`) maps any board / careers URL in a JSON or CSV registry through the
+project's own `URL_TO_SLUG` converters, so a new registry needs no ATS column or per-repo field mapping.
 
 ## Pipeline stages
 
@@ -142,9 +149,11 @@ otherwise just be dropped. Rank 4 gives **Customer Success and Account
 Management roles only** one more look, under a strict gate:
 
 1. Role is `CS` or `AM` (not PM/OM)
-2. ATS is one of 12 verified platforms — chosen because they reliably
+2. ATS is one of 16 verified platforms (`RANK4_ELIGIBLE_ATS`; Gem, HiBob and Deel added 2026-10) — chosen because they reliably
    return *both* a location field *and* real application questions on the
-   same job, not just one or the other
+   same job, not just one or the other. Added only after a live probe through the real
+   pipeline showed the question reader works from structured data; the probe results and the
+   platforms left out (and why) are in the comment above the set in `classifier.py`
 3. `ENABLE_RANK4_COUNTRY_SPECIFIC` is turned on for this run — on by
    default (both the unattended cron schedule and an untouched manual
    dispatch), untick the checkbox on a manual dispatch to turn it off

@@ -232,6 +232,8 @@ PLATFORM_WORKERS = {
     "getro": 4,
     # 2026-10: Himalayas = a few hundred paged searches against himalayas.app (virtual board, no archive_i row).
     "himalayas": 2,
+    # 2026-10: Remote.com = 12 role queries x up to 10 pages against talent-api.remote.com (virtual board, no archive_i row).
+    "remote": 2,
 }
 
 

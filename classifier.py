@@ -6443,7 +6443,20 @@ RANK4_ELIGIBLE_ATS = {
     "Greenhouse", "Workable", "Personio", "JazzHR", "Teamtailor",
     "Recruitee", "Lever", "PageUp", "isolvedhire", "Pinpoint",
     "Rippling", "Ashby", "BambooHR",
+    "Gem", "HiBob", "Deel",
 }
+# 2026-10: Gem, HiBob and Deel added after a live capability probe through the real pipeline (scrape -> description ->
+# application questions; tenants from the public jobseek registry, 7-9 jobs per platform, no database):
+#   Gem   20 jobs / 8 tenants: location 20, description 20, form read 20 (_form_status ok), questions on 18
+#   HiBob  7 jobs / 3 tenants: location 7, description 7, form read 7, questions on 1 (most forms have none; the reader is reliable)
+#   Deel   9 jobs / 3 tenants: location 9, description 9, form read 8, questions on 8
+# All three read the form from structured data the board itself loads (Gem's oatsJobPostFieldsAndQuestions GraphQL field,
+# HiBob's /api/job-ad/{id}/application-form JSON, Deel's inlined Next.js form payload), not from scraped HTML, and set
+# job["_form_status"]. Probed and left OUT: SmartRecruiters (apply page behind DataDome), JOIN / Paylocity / Dayforce / Keka /
+# ApplicantPro / Jobylon / Avature / RecruiterBox / CSOD / Paycom (0 question lines), Workday / iCIMS / ADP / Oracle / Taleo
+# (login-gated forms), Comeet / Elmo / Manatal / Freshteam / Homerun (the generic reader returned junk: department filter chips,
+# a password field, "[[ answer ]]", consent text), BreezyHR / Jobvite (DOM-only reader, partial forms), Traffit (Polish labels
+# the English restriction patterns cannot read).
 # 2026-10: BambooHR added once its form became readable: the careers page is JavaScript-rendered, but its
 # public /careers/{id}/detail JSON carries result.formFields.customQuestions (verified live, 15/15 postings).
 # 2026-10: Ashby added once its question fetcher worked again (GraphQL; the old
