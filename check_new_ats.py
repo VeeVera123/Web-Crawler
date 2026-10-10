@@ -673,6 +673,36 @@ cqj2 = {"url": "https://iaqa.careerplug.com/jobs/1"}
 check(A._fetch_careerplug_questions(cqj2) == "" and cqj2.get("_form_status") is None and "CareerPlug" in A.QUESTION_FETCHERS, "careerplug: no form -> not read")
 A._get_requests_sync = _orig_sync
 
+# ── Workday: a retired saved site falls back to the live site named in robots.txt (2026-10) ──
+WD_ROBOTS = "Sitemap: https://solera.wd5.myworkdayjobs.com/Global_Career_Site/siteMap.xml\n\nUser-agent: *\nAllow: /Global_Career_Site/\nDisallow: /refreshFacet/"
+wd_posts = []
+
+
+async def fake_wd_post(url, **kw):
+    wd_posts.append(url)
+    if "/international_career_site/" in url.lower():
+        return R("permission denied", 403, url, {"errorCode": "S22"})
+    return R("", 200, url, {"total": 1, "jobPostings": [{"title": "Principal Engineer", "externalPath": "/job/Bangalore/Principal-Engineer_JR-1", "locationsText": "Bangalore"}]})
+
+
+async def fake_wd_get(url, **kw):
+    return R(WD_ROBOTS, 200, url) if url.endswith("/robots.txt") else R("", 404, url)
+
+
+_post0, _get0 = A._post, A._get
+A._post, A._get = fake_wd_post, fake_wd_get
+wdj = asyncio.run(A.scrape_workday("solera|wd5|international_career_site"))
+check(len(wdj) == 1 and wdj[0]["url"] == "https://solera.wd5.myworkdayjobs.com/Global_Career_Site/job/Bangalore/Principal-Engineer_JR-1"
+      and len(wd_posts) == 2, f"workday site fallback {wdj} {wd_posts}")
+wd_posts.clear()
+async def fake_wd_get_none(url, **kw):
+    return R("", 422, url)
+
+
+A._get = fake_wd_get_none
+check(asyncio.run(A.scrape_workday("solera|wd5|international_career_site")) == [] and len(wd_posts) == 1, "workday: no robots.txt site -> no retry")
+A._post, A._get = _post0, _get0
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

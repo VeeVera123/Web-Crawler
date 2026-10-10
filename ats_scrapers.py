@@ -1497,7 +1497,22 @@ def scrape_icims(slug: str) -> list[dict]:
 
 # ── Workday ────────────────────────────────────────────
 
-async def scrape_workday(slug: str) -> list[dict]:
+async def _workday_robots_sites(base_url: str) -> list[str]:
+    """The tenant's live public site name(s), read from its robots.txt (`Sitemap: https://host/{Site}/siteMap.xml` and
+    `Allow: /{Site}/`). Solera's saved site `International_Career_Site` redirects to a Workday outage page while its robots.txt
+    names `Global_Career_Site`, which serves 180 jobs. [] when robots.txt is unreadable (some tenants answer 422)."""
+    r = await _get(f"{base_url}/robots.txt", headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r or r.status_code != 200:
+        return []
+    sites: list[str] = []
+    for m in re.finditer(r"^\s*(?:Sitemap:\s*https?://[^/\s]+/|Allow:\s*/)([^/\s]+)/", r.text, re.I | re.M):
+        name = m.group(1)
+        if name.lower() not in ("wday", "refreshfacet", "talentcommunity") and name.lower() not in (x.lower() for x in sites):
+            sites.append(name)
+    return sites
+
+
+async def scrape_workday(slug: str, _site_retry: bool = False) -> list[dict]:
     """Workday CXS JSON API. Slug format: 'company|wd#|site_id'.
     POST to /wday/cxs/{company}/{site_id}/jobs for paginated results.
 
@@ -1561,6 +1576,14 @@ async def scrape_workday(slug: str) -> list[dict]:
                 error_code = r.json().get("errorCode")
             except Exception:
                 pass
+            # 2026-10: a saved site id that Workday refuses (403 outage / 404 / 422) may simply be a retired site of a tenant
+            # whose live site has another name (Solera: International_Career_Site -> Global_Career_Site). The tenant's
+            # robots.txt names the live site; retry once with it. Only on the first page and only once.
+            if offset == 0 and not _site_retry and r.status_code in (403, 404, 422):
+                alt = [x for x in await _workday_robots_sites(base_url) if x.lower() != site_id.lower()]
+                if alt:
+                    log.info(f"[workday] {slug!r}: site {site_id!r} refused (HTTP {r.status_code}); robots.txt names {alt[0]!r}, retrying")
+                    return await scrape_workday(f"{company}|{wd}|{alt[0]}", _site_retry=True)
             reason = f"HTTP {r.status_code}" + (f" ({error_code})" if error_code else "")
             _record_scrape_failure("workday", company, reason)
             break
