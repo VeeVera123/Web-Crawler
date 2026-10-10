@@ -177,6 +177,7 @@ Usage:
 """
 
 import argparse
+import gzip
 import json
 import logging
 import os
@@ -187,6 +188,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, urljoin, unquote
 
@@ -1272,6 +1274,12 @@ def _url_to_slug_rippling(url: str) -> str | None:
         # actually be present somewhere after the company segment, not
         # just assumed from parts[0] alone (see the comment above).
         parts = [p for p in parsed.path.strip("/").split("/") if p]
+        # ats.rippling.com/{locale}/{company}/jobs — skip the locale
+        # segment and read the real company after it (previously this
+        # URL shape was just dropped).
+        if (len(parts) > 2 and re.fullmatch(r"[a-z]{2}(?:-[A-Za-z]{2})?", parts[0])
+                and parts[1].lower() != "jobs"):
+            parts = parts[1:]
         if (parts and "jobs" in [p.lower() for p in parts[1:]]
                 and parts[0].lower() not in SKIP_SLUGS
                 and _looks_like_real_slug(parts[0])):
@@ -4364,7 +4372,6 @@ _CC_LIVE_CHECK = {
     "jobsoid": _via_verification("jobsoid", _cc_check_jobsoid),
     "recruiterflow": _via_verification("recruiterflow", _cc_check_recruiterflow),
     "homerun": _via_verification("homerun", _cc_check_homerun),
-    "getro": _via_verification("getro", _cc_check_getro),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
     # 2026-09: Gem — via verification.py's board-existence GraphQL query,

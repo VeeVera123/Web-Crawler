@@ -752,6 +752,19 @@ check(len(asyncio.run(A.scrape_getro("36986"))) == 2 and "mayfield" in " ".join(
 check(asyncio.run(A.scrape_getro("nobody-here")) == [] and asyncio.run(A.scrape_getro("")) == [], "getro: unknown tenant / empty -> []")
 check("getro" in A.SCRAPERS and "getro" in D.SUPPORTED_ATS and D._url_to_slug_getro("https://mayfield.getro.com/jobs") == "mayfield", "getro registered")
 
+
+# ── node: escaped / encoded / protocol-relative URL forms in pages ──
+import node as N
+_pg = ('<script>var a="https:\\/\\/boards.greenhouse.io\\/acme1\\/jobs\\/1";var b="https:\\u002F\\u002Fjobs.lever.co\\u002Facme2";</script>'
+       '<a href="/r?url=https%3A%2F%2Fjobs.ashbyhq.com%2Facme3&x=1">x</a>'
+       '<script src="//boards.greenhouse.io/embed/job_board/js?for=acme4"></script>'
+       '<iframe src="https://acme5.bamboohr.com/jobs/embed2.php"></iframe>')
+_hits = {(a, s) for a, s, _ in N._detect_ats_hits(N._extract_candidate_urls(_pg, "https://example.com/careers"))}
+check({("greenhouse", "acme1"), ("lever", "acme2"), ("ashby", "acme3"), ("greenhouse", "acme4"), ("bamboohr", "acme5")} <= _hits,
+      f"node: JSON-escaped, \\u002F, %3A%2F, protocol-relative script src and iframe src all yield tenants {sorted(_hits)}")
+check(D._url_to_slug_rippling("https://ats.rippling.com/en-GB/acme/jobs") == "acme" and D._url_to_slug_rippling("https://ats.rippling.com/en-US/jobs") is None,
+      "rippling: locale-prefixed board URL resolves to the company; bare locale/jobs does not")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)

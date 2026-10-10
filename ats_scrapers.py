@@ -590,19 +590,6 @@ async def _post(url: str, **kwargs) -> httpx.Response | None:
     return None
 
 
-async def _pace_host_async(url: str) -> None:
-    """Async counterpart to _pace_host — same gap-based per-host pacing,
-    but sleeps the coroutine (asyncio.sleep) instead of blocking the
-    thread (time.sleep), so a paced host doesn't stall the whole event
-    loop from servicing other hosts' in-flight requests while it waits."""
-    host = _host_of(url)
-    with _host_pace_lock:
-        state = _host_pace_state.get(host)
-        gap = state["gap"] if state else 0.0
-    if gap > 0:
-        await asyncio.sleep(gap + random.uniform(0, gap * 0.25))
-
-
 # ── Shared markup-tolerant location extraction ────────────
 # 2026-09: several scrapers below extracted a location by regex-matching a
 # class/icon marker and then capturing "everything up to the next `<`"

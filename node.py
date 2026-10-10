@@ -28,7 +28,7 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 from dotenv import load_dotenv
@@ -565,14 +565,47 @@ def _clean_extracted_url(url: str) -> str:
     return url
 
 
+# URLs that sit inside JSON/JS strings or query parameters are written in
+# escaped forms the plain _URL_RE can't see: `https:\/\/boards.greenhouse.io\/acme`
+# (JSON-escaped slashes, ubiquitous in inline __NEXT_DATA__/wp-json blobs),
+# `https:\u002F\u002F...`, `&#x2F;`, `https%3A%2F%2F...` (a redirect/utm
+# wrapper's ?url= parameter), and protocol-relative `//host/path`
+# (script/iframe embeds). One normalisation pass makes all of them
+# ordinary http(s) URLs for the raw-text scan; each rewrite is gated on a
+# cheap substring check so the common clean page pays nothing.
+_ESCAPED_SLASH_RE = re.compile(r'\\u002[Ff]|\\/|&#x2[Ff];|&#47;')
+_PCT_URL_RE = re.compile(r'https?(?:%3A|%3a)(?:%2F|%2f){2}[A-Za-z0-9._~%\-]{4,400}')
+_PROTO_REL_RE = re.compile(r'(?<=["\'(=\s])//([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(/[^\s"\'<>\\`]{0,300})?')
+
+
+def _normalise_escaped_urls(html: str) -> str:
+    extra: list[str] = []
+    if "\\/" in html or "\\u002" in html or "&#x2" in html or "&#47;" in html:
+        html = _ESCAPED_SLASH_RE.sub("/", html)
+    if "%3A%2F" in html or "%3a%2f" in html or "%3A%2f" in html:
+        for m in _PCT_URL_RE.finditer(html):
+            try:
+                extra.append(unquote(m.group(0)))
+            except Exception:
+                pass
+    if "//" in html:
+        for m in _PROTO_REL_RE.finditer(html):
+            extra.append("https://" + m.group(1) + (m.group(2) or ""))
+            if len(extra) > _MAX_CANDIDATE_URLS_PER_PAGE:
+                break
+    return html + "\n" + "\n".join(extra) if extra else html
+
+
 def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
-    """Method A (parsed <a href>) + B (raw-text URL regex scan, catches
+    """Method A (parsed <a href> + embed src/action attributes) + B
+    (raw-text URL regex scan over the escape-normalised page, catches
     links in <script>/JS/iframe src that A misses)."""
     urls: set[str] = set()
     try:
         tree = LexborHTMLParser(html)
-        for node in tree.css("a[href]"):
-            href = node.attributes.get("href")
+        for node in tree.css("a[href], iframe[src], script[src], form[action], link[href]"):
+            href = (node.attributes.get("href") or node.attributes.get("src")
+                    or node.attributes.get("action"))
             if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
                 continue
             try:
@@ -585,7 +618,7 @@ def _extract_candidate_urls(html: str, base_url: str) -> set[str]:
                 break
     except Exception:
         pass  # a malformed page shouldn't kill the crawl of this company
-    for m in _URL_RE.finditer(html):
+    for m in _URL_RE.finditer(_normalise_escaped_urls(html)):
         cleaned = _clean_extracted_url(m.group(0))
         if cleaned:
             urls.add(cleaned)
