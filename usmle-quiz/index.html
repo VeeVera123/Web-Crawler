@@ -530,6 +530,14 @@
         .reveal.in { opacity: 1; transform: none; }
 
         /* ---- liquid glass: the "Songs my cat thinks are cool" material, used everywhere ---- */
+        /* Exact liquid glass copied from the quiz's music/calc buttons (uses #glass-distortion) */
+        .lg, .brand, .find, .tabs, .pal { position: relative; isolation: isolate; -webkit-backdrop-filter: none; backdrop-filter: none;
+            background: rgba(255,255,255,.05);
+            box-shadow: 0 8px 32px rgba(0,0,0,.25), 0 0 0 1px rgba(255,255,255,.1), inset 0 1px 0 rgba(255,255,255,.3); }
+        .lg::before, .brand::before, .find::before, .tabs::before, .pal::before { content:""; position:absolute; inset:0; z-index:-1; border-radius:inherit; box-shadow: inset 0 0 12px -4px #000; background: rgba(255,255,255,.05); }
+        .lg::after, .brand::after, .find::after, .tabs::after, .pal::after { content:""; position:absolute; inset:0; z-index:-2; border-radius:inherit; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); filter: url(#glass-distortion); }
+        .lg > *, .brand > *, .find > *, .tabs > *, .pal > * { position: relative; z-index: 1; }
+
         .lg, .dc, .fcard, .neu, .wcard, .explorer-input, .rail-grp, .pillseg, .empty-note, .pal, .mini-tabs, .stepper button, .arrow-btn, .neu-btn {
             position: relative; isolation: isolate; color: var(--fg, #f4f4f6);
             background: linear-gradient(177deg, rgba(255,255,255,.14), rgba(255,255,255,.05) 48%, rgba(255,255,255,.028));
