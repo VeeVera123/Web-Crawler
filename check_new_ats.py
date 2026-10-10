@@ -546,7 +546,87 @@ A._get = fake_rc_detail
 check("Own renewals" in asyncio.run(A._fetch_remote_com_description({"url": "https://remote.com/jobs/acme-c1/csm-j1"})), "remote.com description fetch")
 # Rank 4 eligibility list (2026-10 probe)
 import classifier as _C  # noqa: E402
-check({"Gem", "HiBob", "Deel"} <= _C.RANK4_ELIGIBLE_ATS and "SmartRecruiters" not in _C.RANK4_ELIGIBLE_ATS, "rank 4: Gem/HiBob/Deel eligible, SmartRecruiters not")
+check({"Gem", "HiBob", "Deel", "Paylocity", "Dayforce", "Cornerstone OnDemand"} <= _C.RANK4_ELIGIBLE_ATS
+      and not ({"SmartRecruiters", "JOIN", "Workday", "iCIMS"} & _C.RANK4_ELIGIBLE_ATS), "rank 4: probed platforms eligible, blocked ones not")
+
+# ── Paylocity application questions (2026-10) ──
+PAYD = {"screener": {"title": "Director", "questions": [
+    {"title": "Are you legally authorized to work in the United States?", "isRequired": True, "answers": [{"title": "Yes"}, {"title": "No"}], "data": "<data></data>"},
+    {"title": "Do you have a Bachelor's degree?", "isRequired": True, "data": "<data><answers><title>Yes</title></answers><answers><title>No</title></answers></data>"}]}}
+PAYH = "<html><script> window.pageData = " + json.dumps(PAYD) + "; var x = 1;</script></html>"
+pay_seen = {}
+
+
+def fake_sync_pay(url, **kw):
+    pay_seen["url"] = url
+    return R(PAYH, 200, url)
+
+
+A._get_requests_sync = fake_sync_pay
+pj = {"url": "https://recruiting.paylocity.com/recruiting/jobs/Details/4563618/Winthrop"}
+pq = A._fetch_paylocity_questions(pj)
+check("Application Question: Are you legally authorized to work in the United States?" in pq and "Bachelor" in pq and pj.get("_form_status") == "ok"
+      and pay_seen["url"] == "https://recruiting.paylocity.com/Recruiting/jobs/Apply/4563618", f"paylocity {pq!r} {pay_seen}")
+PAYD["screener"]["questions"] = []
+pj2 = {"url": "https://recruiting.paylocity.com/recruiting/jobs/Details/1/x"}
+PAYH = "<html><script> window.pageData = " + json.dumps(PAYD) + ";</script></html>"
+check(A._fetch_paylocity_questions(pj2) == "" and pj2.get("_form_status") == "ok", "paylocity: read form with no screener")
+A._get_requests_sync = _orig_sync
+
+# ── Dayforce application questions (2026-10) ──
+DFA = {"sections": [
+    {"xRefCode": "PERSONALINFORMATION", "fields": [{"x": 1}], "questionnaire": None},
+    {"xRefCode": None, "displayName": "References", "questionnaire": {"displayName": "References", "questions": [{"description": "References will be obtained at offer.", "options": []}]}},
+    {"xRefCode": None, "displayName": "Additional Questions", "questionnaire": {"displayName": "Additional Questions", "questions": [
+        {"displayName": "Right to Work", "description": "Are you authorised to work in the UK?", "isRequired": True, "options": [{"displayName": "Yes"}, {"displayName": "No"}]},
+        {"displayName": "Passport", "description": "", "isRequired": False, "options": []}]}}]}
+df_seen = {}
+
+
+def fake_sync_df(url, **kw):
+    if "/sitecontext/" in url:
+        return R("", 200, url, {"jobBoardId": 1})
+    df_seen["url"] = url
+    return R("", 200, url, DFA)
+
+
+A._get_requests_sync = fake_sync_df
+dfj = {"url": "https://jobs.dayforcehcm.com/en-US/caciltd/CANDIDATEPORTAL/jobs/3295"}
+dq = A._fetch_dayforce_questions(dfj)
+check("Application Question: Are you authorised to work in the UK?" in dq and "References will be obtained" not in dq and "Application Question: Passport" in dq
+      and dfj.get("_form_status") == "ok" and df_seen["url"] == "https://jobs.dayforcehcm.com/api/geo/caciltd/jobapplication/caciltd/en-GB/1/3295", f"dayforce {dq!r} {df_seen}")
+check(A._fetch_dayforce_questions({"url": "https://example.com/x"}) == "" and "Dayforce" in A.QUESTION_FETCHERS, "dayforce: other url / registered")
+A._dayforce_board_ids.clear()
+A._get_requests_sync = lambda url, **kw: R("", 200, url, {"jobBoardId": 4}) if "/sitecontext/" in url else fake_sync_df(url, **kw)
+dfj2 = {"url": "https://jobs.dayforcehcm.com/en-US/dcrusa/Join-us/jobs/2996"}
+A._fetch_dayforce_questions(dfj2)
+check(df_seen["url"] == "https://jobs.dayforcehcm.com/api/geo/dcrusa/jobapplication/dcrusa/en-GB/4/2996", f"dayforce custom board id {df_seen}")
+A._get_requests_sync = _orig_sync
+
+# ── CSOD application questions (2026-10) ──
+CSW = {"data": [{"totalPages": 2, "applicationId": 0, "actions": [
+    {"type": "contactInformation"},
+    {"type": "prescreeningQuestions", "section": {"questions": [
+        {"text": "Are you legally authorized to work in the United States?", "isRequired": True, "options": [{"text": "Yes"}, {"text": "No"}]}]}},
+    {"type": "eeoQuestions", "eeoQuestions": [{"text": "Gender"}]}]}]}
+cs_urls = []
+
+
+def fake_sync_cs(url, **kw):
+    cs_urls.append(url)
+    if "/home?c=" in url:
+        return R('<script>var b = {"token":"eyJabc.def.ghi","cloud":"https://us.api.csod.com/"}</script>', 200, url)
+    assert (kw.get("headers") or {}).get("Authorization") == "Bearer eyJabc.def.ghi"
+    return R("", 200, url, CSW)
+
+
+A._get_requests_sync = fake_sync_cs
+csj = {"url": "https://turner.csod.com/ux/ats/careersite/1/home/requisition/21960?c=turner"}
+csq = A._fetch_csod_questions(csj)
+check("Application Question: Are you legally authorized to work in the United States?" in csq and "Gender" not in csq and csj.get("_form_status") == "ok"
+      and any("/jobrequisition/21960/page/2" in u for u in cs_urls), f"csod {csq!r} {cs_urls}")
+check(A._fetch_csod_questions({"url": "https://example.com/x"}) == "" and "Cornerstone OnDemand" in A.QUESTION_FETCHERS, "csod: other url / registered")
+A._get_requests_sync = _orig_sync
 
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}

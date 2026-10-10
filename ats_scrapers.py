@@ -10655,11 +10655,53 @@ def _fetch_taleo_questions(job: dict) -> str:
     return _format_auth_questions(_fetch_generic_form_questions(url, job))
 
 
+_PAYLOCITY_JOB_RE = re.compile(r"https?://recruiting\.paylocity\.com/recruiting/jobs/(?:Details|Apply)/(\d+)", re.I)
+
+
+def _paylocity_screener_questions(html: str):
+    """The employer's screening questions from the Apply page's `window.pageData` JSON (screener.questions: title,
+    isRequired and the answers as XML in `data`), or None when the page carries no pageData (a form that was not read)."""
+    m = re.search(r"window\.pageData\s*=\s*", html)
+    if not m:
+        return None
+    try:
+        data, _ = json.JSONDecoder().raw_decode(html, m.end())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    screener = data.get("screener") or ((data.get("application") or {}).get("job") or {}).get("screener") or {}
+    questions = screener.get("questions") if isinstance(screener, dict) else None
+    if questions is None:
+        return []
+    fields = []
+    for q in questions if isinstance(questions, list) else []:
+        if not isinstance(q, dict) or not q.get("title"):
+            continue
+        opts = [a.get("title") or "" for a in (q.get("answers") or []) if isinstance(a, dict)]
+        if not opts:
+            opts = re.findall(r"<title>(.*?)</title>", q.get("data") or "", re.S)
+        fields.append({"label": q["title"], "required": bool(q.get("isRequired")), "options": opts})
+    return fields
+
+
 def _fetch_paylocity_questions(job: dict) -> str:
-    # 2026-10: pass `job` -- Paylocity's description fetcher
-    # (_fetch_generic_description) fetches this exact URL. See
+    """2026-10: the job's Details page has no form; the Apply page (/Recruiting/jobs/Apply/{id}, public, no login) is a React
+    app whose raw HTML embeds window.pageData with the screener questions. Live check: a Director of HR posting returned its
+    four screening questions. A page carrying pageData is a form that was READ (_form_status ok, even with no screener); anything
+    else falls back to the generic reader on the original URL."""
+    url = job.get("url", "") or ""
+    m = _PAYLOCITY_JOB_RE.match(url)
+    if m:
+        r = _get_requests_sync(f"https://recruiting.paylocity.com/Recruiting/jobs/Apply/{m.group(1)}",
+                               headers={"User-Agent": random.choice(USER_AGENTS)})
+        fields = _paylocity_screener_questions(r.text) if r is not None and getattr(r, "status_code", 0) == 200 else None
+        if fields is not None:
+            job["_form_status"] = "ok"
+            return _format_auth_questions(fields)
+    # 2026-10: pass `job` -- Paylocity's description fetcher (_fetch_generic_description) fetches this exact URL. See
     # _enrich_cache_get's module comment.
-    return _format_auth_questions(_fetch_generic_form_questions_multi(job.get("url", ""), job))
+    return _format_auth_questions(_fetch_generic_form_questions_multi(url, job))
 
 
 # ── SmartRecruiters ──
@@ -10817,6 +10859,102 @@ def _fetch_deel_questions(job: dict) -> str:
     return _format_auth_questions(fields)
 
 
+# ── Dayforce ──
+# 2026-10: the candidate portal's own request for the guest apply form (seen in headless Chrome after "Apply without an Account"):
+# GET jobs.dayforcehcm.com/api/geo/{client}/jobapplication/{client}/en-GB/1/{jobPostingId} -> sections[], each with a
+# `questionnaire` whose questions carry description (the question text), isRequired and options[].displayName. Keyless, no login.
+# Sections without a questionnaire are the standard fields; the "References" questionnaire is a notice, not a screening question.
+_DAYFORCE_JOB_RE = re.compile(r"https?://jobs\.dayforcehcm\.com/(?:[a-z]{2}-[A-Z]{2}/)?([^/?#]+)/([^/?#]+)/jobs/(\d+)", re.I)
+_dayforce_board_ids: dict[tuple[str, str], str] = {}
+
+
+def _dayforce_board_id(client: str, board: str) -> str:
+    """The `1` in the form URL is the job board's id: 1 on the default CANDIDATEPORTAL board, other numbers on custom boards
+    (dcrusa/Join-us is 4). sitecontext carries it as jobBoardId; cached per board."""
+    key = (client.lower(), board.lower())
+    if key not in _dayforce_board_ids:
+        board_id = "1"
+        r = _get_requests_sync(f"https://jobs.dayforcehcm.com/api/geo/{client}/sitecontext/{client}/{board}/en-GB",
+                               headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+        try:
+            board_id = str(int(r.json()["jobBoardId"]))
+        except Exception:
+            pass
+        _dayforce_board_ids[key] = board_id
+    return _dayforce_board_ids[key]
+
+
+def _fetch_dayforce_questions(job: dict) -> str:
+    m = _DAYFORCE_JOB_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    client, board, posting_id = m.group(1), m.group(2), m.group(3)
+    r = _get_requests_sync(f"https://jobs.dayforcehcm.com/api/geo/{client}/jobapplication/{client}/en-GB/{_dayforce_board_id(client, board)}/{posting_id}",
+                           headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+    try:
+        sections = r.json()["sections"]
+    except Exception:
+        return ""
+    if not isinstance(sections, list):
+        return ""
+    job["_form_status"] = "ok"
+    fields = []
+    for sec in sections:
+        quest = sec.get("questionnaire") if isinstance(sec, dict) else None
+        if not isinstance(quest, dict) or (sec.get("xRefCode") or "").upper() == "REFERENCES" or (quest.get("displayName") or "").strip().lower() == "references":
+            continue
+        for q in quest.get("questions") or []:
+            if isinstance(q, dict):
+                fields.append({"label": q.get("description") or q.get("displayName") or "", "required": bool(q.get("isRequired")),
+                               "options": [o.get("displayName") or "" for o in (q.get("options") or []) if isinstance(o, dict)]})
+    return _format_auth_questions(fields)
+
+
+# ── Cornerstone OnDemand (CSOD) ──
+# 2026-10: the career site's own application workflow (seen in headless Chrome after Apply):
+# GET {tenant}.csod.com/Services/API/ATS/applicationworkflow/jobrequisition/{req}/page/{n}?c={site}&careerSiteId={site}&applicationType=0
+# with the same anonymous bearer token scrape_csod already reads from the career site home page. data[0].actions[] has one entry
+# of type "prescreeningQuestions" whose section.questions[] carry text, isRequired and options[].text ("Are you legally authorized
+# to work in the United States?", visa sponsorship ...). The EEO questions are a separate action and are not read. applicationId is
+# 0 in the response, so reading the form creates no application record.
+_CSOD_JOB_RE = re.compile(r"https?://([a-z0-9-]+)\.csod\.com/ux/ats/careersite/(\d+)/home/requisition/(\d+)", re.I)
+
+
+def _fetch_csod_questions(job: dict) -> str:
+    m = _CSOD_JOB_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    tenant, site, req = m.group(1), m.group(2), m.group(3)
+    home = _get_requests_sync(f"https://{tenant}.csod.com/ux/ats/careersite/{site}/home?c={tenant}",
+                              headers={"User-Agent": random.choice(USER_AGENTS)})
+    tm = _CSOD_TOKEN_RE.search(home.text) if home is not None and getattr(home, "status_code", 0) == 200 else None
+    if not tm:
+        return ""
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json", "Authorization": f"Bearer {tm.group(1)}"}
+    fields, read, total = [], False, 1
+    page = 1
+    while page <= min(total, 4):
+        r = _get_requests_sync(f"https://{tenant}.csod.com/Services/API/ATS/applicationworkflow/jobrequisition/{req}/page/{page}"
+                               f"?c={site}&careerSiteId={site}&socialProvider=&socialId=&applicationType=0", headers=headers)
+        try:
+            data = r.json()["data"][0]
+            total = int(data.get("totalPages") or 1)
+            actions = data["actions"]
+        except Exception:
+            break
+        read = True
+        for a in actions if isinstance(actions, list) else []:
+            sec = a.get("section") if isinstance(a, dict) else None
+            for q in (sec.get("questions") or []) if isinstance(sec, dict) else []:
+                if isinstance(q, dict) and q.get("text"):
+                    fields.append({"label": q["text"], "required": bool(q.get("isRequired")),
+                                   "options": [o.get("text") or "" for o in (q.get("options") or []) if isinstance(o, dict)]})
+        page += 1
+    if read:
+        job["_form_status"] = "ok"
+    return _format_auth_questions(fields)
+
+
 # ── Dispatch table: source_ats (as stored on job dicts) → fetcher ──
 QUESTION_FETCHERS = {
     "Greenhouse": _fetch_greenhouse_questions,
@@ -10844,6 +10982,8 @@ QUESTION_FETCHERS = {
     "Gem": _fetch_gem_questions,
     "HiBob": _fetch_hibob_questions,
     "Deel": _fetch_deel_questions,
+    "Dayforce": _fetch_dayforce_questions,
+    "Cornerstone OnDemand": _fetch_csod_questions,
 }
 
 

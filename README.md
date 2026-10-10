@@ -149,7 +149,7 @@ otherwise just be dropped. Rank 4 gives **Customer Success and Account
 Management roles only** one more look, under a strict gate:
 
 1. Role is `CS` or `AM` (not PM/OM)
-2. ATS is one of 16 verified platforms (`RANK4_ELIGIBLE_ATS`; Gem, HiBob and Deel added 2026-10) — chosen because they reliably
+2. ATS is one of 19 verified platforms (`RANK4_ELIGIBLE_ATS`; Gem, HiBob, Deel, Paylocity, Dayforce and Cornerstone OnDemand added 2026-10) — chosen because they reliably
    return *both* a location field *and* real application questions on the
    same job, not just one or the other. Added only after a live probe through the real
    pipeline showed the question reader works from structured data; the probe results and the
