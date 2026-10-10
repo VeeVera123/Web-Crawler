@@ -593,6 +593,8 @@ SUPPORTED_ATS = {
     "emply", "cats", "elmo", "easyapply",
     # 2026-10: HiBob and Deel (public career APIs), found by reading colophon-group/jobseek's monitors.
     "hibob", "deel",
+    # 2026-10: ApplicantPro (isolved Talent Acquisition): {tenant}.applicantpro.com, public /core/jobs JSON.
+    "applicantpro",
     # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
     # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
     "getro",
@@ -2149,6 +2151,11 @@ def _url_to_slug_hibob(url: str) -> str | None:
     return _tenant_of(urlparse(url).hostname, ".careers.hibob.com")
 
 
+def _url_to_slug_applicantpro(url: str) -> str | None:
+    """ApplicantPro (2026-10): {tenant}.applicantpro.com -> tenant."""
+    return _tenant_of(urlparse(url).hostname, ".applicantpro.com")
+
+
 _DEEL_NON_SLUGS = frozenset({"auth", "login", "signup", "guest", "api", "deelapi", "job-boards", "job-details"})
 
 
@@ -2566,6 +2573,7 @@ URL_TO_SLUG = {
     "easyapply": _url_to_slug_easyapply,
     "hibob": _url_to_slug_hibob,
     "deel": _url_to_slug_deel,
+    "applicantpro": _url_to_slug_applicantpro,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3274,6 +3282,7 @@ CC_PLATFORM_PATTERNS = {
     "easyapply": ["*.easyapply.co/*"],
     "hibob": ["*.careers.hibob.com/*"],
     "deel": ["jobs.deel.com/*"],
+    "applicantpro": ["*.applicantpro.com/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3362,6 +3371,7 @@ CC_EXTRACTORS = {
     "easyapply": _url_to_slug_easyapply,
     "hibob": _url_to_slug_hibob,
     "deel": _url_to_slug_deel,
+    "applicantpro": _url_to_slug_applicantpro,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3692,6 +3702,16 @@ def _cc_check_deel(slug: str) -> bool | None:
     except Exception:
         return None
     return True if r.status_code == 200 else (False if r.status_code == 404 else None)
+
+
+def _cc_check_applicantpro(slug: str) -> bool | None:
+    """A live tenant answers 200 on /jobs/; an unknown one 302-redirects to /notset.php (confirmed live)."""
+    try:
+        r = requests.get(f"https://{slug}.applicantpro.com/jobs/", timeout=10, allow_redirects=False,
+                         headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    return True if r.status_code == 200 else (False if r.status_code in (301, 302, 404) else None)
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -4105,6 +4125,7 @@ _CC_LIVE_CHECK = {
     "easyapply": _via_verification("easyapply", _cc_check_easyapply),
     "hibob": _via_verification("hibob", _cc_check_hibob),
     "deel": _via_verification("deel", _cc_check_deel),
+    "applicantpro": _via_verification("applicantpro", _cc_check_applicantpro),
     "getro": _via_verification("getro", _cc_check_getro),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
@@ -7026,6 +7047,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "dayforce": "dayforce", "ceridian": "dayforce", "hirehive": "hirehive",
     "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
     "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply", "hibob": "hibob", "deel": "deel",
+    "applicantpro": "applicantpro",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7045,6 +7067,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("careers-page.com", "manatal"), ("careers.jobscore.com", "jobscore"),
     ("jobs.crelate.com", "crelate"), ("comeet.com", "comeet"),
     ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"), ("careers.hibob.com", "hibob"), ("jobs.deel.com", "deel"),
+    ("applicantpro.com", "applicantpro"),
 )
 
 

@@ -914,6 +914,11 @@ async def _verify_hibob(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_applicantpro(session: aiohttp.ClientSession, slug: str) -> bool:
+    """A live tenant answers 200 on /jobs/; an unknown one 302-redirects to /notset.php."""
+    return await _verify_by_status(session, f"https://{slug}.applicantpro.com/jobs/")
+
+
 async def _verify_getro(session: aiohttp.ClientSession, slug: str) -> bool:
     """A Getro board is live when its network has jobs. slug is a {tenant} (read the network id from the board page) or
     a numeric network id."""
@@ -1110,6 +1115,7 @@ ARCHIVE_II_VERIFIERS = {
     "easyapply": _verify_easyapply,
     "hibob": _verify_hibob,
     "deel": _verify_deel,
+    "applicantpro": _verify_applicantpro,
     "getro": _verify_getro,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full

@@ -55,7 +55,8 @@ robots-allowed job API before being added to Crawl I:
 | Employment Hero | Not added — `jobs.employmenthero.com` is a client-rendered job marketplace: no sitemap, no per-employer slug in URLs, and every data route is under the robots-disallowed `/api/` / `/_next/` |
 | GoHire | Not added — `app.gohire.io/{slug}` is an SPA shell (200 for any slug, so no dead-slug signal) and no public list endpoint was found |
 | Comeet | Not added — the careers API needs a per-company `uid` + token that the 73-slug registry doesn't carry; `comeet.com/jobs/{name}` 404s |
-| ApplicantPro/Stack, CareerPlug | Not added — HTML-only / token-gated, and mostly local/hourly US roles that the location filter would drop |
+| ApplicantPro (`applicantpro.com`) | **Added** (`scrape_applicantpro`): the tenant id sits in the board page's raw HTML, then `/core/jobs/{id}` returns every job as JSON; live-verified on 4 tenants. (An earlier "no jobs" result came from tenants with nothing open.) |
+| CareerPlug | Not added yet — HTML-only, mostly local/hourly US roles |
 
 ## Pipeline stages
 

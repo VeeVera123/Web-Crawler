@@ -7210,6 +7210,62 @@ async def scrape_himalayas(slug: str) -> list[dict]:
     return jobs
 
 
+# ── ApplicantPro (isolved Talent Acquisition) ─────────────────────────────────
+# 2026-10, verified live on 4 tenants (airbusspaceanddefense 37 jobs, xbowsystems 46, tritonsystems 15, wilsonconnectivity 10).
+# {slug}.applicantpro.com/jobs/ carries the tenant's numeric id in its raw HTML (courierCurrentRouteData {"domain_id":"3546"});
+# GET /core/jobs/{domain_id}?getParams={...} then returns every open job as JSON (no description: the job page's JSON-LD
+# supplies it through _fetch_generic_description). An earlier "no jobs" result came from tenants that simply had none open.
+_APPLICANTPRO_WORKPLACE = {"onsite": "On-site", "on-site": "On-site", "remote": "Remote", "hybrid": "Hybrid"}
+
+
+async def scrape_applicantpro(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+        return []
+    origin = f"https://{slug}.applicantpro.com"
+    r = await _get(f"{origin}/jobs/", headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r or r.status_code != 200:
+        return []
+    m = re.search(r'"domain_id"\s*:\s*"?(\d+)', r.text)
+    if not m:
+        return []
+    params = {"getParams": json.dumps({"isInternal": 0, "showLocation": 1, "showEmploymentType": 1,
+                                       "showWorkplaceType": 1, "showOrgUnit": 1, "showDate": 1})}
+    r2 = await _get(f"{origin}/core/jobs/{m.group(1)}", params=params,
+                    headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json", "Referer": f"{origin}/jobs/"})
+    if not r2 or r2.status_code != 200:
+        return []
+    try:
+        items = (r2.json().get("data") or {}).get("jobs") or []
+    except Exception:
+        return []
+    jobs = []
+    for it in items:
+        if not isinstance(it, dict) or not it.get("title") or not it.get("jobUrl"):
+            continue
+        country = _text(it.get("iso3"))
+        location = ", ".join(p for p in (_text(it.get("city")), _text(it.get("abbreviation") or it.get("stateName")), country) if p)
+        ws = _text(it.get("workplaceType"))
+        salary = ""
+        if it.get("minSalary") or it.get("maxSalary"):
+            salary = f"{it.get('minSalary') or ''}-{it.get('maxSalary') or ''} {_text(it.get('payTypeFrame'))}".strip()
+        jobs.append({
+            "title": _text(it["title"]),
+            "url": it["jobUrl"],
+            "company": _text(it.get("parentTitle")) or slug.replace("-", " ").title(),
+            "location": location,
+            "country": country,
+            "department": _text(it.get("orgTitle")),
+            "workplace_type": _APPLICANTPRO_WORKPLACE.get(ws.lower(), ws),
+            "employment_type": _text(it.get("employmentType")),
+            "salary": salary,
+            "description_snippet": "",
+            "source_ats": "ApplicantPro",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7295,6 +7351,7 @@ SCRAPERS = {
     "getro": scrape_getro,
     "himalayas": scrape_himalayas,
     "deel": scrape_deel,
+    "applicantpro": scrape_applicantpro,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -8482,6 +8539,7 @@ DESCRIPTION_FETCHERS = {
     # hit either gap silently kept an empty description forever with no
     # way to recover it.
     "Zoho": _fetch_generic_description,
+    "ApplicantPro": _fetch_generic_description,
     "BambooHR": _fetch_generic_description,
     # 2026-09: Paycom — the search endpoint's description field is
     # truncated; the real full text (plus salary/category) only comes

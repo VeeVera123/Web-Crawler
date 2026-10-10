@@ -207,6 +207,42 @@ async def fake_404(url, **kw):
 A._get = fake_404
 check(asyncio.run(A.scrape_deel("nobody")) == [] and asyncio.run(A.scrape_hibob("nobody")) == [], "unknown tenants -> []")
 
+# ── ApplicantPro (2026-10) ──
+for url, want in [("https://xbowsystems.applicantpro.com/jobs/4175504", "xbowsystems"), ("https://www.applicantpro.com/", None),
+                  ("https://applicantpro.com/", None), ("https://app.applicantpro.com/x", None)]:
+    check(D._url_to_slug_applicantpro(url) == want, f"applicantpro slug {url} -> {D._url_to_slug_applicantpro(url)!r}")
+check("applicantpro" in D.URL_TO_SLUG and "applicantpro" in D.SUPPORTED_ATS and "applicantpro" in A.SCRAPERS
+      and "applicantpro" in D._CC_LIVE_CHECK and "ApplicantPro" in A.DESCRIPTION_FETCHERS, "applicantpro registered")
+APJ = {"success": True, "data": {"jobs": [
+    {"id": 1, "title": "Customer Success Manager", "city": "Austin", "abbreviation": "TX", "iso3": "USA", "workplaceType": "Remote",
+     "employmentType": "Full Time", "orgTitle": "Support", "parentTitle": "Acme Inc", "minSalary": "90,000", "maxSalary": "110,000",
+     "payTypeFrame": "per year", "jobUrl": "https://acme.applicantpro.com/jobs/1"},
+    {"id": 2, "title": "Welder", "city": "Mesa", "iso3": "USA", "workplaceType": "Onsite", "jobUrl": "https://acme.applicantpro.com/jobs/2"},
+    {"id": 3, "title": "", "jobUrl": "https://acme.applicantpro.com/jobs/3"}]}}
+ap_calls = []
+
+
+async def fake_ap(url, **kw):
+    ap_calls.append(url)
+    if url.endswith("/jobs/"):
+        return R('<script>x = {"domain_id":"3546","career_site_name":"Acme"}</script>', 200, url)
+    assert "/core/jobs/3546" in url and "getParams" in (kw.get("params") or {})
+    return R("", 200, url, APJ)
+
+
+A._get = fake_ap
+apj = asyncio.run(A.scrape_applicantpro("Acme"))
+check(len(apj) == 2 and apj[0]["location"] == "Austin, TX, USA" and apj[0]["workplace_type"] == "Remote" and apj[0]["company"] == "Acme Inc"
+      and apj[0]["salary"] == "90,000-110,000 per year" and apj[1]["workplace_type"] == "On-site" and apj[1]["location"] == "Mesa, USA", f"applicantpro {apj}")
+
+
+async def fake_ap_none(url, **kw):
+    return R("<html>no id</html>", 200, url)
+
+
+A._get = fake_ap_none
+check(asyncio.run(A.scrape_applicantpro("acme")) == [] and asyncio.run(A.scrape_applicantpro("Bad_Slug!")) == [], "applicantpro: no domain id / bad slug")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [
