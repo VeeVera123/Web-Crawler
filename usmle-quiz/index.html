@@ -54,9 +54,9 @@
             --dur-med:   420ms;
             --dur-slow:  600ms;
         }
-        * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
-        *::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
-        html, body { overflow: hidden; }
+        /* page scrolls normally; scrollbars are hidden only inside the quiz stage */
+        .quiz-root * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+        .quiz-root *::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
         body { font-family: 'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
         .no-select { -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none; -webkit-touch-callout: none; }
         .screenshot-protected { transition: filter 0.1s ease-out; }
@@ -493,6 +493,12 @@
             .calc-btn { width: 50px; height: 50px; }
         }
 
+        /* Calm controls: no hover / press motion on the glass buttons */
+        .liquid-glass-music-btn:hover, .lg-toggle:hover, .lg-toggle:active, .calc-pill:hover, .calc-pill:active,
+        .liquid-glass-play-btn:hover, .lg-glass-btn:hover, .lg-glass-btn:active, .liquid-glass-playlist-card:hover,
+        .liquid-glass-music-dropdown:hover { transform: none !important; }
+        .calc-btn:hover { transform: none; }
+
 
         /* ==========================================================================
            SITE SHELL  -  tabs, scroll tones, liquid glass, sections
@@ -506,12 +512,15 @@
         .quiz-host[hidden] { display: none; }
         .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-        /* ---- section tones: each section owns its colours AND fonts ---- */
-        [data-tone="ink"]   { --bg:#050506; --fg:#f5f5f7; --mut:rgba(245,245,247,.64); --acc:#FF9E7C; --line:rgba(255,255,255,.12); --card:rgba(255,255,255,.05); --fd:'Sora',sans-serif; --fb:'Manrope',sans-serif; }
-        [data-tone="pearl"] { --bg:#E8E8EB; --fg:#26262a; --mut:#6b6b72; --acc:#1d1d1f; --line:rgba(0,0,0,.09); --card:#ececef; --fd:'Inter Tight','Inter',-apple-system,sans-serif; --fb:'Inter Tight','Inter',-apple-system,sans-serif; }
-        [data-tone="mint"]  { --bg:#EBEEEB; --fg:#0f1511; --mut:#5d6a62; --acc:#14804F; --line:rgba(0,0,0,.08); --card:#ffffff; --fd:'Outfit',sans-serif; --fb:'Outfit',sans-serif; }
-        [data-tone="paper"] { --bg:#D6D0BE; --fg:#2b291f; --mut:#6a665a; --acc:#55552f; --line:rgba(43,41,31,.16); --card:#e4dfce; --fd:'Space Grotesk',sans-serif; --fb:'Manrope',sans-serif; }
-        .sec { position: relative; background: var(--bg); color: var(--fg); font-family: var(--fb); padding: clamp(72px, 10vw, 150px) clamp(18px, 5vw, 80px); }
+        /* ---- one palette, one type system ----
+           ink + glass + coral everywhere. Sora (display), Manrope (body), Space Grotesk (labels),
+           Instrument Serif italic (highlighted words). Sections differ only by a subtle depth shift. */
+        :root { --ink: #07070a; --coral: #FF9E7C; --coral-deep: #FF6A3D; --violet: #8d9bff; }
+        [data-tone] { --bg: var(--ink); --fg: #f4f4f6; --mut: rgba(244,244,246,.62); --acc: var(--coral); --line: rgba(255,255,255,.1); --fd: 'Sora', sans-serif; --fb: 'Manrope', sans-serif; }
+        [data-tone="pearl"] { --bg: #09090d; } [data-tone="mint"] { --bg: #0b0b10; } [data-tone="paper"] { --bg: #08080b; }
+        .sec { position: relative; color: var(--fg); font-family: var(--fb); padding: clamp(72px, 10vw, 150px) clamp(18px, 5vw, 80px);
+               background: radial-gradient(70% 45% at 100% 0%, rgba(255,120,70,.11), transparent 62%), radial-gradient(60% 45% at 0% 100%, rgba(110,100,255,.13), transparent 62%), var(--bg);
+               border-top: 1px solid rgba(255,255,255,.06); }
         .hero + .sec, .sec + .sec { margin-top: -38px; border-radius: 40px 40px 0 0; padding-top: calc(clamp(72px, 10vw, 150px) + 20px); }
         .sec h1, .sec h2, .sec h3 { font-family: var(--fd); letter-spacing: -.035em; margin: 0; }
         .hl { font-family: 'Instrument Serif', Georgia, serif; font-style: italic; font-weight: 400; color: var(--acc); letter-spacing: -.01em; }
@@ -520,47 +529,45 @@
         .reveal { opacity: 0; transform: translateY(28px); transition: opacity .9s cubic-bezier(.22,1,.36,1), transform .9s cubic-bezier(.22,1,.36,1); transition-delay: var(--d, 0ms); }
         .reveal.in { opacity: 1; transform: none; }
 
-        /* ---- liquid glass (site) ---- */
-        :root { --g-bg: rgba(255,255,255,.09); --g-bd: rgba(255,255,255,.22); --g-fg: #fff; --g-sh: rgba(0,0,0,.3); }
-        body[data-navtone="light"] { --g-bg: rgba(255,255,255,.55); --g-bd: rgba(255,255,255,.9); --g-fg: #1d1d1f; --g-sh: rgba(40,40,60,.18); }
-        .lg { position: relative; isolation: isolate; background: var(--g-bg); border: 1px solid var(--g-bd); color: var(--g-fg);
-              box-shadow: inset 0 1px 0 rgba(255,255,255,.55), inset 0 -1px 0 rgba(255,255,255,.12), inset 0 0 26px rgba(255,255,255,.08), 0 14px 44px var(--g-sh);
-              -webkit-backdrop-filter: blur(16px) saturate(1.8); backdrop-filter: blur(16px) saturate(1.8); }
-        .lg::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: -1;
-              background: radial-gradient(120% 140% at 12% 0%, rgba(255,255,255,.38), rgba(255,255,255,0) 46%), linear-gradient(315deg, rgba(255,255,255,.16), rgba(255,255,255,0) 40%); }
-        .lg-refract::after { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: -2; -webkit-backdrop-filter: url(#lg-refract); backdrop-filter: url(#lg-refract); }
+        /* ---- liquid glass: the "Songs my cat thinks are cool" material, used everywhere ---- */
+        .lg, .dc, .fcard, .neu, .wcard, .explorer-input, .rail-grp, .pillseg, .empty-note, .pal, .mini-tabs, .stepper button, .arrow-btn, .neu-btn {
+            position: relative; isolation: isolate; color: var(--fg, #f4f4f6);
+            background: linear-gradient(180deg, rgba(255,255,255,.075), rgba(255,255,255,.025));
+            border: 1px solid rgba(255,255,255,.13);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.26), inset 0 0 14px -5px rgba(0,0,0,.85), 0 10px 32px rgba(0,0,0,.28);
+            -webkit-backdrop-filter: blur(16px) saturate(1.5); backdrop-filter: blur(16px) saturate(1.5);
+            transition: border-color .25s, background .25s;
+        }
+        .lg::before, .dc::before, .fcard::before, .wcard::before, .neu::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: -1;
+            background: radial-gradient(120% 90% at 10% 0%, rgba(255,255,255,.10), transparent 46%); }
+        .lg:hover, .dc:hover, .fcard:hover, .wcard:hover, .arrow-btn:hover, .neu-btn:hover { border-color: rgba(255,255,255,.24); }
         .btn-orange { display: inline-flex; align-items: center; gap: 10px; padding: 13px 22px; border-radius: 999px; font: 700 14px/1 'Manrope', sans-serif; color: #1b0d06; cursor: pointer; border: 0;
-              background: linear-gradient(135deg, #FFB48F, #FF7A45); box-shadow: inset 0 1px 0 rgba(255,255,255,.7), 0 10px 30px rgba(255,122,69,.45); }
+              background: linear-gradient(135deg, #FFB48F, #FF7A45); box-shadow: inset 0 1px 0 rgba(255,255,255,.7), 0 10px 30px rgba(255,122,69,.4); }
         .btn-white { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 999px; font: 700 13px/1 'Manrope', sans-serif; color: #0b0b0c; background: #fff; border: 0; cursor: pointer; box-shadow: 0 8px 28px rgba(0,0,0,.25); }
-        .btn-ghost { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 999px; font: 600 13px/1 var(--fb, 'Manrope'); color: var(--fg); background: transparent; border: 1px solid var(--line); cursor: pointer; }
-        .btn-ghost:hover { border-color: var(--fg); }
+        .btn-ghost { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 999px; font: 600 13px/1 var(--fb, 'Manrope'); color: var(--fg); background: transparent; border: 1px solid var(--line); cursor: pointer; transition: border-color .25s; }
+        .btn-ghost:hover { border-color: rgba(255,255,255,.45); }
         .btn-dark { display: inline-flex; align-items: center; gap: 8px; padding: 13px 22px; border-radius: 999px; font: 700 14px/1 var(--fb); color: var(--bg); background: var(--fg); border: 0; cursor: pointer; }
-        .neu { background: var(--bg); box-shadow: 12px 12px 28px rgba(160,160,175,.55), -12px -12px 28px rgba(255,255,255,.95); border-radius: 28px; }
-        .neu-btn { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; background: var(--bg); color: var(--fg); border: 0; cursor: pointer; box-shadow: 8px 8px 18px rgba(160,160,175,.6), -8px -8px 18px #fff; font-size: 18px; }
-        .neu-btn:active { box-shadow: inset 6px 6px 12px rgba(160,160,175,.6), inset -6px -6px 12px #fff; }
+        .neu { border-radius: 28px; }
+        .neu-btn { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; font-size: 18px; }
         .spot { position: relative; overflow: hidden; }
-        .spot::after { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .4s; background: radial-gradient(380px circle at var(--mx, 50%) var(--my, 50%), rgba(255,158,124,.2), transparent 60%); }
+        .spot::after { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .4s; background: radial-gradient(380px circle at var(--mx, 50%) var(--my, 50%), rgba(255,158,124,.14), transparent 60%); }
         .spot:hover::after { opacity: 1; }
-        [data-tone="pearl"] .spot::after, [data-tone="mint"] .spot::after { background: radial-gradient(380px circle at var(--mx, 50%) var(--my, 50%), rgba(255,255,255,.7), transparent 60%); }
 
         /* ---- nav ---- */
-        body[data-route="quiz"] .tabs { --g-bg: rgba(18,18,22,.8); --g-fg: #fff; --g-bd: rgba(255,255,255,.2); --g-sh: rgba(0,0,0,.4); }
-        body[data-route="quiz"] .tab-thumb { background: rgba(255,255,255,.2); border-color: rgba(255,255,255,.35); }
         .progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 120; transform-origin: left; transform: scaleX(var(--p, 0)); background: linear-gradient(90deg, #FF9E7C, #FF6A2B, #6a6bff); pointer-events: none; }
-        .site-nav { position: fixed; top: 0; left: 0; right: 0; z-index: 90; display: flex; align-items: center; justify-content: space-between; padding: 14px clamp(14px, 3vw, 32px); pointer-events: none; transition: opacity .5s, transform .6s cubic-bezier(.34,1.3,.64,1); }
+        .site-nav { position: fixed; top: 0; left: 0; right: 0; z-index: 90; display: flex; align-items: center; justify-content: space-between; padding: 14px clamp(14px, 3vw, 32px); pointer-events: none; transition: opacity .5s, transform .6s cubic-bezier(.2,.8,.2,1); }
         .site-nav > * { pointer-events: auto; }
         .site-nav[data-hide="true"] { opacity: 0; transform: translateY(-20px); pointer-events: none; }
         .site-nav[data-hide="true"] > * { pointer-events: none; }
-        .brand { display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 18px 0 8px; border-radius: 999px; font: 700 13px/1 'Manrope', sans-serif; cursor: pointer; }
+        .brand { display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 18px 0 8px; border-radius: 999px; font: 700 13px/1 'Manrope', sans-serif; color: #f4f4f6; cursor: pointer; }
         .brand-mark { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: #E4502B; font-size: 14px; }
         .nav-actions { display: flex; gap: 10px; align-items: center; }
-        .find { display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 16px; border-radius: 999px; font: 600 13px/1 'Manrope', sans-serif; cursor: pointer; }
-        .find kbd { font: 600 10px/1 'Space Grotesk', monospace; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--g-bd); opacity: .8; }
-        .tabs { position: fixed; z-index: 91; left: 50%; top: 14px; transform: translateX(-50%); display: flex; padding: 5px; border-radius: 999px; height: 54px; transition: top .8s cubic-bezier(.34,1.25,.64,1); }
+        .find { display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 16px; border-radius: 999px; font: 600 13px/1 'Manrope', sans-serif; color: #f4f4f6; cursor: pointer; }
+        .find kbd { font: 600 10px/1 'Space Grotesk', monospace; padding: 4px 6px; border-radius: 6px; border: 1px solid rgba(255,255,255,.25); opacity: .8; }
+        .tabs { position: fixed; z-index: 91; left: 50%; top: 14px; transform: translateX(-50%); display: flex; padding: 5px; border-radius: 999px; height: 54px; transition: top .7s cubic-bezier(.2,.8,.2,1); }
         .tabs[data-pos="bottom"] { top: calc(100dvh - 54px - 16px - env(safe-area-inset-bottom)); }
-        .tab-thumb { position: absolute; top: 5px; bottom: 5px; left: 0; border-radius: 999px; background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.35); box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 4px 16px rgba(0,0,0,.2); transition: transform .65s cubic-bezier(.34,1.5,.64,1), width .65s cubic-bezier(.34,1.5,.64,1); z-index: 0; }
-        body[data-navtone="light"] .tab-thumb { background: rgba(255,255,255,.95); border-color: #fff; }
-        .tab { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 8px; padding: 0 20px; border-radius: 999px; font: 600 13px/1 'Manrope', sans-serif; color: var(--g-fg); opacity: .72; cursor: pointer; background: none; border: 0; transition: opacity .3s; }
+        .tab-thumb { position: absolute; top: 5px; bottom: 5px; left: 0; border-radius: 999px; background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.35); box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 4px 16px rgba(0,0,0,.2); transition: transform .5s cubic-bezier(.2,.8,.2,1), width .5s cubic-bezier(.2,.8,.2,1); z-index: 0; }
+        .tab { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 8px; padding: 0 20px; border-radius: 999px; font: 600 13px/1 'Manrope', sans-serif; color: #f4f4f6; opacity: .7; cursor: pointer; background: none; border: 0; transition: opacity .3s; }
         .tab[aria-current="page"] { opacity: 1; }
         .tab i { font-size: 13px; }
 
@@ -590,7 +597,7 @@
         .hs1 { position: relative; margin-top: 22px; width: fit-content; } .hs1::after { transform: rotate(-6deg); }
         .hs2 { right: 10%; top: 6%; } .hs2::after { left: auto; right: 100%; margin: 0 14px 0 0; transform: rotate(18deg); transform-origin: right; }
         .hs3 { right: 6%; bottom: 26%; } .hs3::after { display: none; }
-        .hero-cta { display: flex; align-items: center; gap: 22px; padding: 10px 10px 10px 26px; border-radius: 999px; width: fit-content; margin: 36px auto 0; font-size: 13px; z-index: 3; animation: hwIn 1.2s cubic-bezier(.22,1,.36,1) .9s both; --g-bg: rgba(255,255,255,.08); --g-fg: #fff; --g-bd: rgba(255,255,255,.2); --g-sh: rgba(0,0,0,.4); }
+        .hero-cta { display: flex; align-items: center; gap: 22px; padding: 10px 10px 10px 26px; border-radius: 999px; width: fit-content; margin: 36px auto 0; font-size: 13px; z-index: 3; animation: hwIn 1.2s cubic-bezier(.22,1,.36,1) .9s both; }
         .hero-para { position: absolute; z-index: 3; right: 6%; bottom: 8%; max-width: 330px; font-size: 13px; line-height: 1.6; color: rgba(255,255,255,.78); }
         .scroll-hint { position: absolute; z-index: 3; left: 50%; bottom: 28px; transform: translateX(-50%); font: 500 11px/1 'Space Grotesk', monospace; letter-spacing: .2em; color: rgba(255,255,255,.5); text-transform: uppercase; animation: bob 2.4s ease-in-out infinite; }
         @keyframes bob { 50% { transform: translate(-50%, 8px); } }
@@ -599,24 +606,24 @@
         .marquee-track { display: flex; gap: 14px; width: max-content; animation: slide 40s linear infinite; }
         .marquee:hover .marquee-track { animation-play-state: paused; }
         @keyframes slide { to { transform: translateX(-50%); } }
-        .chip-lg { display: inline-flex; align-items: center; gap: 12px; height: 64px; padding: 0 28px; border-radius: 20px; font: 700 22px/1 'Sora', sans-serif; letter-spacing: -.03em; color: #fff; --g-bg: rgba(255,255,255,.06); --g-fg: #fff; --g-bd: rgba(255,255,255,.14); }
+        .chip-lg { display: inline-flex; align-items: center; gap: 12px; height: 64px; padding: 0 28px; border-radius: 20px; font: 700 22px/1 'Sora', sans-serif; letter-spacing: -.03em; color: #fff }
         .chip-lg i { color: #FF9E7C; font-size: 18px; }
 
         /* ---- pearl: benefits ---- */
-        .ghost-word { position: absolute; left: -2%; top: 4%; font: 800 clamp(120px, 26vw, 380px)/.8 var(--fd); letter-spacing: -.06em; color: rgba(255,255,255,.55); pointer-events: none; user-select: none; text-shadow: 0 2px 0 rgba(255,255,255,.4); }
-        .big-h { font-size: clamp(40px, 7vw, 96px); line-height: .96; font-weight: 800; max-width: 880px; position: relative; }
+        .ghost-word { position: absolute; left: -2%; top: 4%; font: 800 clamp(120px, 26vw, 380px)/.8 var(--fd); letter-spacing: -.06em; color: rgba(255,255,255,.035); pointer-events: none; user-select: none; }
+        .big-h { font-size: clamp(38px, 6.4vw, 88px); line-height: 1; font-weight: 600; letter-spacing: -.045em; max-width: 880px; position: relative; }
         .grid4 { display: grid; gap: 22px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 64px; position: relative; }
         .fcard { padding: 28px; min-height: 250px; display: flex; flex-direction: column; justify-content: space-between; gap: 22px; }
-        .fcard h3 { font-size: 24px; line-height: 1.1; font-weight: 700; margin-top: 14px; }
+        .fcard h3 { font-size: 22px; line-height: 1.15; font-weight: 600; margin-top: 14px; }
         .fcard p { font-size: 14px; line-height: 1.55; color: var(--mut); margin: 10px 0 0; }
-        .ficon { width: 52px; height: 52px; border-radius: 18px; display: grid; place-items: center; font-size: 18px; color: var(--fg); background: var(--bg); box-shadow: inset 5px 5px 12px rgba(160,160,175,.5), inset -5px -5px 12px #fff; }
+        .ficon { width: 52px; height: 52px; border-radius: 18px; display: grid; place-items: center; font-size: 18px; color: var(--coral); background: rgba(255,158,124,.12); border: 1px solid rgba(255,158,124,.25); }
         .show { display: grid; gap: clamp(28px, 5vw, 70px); grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: center; margin-top: clamp(80px, 12vw, 170px); }
-        .show .frame { position: relative; border-radius: 28px; overflow: hidden; background: #0b0b0d; aspect-ratio: 4 / 5; display: grid; place-items: center; box-shadow: 0 30px 80px rgba(60,60,80,.35); }
+        .show .frame { position: relative; border-radius: 28px; overflow: hidden; background: #0b0b0d; aspect-ratio: 4 / 5; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.12); box-shadow: 0 30px 80px rgba(0,0,0,.5); }
         .show .frame img { width: 92%; border-radius: 14px; }
         .show .frame .cap { position: absolute; left: 18px; bottom: 16px; right: 18px; font: 800 clamp(28px, 4.5vw, 54px)/.95 var(--fd); letter-spacing: -.04em; color: rgba(255,255,255,.88); mix-blend-mode: difference; }
-        .show h3 { font-size: clamp(32px, 5vw, 64px); line-height: .98; font-weight: 800; }
+        .show h3 { font-size: clamp(32px, 5vw, 62px); line-height: 1; font-weight: 600; letter-spacing: -.045em; }
         .show p.lead { font-size: 16px; line-height: 1.65; color: var(--mut); max-width: 460px; margin: 22px 0 32px; }
-        .demo { position: relative; height: 230px; border-radius: 24px; overflow: hidden; background: #111114; margin: 0 0 30px; }
+        .demo { position: relative; height: 230px; border-radius: 24px; overflow: hidden; background: #0e0e12; border: 1px solid rgba(255,255,255,.1); margin: 0 0 30px; }
         .demo .dcard { position: absolute; left: 50%; top: 50%; width: 52%; height: 62%; margin: -31% 0 0 -26%; border-radius: 16px; background: linear-gradient(160deg, #26262c, #17171b); border: 1px solid rgba(255,255,255,.1); animation: dockCard 6s cubic-bezier(.5,0,.2,1) infinite; }
         .demo .dcard::before, .demo .dcard::after { content: ""; position: absolute; left: 14px; right: 14px; height: 8px; border-radius: 8px; background: rgba(255,255,255,.14); top: 18px; }
         .demo .dcard::after { top: 36px; right: 40%; background: rgba(255,255,255,.08); }
@@ -626,83 +633,92 @@
         @keyframes dockCard { 0%, 12%, 88%, 100% { transform: translateX(0); } 30%, 70% { transform: translateX(-24%) scale(.92); } }
         @keyframes dockPanel { 0%, 12%, 88%, 100% { transform: translateX(120%); opacity: 0; } 30%, 70% { transform: none; opacity: 1; } }
 
-        /* ---- mint: dashboard ---- */
+        /* ---- dashboard (dark glass + coral) ---- */
         .dash-shell { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 18px; }
         .rail { position: sticky; top: 92px; align-self: start; display: grid; gap: 14px; }
-        .rail-grp { background: #fff; border-radius: 40px; padding: 10px; display: grid; gap: 10px; box-shadow: 0 6px 24px rgba(20,60,40,.06); }
-        .rail button { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; font-size: 16px; background: transparent; border: 0; color: #3a463f; cursor: pointer; }
-        .rail button.on { background: #14804F; color: #fff; }
+        .rail-grp { border-radius: 40px; padding: 10px; display: grid; gap: 10px; }
+        .rail button { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; font-size: 16px; background: transparent; border: 0; color: rgba(255,255,255,.62); cursor: pointer; transition: background .25s, color .25s; }
+        .rail button:hover { color: #fff; background: rgba(255,255,255,.07); }
+        .rail button.on { background: rgba(255,158,124,.18); color: var(--coral); }
         .dash-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
-        .dash-head h1 { font-size: clamp(34px, 5vw, 60px); font-weight: 400; line-height: 1; }
-        .dash-head h1 input { font: inherit; color: #8a948d; background: transparent; border: 0; border-bottom: 2px dashed transparent; width: 6.4em; outline: none; padding: 0; transition: border-color .2s; }
-        .dash-head h1 input:hover, .dash-head h1 input:focus { border-bottom-color: #14804F; }
-        .pillseg { display: inline-flex; padding: 5px; background: #fff; border-radius: 999px; box-shadow: 0 6px 24px rgba(20,60,40,.06); position: relative; }
-        .pillseg button { position: relative; z-index: 1; padding: 11px 18px; border-radius: 999px; font: 500 13px/1 var(--fb); color: #55615a; background: none; border: 0; cursor: pointer; transition: color .3s; }
-        .pillseg button.on { color: #fff; }
-        .pillseg .pill-thumb { position: absolute; top: 5px; bottom: 5px; left: 0; background: #14804F; border-radius: 999px; transition: transform .6s cubic-bezier(.34,1.5,.64,1), width .6s cubic-bezier(.34,1.5,.64,1); }
+        .dash-head h1 { font-size: clamp(32px, 4.8vw, 58px); font-weight: 500; line-height: 1.12; letter-spacing: -.04em; }
+        .mark-wrap { position: relative; display: inline-block; white-space: nowrap; }
+        .autosize { position: relative; z-index: 1; display: inline-grid; }
+        .autosize > * { grid-area: 1 / 1; font: inherit; letter-spacing: inherit; padding: 0 .06em; }
+        .autosize .sizer { visibility: hidden; white-space: pre; min-width: 2ch; }
+        .autosize input { width: 0; min-width: 100%; color: #fff; background: transparent; border: 0; outline: none; }
+        .mark { position: absolute; z-index: 0; left: -3%; top: 2%; width: 106%; height: 108%; overflow: visible; pointer-events: none; transform: rotate(-1.1deg); }
+        .mark path { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
+        .mk-hl { stroke: rgba(255,158,124,.5); stroke-width: 30; animation: draw 1s cubic-bezier(.5,.1,.2,1) 1.1s forwards; }
+        .mk-hl2 { stroke: rgba(255,158,124,.28); stroke-width: 14; animation: draw .8s cubic-bezier(.5,.1,.2,1) 1.4s forwards; }
+        .mk-ul { stroke: #FF9E7C; stroke-width: 2.6; animation: draw .7s cubic-bezier(.5,.1,.2,1) 2s forwards; }
+        .mk-ul2 { stroke: rgba(255,158,124,.6); stroke-width: 1.8; animation: draw .6s cubic-bezier(.5,.1,.2,1) 2.35s forwards; }
+        .pillseg { display: inline-flex; padding: 5px; border-radius: 999px; position: relative; }
+        .pillseg button { position: relative; z-index: 1; padding: 11px 18px; border-radius: 999px; font: 500 13px/1 var(--fb); color: rgba(255,255,255,.65); background: none; border: 0; cursor: pointer; transition: color .3s; }
+        .pillseg button.on { color: #1b0d06; font-weight: 700; }
+        .pillseg .pill-thumb { position: absolute; top: 5px; bottom: 5px; left: 0; background: linear-gradient(135deg, #FFB48F, #FF7A45); border-radius: 999px; box-shadow: 0 6px 18px rgba(255,122,69,.35); transition: transform .5s cubic-bezier(.2,.8,.2,1), width .5s cubic-bezier(.2,.8,.2,1); }
         .dgrid { display: grid; gap: 16px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
-        .dc { background: #fff; border-radius: 28px; padding: 22px; box-shadow: 0 6px 24px rgba(20,60,40,.05); position: relative; transition: transform .5s cubic-bezier(.34,1.4,.64,1), box-shadow .3s; }
-        .dc:hover { transform: translateY(-4px); box-shadow: 0 18px 40px rgba(20,60,40,.1); }
-        .dc h4 { margin: 0; font: 600 15px/1.2 var(--fb); }
-        .dc .sub { font-size: 12px; color: #86918a; margin-top: 4px; }
+        .dc { border-radius: 28px; padding: 22px; }
+        .dc h4 { margin: 0; font: 600 15px/1.2 var(--fb); color: #fff; }
+        .dc .sub { font-size: 12px; color: rgba(255,255,255,.5); margin-top: 4px; }
         .dc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-        .arrow-btn { width: 40px; height: 40px; border-radius: 50%; background: #f1f3f1; display: grid; place-items: center; color: #3a463f; border: 0; cursor: pointer; flex: none; }
-        .c-best { grid-column: span 3; padding: 0; background: none; box-shadow: none; }
+        .arrow-btn { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; flex: none; }
+        .c-best { grid-column: span 3; padding: 0; background: none; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+        .c-best::before { display: none; }
         .c-bars { grid-column: span 5; grid-row: span 2; }
         .c-trend { grid-column: span 4; }
         .c-week { grid-column: span 3; }
         .c-mastery { grid-column: span 4; }
         .c-table { grid-column: span 8; }
         .c-goal { grid-column: span 4; }
-        .green-card { background: linear-gradient(150deg, #17995f, #0e6b41); color: #fff; border-radius: 26px; padding: 22px; min-height: 200px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 22px 44px rgba(20,128,79,.35); position: relative; overflow: hidden; }
-        .green-card::after { content: ""; position: absolute; right: -40px; top: -40px; width: 160px; height: 160px; border-radius: 50%; background: rgba(255,255,255,.12); }
-        .green-card .num { font: 400 clamp(38px, 4vw, 52px)/1 var(--fb); letter-spacing: -.02em; }
-        .green-card small { opacity: .8; font-size: 12px; }
-        .bigmetric { font: 400 clamp(30px, 3.2vw, 46px)/1 var(--fb); letter-spacing: -.03em; }
-        .bigmetric .dim { color: #9aa49d; }
-        .chip-up { display: inline-flex; padding: 4px 10px; border-radius: 999px; font: 600 11px/1.4 var(--fb); color: #fff; background: #1fb575; }
-        .chip-dn { background: #e5586a; }
+        .green-card { background: linear-gradient(145deg, #FFB48F, #FF7A45); color: #1b0d06; border-radius: 26px; padding: 22px; min-height: 200px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: inset 0 1px 0 rgba(255,255,255,.55), 0 22px 50px rgba(255,122,69,.3); position: relative; overflow: hidden; }
+        .green-card::after { content: ""; position: absolute; right: -40px; top: -40px; width: 160px; height: 160px; border-radius: 50%; background: rgba(255,255,255,.2); }
+        .green-card .num { font: 500 clamp(38px, 4vw, 52px)/1 var(--fd); letter-spacing: -.04em; }
+        .green-card small { opacity: .75; font-size: 12px; }
+        .bigmetric { font: 500 clamp(30px, 3.2vw, 44px)/1 var(--fd); letter-spacing: -.045em; }
+        .bigmetric .dim { color: rgba(255,255,255,.35); }
+        .chip-up { display: inline-flex; padding: 4px 10px; border-radius: 999px; font: 600 11px/1.4 var(--fb); color: #3ddc97; background: rgba(61,220,151,.14); border: 1px solid rgba(61,220,151,.25); }
+        .chip-dn { color: #ff7a89; background: rgba(255,122,137,.14); border-color: rgba(255,122,137,.25); }
         .chart { position: relative; height: 280px; }
-        .gl { position: absolute; left: 34px; right: 0; top: calc(10px + (100% - 34px) * var(--k) / 4); border-top: 1px dashed rgba(0,0,0,.1); }
-        .gl span { position: absolute; left: -34px; top: -8px; font-size: 11px; color: #98a29b; }
+        .gl { position: absolute; left: 34px; right: 0; top: calc(10px + (100% - 34px) * var(--k) / 4); border-top: 1px dashed rgba(255,255,255,.09); }
+        .gl span { position: absolute; left: -34px; top: -8px; font-size: 11px; color: rgba(255,255,255,.4); }
         .plot { position: absolute; left: 34px; right: 0; top: 10px; bottom: 0; display: flex; gap: 10px; }
         .bcol { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; cursor: pointer; }
         .barwrap { position: relative; flex: 1; width: 100%; display: flex; align-items: flex-end; }
-        .bar { width: 100%; height: var(--h); border-radius: 999px; background: repeating-linear-gradient(135deg, rgba(20,128,79,.34) 0 6px, rgba(20,128,79,.22) 6px 12px); transform-origin: bottom; animation: growY .9s cubic-bezier(.34,1.3,.64,1) both; animation-delay: calc(var(--i) * 80ms); transition: background .3s; min-height: 12px; }
-        .bcol.on .bar { background: repeating-linear-gradient(135deg, #0e6b41 0 6px, #14804F 6px 12px); }
-        .bcol.ghost { cursor: default; } .bcol.ghost .bar { background: repeating-linear-gradient(135deg, rgba(0,0,0,.06) 0 6px, rgba(0,0,0,.025) 6px 12px); }
-        .bub { position: absolute; left: 50%; bottom: calc(var(--h) + 10px); transform: translateX(-50%) scale(.5); opacity: 0; transition: transform .5s cubic-bezier(.34,1.8,.64,1), opacity .25s; background: #14804F; color: #fff; font: 600 11px/1 var(--fb); padding: 6px 9px; border-radius: 999px; white-space: nowrap; pointer-events: none; z-index: 2; }
-        .bcol.on .bub { transform: translateX(-50%) scale(1); opacity: 1; }
-        .xl { height: 24px; padding-top: 8px; font-size: 11px; color: #98a29b; white-space: nowrap; }
+        .bar { width: 100%; height: var(--h); border-radius: 999px; background: repeating-linear-gradient(135deg, rgba(255,158,124,.34) 0 6px, rgba(255,158,124,.18) 6px 12px); transform-origin: bottom; animation: growY .8s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(var(--i) * 70ms); transition: background .3s; min-height: 12px; }
+        .bcol.on .bar { background: repeating-linear-gradient(135deg, #FF7A45 0 6px, #FF9E7C 6px 12px); box-shadow: 0 0 24px rgba(255,122,69,.35); }
+        .bcol.ghost { cursor: default; } .bcol.ghost .bar { background: repeating-linear-gradient(135deg, rgba(255,255,255,.07) 0 6px, rgba(255,255,255,.03) 6px 12px); }
+        .bub { position: absolute; left: 50%; bottom: calc(var(--h) + 10px); transform: translateX(-50%); opacity: 0; transition: opacity .25s; background: #FF9E7C; color: #1b0d06; font: 700 11px/1 var(--fb); padding: 6px 9px; border-radius: 999px; white-space: nowrap; pointer-events: none; z-index: 2; }
+        .bcol.on .bub { opacity: 1; }
+        .xl { height: 24px; padding-top: 8px; font-size: 11px; color: rgba(255,255,255,.4); white-space: nowrap; }
         @keyframes growY { from { transform: scaleY(0); } }
         .line { width: 100%; height: 130px; overflow: visible; }
-        .line .stroke { fill: none; stroke: #14804F; stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 1.6s cubic-bezier(.22,1,.36,1) .3s forwards; }
+        .line .stroke { fill: none; stroke: #FF9E7C; stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 1.6s cubic-bezier(.22,1,.36,1) .3s forwards; }
         @keyframes draw { to { stroke-dashoffset: 0; } }
-        .line .dot { fill: #fff; stroke: #14804F; stroke-width: 2; transition: r .3s cubic-bezier(.34,1.8,.64,1); }
-        .line .dot:hover { r: 6; }
-        .mini-tabs { display: inline-flex; background: #f1f3f1; border-radius: 999px; padding: 4px; }
-        .mini-tabs button { padding: 8px 14px; border-radius: 999px; font: 500 12px/1 var(--fb); color: #66726b; border: 0; background: none; cursor: pointer; transition: all .35s cubic-bezier(.34,1.5,.64,1); }
-        .mini-tabs button.on { background: #14804F; color: #fff; }
+        .line .dot { fill: #0b0b10; stroke: #FF9E7C; stroke-width: 2; }
+        .mini-tabs { display: inline-flex; border-radius: 999px; padding: 4px; }
+        .mini-tabs button { padding: 8px 14px; border-radius: 999px; font: 500 12px/1 var(--fb); color: rgba(255,255,255,.6); border: 0; background: none; cursor: pointer; transition: background .3s, color .3s; }
+        .mini-tabs button.on { background: linear-gradient(135deg, #FFB48F, #FF7A45); color: #1b0d06; font-weight: 700; }
         .dtable { width: 100%; border-collapse: collapse; font-size: 13px; }
-        .dtable th { text-align: left; font-weight: 500; color: #86918a; padding: 6px 8px 12px; }
-        .dtable td { padding: 13px 8px; border-top: 1px solid #f0f2f0; }
-        .dtable tbody tr { transition: background .25s; } .dtable tbody tr:hover { background: #f5f7f5; }
+        .dtable th { text-align: left; font-weight: 500; color: rgba(255,255,255,.45); padding: 6px 8px 12px; }
+        .dtable td { padding: 13px 8px; border-top: 1px solid rgba(255,255,255,.07); }
+        .dtable tbody tr { transition: background .25s; } .dtable tbody tr:hover { background: rgba(255,255,255,.04); }
         .st { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; }
-        .st::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #1fb575; } .st.warn::before { background: #f0a23b; }
+        .st::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #3ddc97; } .st.warn::before { background: #f5b454; }
         .mrow { display: flex; align-items: center; gap: 12px; padding: 9px 0; }
-        .mrow .mbar { flex: 1; height: 8px; border-radius: 999px; background: #eef1ee; overflow: hidden; }
-        .mrow .mbar i { display: block; height: 100%; border-radius: inherit; background: #14804F; transform-origin: left; animation: growX 1.2s cubic-bezier(.22,1,.36,1) both; }
+        .mrow .mbar { flex: 1; height: 8px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
+        .mrow .mbar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #FF9E7C, #FF7A45); transform-origin: left; animation: growX 1.1s cubic-bezier(.22,1,.36,1) both; }
         @keyframes growX { from { transform: scaleX(0); } }
-        .mrow .q { width: 34px; height: 34px; border-radius: 50%; background: #e7f4ee; color: #14804F; display: grid; place-items: center; font: 600 12px/1 var(--fb); flex: none; }
+        .mrow .q { width: 34px; height: 34px; border-radius: 50%; background: rgba(255,158,124,.14); color: var(--coral); display: grid; place-items: center; font: 600 12px/1 var(--fb); flex: none; }
         .stepper { display: inline-flex; align-items: center; gap: 12px; }
-        .stepper button { width: 34px; height: 34px; border-radius: 50%; border: 0; background: #f1f3f1; font-size: 16px; cursor: pointer; color: #26322b; }
+        .stepper button { width: 34px; height: 34px; border-radius: 50%; font-size: 16px; cursor: pointer; }
         .ringwrap { display: grid; place-items: center; position: relative; margin: 6px 0 10px; }
-        .ringwrap .mid { position: absolute; text-align: center; font: 400 34px/1 var(--fb); }
-        .ringwrap .mid small { display: block; font-size: 11px; color: #86918a; margin-top: 4px; }
-        .empty-note { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px 20px; border-radius: 20px; background: #fff; margin-bottom: 16px; font-size: 14px; box-shadow: 0 6px 24px rgba(20,60,40,.05); }
+        .ringwrap .mid { position: absolute; text-align: center; font: 500 32px/1 var(--fd); letter-spacing: -.04em; }
+        .ringwrap .mid small { display: block; font: 500 11px/1 var(--fb); letter-spacing: 0; color: rgba(255,255,255,.5); margin-top: 6px; }
+        .empty-note { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px 20px; border-radius: 20px; margin-bottom: 16px; font-size: 14px; }
 
         /* ---- paper: case files ---- */
-        .files-h { font-size: clamp(38px, 6vw, 84px); font-weight: 700; line-height: .94; max-width: 900px; text-transform: uppercase; letter-spacing: -.045em; }
+        .files-h { font-family: 'Space Grotesk', sans-serif !important; font-size: clamp(38px, 6vw, 84px); font-weight: 700; line-height: .94; max-width: 900px; text-transform: uppercase; letter-spacing: -.045em; }
         .files-h .hl { text-transform: none; }
         .files { display: flex; height: min(78vh, 680px); margin-top: 70px; padding-top: 34px; }
         .file { --c: #8d8f77; --tabx: 12%; position: relative; flex: 1 1 0; min-width: 0; margin-left: -14px; background: var(--c); border-radius: 22px 22px 0 0; cursor: pointer; transition: flex-grow .9s cubic-bezier(.22,1,.36,1), transform .5s cubic-bezier(.34,1.4,.64,1); box-shadow: -10px 0 24px rgba(0,0,0,.14); color: #23231a; overflow: visible; text-align: left; border: 0; padding: 0; font-family: inherit; }
@@ -745,12 +761,11 @@
         .reader .imgs img { height: 190px; border-radius: 14px; scroll-snap-align: start; border: 1px solid rgba(35,35,26,.14); }
         .reader .obj { padding: 14px 16px; border-radius: 14px; background: rgba(20,128,79,.1); border-left: 3px solid #14804F; }
         .explorer { margin-top: 90px; display: grid; gap: 22px; }
-        .explorer-input { display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 24px; border-radius: 999px; background: rgba(255,255,255,.55); border: 1px solid var(--line); max-width: 640px; }
+        .explorer-input { display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 24px; border-radius: 999px; max-width: 640px; }
         .explorer-input input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; font: 500 16px/1 var(--fb); color: var(--fg); padding: 14px 0; }
         .wiki-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-        .wcard { display: grid; grid-template-columns: 72px 1fr; gap: 14px; padding: 14px; border-radius: 20px; background: rgba(255,255,255,.5); text-decoration: none; color: inherit; transition: transform .5s cubic-bezier(.34,1.4,.64,1), background .3s; }
-        .wcard:hover { transform: translateY(-4px) rotate(-.4deg); background: rgba(255,255,255,.8); }
-        .wcard img, .wcard .ph { width: 72px; height: 72px; border-radius: 14px; object-fit: cover; background: rgba(0,0,0,.06); }
+        .wcard { display: grid; grid-template-columns: 72px 1fr; gap: 14px; padding: 14px; border-radius: 20px; text-decoration: none; color: inherit; }
+        .wcard img, .wcard .ph { width: 72px; height: 72px; border-radius: 14px; object-fit: cover; background: rgba(255,255,255,.06); }
         .wcard b { font: 700 15px/1.2 var(--fd); display: block; margin-bottom: 4px; }
         .wcard span { font-size: 12.5px; line-height: 1.45; color: var(--mut); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
@@ -770,7 +785,7 @@
 
         /* ---- find palette ---- */
         .pal-back { position: fixed; inset: 0; z-index: 150; background: rgba(8,8,10,.5); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); display: flex; justify-content: center; align-items: flex-start; padding: min(14vh, 120px) 14px 14px; animation: fadeIn .25s both; }
-        .pal { width: min(680px, 100%); max-height: 72dvh; display: flex; flex-direction: column; border-radius: 26px; overflow: hidden; animation: popIn .5s cubic-bezier(.34,1.4,.64,1) both; --g-bg: rgba(28,28,34,.72); --g-fg: #f5f5f7; --g-bd: rgba(255,255,255,.2); --g-sh: rgba(0,0,0,.6); }
+        .pal { width: min(680px, 100%); max-height: 72dvh; display: flex; flex-direction: column; border-radius: 26px; overflow: hidden; animation: popIn .5s cubic-bezier(.34,1.4,.64,1) both; }
         .pal-in { display: flex; align-items: center; gap: 14px; padding: 18px 20px; border-bottom: 1px solid rgba(255,255,255,.1); }
         .pal-in input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font: 500 17px/1 'Manrope', sans-serif; }
         .pal-in input::placeholder { color: rgba(255,255,255,.4); }
@@ -828,7 +843,7 @@
 <body>
     <svg style="display: none"><filter id="lg-dist"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="70" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none"><defs><filter id="glass-distortion" x="0%" y="0%" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="77" xChannelSelector="R" yChannelSelector="G"/></filter></defs></svg>
-    <svg xmlns="http://www.w3.org/2000/svg" style="display:none"><defs><filter id="lg-refract" x="0%" y="0%" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.011 0.011" numOctaves="2" seed="7" result="n"/><feGaussianBlur in="n" stdDeviation="2" result="b"/><feDisplacementMap in="SourceGraphic" in2="b" scale="7" xChannelSelector="R" yChannelSelector="G"/></filter></defs></svg>
+
 <div id="root"></div>
 <script>
 /* ==========================================================================
@@ -1218,7 +1233,7 @@
                 return 'opt-btn locked opt-dim';
             };
 
-            const LETTERS = ['A','B','C','D','E','F','G','H'];
+            const LETTERS = ['A','B','C','D','E','F','G','H','I','J'];
             const renderOptions = () => h('div', { className: 'space-y-2' },
                 q.options.map((opt, idx) => h('button', {
                     key: idx,
@@ -1327,9 +1342,9 @@
                 [['0','num',()=>pressNum('0'),true],['.','num',pressDot],['=','op',pressEq]]
             ];
             return h('div',{ref:wrapRef,'data-anchor':'calc',style:{position:'relative',zIndex:9999}},
-                h('div',{ref:btnRef,className:`calc-pill jelly ${isOpen?' open':''}${isDarkMode?' dark':''}`,onClick:toggleOpen,'data-hover':'1.08','aria-label':'Calculator',title:"Calculator"}, h('span',{className:'calc-icon'},'+')),
+                h('div',{ref:btnRef,className:`calc-pill ${isOpen?' open':''}${isDarkMode?' dark':''}`,onClick:toggleOpen,'aria-label':'Calculator',title:"Calculator"}, h('span',{className:'calc-icon'},'+')),
                 (isOpen || isAnimating) && h('div',{className:`${isMobile?'dock-sheet calc-sheet':'absolute top-full right-0 mt-2'} overflow-visible transition-all duration-150 ${isOpen?'opacity-100 scale-100':'opacity-0 scale-95 pointer-events-none'}`,style:isMobile?{transformOrigin:'bottom center'}:{width:'268px',transformOrigin:'top right',zIndex:9999}},
-                    h('div',{ref:panelRef,className:`liquid-glass-calc-panel jelly ${isDarkMode?'dark':''}`,style:{width:'260px',padding:'4px 0'},'data-tilt':'3','data-hover':'1.0'},
+                    h('div',{ref:panelRef,className:`liquid-glass-calc-panel ${isDarkMode?'dark':''}`,style:{width:'260px',padding:'4px 0'}},
                         h('div',{className:`calc-display${disp.length>9?' small':''}`},disp),
                         h('div',{className:'calc-grid'},
                             rows.map((row,ri)=>row.map(([label,type,fn,wide],ci)=>
@@ -1344,13 +1359,23 @@
         const questions = [
             { question: "A 63-year-old man comes to the office due to poor urine flow for several months. The patient says that it takes about 10 seconds to initiate a urinary stream. He also needs to strain when urinating or the stream just stops before his bladder is empty. He has tried behavioral modifications, but the symptoms continue to be bothersome. The patient takes lisinopril for hypertension. He has smoked a pack of cigarettes a day for 30 years. His father had urothelial cancer of the bladder. He reports significant improvement several months after starting finasteride. A therapeutic effect on which of the following structures is most likely responsible for this patient's symptomatic improvement?", options: ["Structure A","Structure B","Structure C","Structure D","Structure E","Structure F"], answer: 2, image: "https://github.com/Bluegates77/Question-Images/blob/main/Question%201.png?raw=true" },
             { question: "A 54-year-old man comes to the office due to difficulty maintaining an erection for the last several weeks. He says, \"One night I was having sex with my wife and could not maintain an erection. Since then, it has continued to be a problem.\" The patient still has morning erections. His medical history is significant for hypertension, coronary artery disease, and depression. He has been married for 20 years but reports that he and his wife have been arguing since he began spending more time at work following a promotion 2 months ago. His current medications include amlodipine, lisinopril, and bupropion. Physical examination is unremarkable. Which of the following is the most likely cause of this patient's erectile dysfunction?", options: ["Advancing age","Antidepressant-induced sexual dysfunction","Antihypertensive-induced adverse effect","Psychological distress","Vascular insufficiency"], answer: 3 },
-            { question: "A 21-year-old previously healthy man comes to the emergency department with acute onset of severe left scrotal pain and nausea. The pain started after he returned home from the gym following an intense workout. He denies any trauma, fever, or dysuria. Examination shows a swollen and tender left testis that lies higher than the right testis. Doppler ultrasound shows decreased arterial blood flow in the left spermatic cord entering the testis. Which of the following is the likely origin of the artery involved in this patient's condition?", options: ["Abdominal aorta","External iliac artery","Internal iliac artery","Internal pudendal artery","Obturator artery","Renal artery"], answer: 0 }
+            { question: "A 21-year-old previously healthy man comes to the emergency department with acute onset of severe left scrotal pain and nausea. The pain started after he returned home from the gym following an intense workout. He denies any trauma, fever, or dysuria. Examination shows a swollen and tender left testis that lies higher than the right testis. Doppler ultrasound shows decreased arterial blood flow in the left spermatic cord entering the testis. Which of the following is the likely origin of the artery involved in this patient's condition?", options: ["Abdominal aorta","External iliac artery","Internal iliac artery","Internal pudendal artery","Obturator artery","Renal artery"], answer: 0 },
+            {"question": "A 53-year-old woman comes to the office because of a 6-year history of stiffness and pain of her hands. She has difficulty buttoning her clothes because of the symptoms. She takes no medications. Physical examination shows the findings in the photograph. An abnormality of which of the following is most likely to confirm the diagnosis in this patient?", "options": ["Anti-citrullinated peptide antibody", "Antimitochondrial antibody assay", "Human leukocyte antigen-DQ2 antibody assay", "Precursor of the erythroid cell line", "Precursor of the thrombopoietic line"], "answer": 0, "image": "https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@211e233045daef6509b32705ff4f6025f6c3df20/usmle-quiz/assets/questions/usmle-step1-item02.png"},
+            {"question": "An 80-year-old woman is evaluated in a subacute rehabilitation facility 6 months after she sustained a cerebral infarction. Her vital signs are within normal limits. When the patient is asked to look to the right, the right eye abducts and the left eye adducts. When she is asked to look to the left, the right eye adducts and the left eye remains midline. There is right-sided hemiparesis. Deep tendon reflexes are 3+ in the right biceps and quadriceps. Babinski sign is present on the right. Sensation to vibration and two-point discrimination are decreased on the right. The area affected by the cerebral infarction is indicated by the shaded area in the drawing of the brain stem shown. Which of the following additional findings is most likely in this patient?", "options": ["Anesthesia of the left side of the face", "Asymmetric smile", "Hoarseness", "Loss of accommodation", "Paralysis of the tongue"], "answer": 1, "image": "https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@211e233045daef6509b32705ff4f6025f6c3df20/usmle-quiz/assets/questions/usmle-step1-item03.png"},
+            {"question": "A 63-year-old woman with a 2-year history of indigestion and heartburn volunteers for a research study in which a variety of drugs are administered and her gastric pH is measured. Which of the following sets of curves best represents the results in this patient after administration of cimetidine and omeprazole?", "options": ["Cimetidine A, omeprazole D", "Cimetidine B, omeprazole A", "Cimetidine B, omeprazole D", "Cimetidine C, omeprazole A", "Cimetidine C, omeprazole D", "Cimetidine D, omeprazole A"], "answer": 1, "image": "https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@211e233045daef6509b32705ff4f6025f6c3df20/usmle-quiz/assets/questions/usmle-step1-item15.png"},
+            {"question": "A 65-year-old woman is brought to the emergency department because of a 10-minute history of chest tightness and severe pain of her left arm. Physical examination shows jugular venous distention. Crackles are heard over the lung fields. An ECG shows ST-segment elevation greater than 1 mm in leads V4 through V6 and new Q waves. Serum studies show an increased troponin I concentration. Which of the following labeled points in the graph best represents the changes in cardiac function that occurred during the first 10 seconds after the onset of pain in this patient?", "options": ["W → X", "W → Y", "W → Z", "X → W", "X → Y", "X → Z", "Z → W", "Z → X", "Z → Y"], "answer": 2, "image": "https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@211e233045daef6509b32705ff4f6025f6c3df20/usmle-quiz/assets/questions/usmle-step1-item24.png"},
+            {"question": "A 25-year-old man is brought to the emergency department via ambulance 15 minutes after he sustained a gunshot wound to his back during a robbery. On arrival, he is conscious but appears confused. Temperature is 37.0°C (98.6°F), pulse is 120/min and weak, respirations are 20/min, and blood pressure is 110/50 mm Hg. Pulse oximetry on room air shows an oxygen saturation of 96%. Physical examination shows pale, cold, clammy skin and a single bullet entry wound in the posterior 10th intercostal space on the left side. Abdominal CT scan is shown. The bullet is most likely lodged in which of the following structures in this patient?", "options": ["Adrenal gland", "Colon", "Kidney", "Lung", "Spleen"], "answer": 4, "image": "https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@211e233045daef6509b32705ff4f6025f6c3df20/usmle-quiz/assets/questions/usmle-step1-item26.png"}
         ];
 
         const explanations = [
             { text: `This patient has signs of bladder outlet obstruction (eg, urinary hesitancy, need to strain) most likely due to benign prostatic hyperplasia (BPH), a condition that is present in >90% of men age >80. The diagnosis is based on history of urinary symptoms and digital rectal examination showing a smooth, homogenously enlarged prostate. The prostate is located just anterior to the anal canal (Choice D) and posterior to the symphysis pubis (the above CT image is just superior to the joining of the left and right pubic bones).\n\nBPH may cause static urinary obstruction (androgen-mediated enlargement of the prostate) or dynamic obstruction (prostate smooth muscle contraction via α-adrenoceptors). 5-α reductase inhibitors (eg, finasteride) inhibit the action of androgens on the prostate gland, preventing the conversion of testosterone to dihydrotestosterone and thereby limiting further prostate enlargement. α-adrenergic blockers (eg, tamsulosin) relax the smooth muscle in the bladder neck and prostate gland and are also used to control symptoms of BPH.\n\n(Choice B) The distal end of the anterior bladder wall may or may not be visible at this level depending on patient positioning and bladder filling.\n\nEducational objective:\nThe prostate is located between the pubic symphysis and the anal canal and is visible on inferior sections of the pelvis on CT scan. Benign prostatic hyperplasia is a common, age-related condition that causes urinary symptoms (eg, hesitancy, straining, incomplete voiding). It can be medically treated with α-adrenergic blockers and 5-α reductase inhibitors.`, images: ["https://github.com/Bluegates77/Question-Images/blob/main/Answer%201.jpeg?raw=true","https://github.com/Bluegates77/Question-Images/blob/main/Benign%20prostatic%20hyperplasia%20%28BPH%29.jpeg?raw=true","https://github.com/Bluegates77/Question-Images/blob/main/Benign%20prostatic%20hyperplasia.jpeg?raw=true"] },
             `The temporal association between this patient's arguments with his wife and subsequent onset of erectile dysfunction (ED) makes psychogenic factors the most likely cause of his ED. The presence of spontaneous nocturnal erections is another important diagnostic clue as this demonstrates the integrity of neurologic reflexes and corpus cavernosa blood flow. Loss of normal nocturnal erections occurs in men with organic ED but is not seen with psychogenic etiologies.\n\nED can be caused by organic factors, psychogenic factors, or a combination of both. Psychogenic causes include performance anxiety, depression, sexual trauma, and/or relationship problems and are typically associated with an abrupt onset triggered by stress, as in this patient. In contrast, men suffering from organic causes of ED (eg, vascular insufficiency) tend to have a slower progression of symptoms, with intermittent ED later becoming more persistent in nature (Choice E).\n\n(Choice A) There tends to be an increase in the incidence of ED with advancing age. However, the sudden onset of this patient's dysfunction during a time of relationship and work stress makes a psychogenic cause more likely.\n\n(Choices B and C) Antidepressants, particularly selective serotonin reuptake inhibitors, have been associated with sexual dysfunction. However, the norepinephrine-dopamine reuptake inhibitor bupropion has not been associated with sexual dysfunction. Of the antihypertensive agents, thiazide diuretics and sympathetic blockers (eg, clonidine, methyldopa) have the greatest risk for ED. Angiotensin-converting enzyme inhibitors (eg, lisinopril) and calcium channel blockers (eg, amlodipine) have the least risk.\n\nEducational objective:\nPsychogenic causes of erectile dysfunction include performance anxiety, depression, sexual trauma, relationship problems, and stress. Important clues include sudden-onset and normal nocturnal erections.`,
-            `The gonadal arteries arise from the abdominal aorta slightly below the renal arteries. Each gonadal artery courses obliquely downward and laterally within the retroperitoneal space near the psoas major muscle. After crossing anteriorly over the ureter, the gonadal arteries run parallel to the external iliac vessels and eventually traverse the inguinal canal to supply the testes via the spermatic cord in males.\n\nThis patient most likely has testicular torsion, which is usually due to inadequate fixation of the lower pole of the testis to the tunica vaginalis. Testicular torsion is caused by twisting of the spermatic cord, resulting in compression of the pampiniform plexus of the testicular vein and reduced venous outflow. Arterial blood flow in the testicular arteries is initially preserved or slightly decreased, leading to engorgement and eventual hemorrhagic infarction. Torsion is characterized by acute, severe pain with nausea/vomiting, an asymmetrically high-riding testis, and absent cremasteric reflex (elevation of testis while pinching the skin in upper thigh).\n\n(Choices B and C) The external and internal iliac arteries arise from the common iliac artery. The external iliac artery travels underneath the inguinal ligament and becomes the femoral artery, which supplies the lower extremity. The internal iliac artery provides blood supply to the pelvic wall/viscera, buttock, female reproductive organs, bladder, and medial thigh.\n\n(Choice D) The internal pudendal artery is a branch of the internal iliac artery and provides blood supply to the anal canal, scrotum, and penis. However, it does not provide blood supply to the testis.\n\n(Choice E) The obturator artery arises from the internal iliac artery and provides blood supply to the pelvis, bladder, and parts of the femoral head and medial thigh muscles.\n\n(Choice F) The renal artery provides blood supply to the kidney. Branches of the renal artery supply the ureter but do not travel to the testis. Unlike the gonadal arteries, the gonadal veins arise from different structures. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.\n\nEducational objective:\nTesticular torsion is due to twisting of the testis around the spermatic cord (containing the gonadal artery), which can eventually lead to ischemia. The gonadal arteries arise from the abdominal aorta. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.`
+            `The gonadal arteries arise from the abdominal aorta slightly below the renal arteries. Each gonadal artery courses obliquely downward and laterally within the retroperitoneal space near the psoas major muscle. After crossing anteriorly over the ureter, the gonadal arteries run parallel to the external iliac vessels and eventually traverse the inguinal canal to supply the testes via the spermatic cord in males.\n\nThis patient most likely has testicular torsion, which is usually due to inadequate fixation of the lower pole of the testis to the tunica vaginalis. Testicular torsion is caused by twisting of the spermatic cord, resulting in compression of the pampiniform plexus of the testicular vein and reduced venous outflow. Arterial blood flow in the testicular arteries is initially preserved or slightly decreased, leading to engorgement and eventual hemorrhagic infarction. Torsion is characterized by acute, severe pain with nausea/vomiting, an asymmetrically high-riding testis, and absent cremasteric reflex (elevation of testis while pinching the skin in upper thigh).\n\n(Choices B and C) The external and internal iliac arteries arise from the common iliac artery. The external iliac artery travels underneath the inguinal ligament and becomes the femoral artery, which supplies the lower extremity. The internal iliac artery provides blood supply to the pelvic wall/viscera, buttock, female reproductive organs, bladder, and medial thigh.\n\n(Choice D) The internal pudendal artery is a branch of the internal iliac artery and provides blood supply to the anal canal, scrotum, and penis. However, it does not provide blood supply to the testis.\n\n(Choice E) The obturator artery arises from the internal iliac artery and provides blood supply to the pelvis, bladder, and parts of the femoral head and medial thigh muscles.\n\n(Choice F) The renal artery provides blood supply to the kidney. Branches of the renal artery supply the ureter but do not travel to the testis. Unlike the gonadal arteries, the gonadal veins arise from different structures. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.\n\nEducational objective:\nTesticular torsion is due to twisting of the testis around the spermatic cord (containing the gonadal artery), which can eventually lead to ischemia. The gonadal arteries arise from the abdominal aorta. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.`,
+            {"text": "Official answer: (A) Anti-citrullinated peptide antibody.\n\nThe USMLE publishes its sample questions with an answer key only, so there is no official explanation for this item.\n\nSource: USMLE Step 1 Sample Test Questions (April 2026 update), Item 2. © FSMB / NBME, free public release.", "images": []},
+            {"text": "Official answer: (B) Asymmetric smile.\n\nThe USMLE publishes its sample questions with an answer key only, so there is no official explanation for this item.\n\nSource: USMLE Step 1 Sample Test Questions (April 2026 update), Item 3. © FSMB / NBME, free public release.", "images": []},
+            {"text": "Official answer: (B) Cimetidine B, omeprazole A.\n\nThe USMLE publishes its sample questions with an answer key only, so there is no official explanation for this item.\n\nSource: USMLE Step 1 Sample Test Questions (April 2026 update), Item 15. © FSMB / NBME, free public release.", "images": []},
+            {"text": "Official answer: (C) W → Z.\n\nThe USMLE publishes its sample questions with an answer key only, so there is no official explanation for this item.\n\nSource: USMLE Step 1 Sample Test Questions (April 2026 update), Item 24. © FSMB / NBME, free public release.", "images": []},
+            {"text": "Official answer: (E) Spleen.\n\nThe USMLE publishes its sample questions with an answer key only, so there is no official explanation for this item.\n\nSource: USMLE Step 1 Sample Test Questions (April 2026 update), Item 26. © FSMB / NBME, free public release.", "images": []}
         ];
 
         const firstRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images@main/Download%202.jpg","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Black%20Car.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Brunch.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Mirror.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/book.jfif"];
@@ -2043,7 +2068,7 @@
                 const pct = audioProgress.dur ? (audioProgress.cur / audioProgress.dur) * 100 : 0;
                 const panelOpen = musicDropdownOpen || dropdownAnimating;
                 const eqBars = (cls) => h('div', { className: 'flex items-end gap-0.5 h-4' }, [8, 12, 6].map((ht, k) => h('div', { key: k, className: `w-1 ${cls} rounded-full sound-bar`, style: { height: ht + 'px' } })));
-                const miniBtn = (icon, label, fn) => h('button', { onClick: fn, 'aria-label': label, className: `liquid-glass-play-btn jelly ${dark} w-10 h-10 flex items-center justify-center flex-shrink-0` },
+                const miniBtn = (icon, label, fn) => h('button', { onClick: fn, 'aria-label': label, className: `liquid-glass-play-btn ${dark} w-10 h-10 flex items-center justify-center flex-shrink-0` },
                     h('span', { className: 'liquid-glass-content' }, h('i', { className: `fas ${icon} text-sm ${ink}` })));
 
                 return h('div', { className: 'relative z-40', 'data-anchor': 'music' },
@@ -2052,8 +2077,8 @@
                         onClick: toggleMusicDropdown,
                         'aria-label': 'Music',
                         'aria-expanded': musicDropdownOpen,
-                        'data-hover': '1.05',
-                        className: `liquid-glass-music-btn jelly ${dark} px-4 md:px-5 rounded-2xl flex items-center justify-center gap-3 text-sm font-medium transition-all ${isDarkMode ? 'text-white/90' : 'text-gray-800'} ${musicDropdownOpen ? 'ring-1 ring-white/30' : ''}`,
+                       
+                        className: `liquid-glass-music-btn ${dark} px-4 md:px-5 rounded-2xl flex items-center justify-center gap-3 text-sm font-medium transition-all ${isDarkMode ? 'text-white/90' : 'text-gray-800'} ${musicDropdownOpen ? 'ring-1 ring-white/30' : ''}`,
                         style: { minWidth: isMobile ? '48px' : '200px', height: '48px', position: 'relative', zIndex: 2 }
                     },
                         h('span', { className: 'liquid-glass-content flex items-center gap-3' },
@@ -2092,7 +2117,7 @@
                                     /* Transport */
                                     h('div', { className: 'mt-3 flex items-center justify-center gap-4' },
                                         miniBtn('fa-backward-step', 'Previous song', () => goRelative(-1)),
-                                        h('button', { onClick: togglePlayPause, 'aria-label': isPlaying ? 'Pause' : 'Play', className: `liquid-glass-play-btn jelly ${dark} w-12 h-12 flex items-center justify-center flex-shrink-0` },
+                                        h('button', { onClick: togglePlayPause, 'aria-label': isPlaying ? 'Pause' : 'Play', className: `liquid-glass-play-btn ${dark} w-12 h-12 flex items-center justify-center flex-shrink-0` },
                                             h('span', { className: 'liquid-glass-content' }, isPlaying ? h('i', { className: `fas fa-pause ${ink}` }) : h('i', { className: `fas fa-play ${ink}` }))
                                         ),
                                         miniBtn('fa-forward-step', 'Next song', () => goRelative(1))
@@ -2162,7 +2187,7 @@
                             style: { overflow: 'hidden', cursor: 'grab', backgroundColor: opaqueMode ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.3)', pointerEvents: 'auto', touchAction: 'pan-y' }
                         },
                             h('div', { className: 'absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-white/10 border border-white/15' }, h('span', { className: 'text-white/70 text-xs font-medium font-grotesk' }, `${lightboxImageIndex + 1} / ${count}`)),
-                            h('button', { onClick: () => setLightboxOpen(false), 'aria-label': 'Close', className: 'jelly absolute top-3 right-3 z-20 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 flex items-center justify-center' }, h('i', { className: 'fas fa-times text-white text-sm' })),
+                            h('button', { onClick: () => setLightboxOpen(false), 'aria-label': 'Close', className: 'absolute top-3 right-3 z-20 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 flex items-center justify-center' }, h('i', { className: 'fas fa-times text-white text-sm' })),
                             h('div', { className: 'relative w-full h-full flex items-center justify-center' },
                                 q.explanationImages.map((imgUrl, imgIdx) => {
                                     const off = imgIdx - lightboxImageIndex;
@@ -2197,7 +2222,7 @@
 
                 const pagerBtn = (label, icon, disabled, fn, after) => h('button', {
                     onClick: fn, disabled,
-                    className: `lg-glass-btn jelly ${isDarkMode ? 'dark' : ''}`,
+                    className: `lg-glass-btn ${isDarkMode ? 'dark' : ''}`,
                     style: { padding: '10px 18px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 500, fontSize: '14px', opacity: disabled ? 0.38 : 1, background: 'rgba(0,0,0,0.5)', WebkitBackdropFilter: 'blur(14px)', backdropFilter: 'blur(14px)' }
                 }, !after && h('i', { className: `fas ${icon}` }), label, after && h('i', { className: `fas ${icon}` }));
 
@@ -2425,7 +2450,7 @@
                 selected, locked, quizStarted
             });
 
-            const toggleBtn = (onClick, label, icon, extra) => h('button', { onClick, 'aria-label': label, 'data-hover': '1.08', className: `lg-toggle jelly ${isDarkMode ? 'dark' : ''} w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl` }, icon);
+            const toggleBtn = (onClick, label, icon, extra) => h('button', { onClick, 'aria-label': label, className: `lg-toggle ${isDarkMode ? 'dark' : ''} w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl` }, icon);
             const layerIcon = h('i', { className: `fas fa-layer-group text-lg ${opaqueMode ? (isDarkMode ? 'text-gray-300' : 'text-gray-500') : (isDarkMode ? 'text-white' : 'text-gray-900')}` });
             const themeIcon = isDarkMode ? h('i', { className: 'fas fa-sun text-yellow-300 text-lg' }) : h('i', { className: 'fas fa-moon text-gray-700 text-lg' });
             const rootVars = {
@@ -2479,7 +2504,7 @@
         }
 
         window.QuizApp = PhysiologyQuiz;
-        window.__quizData = { questions, explanations };
+        window.__quizData = { questions, explanations, meta: {"3": {"title": "Rheumatoid hands", "item": 2}, "4": {"title": "Brainstem lesion", "item": 3}, "5": {"title": "Gastric pH curves", "item": 15}, "6": {"title": "Cardiac function graph", "item": 24}, "7": {"title": "Abdominal CT", "item": 26}} };
 
 })();
 </script>
@@ -2505,10 +2530,18 @@ const CASE_META = [
   { code: 'CASE_002', tag: 'Urology · Psychiatry', title: 'Erectile dysfunction', short: 'Erectile', wiki: 'Erectile dysfunction', cls: 'c2' },
   { code: 'CASE_003', tag: 'Urology · Embryology', title: 'Testicular torsion', short: 'Torsion', wiki: 'Testicular torsion', cls: 'c3' },
 ];
+const EXTRA_META = window.__quizData.meta || {};
+const EXTRA_WIKI = ['Rheumatoid arthritis', 'Brainstem', 'Omeprazole', 'Cardiac output', 'Spleen'];
+const EXTRA_SHORT = ['Hands', 'Brainstem', 'pH curves', 'Graph', 'CT'];
+const SWATCH = ['', 'c2', 'c3', 'c4'];
 const CASES = QS.map((q, i) => {
   const exp = normExp(EX[i]);
   const m = exp.text.match(/Educational objective:\s*([\s\S]*)$/);
-  return { ...CASE_META[i], id: 'q' + (i + 1), index: i, q, exp, objective: m ? m[1].trim() : '' };
+  const base = CASE_META[i] || (() => {
+    const x = EXTRA_META[i] || {};
+    return { code: 'CASE_00' + (i + 1), tag: 'USMLE sample · Item ' + (x.item || '?'), title: x.title || 'Sample question ' + (i + 1), short: EXTRA_SHORT[i - 3] || 'Case', wiki: EXTRA_WIKI[i - 3] || 'Medicine' };
+  })();
+  return { ...base, cls: SWATCH[i % 4], tabx: 8 + ((i * 29) % 56), id: 'q' + (i + 1), index: i, q, exp, objective: m ? m[1].trim() : '' };
 });
 const DURATION = 1800;
 
@@ -2645,12 +2678,12 @@ const TABS = [['home', 'Home', 'fa-house'], ['quiz', 'Quiz', 'fa-pen-to-square']
 function SiteNav({ route, go, openFind }) {
   const hide = route === 'quiz';
   return html`<header className="site-nav" data-hide=${hide}>
-    <button className="brand lg lg-refract jelly" onClick=${() => go('home')} aria-label="USMLE Quiz home">
+    <button className="brand lg" onClick=${() => go('home')} aria-label="USMLE Quiz home">
       <span className="brand-mark"><i className="fas fa-plus"></i></span><span className="bn">USMLE Quiz</span>
     </button>
     <div className="nav-actions">
-      <button className="find lg jelly" onClick=${openFind} aria-label="Find"><${Icon} n="fa-magnifying-glass" /><span className="lbl">Find</span><kbd>⌘K</kbd></button>
-      <button className="btn-white jelly" onClick=${() => go('quiz')}>get started</button>
+      <button className="find lg" onClick=${openFind} aria-label="Find"><${Icon} n="fa-magnifying-glass" /><span className="lbl">Find</span><kbd>⌘K</kbd></button>
+      <button className="btn-white" onClick=${() => go('quiz')}>get started</button>
     </div>
   </header>`;
 }
@@ -2661,9 +2694,9 @@ function Tabs({ route, go }) {
   const measure = useCallback(() => { const el = refs.current[route]; if (el) setTh({ x: el.offsetLeft, w: el.offsetWidth }); }, [route]);
   useLayoutEffect(measure, [measure]);
   useEffect(() => { window.addEventListener('resize', measure); if (document.fonts) document.fonts.ready.then(measure); return () => window.removeEventListener('resize', measure); }, [measure]);
-  return html`<nav className="tabs lg lg-refract" data-pos=${route === 'quiz' ? 'bottom' : 'top'} aria-label="Primary">
+  return html`<nav className="tabs lg" data-pos=${route === 'quiz' ? 'bottom' : 'top'} aria-label="Primary">
     <span className="tab-thumb" style=${{ width: th.w, transform: `translateX(${th.x}px)` }}></span>
-    ${TABS.map(([r, label, icon]) => html`<button key=${r} ref=${(el) => { refs.current[r] = el; }} className="tab jelly" data-tilt="4" data-hover="1.06"
+    ${TABS.map(([r, label, icon]) => html`<button key=${r} ref=${(el) => { refs.current[r] = el; }} className="tab"
       aria-current=${route === r ? 'page' : undefined} onClick=${() => go(r)}><${Icon} n=${icon} /><span>${label}</span></button>`)}
   </nav>`;
 }
@@ -2690,7 +2723,7 @@ function Hero({ go, attempts }) {
       <div className="hstat hs2"><b><${AN} value=${s.n} /></b><span>sessions completed</span></div>
       <div className="hstat hs3"><b>${s.n ? html`<${AN} value=${s.best} suffix="%" />` : '30:00'}</b><span>${s.n ? 'personal best' : 'timed run'}</span></div>
       <p className="hero-para">Practise the way the exam feels: one question at a time, the clock running, explanations waiting when you finish.</p>
-      <div className="hero-cta lg lg-refract"><span>ready when you are</span><button className="btn-orange jelly" onClick=${() => go('quiz')}>start quiz <${Icon} n="fa-arrow-right" /></button></div>
+      <div className="hero-cta lg"><span>ready when you are</span><button className="btn-orange" onClick=${() => go('quiz')}>start quiz <${Icon} n="fa-arrow-right" /></button></div>
     </div>
     <div className="marquee" aria-hidden="true"><div className="marquee-track">
       ${[...TOPICS, ...TOPICS].map(([ic, t], i) => html`<span key=${i} className="chip-lg lg"><${Icon} n=${ic} />${t}</span>`)}
@@ -2713,7 +2746,7 @@ function Benefits({ go }) {
       <p className="eyebrow reveal">Why it works</p>
       <h2 className="big-h reveal" style=${{ '--d': '80ms', marginTop: 18 }}>Built to feel like the <span className="hl">real thing.</span></h2>
       <div className="grid4">
-        ${FEATURES.map(([ic, t, p], i) => html`<article key=${t} className="fcard neu spot reveal jelly" data-tilt="3" data-hover="1.015" style=${{ '--d': 120 + i * 90 + 'ms' }}>
+        ${FEATURES.map(([ic, t, p], i) => html`<article key=${t} className="fcard neu spot reveal" style=${{ '--d': 120 + i * 90 + 'ms' }}>
           <div><span className="ficon"><${Icon} n=${ic} /></span><h3>${t}</h3><p>${p}</p></div>
         </article>`)}
       </div>
@@ -2724,7 +2757,7 @@ function Benefits({ go }) {
           <p className="eyebrow">Explanations</p>
           <h3 style=${{ margin: '14px 0 0' }}>Sounds like an <span className="hl">epiphany.</span></h3>
           <p className="lead">Finish a run and every question opens into the reasoning, the educational objective and the images, so each miss turns into a lesson.</p>
-          <button className="neu-btn jelly" onClick=${() => go('library')} aria-label="Browse the case files"><${Icon} n="fa-arrow-right" /></button>
+          <button className="neu-btn" onClick=${() => go('library')} aria-label="Browse the case files"><${Icon} n="fa-arrow-right" /></button>
         </div>
       </div>
 
@@ -2736,7 +2769,7 @@ function Benefits({ go }) {
           <p className="eyebrow">Docked tools</p>
           <h3 style=${{ margin: '14px 0 0' }}>Never in the <span className="hl">way.</span></h3>
           <p className="lead">Open the calculator or the playlist and your cards glide aside instead of hiding underneath. Same on the review page. On phones they rise as a sheet.</p>
-          <button className="btn-dark jelly" onClick=${() => go('quiz')}>Try it in the quiz <${Icon} n="fa-arrow-right" /></button>
+          <button className="btn-dark" onClick=${() => go('quiz')}>Try it in the quiz <${Icon} n="fa-arrow-right" /></button>
         </div>
       </div>
     </div>
@@ -2747,7 +2780,7 @@ function Benefits({ go }) {
    DASHBOARD COMPONENTS
    ========================================================================== */
 function GreenCard({ st }) {
-  return html`<div className="green-card jelly" data-tilt="4" data-hover="1.02">
+  return html`<div className="green-card">
     <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><b style=${{ fontSize: 15 }}>Best score</b><${Icon} n="fa-trophy" /></div>
     <div><div className="num"><${AN} value=${st.best} suffix="%" /></div><small>${st.n ? `across ${st.n} attempt${st.n === 1 ? '' : 's'}` : 'no attempts yet'}</small></div>
     <div style=${{ display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: .85 }}><span>AVG ${st.avg}%</span><span>${st.streak}-day streak</span></div>
@@ -2762,7 +2795,7 @@ function BarsCard({ list }) {
   const on = hover === null ? bestIdx : hover;
   const bub = (a, i) => { const prev = cols[i - 1]; const d = prev ? pctOf(a) - pctOf(prev) : null; return d === null ? `${pctOf(a)}%` : `${d >= 0 ? '+' : ''}${d}%`; };
   return html`<article className="dc c-bars">
-    <div className="dc-head"><div><h4>Score by attempt</h4><p className="sub">Last six sessions</p></div><button className="arrow-btn jelly" aria-label="Open history"><${Icon} n="fa-arrow-up-right-from-square" /></button></div>
+    <div className="dc-head"><div><h4>Score by attempt</h4><p className="sub">Last six sessions</p></div><button className="arrow-btn" aria-label="Open history"><${Icon} n="fa-arrow-up-right-from-square" /></button></div>
     <div className="chart" onPointerLeave=${() => setHover(null)}>
       ${[0, 1, 2, 3, 4].map(k => html`<div key=${k} className="gl" style=${{ '--k': k }}><span>${100 - k * 25}</span></div>`)}
       <div className="plot">
@@ -2798,7 +2831,7 @@ function TrendCard({ list }) {
       <div className="mini-tabs"><button className=${cx(mode === 'score' && 'on')} onClick=${() => setMode('score')}>Score</button><button className=${cx(mode === 'time' && 'on')} onClick=${() => setMode('time')}>Time</button></div></div>
     <div style=${{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}><span className="bigmetric">${latest}<span className="dim">%</span></span>${delta !== null && html`<span className=${cx('chip-up', delta < 0 && 'chip-dn')}>${delta >= 0 ? '+' : ''}${delta}%</span>`}</div>
     ${vals.length ? html`<svg key=${mode} className="line" viewBox=${`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Trend line">
-      <defs><linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#14804F" stopOpacity=".28" /><stop offset="1" stopColor="#14804F" stopOpacity="0" /></linearGradient></defs>
+      <defs><linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#FF9E7C" stopOpacity=".28" /><stop offset="1" stopColor="#FF9E7C" stopOpacity="0" /></linearGradient></defs>
       ${pts.length > 1 && html`<path d=${`${d} L${W},${H} L0,${H} Z`} fill="url(#trendFill)" />`}
       ${pts.length > 1 && html`<path className="stroke" pathLength="1" d=${d} />`}
       ${pts.map((p, i) => html`<circle key=${i} className="dot" cx=${p[0]} cy=${p[1]} r="4"><title>${vals[i]}%</title></circle>`)}
@@ -2835,8 +2868,8 @@ function GoalCard({ st }) {
   const R = 56, C = 2 * Math.PI * R;
   return html`<article className="dc c-goal"><div className="dc-head"><div><h4>Daily goal</h4><p className="sub">Sessions today</p></div>
     <div className="stepper"><button onClick=${() => setGoal(Math.max(1, goal - 1))} aria-label="Fewer sessions">−</button><b>${goal}</b><button onClick=${() => setGoal(Math.min(12, goal + 1))} aria-label="More sessions">+</button></div></div>
-    <div className="ringwrap"><svg width="148" height="148" viewBox="0 0 148 148" style=${{ transform: 'rotate(-90deg)' }}><circle cx="74" cy="74" r=${R} fill="none" stroke="#eef1ee" strokeWidth="12" />
-      <circle cx="74" cy="74" r=${R} fill="none" stroke="#14804F" strokeWidth="12" strokeLinecap="round" strokeDasharray=${C} strokeDashoffset=${C * (1 - p)} style=${{ transition: 'stroke-dashoffset 1s cubic-bezier(.22,1,.36,1)' }} /></svg>
+    <div className="ringwrap"><svg width="148" height="148" viewBox="0 0 148 148" style=${{ transform: 'rotate(-90deg)' }}><circle cx="74" cy="74" r=${R} fill="none" stroke="rgba(255,255,255,.1)" strokeWidth="12" />
+      <circle cx="74" cy="74" r=${R} fill="none" stroke="#FF9E7C" strokeWidth="12" strokeLinecap="round" strokeDasharray=${C} strokeDashoffset=${C * (1 - p)} style=${{ transition: 'stroke-dashoffset 1s cubic-bezier(.22,1,.36,1)' }} /></svg>
       <div className="mid">${st.today}/${goal}<small>${st.streak}-day streak</small></div></div></article>`;
 }
 
@@ -2855,10 +2888,17 @@ function Dashboard({ go }) {
         <aside className="rail"><div className="rail-grp"><button className="on" aria-label="Overview"><${Icon} n="fa-table-cells-large" /></button><button onClick=${() => go('quiz')} aria-label="Quiz"><${Icon} n="fa-pen-to-square" /></button><button onClick=${() => go('library')} aria-label="Library"><${Icon} n="fa-folder-open" /></button></div>
           <div className="rail-grp"><button onClick=${() => { if (confirm('Clear all saved attempts on this device?')) window.AttemptStore.clear(); }} aria-label="Reset history"><${Icon} n="fa-trash-can" /></button></div></aside>
         <div>
-          <div className="dash-head reveal"><h1>Welcome back, <input value=${name} onChange=${(e) => setName(e.target.value)} aria-label="Your name" maxLength="22" /></h1>
+          <div className="dash-head reveal"><h1>Welcome back, <span className="mark-wrap">
+              <svg className="mark" viewBox="0 0 300 70" preserveAspectRatio="none" aria-hidden="true">
+                <path className="mk-hl" pathLength="1" d="M7,41 C34,27 62,50 104,38 S176,30 214,40 S274,33 293,39" />
+                <path className="mk-hl2" pathLength="1" d="M14,31 C60,38 96,26 150,34 S242,30 286,36" />
+                <path className="mk-ul" pathLength="1" d="M9,61 C48,54 84,67 138,58 S236,63 292,55" />
+                <path className="mk-ul2" pathLength="1" d="M30,66 C76,60 120,68 170,62 S246,65 276,60" />
+              </svg>
+              <span className="autosize"><span className="sizer">${name || ' '}</span><input value=${name} onChange=${(e) => setName(e.target.value)} aria-label="Your name" maxLength="22" /></span></span></h1>
             <${Seg} value=${range} onChange=${setRange} options=${[['7', '7 days'], ['30', '30 days'], ['all', 'All time']]} /></div>
           ${!real.length && html`<div className="empty-note reveal"><span>${demo ? 'Showing sample data so you can see how this fills up.' : 'No attempts yet. Take the quiz and this page fills itself in.'}</span>
-            <span style=${{ display: 'flex', gap: 10 }}><button className="btn-dark jelly" onClick=${() => go('quiz')}>Take the quiz</button><button className="btn-ghost jelly" onClick=${() => setDemo(!demo)}>${demo ? 'Hide sample' : 'Preview sample data'}</button></span></div>`}
+            <span style=${{ display: 'flex', gap: 10 }}><button className="btn-dark" onClick=${() => go('quiz')}>Take the quiz</button><button className="btn-ghost" onClick=${() => setDemo(!demo)}>${demo ? 'Hide sample' : 'Preview sample data'}</button></span></div>`}
           <div className="dgrid">
             <div className="dc c-best reveal"><${GreenCard} st=${st} /></div>
             <${BarsCard} list=${list} />
@@ -2888,7 +2928,7 @@ function DashPreview({ go, attempts }) {
         <${TrendCard} list=${list} />
         <${WeekCard} st=${st} />
       </div>
-      <div style=${{ marginTop: 34 }} className="reveal"><button className="btn-dark jelly" onClick=${() => go('dashboard')}>Open the dashboard <${Icon} n="fa-arrow-right" /></button></div>
+      <div style=${{ marginTop: 34 }} className="reveal"><button className="btn-dark" onClick=${() => go('dashboard')}>Open the dashboard <${Icon} n="fa-arrow-right" /></button></div>
     </div>
   </section>`;
 }
@@ -2901,7 +2941,7 @@ function CaseFile({ c, active, onActivate, onRead }) {
   useEffect(() => { if (active) setSeen(true); }, [active]);
   const { data, failed } = useWiki(c.wiki, seen);
   const onKey = (e) => { if (!active && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onActivate(); } };
-  return html`<div className=${cx('file', c.cls, active && 'active')} role="button" tabIndex=${active ? -1 : 0} aria-expanded=${active} aria-label=${`Open ${c.title}`} onClick=${() => !active && onActivate()} onKeyDown=${onKey}>
+  return html`<div className=${cx('file', c.cls, active && 'active')} style=${{ '--tabx': c.tabx + '%' }} role="button" tabIndex=${active ? -1 : 0} aria-expanded=${active} aria-label=${`Open ${c.title}`} onClick=${() => !active && onActivate()} onKeyDown=${onKey}>
     <span className="tab-n">${c.code} //</span>
     <div className="spine"><span>0${c.index + 1}</span><b>${c.short}</b><span>${c.tag.split(' · ')[0]}</span></div>
     <div className="body">
@@ -2910,8 +2950,8 @@ function CaseFile({ c, active, onActivate, onRead }) {
       <div className="wiki">${data && data.thumb ? html`<img src=${data.thumb} alt="" loading="lazy" />` : html`<div className="ph"></div>`}
         <div><b style=${{ fontFamily: 'Space Grotesk', fontSize: 11, letterSpacing: '.14em', textTransform: 'uppercase' }}>Wikipedia</b><br />${data ? data.extract.slice(0, 230) + (data.extract.length > 230 ? '…' : '') : failed ? 'Offline: the live summary could not be loaded.' : 'Loading summary…'}</div></div>
       ${c.objective && html`<p className="obj"><b>Educational objective.</b> ${c.objective}</p>`}
-      <div className="acts"><button className="primary jelly" onClick=${(e) => { e.stopPropagation(); onRead(); }}>Read the full case</button>
-        ${data && data.url && html`<a className="jelly" href=${data.url} target="_blank" rel="noopener noreferrer" onClick=${(e) => e.stopPropagation()}>Wikipedia ↗</a>`}</div>
+      <div className="acts"><button className="primary" onClick=${(e) => { e.stopPropagation(); onRead(); }}>Read the full case</button>
+        ${data && data.url && html`<a href=${data.url} target="_blank" rel="noopener noreferrer" onClick=${(e) => e.stopPropagation()}>Wikipedia ↗</a>`}</div>
     </div>
   </div>`;
 }
@@ -2921,7 +2961,6 @@ function CaseFiles({ pending, onRead }) {
   useEffect(() => { if (pending !== null && pending !== undefined) setActive(pending); }, [pending]);
   return html`<div className="files reveal">
     ${CASES.map((c) => html`<${CaseFile} key=${c.id} c=${c} active=${active === c.index} onActivate=${() => setActive(c.index)} onRead=${() => onRead(c)} />`)}
-    <div className="file dashed c4" aria-hidden="true"><span className="tab-n" style=${{ background: 'transparent' }}>CASE_004 //</span><div className="spine"><span>04</span><b style=${{ opacity: .35 }}>More soon</b><span></span></div></div>
   </div>`;
 }
 
@@ -2953,7 +2992,7 @@ function Explorer() {
   return html`<div className="explorer">
     <div><p className="eyebrow">Topic explorer · live from Wikipedia</p><h2 style=${{ fontSize: 'clamp(30px,4.6vw,56px)', fontWeight: 700, margin: '14px 0 0', lineHeight: 1 }}>Go <span className="hl">deeper.</span></h2></div>
     <label className="explorer-input"><${Icon} n="fa-magnifying-glass" /><input value=${q} onChange=${(e) => setQ(e.target.value)} placeholder="Search a topic, drug or structure…" aria-label="Search topics" /></label>
-    <div style=${{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>${['Prostate', 'Finasteride', 'Tamsulosin', 'Spermatic cord', 'Bupropion'].map(t => html`<button key=${t} className="btn-ghost jelly" onClick=${() => run(t)}>${t}</button>`)}</div>
+    <div style=${{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>${['Prostate', 'Finasteride', 'Tamsulosin', 'Spermatic cord', 'Bupropion'].map(t => html`<button key=${t} className="btn-ghost" onClick=${() => run(t)}>${t}</button>`)}</div>
     ${state === 'loading' && html`<p className="sub" style=${{ color: 'var(--mut)' }}>Searching…</p>`}
     ${state === 'none' && html`<p style=${{ color: 'var(--mut)' }}>No matches. Try a simpler term.</p>`}
     ${state === 'error' && html`<p style=${{ color: 'var(--mut)' }}>Couldn't reach Wikipedia. Check your connection and try again.</p>`}
@@ -2979,7 +3018,7 @@ function Cta({ go }) {
   return html`<section className="sec cta-sec" data-tone="ink" data-nav="dark">
     <div className="wrap"><p className="eyebrow reveal">Step 1 · one session at a time</p><h2 className="reveal" style=${{ '--d': '80ms', margin: '22px 0 0' }}>Ready when you are.</h2>
       <p className="reveal" style=${{ '--d': '140ms' }}>Thirty minutes, three cases, a clear read on where you are.</p>
-      <div className="reveal" style=${{ '--d': '200ms' }}><button className="btn-orange jelly" style=${{ padding: '17px 30px', fontSize: 16 }} onClick=${() => go('quiz')}>Start the quiz <${Icon} n="fa-arrow-right" /></button></div></div>
+      <div className="reveal" style=${{ '--d': '200ms' }}><button className="btn-orange" style=${{ padding: '17px 30px', fontSize: 16 }} onClick=${() => go('quiz')}>Start the quiz <${Icon} n="fa-arrow-right" /></button></div></div>
   </section>`;
 }
 
@@ -2989,14 +3028,14 @@ function Footer({ go, openFind }) {
     <div className="cols">
       <div><div style=${{ display: 'flex', alignItems: 'center', gap: 10, fontWeight: 700 }}><span className="brand-mark"><i className="fas fa-plus"></i></span>USMLE Quiz</div>
         <p className="blurb">A calm place to practise. Timed questions, explanations with imaging, a calculator and a study playlist.</p>
-        <button className="btn-orange jelly" onClick=${() => go('quiz')}>Start the quiz <${Icon} n="fa-arrow-right" /></button></div>
+        <button className="btn-orange" onClick=${() => go('quiz')}>Start the quiz <${Icon} n="fa-arrow-right" /></button></div>
       <div><h5>Navigate</h5>${link('home', 'Home')}${link('quiz', 'Quiz')}${link('dashboard', 'Dashboard')}${link('library', 'Library')}</div>
       <div><h5>Tools</h5><button className="flink" onClick=${openFind}>Find · ⌘K</button>${link('quiz', 'Calculator')}${link('quiz', 'Study playlist')}${link('dashboard', 'Daily goal')}</div>
       <div><h5>Read more</h5>${CASES.map(c => html`<a key=${c.id} href=${'https://en.wikipedia.org/wiki/' + encodeURIComponent(c.wiki.replace(/ /g, '_'))} target="_blank" rel="noopener noreferrer">${c.wiki} ↗</a>`)}</div>
     </div>
     <div className="footer-word" aria-hidden="true">USMLE</div>
     <div className="footer-bar"><span>© ${new Date().getFullYear()} USMLE Quiz · A practice tool, not a substitute for your curriculum.</span>
-      <button className="totop jelly" onClick=${() => window.scrollTo({ top: 0, behavior: 'smooth' })} aria-label="Back to top"><${Icon} n="fa-arrow-up" /></button></div>
+      <button className="totop" onClick=${() => window.scrollTo({ top: 0, behavior: 'smooth' })} aria-label="Back to top"><${Icon} n="fa-arrow-up" /></button></div>
   </footer>`;
 }
 
@@ -3099,16 +3138,13 @@ function App() {
     window.scrollTo(0, 0);
   }, [route]);
 
-  /* scroll progress + nav tone follows the section under the nav */
+  /* scroll progress bar */
   useEffect(() => {
     let raf = 0;
     const update = () => {
       raf = 0;
       const max = document.documentElement.scrollHeight - window.innerHeight;
       if (progressRef.current) progressRef.current.style.setProperty('--p', max > 0 ? Math.min(1, window.scrollY / max) : 0);
-      let tone = 'dark';
-      document.querySelectorAll('[data-nav]').forEach(el => { const r = el.getBoundingClientRect(); if (r.top <= 40 && r.bottom > 40) tone = el.dataset.nav; });
-      document.body.dataset.navtone = route === 'quiz' ? 'dark' : tone;
     };
     const on = () => { if (!raf) raf = requestAnimationFrame(update); };
     window.addEventListener('scroll', on, { passive: true });
