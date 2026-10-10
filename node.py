@@ -850,7 +850,7 @@ _ATS_VENDOR_DOMAINS = (
     # (careers-page.com is Manatal's one shared career-page host).
     "careers-page.com", "jobscore.com", "crelate.com", "comeet.com",
     # 2026-10: Emply / CATS / Elmo Talent / Easy Apply tenants are ATS-related, not in-house.
-    "emply.com", "catsone.com", "elmotalent.com.au", "easyapply.co", "careers.hibob.com", "jobs.deel.com", "traffit.com", "jobsoid.com", "keka.com", "homerun.co", "recruiterflow.com", "loxo.co", "factorial.com", "peopleforce.io",
+    "emply.com", "catsone.com", "elmotalent.com.au", "easyapply.co", "careers.hibob.com", "jobs.deel.com", "traffit.com", "careerplug.com", "jobsoid.com", "keka.com", "homerun.co", "recruiterflow.com", "loxo.co", "factorial.com", "peopleforce.io",
     # 2026-09: gem.com added alongside discovery.py's new "gem"
     # SUPPORTED_ATS entry — jobs.gem.com/{slug} is ATS-related, not
     # in-house. Full-suffix "gem.com" matches jobs.gem.com safely (no
