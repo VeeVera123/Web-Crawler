@@ -19,7 +19,7 @@ jobs (`.github/workflows/crawl.yml`), each sharded 10-way by default.
 | | Source | What's different |
 |---|---|---|
 | **Crawl I** (`crawl_i.py`) | Live-scrapes ~40 known ATS platforms (Greenhouse, Lever, Workday, Workable, …) from a list of company slugs (`archive_i` table) | The main, daily-reliable pipeline |
-| **Crawl II** (`crawl_ii.py`) | Heuristically scrapes career pages that *aren't* on a known ATS — JSON-LD first, then pattern-matching fallback (`archive_ii` table) | Messier data, leans on the LLM stage more |
+| **Crawl II** (`crawl_ii.py`) | Heuristically scrapes career pages that *aren't* on a known ATS (`archive_ii` table). Extraction ladder (all pure helpers in `page_extract.py`): JSON-LD → microdata → embedded JSON state (`__NEXT_DATA__`, `window.__X__`, hidden-input JSON) → confirmed job links; dead ends try a known-ATS bridge, iframes/embeds, RSS + WordPress REST, the page being one posting, then the sitemap. Descriptions are boilerplate-free main text; a page only becomes a job if it reads as one JD (`page_extract.is_job_description`) | Messier data, leans on the LLM stage more. Role pre-filter skips detail fetches for titles the role filter would drop anyway; `CRAWL_II_SITEMAP_FALLBACK=0` turns the sitemap step off |
 | **Crawl III** (`crawl_iii.py`) | Consumes stapply.ai's pre-scraped bulk CSVs for platforms we don't scrape ourselves (Phenom, UKG, SAP, Dayforce, Eightfold, MokaHR, …) | No per-job HTTP fetch needed — full JD is already in the CSV. Never has application questions, so it can't reach Rank 4 |
 
 The company lists Crawl I/II scrape from (`archive_i`/`archive_ii`) are

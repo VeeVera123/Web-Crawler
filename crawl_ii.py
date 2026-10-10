@@ -94,6 +94,7 @@ sys.path.insert(0, _ROOT)
 sys.path.insert(0, _MAIN_DIR)
 
 import node  # noqa: E402 — reuse _fetch_page, USER_AGENT, new_connector, new_parse_pool
+import page_extract as PE  # noqa: E402 — pure HTML->job helpers (main text, JD scoring, state JSON, frames, feeds)
 # (2026-08: this file used to do all its HTML parsing inline on the event
 # loop with no pool at all — see extract_postings_from_page's docstring —
 # it now shares node.py's new_parse_pool() ThreadPoolExecutor pattern.)
@@ -120,6 +121,7 @@ from classifier import (  # noqa: E402
 # platform without a dedicated fetcher — which covers most of this file's
 # unsupported/"wild" company career sites) needed no new code to support
 # this; the only gap was that nothing here ever called it.
+import ats_scrapers  # noqa: E402
 from ats_scrapers import enrich_application_questions_async  # noqa: E402
 from supabase_handler import (  # noqa: E402
     add_jobs_batch, cleanup_stale_jobs, get_archive_ii_pages, SupabaseFetchError,
@@ -493,10 +495,16 @@ def _extract_jsonld_jobs(html: str, page_url: str, company: str) -> list[dict]:
         seen_urls.add(url)
         org = item.get("hiringOrganization")
         org_name = org.get("name") if isinstance(org, dict) else None
+        # 2026-10: jobLocationType TELECOMMUTE is schema.org's structured "remote" flag; it was dropped, so a
+        # JSON-LD job never carried a workplace_type (the hybrid/on-site hard check had nothing to read either).
+        loc_type = item.get("jobLocationType")
+        loc_types = loc_type if isinstance(loc_type, list) else [loc_type]
+        workplace = "Remote" if any(isinstance(x, str) and x.upper() == "TELECOMMUTE" for x in loc_types) else ""
         postings.append({
             "title": title[:500],
             "url": url,
             "location": _jsonld_location(item),
+            "workplace_type": workplace,
             "description": _strip_html(item.get("description", "")),
             "company": org_name or company,
             "source_ats": DEFAULT_ATS_LABEL,
@@ -760,29 +768,63 @@ def _extract_heuristic_workplace_type(text: str) -> str:
     return value if value and len(value) <= 40 else ""
 
 
+_GENERIC_ANCHOR_TOKENS = frozenset({
+    "view", "read", "learn", "see", "show", "more", "detail", "details", "apply", "open", "position", "role", "job",
+    "jobs", "posting", "opening", "vacancy", "click", "here", "info", "information", "now", "this", "the", "full",
+    "description", "listing", "for", "to", "about", "and", "angebot", "ansehen", "mehr", "lire", "voir", "plus", "ver",
+    "roles", "positions", "openings", "vacancies", "learnmore", "readmore",
+})
+
+
+def _is_generic_anchor(text: str) -> bool:
+    """'View position', 'Read more', 'Angebot ansehen' ... -- link text that is a button label, not a job
+    title. The real title is then read from the detail page (h1 / og:title) instead of being judged as-is."""
+    toks = [t for t in re.split(r"[^a-z\u00c0-\u024f]+", (text or "").lower()) if t]
+    return not toks or all(t in _GENERIC_ANCHOR_TOKENS for t in toks)
+
+
+def _worth_detail_fetch(title: str) -> bool:
+    """Role pre-filter applied BEFORE spending a request on a posting's detail page. _filter_roles drops
+    keyword 'exclude' titles with no AI call and no appeal, so fetching their detail page is pure waste
+    (it used to be done for up to 25 candidates per page, then thrown away). Generic button-label anchors
+    are kept: their real title is only known after the fetch."""
+    return _is_generic_anchor(title) or keyword_classify_role(title) != "exclude"
+
+
 def _confirm_and_build_posting(detail_html: str, candidate: dict, company: str) -> dict | None:
-    """A candidate link alone is never trusted — this is the gate that
-    keeps a heuristic hit from becoming a written job. Requires BOTH a
-    real amount of body text (rules out a soft-404/stub/redirect-to-
-    homepage-in-disguise, same failure mode node.py's career-page quality
-    gate exists for) AND at least one phrase that specifically reads like
-    a job posting, not just any content page of similar length."""
-    text = _strip_html(detail_html)
-    if len(text) < _MIN_JOB_DETAIL_TEXT_CHARS:
+    """A candidate link alone is never trusted -- this is the gate that keeps a heuristic hit from becoming a
+    written job.
+
+    1. A JobPosting JSON-LD on the detail page wins (structured title/location/description/remote flag).
+    2. Otherwise the page's MAIN text (nav/footer/cookie/related-jobs removed -- see page_extract.main_text)
+       must read as ONE job description (page_extract.is_job_description: score + a JD-specific anchor such
+       as an Apply CTA with a core section, or several core sections). 2026-10: this replaced "200 chars and
+       any of 20 phrases anywhere in the whole page", which let nav buttons ("Apply now" in the header) and
+       marketing pages through and stored the entire page chrome as the job description."""
+    ld = _extract_jsonld_jobs(detail_html, candidate["url"], company)
+    if ld:
+        pick = next((j for j in ld if j["url"] == candidate["url"]), ld[0])
+        pick = dict(pick)
+        pick["url"] = candidate["url"]
+        if not pick.get("location"):
+            pick["location"] = _extract_heuristic_location(_strip_html(detail_html))
+        return pick
+
+    text, li = PE.main_text(detail_html)
+    if not PE.is_job_description(text, li):
         return None
-    text_lower = text.lower()
-    if not any(p in text_lower for p in _STRONG_JOB_PAGE_PHRASES):
-        return None
+    title = candidate["title"]
+    if _is_generic_anchor(title) or candidate.get("_slug_title"):
+        better = PE.page_title(detail_html)
+        if better and not PE.is_generic_title(better):
+            title = better
+    full = _strip_html(detail_html)
     return {
-        "title": candidate["title"],
+        "title": title,
         "url": candidate["url"],
-        # 2026-09: try a real regex extraction first (see
-        # _extract_heuristic_location) — falls back to blank, exactly the
-        # old behavior, only when the page has no recognizable location
-        # label at all. classifier.py's "blank → unsure, let the AI stage
-        # look at it" path still handles that case unchanged.
-        "location": _extract_heuristic_location(text),
-        "workplace_type": _extract_heuristic_workplace_type(text),
+        # label scan on the job's own text first, then the whole page (a hero/header "Location:" line)
+        "location": _extract_heuristic_location(text) or _extract_heuristic_location(full),
+        "workplace_type": _extract_heuristic_workplace_type(text) or _extract_heuristic_workplace_type(full),
         "description": text,
         "company": company,
         "source_ats": DEFAULT_ATS_LABEL,
@@ -951,6 +993,8 @@ async def _augment_with_apply_page(session: aiohttp.ClientSession, sem: asyncio.
     (or no html was passed in), same as before this existed."""
     if _HAS_VISA_OR_CLEARANCE_SIGNAL_RE.search(job.get("description") or ""):
         return
+    if keyword_classify_role(job.get("title", "")) == "exclude":
+        return  # _filter_roles will drop it anyway -- do not spend a request on its /apply page
     job_url = job.get("url", "")
     apply_url = None
     if html:
@@ -984,44 +1028,111 @@ def _company_name_from_domain(website_url: str) -> str:
 
 # ── Per-page extraction ─────────────────────────────────────────────────
 
+class _Postings(list):
+    """A list of postings plus two facts the role pre-filter would otherwise hide:
+      all_urls         every job-looking URL seen on the page (kept or skipped) -- pagination progress is
+                       judged on this, so a page of only-irrelevant roles still lets the walk reach page 2
+      irrelevant_only  the page demonstrably lists real postings but none worth a detail fetch -- the page still
+                       counts as "had roles" for archive_ii.last_seen (Verification prunes registry rows whose
+                       last_seen is ~6 months old, so this must stay true for a board that only has e.g.
+                       Engineer openings today)."""
+    all_urls: set
+    irrelevant_only: bool = False
+
+    def __init__(self, items=(), all_urls=None, irrelevant_only=False):
+        super().__init__(items)
+        self.all_urls = set(all_urls) if all_urls is not None else {j.get("url") for j in self if j.get("url")}
+        self.irrelevant_only = irrelevant_only
+
+
+MAX_DETAIL_ENRICH_PER_PAGE = int(os.environ.get("CRAWL_II_MAX_DETAIL_ENRICH", "40"))
+_SHORT_DESCRIPTION_CHARS = 400
+
+
+async def _enrich_from_detail_pages(session: aiohttp.ClientSession, sem: asyncio.Semaphore, jobs: list[dict],
+                                    page_url: str, company: str, stats: dict,
+                                    parse_pool: concurrent.futures.Executor) -> None:
+    """Listing-style sources (embedded state JSON, microdata, RSS/WP feeds, even JSON-LD ItemLists) usually
+    carry title + url but little or no description, and the description is what the visa / restriction /
+    remote-scope checks read. For role-relevant jobs whose description is short, fetch the job's own page and
+    take its JobPosting JSON-LD or its main text. Bounded per page; never raises; never drops a job."""
+    loop = asyncio.get_running_loop()
+    todo = [j for j in jobs
+            if len(j.get("description") or "") < _SHORT_DESCRIPTION_CHARS and j.get("url") and j["url"] != page_url
+            and keyword_classify_role(j.get("title", "")) != "exclude"][:MAX_DETAIL_ENRICH_PER_PAGE]
+
+    async def _one(job: dict) -> None:
+        try:
+            async with sem:
+                got = await node._fetch_page(session, job["url"], stats)
+            if not got:
+                return
+            _, dh = got
+            built = await loop.run_in_executor(parse_pool, _confirm_and_build_posting, dh,
+                                               {"title": job["title"], "url": job["url"]}, company)
+        except Exception:
+            return
+        if not built:
+            return
+        if len(built.get("description") or "") > len(job.get("description") or ""):
+            job["description"] = built["description"]
+        for k in ("location", "workplace_type"):
+            if built.get(k) and not job.get(k):
+                job[k] = built[k]
+        stats["detail_enriched"] += 1
+
+    await asyncio.gather(*(_one(j) for j in todo))
+
+
 async def _extract_via_jsonld_or_heuristic(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                                             html: str, page_url: str, company: str, stats: dict,
                                             parse_pool: concurrent.futures.Executor) -> list[dict]:
-    """The actual JSON-LD-then-heuristic extraction, factored out of
-    extract_postings_from_page so a page reached via the 2026-09 link-
-    follow step below gets IDENTICAL treatment to the original page —
-    not a second, potentially-drifting copy of the same logic.
+    """The actual extraction ladder for one fetched page, factored out of extract_postings_from_page so a page
+    reached via the link-follow / iframe / pagination steps gets IDENTICAL treatment to the original page.
 
-    2026-08 — two real bottlenecks fixed here:
+    Ladder (first rung that yields postings wins; each rung is a different "where do sites hide their jobs"):
+      1. JSON-LD JobPosting                     (schema.org, highest confidence)
+      2. microdata JobPosting + embedded state  (page_extract: itemprop markup; __NEXT_DATA__ / __NUXT__ /
+         JSON                                    window.__X__ / application/json / data-props / hidden-input
+                                                 JSON such as Zoho Recruit custom domains)
+      3. heuristic job links, each CONFIRMED by fetching the page and requiring it to read as one JD
 
-    1. Every CPU-bound parse call (_extract_jsonld_jobs, LexborHTMLParser-
-       based _find_heuristic_candidates, _confirm_and_build_posting) used
-       to run INLINE on the event loop — worse than node.py's old
-       ProcessPoolExecutor(1 worker) bug, since it wasn't even offloaded
-       to a second worker: it blocked the entire event loop, including
-       every other page's in-flight fetch, for the full duration of each
-       parse. Now offloaded via loop.run_in_executor(parse_pool, ...),
-       same ThreadPoolExecutor pattern as node.py's crawl_one/PARSE_WORKERS.
-
-    2. The up-to-MAX_HEURISTIC_CANDIDATES_PER_PAGE (25) detail-page
-       fetches were a sequential `for cand in candidates: await ...` loop
-       — one at a time, not concurrent, on a page that could have up to
-       25 candidates. Now fetched concurrently via asyncio.gather (same
-       per-fetch semaphore gating as before, just no longer serialized)."""
+    2026-08 history kept: every CPU-bound parse runs in `parse_pool`, detail fetches are concurrent.
+    2026-10: rungs 2 and the role pre-filter are new -- detail pages are only fetched for roles that could
+    survive _filter_roles (it drops keyword-'exclude' titles with no appeal), and the cap of
+    MAX_HEURISTIC_CANDIDATES_PER_PAGE now applies AFTER that filter, so a big board no longer loses its
+    relevant roles behind 25 irrelevant ones."""
     loop = asyncio.get_running_loop()
 
     jsonld_jobs = await loop.run_in_executor(parse_pool, _extract_jsonld_jobs, html, page_url, company)
     if jsonld_jobs:
         stats["jsonld_pages"] += 1
         stats["jsonld_postings"] += len(jsonld_jobs)
+        await _enrich_from_detail_pages(session, sem, jsonld_jobs, page_url, company, stats, parse_pool)
         await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, j, html) for j in jsonld_jobs))
-        return jsonld_jobs
+        return _Postings(jsonld_jobs)
+
+    structured = await loop.run_in_executor(parse_pool, PE.extract_microdata_jobs, html, page_url, company)
+    if structured:
+        stats["microdata_pages"] += 1
+    else:
+        structured = await loop.run_in_executor(parse_pool, PE.extract_state_jobs, html, page_url, company)
+        if structured:
+            stats["state_json_pages"] += 1
+    if structured:
+        stats["structured_postings"] += len(structured)
+        await _enrich_from_detail_pages(session, sem, structured, page_url, company, stats, parse_pool)
+        return _Postings(structured)
 
     candidates = await loop.run_in_executor(parse_pool, _find_heuristic_candidates, html, page_url)
     if not candidates:
-        return []
+        return _Postings()
     stats["heuristic_pages"] += 1
-    candidates = candidates[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
+    all_urls = {c["url"] for c in candidates}
+    worth = [c for c in candidates if _worth_detail_fetch(c["title"])]
+    skipped = [c for c in candidates if not _worth_detail_fetch(c["title"])]
+    stats["role_prefilter_skipped"] += len(skipped)
+    candidates = worth[:MAX_HEURISTIC_CANDIDATES_PER_PAGE]
 
     async def _fetch_and_confirm(cand: dict) -> tuple[dict, str] | None:
         async with sem:
@@ -1040,27 +1151,31 @@ async def _extract_via_jsonld_or_heuristic(session: aiohttp.ClientSession, sem: 
     stats["heuristic_postings"] += len(confirmed)
     await asyncio.gather(*(_augment_with_apply_page(session, sem, stats, job, detail_html)
                             for job, detail_html in confirmed_pairs))
-    return confirmed
+    out = _Postings(confirmed, all_urls=all_urls)
+    if not confirmed and skipped:
+        # nothing relevant -- but is this a real job board? confirm up to 2 of the skipped links (2 requests)
+        probes = await asyncio.gather(*(_fetch_and_confirm(c) for c in skipped[:2]))
+        out.irrelevant_only = any(probes)
+    return out
 
 
 async def _walk_pagination(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
                             first_html: str, first_url: str, company: str, stats: dict,
                             parse_pool: concurrent.futures.Executor,
                             first_postings: list[dict]) -> list[dict]:
-    """2026-09: a genuine listings page (as opposed to the landing/stub-page
-    case MAX_CAREER_LINK_FOLLOW handles above) can itself span multiple
-    pages — "Page 1 of 5", a "Next"/"Load more" control. Previously this
-    file read exactly one listing page per company and stopped, silently
-    missing every posting past page 1. This follows _find_next_page_url
-    forward from a page that already yielded at least one posting, merging
-    each subsequent page's postings in (deduped by job URL) until: no
-    next-page link is found, MAX_ARCHIVE_II_PAGES_PER_LISTING is reached,
-    a next link points somewhere already visited (loop guard against a
-    self-referential/cyclic pagination scheme), or a page adds zero new
-    postings (real pagination always advances; a page that doesn't is
-    either the true end or a broken/looping "next" link either way)."""
+    """2026-09: a genuine listings page can itself span multiple pages ("Page 1 of 5", a "Next"/"Load more"
+    control). This follows _find_next_page_url forward from a page that already yielded postings, merging each
+    subsequent page's postings in (deduped by job URL) until: no next-page link is found,
+    MAX_ARCHIVE_II_PAGES_PER_LISTING is reached, a next link points somewhere already visited (loop guard), or
+    a page adds nothing new.
+
+    2026-10: "adds nothing new" is judged on every job-looking URL the page showed (_Postings.all_urls), not
+    only the role-relevant ones kept -- otherwise a page whose roles were all pre-filtered out would end the
+    walk even though page 3 has the Customer Success opening. Also callable with an empty/irrelevant-only
+    first page for the same reason."""
     all_postings = list(first_postings)
     seen_urls = {p["url"] for p in all_postings if p.get("url")}
+    seen_all = set(getattr(first_postings, "all_urls", set())) | seen_urls
     seen_pages = {first_url}
     loop = asyncio.get_running_loop()
     current_html, current_url = first_html, first_url
@@ -1088,12 +1203,172 @@ async def _walk_pagination(session: aiohttp.ClientSession, sem: asyncio.Semaphor
                 seen_urls.add(u)
             all_postings.append(p)
             new_count += 1
-        if new_count == 0:
+        fresh_urls = set(getattr(next_postings, "all_urls", set())) - seen_all
+        seen_all |= fresh_urls
+        if new_count == 0 and not fresh_urls:
             break
         stats["pagination_extra_postings"] += new_count
         current_html, current_url = next_html, next_final_url
 
-    return all_postings
+    return _Postings(all_postings, all_urls=seen_all)
+
+
+MAX_FRAME_FOLLOW = int(os.environ.get("CRAWL_II_MAX_FRAME_FOLLOW", "3"))
+SITEMAP_FALLBACK = os.environ.get("CRAWL_II_SITEMAP_FALLBACK", "1") != "0"
+MAX_ATS_BRIDGE_BOARDS = 2
+
+
+async def _bridge_known_ats(urls: set[str], stats: dict) -> list[dict]:
+    """A page whose HTML / iframe / script URLs point at one of the platforms ats_scrapers can read gets
+    scraped through that platform's own API (full, structured, with questions) instead of parsed as HTML.
+    node.py already does this at discovery time, so an archive_ii page normally has no such hit -- this
+    catches pages whose embed was added or changed since, and iframe documents (an embed inside an embed)."""
+    try:
+        hits = node._detect_ats_hits(urls)
+    except Exception:
+        return []
+    boards, seen = [], set()
+    for ats, slug, _u in hits:
+        if ats.lower() in ats_scrapers.SCRAPERS and (ats, slug) not in seen:
+            seen.add((ats, slug))
+            boards.append((ats, slug))
+    jobs: list[dict] = []
+    for ats, slug in boards[:MAX_ATS_BRIDGE_BOARDS]:
+        try:
+            got = await ats_scrapers.scrape_board(ats, slug)
+        except Exception as e:
+            log.debug(f"ATS bridge {ats}/{slug} failed: {e}")
+            continue
+        for j in got or []:
+            j.setdefault("description", j.get("description_snippet") or "")
+            j.setdefault("clearance", "")
+            jobs.append(j)
+    if jobs:
+        stats["ats_bridge_pages"] += 1
+        stats["ats_bridge_postings"] += len(jobs)
+    return jobs
+
+
+async def _fetch_json_or_xml(session: aiohttp.ClientSession, sem: asyncio.Semaphore, url: str, stats: dict) -> str | None:
+    async with sem:
+        got = await node._fetch_page(session, url, stats)
+    return got[1] if got else None
+
+
+async def _dead_end_fallbacks(session: aiohttp.ClientSession, sem: asyncio.Semaphore, html: str, final_url: str,
+                              company: str, stats: dict, parse_pool: concurrent.futures.Executor,
+                              depth: int = 0) -> list[dict]:
+    """Everything tried when the page itself (and its best 'Explore roles' link) produced nothing. In order of
+    cost/confidence: known-ATS bridge -> embedded frames / widgets -> RSS/Atom + WordPress REST -> the page
+    being a single posting. Frames recurse once (a frame document can itself embed the board)."""
+    loop = asyncio.get_running_loop()
+
+    urls = await loop.run_in_executor(parse_pool, node._extract_candidate_urls, html, final_url)
+    jobs = await _bridge_known_ats(urls, stats)
+    if jobs:
+        return jobs
+
+    frames = await loop.run_in_executor(parse_pool, PE.find_job_frames, html, final_url, MAX_FRAME_FOLLOW)
+    if frames:
+        jobs = await _bridge_known_ats(set(frames), stats)
+        if jobs:
+            return jobs
+    for furl in frames:
+        if furl == final_url:
+            continue
+        async with sem:
+            got = await node._fetch_page(session, furl, stats)
+        stats["frames_followed"] += 1
+        if not got:
+            continue
+        fu, fh = got
+        found = await _extract_via_jsonld_or_heuristic(session, sem, fh, fu, company, stats, parse_pool)
+        if found or getattr(found, "irrelevant_only", False):
+            stats["frame_found_postings"] += 1
+            return await _walk_pagination(session, sem, fh, fu, company, stats, parse_pool, found)
+        if depth < 1:
+            found = await _dead_end_fallbacks(session, sem, fh, fu, company, stats, parse_pool, depth + 1)
+            if found:
+                stats["frame_found_postings"] += 1
+                return found
+
+    for feed in await loop.run_in_executor(parse_pool, PE.find_feed_links, html, final_url):
+        xml = await _fetch_json_or_xml(session, sem, feed, stats)
+        found = PE.parse_feed_jobs(xml or "", feed, company)
+        if found:
+            stats["feed_found_postings"] += len(found)
+            await _enrich_from_detail_pages(session, sem, found, final_url, company, stats, parse_pool)
+            return found
+
+    root = PE.wp_api_root(html, final_url)
+    if root:
+        types_txt = await _fetch_json_or_xml(session, sem, root.rstrip("/") + "/wp/v2/types", stats)
+        try:
+            bases = PE.wp_job_endpoints(json.loads(types_txt)) if types_txt else []
+        except ValueError:
+            bases = []
+        for base in bases:
+            txt = await _fetch_json_or_xml(session, sem, f"{root.rstrip('/')}/wp/v2/{base}?per_page=100", stats)
+            try:
+                found = PE.parse_wp_posts(json.loads(txt), company) if txt else []
+            except ValueError:
+                found = []
+            if found:
+                stats["wp_api_found_postings"] += len(found)
+                await _enrich_from_detail_pages(session, sem, found, final_url, company, stats, parse_pool)
+                return found
+
+    single = await loop.run_in_executor(parse_pool, PE.single_job_page, html, final_url, company)
+    if single and _worth_detail_fetch(single["title"]):
+        loc = _extract_heuristic_location(single["description"])
+        single["location"] = single["location"] or loc
+        single["workplace_type"] = single.get("workplace_type") or _extract_heuristic_workplace_type(single["description"])
+        stats["single_page_postings"] += 1
+        return [single]
+
+    if depth == 0 and SITEMAP_FALLBACK:
+        return await _sitemap_fallback(session, sem, final_url, company, stats, parse_pool)
+    return []
+
+
+async def _sitemap_fallback(session: aiohttp.ClientSession, sem: asyncio.Semaphore, page_url: str, company: str,
+                            stats: dict, parse_pool: concurrent.futures.Executor) -> list[dict]:
+    """JS-rendered boards usually still have server-rendered detail pages, and their sitemap lists them. Reads
+    {origin}/sitemap.xml (else the robots.txt `Sitemap:` line), follows at most two job-looking child sitemaps,
+    keeps URLs shaped like /jobs/<title-slug>, role-filters by the SLUG (no request wasted on irrelevant roles),
+    then fetches + confirms the survivors exactly like heuristic candidates. <= 4 listing requests per
+    dead-end page; disable with CRAWL_II_SITEMAP_FALLBACK=0."""
+    loop = asyncio.get_running_loop()
+    p = urlparse(page_url)
+    origin = f"{p.scheme}://{p.netloc}"
+    xml = await _fetch_json_or_xml(session, sem, origin + "/sitemap.xml", stats)
+    if not xml or "<loc" not in xml.lower():
+        robots = await _fetch_json_or_xml(session, sem, origin + "/robots.txt", stats)
+        sm_url = next((ln.split(":", 1)[1].strip() for ln in (robots or "").splitlines()
+                       if ln.strip().lower().startswith("sitemap:")), "")
+        xml = await _fetch_json_or_xml(session, sem, sm_url, stats) if sm_url.startswith("http") else None
+    if not xml:
+        return []
+    children, urls = PE.parse_sitemap(xml)
+    for child in PE.pick_job_sitemaps(children):
+        cxml = await _fetch_json_or_xml(session, sem, child, stats)
+        if cxml:
+            urls.extend(PE.parse_sitemap(cxml)[1])
+    cands = [c for c in PE.sitemap_job_candidates(urls) if _worth_detail_fetch(c["title"])]
+    if not cands:
+        return []
+    stats["sitemap_pages_with_candidates"] += 1
+
+    async def _one(cand: dict):
+        async with sem:
+            got = await node._fetch_page(session, cand["url"], stats)
+        if not got:
+            return None
+        return await loop.run_in_executor(parse_pool, _confirm_and_build_posting, got[1], cand, company)
+
+    built = [b for b in await asyncio.gather(*(_one(c) for c in cands[:MAX_HEURISTIC_CANDIDATES_PER_PAGE])) if b]
+    stats["sitemap_postings"] += len(built)
+    return built
 
 
 async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
@@ -1130,8 +1405,11 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
     company = _company_name_from_domain(page["website_url"])
 
     postings = await _extract_via_jsonld_or_heuristic(session, sem, html, final_url, company, stats, parse_pool)
-    if postings:
-        return await _walk_pagination(session, sem, html, final_url, company, stats, parse_pool, postings)
+    if postings or getattr(postings, "irrelevant_only", False):
+        walked = await _walk_pagination(session, sem, html, final_url, company, stats, parse_pool, postings)
+        if not walked and getattr(postings, "irrelevant_only", False):
+            page["_had_postings"] = True  # a real board, just nothing relevant on it today
+        return walked
 
     loop = asyncio.get_running_loop()
     link_candidates = await loop.run_in_executor(
@@ -1149,10 +1427,17 @@ async def extract_postings_from_page(session: aiohttp.ClientSession, sem: asynci
         followed_url, followed_html = followed
         postings = await _extract_via_jsonld_or_heuristic(
             session, sem, followed_html, followed_url, company, stats, parse_pool)
-        if postings:
+        if postings or getattr(postings, "irrelevant_only", False):
             stats["career_link_follow_found_postings"] += 1
-            return await _walk_pagination(
+            walked = await _walk_pagination(
                 session, sem, followed_html, followed_url, company, stats, parse_pool, postings)
+            if not walked and getattr(postings, "irrelevant_only", False):
+                page["_had_postings"] = True
+            return walked
+
+    fallback = await _dead_end_fallbacks(session, sem, html, final_url, company, stats, parse_pool)
+    if fallback:
+        return fallback
 
     stats["no_postings_found"] += 1
     return []
@@ -1717,7 +2002,9 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         # page had ANY role at all" — these are the RAW batch_candidates,
         # before role/location filtering below, so any posting counts,
         # not just CSM/AM ones.
-        all_pages_with_roles |= {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs}
+        all_pages_with_roles |= {p["website_url"] for p, page_jobs in zip(batch, results) if page_jobs or p.get("_had_postings")}
+        for p in batch:
+            p.pop("_had_postings", None)
         retry_pages.extend(p for p in batch if p.pop("_retry", False))
 
         done = min(i + batch_size, len(pages))
@@ -1743,6 +2030,8 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
                 *(extract_postings_from_page(session, retry_sem, p, stats, parse_pool) for p in rbatch))
             for p, page_jobs in zip(rbatch, rresults):
                 p.pop("_retry", None)
+                if not page_jobs and p.pop("_had_postings", None):
+                    all_pages_with_roles.add(p["website_url"])
                 if page_jobs:
                     recovered_with_postings += 1
                     all_candidate_jobs.extend(page_jobs)
@@ -1927,6 +2216,10 @@ async def _run_shard(shard: int, total_shards: int) -> None:
         "apply_page_augmented": 0,
         "career_link_follow_attempted": 0, "career_link_follow_found_postings": 0,
         "pagination_pages_followed": 0, "pagination_extra_postings": 0,
+        "microdata_pages": 0, "state_json_pages": 0, "structured_postings": 0, "detail_enriched": 0,
+        "role_prefilter_skipped": 0, "frames_followed": 0, "frame_found_postings": 0,
+        "ats_bridge_pages": 0, "ats_bridge_postings": 0, "feed_found_postings": 0, "wp_api_found_postings": 0,
+        "single_page_postings": 0, "sitemap_pages_with_candidates": 0, "sitemap_postings": 0,
     }
     sem = asyncio.Semaphore(CRAWL_CONCURRENCY)
     connector = new_connector()

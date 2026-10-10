@@ -29,6 +29,7 @@ import warnings
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 import geo
+import page_extract
 from discovery import _GH_JID_RE, extract_greenhouse_embed_token
 
 log = logging.getLogger(__name__)
@@ -7858,7 +7859,12 @@ async def _fetch_generic_description(job: dict) -> str:
     if not r:
         return ""
 
-    html = r.text
+    # charset-aware decode (header / BOM / <meta charset> / cp1252 fallback): r.text assumes UTF-8 when the header
+    # has no charset, so a Latin-1 / Windows-1252 page lost its accented characters ("Düsseldorf").
+    try:
+        html = page_extract.decode_html(r.content, r.headers.get("content-type", ""))
+    except Exception:
+        html = r.text
     # See _enrich_cache_get/_put's module comment: this lets a later
     # application-question fetch for the SAME job (JazzHR, Paylocity,
     # JOIN all route their description through this exact function)
@@ -7905,6 +7911,18 @@ async def _fetch_generic_description(job: dict) -> str:
             text = _snippet(main_match.group(1))
             if len(text) > 50:
                 candidates.append(text)
+
+    # 2026-10: page_extract.main_text (boilerplate-free whole-page text, scored container choice) as one more
+    # candidate. The regex containers above can capture just a fragment (a '.description' div holding only the
+    # intro, an <article> that wraps a teaser); the longer candidate wins only if it also reads as ONE job
+    # description (page_extract.is_job_description), so page chrome / related-jobs lists can't win on length.
+    try:
+        pe_text, pe_li = page_extract.main_text(html)
+        best_now = max((len(c) for c in candidates), default=0)
+        if pe_text and len(pe_text) > best_now * 1.3 and page_extract.is_job_description(pe_text, pe_li):
+            candidates.append(pe_text)
+    except Exception:
+        pass
 
     if candidates:
         return max(candidates, key=len)

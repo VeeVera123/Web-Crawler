@@ -40,6 +40,7 @@ sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "Main"))  # geo.py/discovery.py live here
 
 import geo  # noqa: E402
+import page_extract  # noqa: E402 — charset-aware decode_html for _fetch_page
 from slug_case import canonical_registry_rows  # noqa: E402
 from discovery import (  # noqa: E402
     URL_TO_SLUG, extract_gh_jid_ids, extract_greenhouse_embed_token,
@@ -1774,7 +1775,9 @@ async def _fetch_page(session: aiohttp.ClientSession, url: str, stats: dict,
                 total += len(chunk)
                 if total >= MAX_PAGE_BYTES:
                     break
-            text = b"".join(chunks).decode("utf-8", errors="ignore")
+            # charset-aware (header / BOM / <meta charset>, then utf-8, then cp1252) instead of utf-8 + "ignore",
+            # which silently deleted every non-UTF-8 byte of a Latin-1 / Windows-1252 page ("D\xfcsseldorf" -> "Dsseldorf")
+            text = page_extract.decode_html(b"".join(chunks), content_type)
             if not text.strip():
                 stats["non_html"] += 1
                 _note_fetch_failure(stats, fail_kind, "non_html")
