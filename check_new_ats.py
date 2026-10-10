@@ -488,6 +488,23 @@ check(A._fetch_deel_questions({"url": "https://jobs.deel.com/klarna/job-details/
 A._get_requests_sync = _orig_sync
 check("HiBob" in A.QUESTION_FETCHERS and "Deel" in A.QUESTION_FETCHERS, "hibob/deel question fetchers registered")
 
+# ── GitHub registry parsers: URL-record and txt slug lists (2026-10) ──
+ur = D._parse_url_records(json.dumps([
+    {"name": "Cusmat", "ats_links": ["https://boards.greenhouse.io/cusmat", "https://cusmat.com/careers/"], "website": "https://cusmat.com"},
+    {"name": "Acme", "ats_links": ["https://jobs.lever.co/acme"]}, {"name": "Nope", "ats_links": ["https://example.com/jobs"]}]), "t/outscal")
+check(ur.get("greenhouse", {}).get("cusmat") == "Cusmat" and ur.get("lever", {}).get("acme") == "Acme" and sum(len(v) for v in ur.values()) == 2, f"url_records json list {ur}")
+ur2 = D._parse_url_records(json.dumps({"ethena": {"name": "ethena", "jobs_url": "https://jobs.lever.co/ethena", "company_url": "https://www.goethena.com"}}), "t/crypto")
+check(ur2 == {"lever": {"ethena": "ethena"}}, f"url_records name-keyed dict {ur2}")
+ur3 = D._parse_url_records("company_slug,board_url,monitor_type\nairbus,https://airbusspaceanddefense.applicantpro.com/jobs/,api_sniffer\nx,https://app.loxo.co/mastec,dom\n", "t/jobseek")
+check(ur3.get("applicantpro", {}).get("airbusspaceanddefense") is not None and "mastec" in ur3.get("loxo", {}), f"url_records csv {ur3}")
+check(D._parse_url_records("not json {", "t/bad") == {} or isinstance(D._parse_url_records("not json {", "t/bad"), dict), "url_records: bad input does not raise")
+_orig_fetch = D._github_registry_fetch
+D._github_registry_fetch = lambda reg: {"a.txt": "acme\n# c\n\nbeta-co\n"}.get(reg["path"])
+tx = D._parse_txt_slug_files({"repo": "t/u", "branch": "main", "files": {"greenhouse": "a.txt", "lever": "missing.txt"}})
+check(set(tx.get("greenhouse", {})) == {"acme", "beta-co"} and "lever" not in tx, f"txt_slugs {tx}")
+D._github_registry_fetch = _orig_fetch
+check(any(r.get("format") == "url_records" for r in D.GITHUB_REGISTRY_REPOS) and any(r.get("format") == "txt_slugs" for r in D.GITHUB_REGISTRY_REPOS), "new registries listed")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

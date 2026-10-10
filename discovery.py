@@ -6964,6 +6964,21 @@ GITHUB_REGISTRY_REPOS = [
     # which were deliberately left out.
     {"repo": "elliottdehn/open-jobs", "branch": "main",
      "path": "slugs.json", "format": "openjobs_slugmap"},
+    # 2026-10 (explicit user request: smaller developer aggregators as slug sources). Found by reading
+    # ElliotGbaum/upstreamit's sources.json, which names the registries it merges. Formats: see _parse_url_records /
+    # _parse_txt_slug_files.
+    # colophon-group/jobseek: 7.9k boards (board_url + monitor_type) across 70 monitor types, including the newer
+    # platforms (ApplicantPro, HiBob, Deel, Traffit ...).
+    {"repo": "colophon-group/jobseek", "branch": "main", "path": "apps/crawler/data/boards.csv", "format": "url_records"},
+    # outscal/OpenJobs: 12k gaming companies with careers URLs, ~2.9k of which sit on a supported ATS.
+    {"repo": "outscal/OpenJobs", "branch": "main", "path": "data/companies_v2.json", "format": "url_records"},
+    # crypto-jobs-fyi/crawler: ~530 crypto / AI company boards (remote-heavy employers).
+    {"repo": "crypto-jobs-fyi/crawler", "branch": "main", "path": "companies.json", "format": "url_records"},
+    {"repo": "crypto-jobs-fyi/crawler", "branch": "main", "path": "crypto_companies.json", "format": "url_records"},
+    # ElliotGbaum/upstreamit: the *-live.txt lists are slugs its own probe confirmed live (including a non-GitHub Ashby
+    # backfill). Workday is left out: its list lower-cases the site id, which Workday treats as case-sensitive.
+    {"repo": "ElliotGbaum/upstreamit", "branch": "main", "format": "txt_slugs",
+     "files": {"greenhouse": "data/slugs/greenhouse-live.txt", "lever": "data/slugs/lever-live.txt", "ashby": "data/slugs/ashby-live.txt"}},
 ]
 
 # openroles filename (their "ats" field) -> our SUPPORTED_ATS key. Every
@@ -7624,6 +7639,74 @@ def _parse_generic_github_csv(text: str, repo: str) -> dict[str, dict[str, str]]
         return {}
 
 
+def _iter_url_records(data: object):
+    """(name, record) pairs from a JSON list of records, a JSON dict of records keyed by company name, or a wrapper dict."""
+    if isinstance(data, list):
+        for rec in data:
+            if isinstance(rec, dict):
+                yield "", rec
+    elif isinstance(data, dict):
+        values = list(data.values())
+        if values and all(isinstance(v, dict) for v in values):
+            for key, rec in data.items():
+                yield str(key), rec
+        else:
+            for v in values:
+                if isinstance(v, (list, dict)):
+                    yield from _iter_url_records(v)
+
+
+def _parse_url_records(text: str, repo: str) -> dict[str, dict[str, str]]:
+    """Registries that list companies with board / careers URLs instead of (ATS, slug) pairs. Every http(s) value on a
+    record (top-level strings and lists of strings) is run through the project's own URL_TO_SLUG converters, so a
+    registry needs no ATS column and no per-repo field mapping. Works for JSON (list or name-keyed dict) and CSV."""
+    import csv
+    try:
+        if text.lstrip()[:1] in ("[", "{"):
+            records = list(_iter_url_records(json.loads(text)))
+        else:
+            records = [("", row) for row in csv.DictReader(text.splitlines())]
+    except Exception as e:
+        log.error(f"  {repo}: invalid URL-record registry: {e}")
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for key_name, rec in records:
+        urls: list[str] = []
+        for v in rec.values():
+            if isinstance(v, str) and v.startswith(("http://", "https://")):
+                urls.append(v.strip())
+            elif isinstance(v, list):
+                urls += [x.strip() for x in v if isinstance(x, str) and x.startswith(("http://", "https://"))]
+        name = str(rec.get("name") or rec.get("company_name") or rec.get("company") or key_name or "").strip()
+        for url in dict.fromkeys(urls):
+            for ats, fn in URL_TO_SLUG.items():
+                try:
+                    token = fn(url)
+                except Exception:
+                    token = None
+                if not token:
+                    continue
+                token = str(token).strip()
+                if token.lower() not in SKIP_SLUGS and _looks_like_real_slug(token):
+                    out.setdefault(ats, {})[token] = name
+                break
+    return out
+
+
+def _parse_txt_slug_files(reg: dict) -> dict[str, dict[str, str]]:
+    """One slug per line, one file per ATS (reg["files"] = {our ats key: path})."""
+    out: dict[str, dict[str, str]] = {}
+    for ats, path in (reg.get("files") or {}).items():
+        text = _github_registry_fetch({**reg, "path": path})
+        if text is None:
+            continue
+        for line in text.splitlines():
+            token = line.strip()
+            if token and not token.startswith("#") and token.lower() not in SKIP_SLUGS and _looks_like_real_slug(token):
+                out.setdefault(ats, {})[token] = ""
+    return out
+
+
 def _merge_github_registry_result(target: dict[str, dict[str, str]], incoming: dict[str, dict[str, str]]) -> int:
     added = 0
     for ats, rows in incoming.items():
@@ -7676,6 +7759,18 @@ def fetch_github_registries_slugs(csod_resolve_time_budget_minutes: int = CSOD_R
                 parsed = _parse_generic_github_csv(text, repo)
                 added = _merge_github_registry_result(slugs_by_ats, parsed)
                 log.info(f"  {repo}: {added} CSV registry slugs normalized")
+            continue
+        if reg.get("format") == "url_records":
+            text = _github_registry_fetch(reg)
+            if text is not None:
+                parsed = _parse_url_records(text, repo)
+                added = _merge_github_registry_result(slugs_by_ats, parsed)
+                log.info(f"  {repo}/{reg.get('path')}: {added} slugs normalized from board / careers URLs")
+            continue
+        if reg.get("format") == "txt_slugs":
+            parsed = _parse_txt_slug_files(reg)
+            added = _merge_github_registry_result(slugs_by_ats, parsed)
+            log.info(f"  {repo}: {added} live-list slugs normalized")
             continue
         if reg.get("format") == "openjobs_slugmap":
             text = _github_registry_fetch(reg)
