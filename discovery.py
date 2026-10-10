@@ -5924,6 +5924,76 @@ def _resolve_url_via_url_to_slug(url: str) -> tuple[str, str] | None:
     return None
 
 
+def _fetch_hf_url_dataset_slugs(repo: str, parquet_key: tuple[str, str] | None, url_cols: tuple[str, ...], label: str,
+                                time_budget_minutes: int = 120, hf_shard: int | None = None,
+                                hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
+    """Resolve the URL column(s) of a public Hugging Face dataset through URL_TO_SLUG, one Parquet file at a time with column
+    projection (only the URL columns are read). `parquet_key` = (config, split) picks one file group of the datasets-server
+    Parquet listing (None = the first/only one). Sharded by file like Edward's source."""
+    import io
+    import pyarrow.parquet as pq
+
+    try:
+        r = requests.get(f"https://huggingface.co/api/datasets/{repo}/parquet", timeout=30)
+        r.raise_for_status()
+        listing = r.json()
+        if parquet_key:
+            files = list(listing.get(parquet_key[0], {}).get(parquet_key[1], []))
+        else:
+            files = [u for splits in listing.values() for urls in splits.values() for u in urls]
+    except Exception as e:
+        log.warning(f"{label}: Parquet listing failed for {repo}: {e}")
+        return {}
+    if hf_total_shards and hf_shard is not None:
+        files = files[hf_shard::hf_total_shards]
+    slugs_by_ats: dict[str, dict[str, str]] = {}
+    start, rows = time.monotonic(), 0
+    for i, url in enumerate(files, 1):
+        if time.monotonic() - start > time_budget_minutes * 60:
+            log.warning(f"{label}: time budget reached after {i - 1}/{len(files)} files")
+            break
+        try:
+            resp = requests.get(url, timeout=180)
+            resp.raise_for_status()
+            pf = pq.ParquetFile(io.BytesIO(resp.content))
+            cols = [c for c in url_cols if c in pf.schema_arrow.names]
+            if not cols:
+                continue
+            table = pf.read(columns=cols)
+        except Exception as e:
+            log.warning(f"{label}: file {i}/{len(files)} failed: {e}")
+            continue
+        seen_urls: set[str] = set()
+        for col in cols:
+            seen_urls.update(u for u in table.column(col).to_pylist() if isinstance(u, str) and u)
+        for u in seen_urls:
+            rows += 1
+            hit = _resolve_url_via_url_to_slug(u)
+            if hit:
+                slugs_by_ats.setdefault(hit[0], {})[hit[1]] = ""
+        if i % 5 == 0:
+            log.info(f"{label}: {i}/{len(files)} files, {rows:,} URLs, {sum(len(v) for v in slugs_by_ats.values()):,} slugs")
+    for ats, slugs in sorted(slugs_by_ats.items()):
+        log.info(f"  {ats}: {len(slugs)} slugs from {label}")
+    log.info(f"{label} summary: {rows:,} URLs, {sum(len(v) for v in slugs_by_ats.values()):,} slugs")
+    return slugs_by_ats
+
+
+def fetch_scholarweave_slugs(time_budget_minutes: int = 120, hf_shard: int | None = None,
+                             hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
+    """scholarweave/Jobs-Dataset-v2 (Apache-2.0, refreshed daily): postings scraped from company career pages; the
+    `minimal-active-current` config's `apply_url` column (64 Parquet files, ~18 MB each) resolves to ATS tenants."""
+    return _fetch_hf_url_dataset_slugs("scholarweave/Jobs-Dataset-v2", ("minimal-active-current", "active"), ("apply_url",),
+                                       "Scholarweave H.F", time_budget_minutes, hf_shard, hf_total_shards)
+
+
+def fetch_hireheat_slugs(time_budget_minutes: int = 30) -> dict[str, dict[str, str]]:
+    """CyberMax-tools/hireheat-career-site-jobs-weekly (cc-by-4.0): one weekly Parquet of postings with `boardUrl` / `url`
+    (Greenhouse, Lever, Ashby, Workable, SmartRecruiters boards)."""
+    return _fetch_hf_url_dataset_slugs("CyberMax-tools/hireheat-career-site-jobs-weekly", None, ("boardUrl", "url"),
+                                       "HireHeat H.F", time_budget_minutes)
+
+
 def fetch_latmay_slugs(hf_shard: int | None = None, hf_total_shards: int | None = None) -> dict[str, dict[str, str]]:
     """latmay/ats-career-page-urls — 69,638 rows of {canonical_url,
     ats_platform}. Small enough to load in one pass, no time-budget/
@@ -8342,7 +8412,7 @@ def main():
         "--source",
         choices=["feashliaa", "kalil", "openpostings", "github_combined",
                  "commoncrawl", "wayback", "ct_logs", "theirstack",
-                 "httparchive", "latmay", "edwarddgao", "openjobsdaily",
+                 "httparchive", "latmay", "edwarddgao", "openjobsdaily", "scholarweave", "hireheat",
                  "icims_hrjobs", "github", "welcometothejungle", "getro", "all"],
         default="all",
         help="Which source to pull from (default: all). 'yc' removed "
@@ -8713,6 +8783,26 @@ def main():
             grand_total += upserted
         else:
             grand_total += lm_total
+
+    # Source: Scholarweave H.F (scholarweave/Jobs-Dataset-v2 apply_url -> ATS tenants)
+    if args.source in ("scholarweave", "all"):
+        log.info("\n--- SCHOLARWEAVE H.F (Hugging Face, career-page postings) ---")
+        sw_slugs = fetch_scholarweave_slugs(hf_shard=args.hf_shard, hf_total_shards=args.hf_total_shards)
+        sw_total = sum(len(s) for s in sw_slugs.values())
+        if not args.dry_run:
+            grand_total += upsert_to_supabase(sw_slugs, source="Scholarweave H.F", dry_run=args.dry_run)
+        else:
+            grand_total += sw_total
+
+    # Source: HireHeat H.F (CyberMax-tools/hireheat-career-site-jobs-weekly boardUrl -> ATS tenants)
+    if args.source in ("hireheat", "all"):
+        log.info("\n--- HIREHEAT H.F (Hugging Face, weekly career-site postings) ---")
+        hh_slugs = fetch_hireheat_slugs()
+        hh_total = sum(len(s) for s in hh_slugs.values())
+        if not args.dry_run:
+            grand_total += upsert_to_supabase(hh_slugs, source="HireHeat H.F", dry_run=args.dry_run)
+        else:
+            grand_total += hh_total
 
     # Source: iCIMS HR Jobs (hrjobs.icims.com — centralized multi-tenant
     # board, HR-professional roles across iCIMS's customer base)

@@ -799,6 +799,13 @@ check(_td.startswith("Real description") and _tj["location"] == "Toronto, ON, On
       f"taleo TBE: JSON-LD gives description + location + country + type {_tj}")
 check(A._fetch_taleo_questions(_tj) == "" and A._scrape_taleo_tbe_sync("tbe|bad") == [] and asyncio.run(A.scrape_taleo("tbe|a|b")) == [], "taleo TBE: no questions, bad slugs -> []")
 
+# ── 2026-10 discovery sources: WDC domain seed + HF URL datasets ──
+import importlib.util as _iu
+_sp = _iu.spec_from_file_location("wdc_seed", "OpenData/wdc_seed.py"); _w = _iu.module_from_spec(_sp); _sp.loader.exec_module(_w)
+_rows = _w.build_rows("Domain\t#Quads\t#Entities\tProps\nacme.co.uk\t9\t5\t{}\nsmall.com\t3\t1\t{}\nacme.greenhouse.io\t9\t9\t{}\nlinkedin.com\t9\t99\t{}\nbig.example.org\t50\t12\t{}\n", 3)
+check(_rows == [("acme", "acme.co.uk", ""), ("big", "big.example.org", "")], f"wdc_seed: >=3 postings, vendors/boards dropped {_rows}")
+check(callable(D.fetch_scholarweave_slugs) and callable(D.fetch_hireheat_slugs), "scholarweave + hireheat discovery sources defined")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)
