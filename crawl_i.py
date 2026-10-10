@@ -224,6 +224,8 @@ PLATFORM_WORKERS = {
     "freshteam": 12, "peopleforce": 12, "factorial": 12, "loxo": 8,
     # 2026-10: Recruiterflow / Homerun = 1 page per tenant.
     "recruiterflow": 12, "homerun": 12,
+    # 2026-10: Keka = 2 calls per tenant (page for the org id, then the jobs JSON with full descriptions).
+    "keka": 12,
     # 2026-10: Getro = ~12 role-query searches (1-8 pages each) per network, all on api.getro.com.
     "getro": 4,
     # 2026-10: Himalayas = a few hundred paged searches against himalayas.app (virtual board, no archive_i row).

@@ -7531,6 +7531,69 @@ async def scrape_homerun(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Keka Hire (India) ─────────────────────────────────────────────────────────
+# 2026-10, pattern read from rishilahoti/ashby-job-scraper's keka adapter, verified live on inc42 / mosaicwellness /
+# knackstudios. {slug}.keka.com/careers/ is an HTML shell whose raw HTML carries the organisation's id inside
+# /ats/documents/{uuid}/; GET /careers/api/embedjobs/default/active/{uuid} then returns every open job as a JSON list with
+# the full description. {slug}.keka.com is every Keka customer's HR app, but only /careers is a job board; an unknown
+# tenant redirects to /careers/Content/TenantNotFound.html.
+_KEKA_JOB_TYPES = {1: "Part time", 2: "Full time"}
+
+
+async def scrape_keka(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+        return []
+    board = f"https://{slug}.keka.com/careers/"
+    r = await _get(board, headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r or r.status_code != 200 or "TenantNotFound" in str(r.url):
+        return []
+    m = re.search(r"/ats/documents/([0-9a-f]{8}-[0-9a-f-]{27})/", r.text, re.I)
+    if not m:
+        return []
+    r2 = await _get(f"{board}api/embedjobs/default/active/{m.group(1)}",
+                    headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"})
+    if not r2 or r2.status_code != 200:
+        return []
+    try:
+        items = r2.json()
+    except Exception:
+        return []
+    if not isinstance(items, list):
+        return []
+    company = slug.replace("-", " ").title()
+    jobs = []
+    for it in items:
+        if not isinstance(it, dict) or it.get("id") is None or not it.get("title"):
+            continue
+        locs = []
+        for loc in it.get("jobLocations") or []:
+            if isinstance(loc, dict):
+                label = ", ".join(p for p in (_text(loc.get("city") or loc.get("name")), _text(loc.get("countryName"))) if p)
+                if label and label not in locs:
+                    locs.append(label)
+        desc = _snippet(it.get("description") or "")
+        sal = it.get("salaryRange") or {}
+        salary = ""
+        if isinstance(sal, dict) and sal.get("maximum"):
+            salary = _text(it.get("salaryRangeFormat")) or f"{sal.get('currency') or ''} {sal.get('minimum') or 0}-{sal['maximum']}".strip()
+        jobs.append({
+            "title": _text(it["title"]),
+            "url": f"{board}jobdetails/{it['id']}",
+            "company": company,
+            "location": "; ".join(locs),
+            "country": "",
+            "department": _text(it.get("departmentName")),
+            "workplace_type": "",
+            "employment_type": _KEKA_JOB_TYPES.get(it.get("jobType"), ""),
+            "salary": salary or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Keka",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7623,6 +7686,7 @@ SCRAPERS = {
     "loxo": scrape_loxo,
     "recruiterflow": scrape_recruiterflow,
     "homerun": scrape_homerun,
+    "keka": scrape_keka,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -8817,6 +8881,7 @@ DESCRIPTION_FETCHERS = {
     "Loxo": _fetch_generic_description,
     "Recruiterflow": _fetch_generic_description,
     "Homerun": _fetch_generic_description,
+    "Keka": _fetch_generic_description,
     "BambooHR": _fetch_generic_description,
     # 2026-09: Paycom — the search endpoint's description field is
     # truncated; the real full text (plus salary/category) only comes

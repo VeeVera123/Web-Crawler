@@ -963,6 +963,15 @@ async def _verify_homerun(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_keka(session: aiohttp.ClientSession, slug: str) -> bool:
+    """An unknown tenant redirects to /careers/Content/TenantNotFound.html."""
+    async with session.get(f"https://{slug}.keka.com/careers/", timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404 or "TenantNotFound" in str(r.url):
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def _verify_getro(session: aiohttp.ClientSession, slug: str) -> bool:
     """A Getro board is live when its network has jobs. slug is a {tenant} (read the network id from the board page) or
     a numeric network id."""
@@ -1167,6 +1176,7 @@ ARCHIVE_II_VERIFIERS = {
     "loxo": _verify_loxo,
     "recruiterflow": _verify_recruiterflow,
     "homerun": _verify_homerun,
+    "keka": _verify_keka,
     "getro": _verify_getro,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full

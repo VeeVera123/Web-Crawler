@@ -366,6 +366,35 @@ async def fake_hr404(url, **kw):
 A._get = fake_hr404
 check(asyncio.run(A.scrape_homerun("acme")) == [] and asyncio.run(A.scrape_homerun("Bad Slug!")) == [], "homerun: unknown tenant / bad slug")
 
+# ── Keka Hire (2026-10) ──
+for url, want in [("https://inc42.keka.com/careers", "inc42"), ("https://techdome.keka.com/careers/jobdetails/159380", "techdome"),
+                  ("https://acme.keka.com/", None), ("https://www.keka.com/careers", None), ("https://help.keka.com/careers", None)]:
+    check(D._url_to_slug_keka(url) == want, f"keka slug {url} -> {D._url_to_slug_keka(url)!r}")
+check("keka" in D.URL_TO_SLUG and "keka" in D.SUPPORTED_ATS and "keka" in A.SCRAPERS and "keka" in D._CC_LIVE_CHECK, "keka registered")
+KK = [{"id": 164639, "title": "Associate - Client Management", "jobLocations": [{"city": "New Delhi", "countryName": "India"}], "description": "<p>Run accounts.</p>",
+       "departmentName": "BrandLabs", "jobType": 2, "salaryRange": {"minimum": 0, "maximum": 0}}, {"id": 2, "title": "", "description": "x"}, {"title": "no id"}]
+
+
+async def fake_keka(url, **kw):
+    if url.endswith("/careers/"):
+        return R('<link href="/ats/documents/0a1b2c3d-1111-2222-3333-444455556666/logo.png">', 200, url)
+    assert url.endswith("/api/embedjobs/default/active/0a1b2c3d-1111-2222-3333-444455556666")
+    return R("", 200, url, KK)
+
+
+A._get = fake_keka
+kj = asyncio.run(A.scrape_keka("Inc42"))
+check(len(kj) == 1 and kj[0]["url"] == "https://inc42.keka.com/careers/jobdetails/164639" and kj[0]["location"] == "New Delhi, India"
+      and kj[0]["employment_type"] == "Full time" and kj[0]["department"] == "BrandLabs" and "Run accounts" in kj[0]["description_snippet"], f"keka {kj}")
+
+
+async def fake_keka_nf(url, **kw):
+    return R("", 200, "https://acme.keka.com/careers/Content/TenantNotFound.html")
+
+
+A._get = fake_keka_nf
+check(asyncio.run(A.scrape_keka("acme")) == [] and asyncio.run(A.scrape_keka("Bad Slug!")) == [], "keka: unknown tenant / bad slug")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

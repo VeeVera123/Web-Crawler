@@ -601,6 +601,8 @@ SUPPORTED_ATS = {
     "freshteam", "peopleforce", "factorial", "loxo",
     # 2026-10: Recruiterflow (recruiterflow.com/{tenant}/jobs, list embedded in the page) and Homerun ({tenant}.homerun.co).
     "recruiterflow", "homerun",
+    # 2026-10: Keka Hire (India): {tenant}.keka.com/careers, public embedjobs JSON.
+    "keka",
     # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
     # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
     "getro",
@@ -2219,6 +2221,15 @@ def _url_to_slug_recruiterflow(url: str) -> str | None:
     return slug if slug not in _RECRUITERFLOW_NON_SLUGS and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug) else None
 
 
+def _url_to_slug_keka(url: str) -> str | None:
+    """Keka Hire (2026-10): {tenant}.keka.com/careers[/...] -> tenant. Every Keka customer has {tenant}.keka.com as its HR
+    app; only the /careers path is a job board, so a URL without it identifies nothing."""
+    parsed = urlparse(url)
+    if not parsed.path.lower().startswith("/careers"):
+        return None
+    return _html_board_tenant(url, ".keka.com")
+
+
 def _url_to_slug_loxo(url: str) -> str | None:
     """Loxo (2026-10): app.loxo.co/{tenant}[/...] -> tenant. Job pages are app.loxo.co/job/{id} (no tenant), so only the
     board URL identifies a company."""
@@ -2655,6 +2666,7 @@ URL_TO_SLUG = {
     "peopleforce": _url_to_slug_peopleforce,
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
+    "keka": _url_to_slug_keka,
     "recruiterflow": _url_to_slug_recruiterflow,
     "homerun": _url_to_slug_homerun,
     "isolvedhire": _url_to_slug_isolvedhire,
@@ -3371,6 +3383,7 @@ CC_PLATFORM_PATTERNS = {
     "peopleforce": ["*.peopleforce.io/careers*"],
     "factorial": ["*.factorial.com/job_posting/*"],
     "loxo": ["app.loxo.co/*"],
+    "keka": ["*.keka.com/careers*"],
     "recruiterflow": ["recruiterflow.com/*/jobs*"],
     "homerun": ["*.homerun.co/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
@@ -3467,6 +3480,7 @@ CC_EXTRACTORS = {
     "peopleforce": _url_to_slug_peopleforce,
     "factorial": _url_to_slug_factorial,
     "loxo": _url_to_slug_loxo,
+    "keka": _url_to_slug_keka,
     "recruiterflow": _url_to_slug_recruiterflow,
     "homerun": _url_to_slug_homerun,
     "isolvedhire": _url_to_slug_isolvedhire,
@@ -3866,6 +3880,17 @@ def _cc_check_homerun(slug: str) -> bool | None:
     except Exception:
         return None
     if "404.homerun.co" in r.url:
+        return False
+    return True if r.status_code == 200 else (False if r.status_code == 404 else None)
+
+
+def _cc_check_keka(slug: str) -> bool | None:
+    """A live tenant answers 200 on /careers/; an unknown one redirects to /careers/Content/TenantNotFound.html."""
+    try:
+        r = requests.get(f"https://{slug}.keka.com/careers/", timeout=10, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if "TenantNotFound" in r.url:
         return False
     return True if r.status_code == 200 else (False if r.status_code == 404 else None)
 
@@ -4287,6 +4312,7 @@ _CC_LIVE_CHECK = {
     "peopleforce": _via_verification("peopleforce", _cc_check_peopleforce),
     "factorial": _via_verification("factorial", _cc_check_factorial),
     "loxo": _via_verification("loxo", _cc_check_loxo),
+    "keka": _via_verification("keka", _cc_check_keka),
     "recruiterflow": _via_verification("recruiterflow", _cc_check_recruiterflow),
     "homerun": _via_verification("homerun", _cc_check_homerun),
     "getro": _via_verification("getro", _cc_check_getro),
@@ -7213,6 +7239,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "applicantpro": "applicantpro", "traffit": "traffit",
     "freshteam": "freshteam", "peopleforce": "peopleforce", "factorial": "factorial", "loxo": "loxo",
     "recruiterflow": "recruiterflow", "homerun": "homerun",
+    "keka": "keka",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7235,6 +7262,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("applicantpro.com", "applicantpro"), ("traffit.com", "traffit"),
     ("freshteam.com", "freshteam"), ("peopleforce.io", "peopleforce"), ("factorial.com", "factorial"), ("app.loxo.co", "loxo"),
     ("recruiterflow.com", "recruiterflow"), ("homerun.co", "homerun"),
+    ("keka.com", "keka"),
 )
 
 
