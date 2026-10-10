@@ -10979,6 +10979,50 @@ def _fetch_csod_questions(job: dict) -> str:
     return _format_auth_questions(fields)
 
 
+# ── CareerPlug ──
+# 2026-10: the application form is a plain server-rendered page, {job url}/apps/new (public, no login; only the submit has a
+# reCAPTCHA). The employer's screening questions are the fields named app[answer_sets_attributes][N][answer_id] - a <select> (or radio
+# group) whose <label> is the question and whose options are the answers ("Do you hold a valid driver's license?" Yes / No). The
+# standard inputs (name, email, resume ...) use other names and are not questions. A page with the applicant's firstname field is a
+# form that was READ, even with no screening questions.
+_CAREERPLUG_JOB_RE = re.compile(r"(https?://[a-z0-9-]+\.careerplug\.com/jobs/\d+)", re.I)
+_CAREERPLUG_Q_NAME_RE = re.compile(r"^app\[answer_sets_attributes\]\[\d+\]\[answer_id\]$")
+
+
+def _fetch_careerplug_questions(job: dict) -> str:
+    m = _CAREERPLUG_JOB_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    r = _get_requests_sync(m.group(1) + "/apps/new", headers={"User-Agent": random.choice(USER_AGENTS)})
+    if r is None or getattr(r, "status_code", 0) != 200:
+        return ""
+    soup = BeautifulSoup(r.text, "html.parser")
+    if not soup.find(attrs={"name": "app[applicant_attributes][firstname]"}):
+        return ""
+    job["_form_status"] = "ok"
+    fields, seen = [], set()
+    for el in soup.find_all(attrs={"name": _CAREERPLUG_Q_NAME_RE}):
+        name = el.get("name")
+        if name in seen:
+            continue
+        seen.add(name)
+        label = soup.find("label", attrs={"for": el.get("id")}) if el.get("id") else None
+        if label is None:
+            group = el.find_parent(class_="form-group")
+            label = group.find("label") if group else None
+        if label is None:
+            continue
+        for star in label.find_all(attrs={"title": "required"}):
+            star.decompose()
+        if el.name == "select":
+            options = [o.get_text(" ", strip=True) for o in el.find_all("option") if o.get("value")]
+        else:
+            options = [soup.find("label", attrs={"for": x.get("id")}).get_text(" ", strip=True) for x in soup.find_all(attrs={"name": name})
+                       if x.get("id") and soup.find("label", attrs={"for": x.get("id")})]
+        fields.append({"label": label.get_text(" ", strip=True).rstrip("*").strip(), "required": bool(el.get("required")), "options": options})
+    return _format_auth_questions(fields)
+
+
 # ── Dispatch table: source_ats (as stored on job dicts) → fetcher ──
 QUESTION_FETCHERS = {
     "Greenhouse": _fetch_greenhouse_questions,
@@ -11008,6 +11052,7 @@ QUESTION_FETCHERS = {
     "Deel": _fetch_deel_questions,
     "Dayforce": _fetch_dayforce_questions,
     "Cornerstone OnDemand": _fetch_csod_questions,
+    "CareerPlug": _fetch_careerplug_questions,
 }
 
 

@@ -6475,13 +6475,14 @@ RANK4_ELIGIBLE_ATS = {
     "Recruitee", "Lever", "PageUp", "isolvedhire", "Pinpoint",
     "Rippling", "Ashby", "BambooHR",
     "Gem", "HiBob", "Deel",
-    "Paylocity", "Dayforce", "Cornerstone OnDemand",
+    "Paylocity", "Dayforce", "Cornerstone OnDemand", "CareerPlug",
 }
 # 2026-10 (second probe round): Paylocity, Dayforce and Cornerstone OnDemand added once each got a reader built on the structured
 # data the apply flow itself loads (found in headless Chrome):
 #   Paylocity 22 jobs / 8 tenants: location 19, description 22, form read 22 - window.pageData.screener on /Recruiting/jobs/Apply/{id}
 #   Dayforce  21 jobs / 7 tenants: location 21, description 21, form read 21 - public jobapplication JSON (board id from sitecontext)
 #   CSOD      24 jobs / 8 tenants: location 23, description 23, form read 24 - applicationworkflow API with the anonymous token
+#   CareerPlug 8 jobs / 3 tenants: location 8, description 8, form read 8 - server-rendered {job}/apps/new, answer_sets_attributes fields
 # Probed again and still OUT: JOIN (the apply flow opens on an email sign-in with reCAPTCHA before any question is shown),
 # Avature (registration step first), Paycom (hCaptcha), Jobylon (Cloudflare challenge on the apply page), Keka / ApplicantPro /
 # Recruiterflow (public form data is only profile fields or a widget, no eligibility questions).

@@ -546,7 +546,7 @@ A._get = fake_rc_detail
 check("Own renewals" in asyncio.run(A._fetch_remote_com_description({"url": "https://remote.com/jobs/acme-c1/csm-j1"})), "remote.com description fetch")
 # Rank 4 eligibility list (2026-10 probe)
 import classifier as _C  # noqa: E402
-check({"Gem", "HiBob", "Deel", "Paylocity", "Dayforce", "Cornerstone OnDemand"} <= _C.RANK4_ELIGIBLE_ATS
+check({"Gem", "HiBob", "Deel", "Paylocity", "Dayforce", "Cornerstone OnDemand", "CareerPlug"} <= _C.RANK4_ELIGIBLE_ATS
       and not ({"SmartRecruiters", "JOIN", "Workday", "iCIMS"} & _C.RANK4_ELIGIBLE_ATS), "rank 4: probed platforms eligible, blocked ones not")
 
 # ── Paylocity application questions (2026-10) ──
@@ -647,6 +647,31 @@ A._get = fake_cp
 cpj = asyncio.run(A.scrape_careerplug("Acme"))
 check(len(cpj) == 2 and cpj[0]["title"] == "Pool Design Consultant" and cpj[0]["location"] == "Columbia, SC" and cpj[0]["url"] == "https://acme.careerplug.com/jobs/3382940"
       and cpj[1]["location"] == "Austin, TX" and cpj[1]["employment_type"] == "Full Time", f"careerplug {cpj}")
+
+# ── CareerPlug application questions (2026-10) ──
+CPF = ('<form><input name="app[applicant_attributes][firstname]"/>'
+       '<input type="hidden" name="app[answer_sets_attributes][0][question_id]" value="1"/>'
+       '<div class="select input required form-group"><span class="form-label"><label for="app_answer_sets_attributes_0_answer_id">Do you hold a valid driver\u2019s license?<span title="required">*</span></label></span>'
+       '<select name="app[answer_sets_attributes][0][answer_id]" id="app_answer_sets_attributes_0_answer_id" required="required"><option value="" label=" "></option><option value="1">Yes</option><option value="2">No</option></select></div>'
+       '<div class="form-group"><label for="app_answer_sets_attributes_1_answer_id">Are you legally authorized to work in the United States?</label>'
+       '<select name="app[answer_sets_attributes][1][answer_id]" id="app_answer_sets_attributes_1_answer_id"><option value="3">Yes</option><option value="4">No</option></select></div></form>')
+cp_seen = {}
+
+
+def fake_sync_cp(url, **kw):
+    cp_seen["url"] = url
+    return R(CPF, 200, url)
+
+
+A._get_requests_sync = fake_sync_cp
+cqj = {"url": "https://iaqa.careerplug.com/jobs/3540329"}
+cq = A._fetch_careerplug_questions(cqj)
+check("Application Question: Do you hold a valid driver\u2019s license?" in cq and "Are you legally authorized to work in the United States?" in cq
+      and cqj.get("_form_status") == "ok" and cp_seen["url"] == "https://iaqa.careerplug.com/jobs/3540329/apps/new", f"careerplug questions {cq!r} {cp_seen}")
+A._get_requests_sync = lambda url, **kw: R("<html>login</html>", 200, url)
+cqj2 = {"url": "https://iaqa.careerplug.com/jobs/1"}
+check(A._fetch_careerplug_questions(cqj2) == "" and cqj2.get("_form_status") is None and "CareerPlug" in A.QUESTION_FETCHERS, "careerplug: no form -> not read")
+A._get_requests_sync = _orig_sync
 
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
