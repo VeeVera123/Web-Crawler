@@ -414,6 +414,80 @@ check(len(jj) == 2 and jj[0]["location"] == "Gricignano, Italy" and jj[0]["depar
       and "Lead worship" in jj[0]["description_snippet"] and jj[1]["location"] == "Remote", f"jobsoid {jj}")
 check(asyncio.run(A.scrape_jobsoid("Bad Slug!")) == [], "jobsoid: bad slug")
 
+# ── Gem: per-job URLs + application questions (2026-10) ──
+GEM_LIST = [{"data": {"oatsExternalJobPostings": {"jobPostings": [
+    {"id": "T2F0cw==", "extId": "ext_one", "title": "Customer Success Manager", "locations": [{"name": "US - Remote", "isRemote": True}], "job": {"department": {"name": "CS"}, "employmentType": "FULL_TIME"}},
+    {"id": "T2F0cx==", "extId": "ext_two", "title": "Account Manager", "locations": [{"name": "London", "isRemote": False}], "job": {}}]}}}]
+GEM_Q = [{"data": {"oatsJobPostFieldsAndQuestions": {"fields": [], "questions": [
+    {"text": "Are you authorized to work in the US or Canada?", "isRequired": True, "options": [{"value": "Yes"}, {"value": "No"}]},
+    {"text": "Email", "isRequired": True, "options": []}]}}}]
+gem_calls = []
+
+
+def fake_gem(ops):
+    gem_calls.append(ops[0]["operationName"])
+    if ops[0]["operationName"] == "JobBoardList":
+        return GEM_LIST
+    if ops[0]["operationName"] == "JobQuestions":
+        assert ops[0]["variables"] == {"boardId": "acme", "extId": "ext_one"}, ops[0]["variables"]
+        return GEM_Q
+    return [{"data": {"oatsExternalJobPosting": {"descriptionHtml": "<p>Own renewals for customers.</p>"}}} for _ in ops]
+
+
+A._gem_graphql_batch = fake_gem
+gj = A.scrape_gem("acme")
+check(len(gj) == 2 and gj[0]["url"] == "https://jobs.gem.com/acme/ext_one" and gj[1]["url"] == "https://jobs.gem.com/acme/ext_two"
+      and len({j["url"] for j in gj}) == 2, f"gem: every job has its own deep link {[j['url'] for j in gj]}")
+gq = A._fetch_gem_questions(gj[0])
+check("Application Question: Are you authorized to work in the US or Canada?" in gq and "Application Question: Email" not in gq
+      and gj[0].get("_form_status") == "ok" and "Gem" in A.QUESTION_FETCHERS, f"gem questions {gq!r}")
+check(A._fetch_gem_questions({"url": "https://jobs.gem.com/acme"}) == "", "gem: board-level url -> no questions")
+
+# ── HiBob / Deel application questions (2026-10) ──
+HBF = {"data": {"jobAd": {"applicationForm": {"/applicationForm/questions": {"value": [
+    {"/question/text": {"value": "Please confirm your eligibility to work in Switzerland"}, "/question/isMandatory": {"value": True},
+     "/question/options": {"value": [{"/questionOption/text": {"value": "I am a Swiss citizen"}}, {"/questionOption/text": {"value": "I am not eligible"}}]}}]},
+    "/applicationForm/fields": {"value": []}}}}}
+hb_seen = {}
+
+
+def fake_sync_hb(url, **kw):
+    hb_seen["url"], hb_seen["ref"] = url, (kw.get("headers") or {}).get("Referer")
+    return R("", 200, url, HBF)
+
+
+_orig_sync = A._get_requests_sync
+A._get_requests_sync = fake_sync_hb
+hjob = {"url": "https://acme.careers.hibob.com/jobs/44a2ddf2-f5a4-42ba-a19b-45d5c9aed2f3"}
+hq = A._fetch_hibob_questions(hjob)
+check("Application Question: Please confirm your eligibility to work in Switzerland" in hq and "I am a Swiss citizen" in hq and hjob.get("_form_status") == "ok"
+      and hb_seen["url"].endswith("/api/job-ad/44a2ddf2-f5a4-42ba-a19b-45d5c9aed2f3/application-form") and hb_seen["ref"] == "https://acme.careers.hibob.com/", f"hibob questions {hq!r} {hb_seen}")
+HBF["data"]["jobAd"]["applicationForm"]["/applicationForm/questions"]["value"] = []
+hjob2 = {"url": "https://acme.careers.hibob.com/jobs/44a2ddf2-f5a4-42ba-a19b-45d5c9aed2f3"}
+check(A._fetch_hibob_questions(hjob2) == "" and hjob2.get("_form_status") == "ok", "hibob: read form with no custom questions is still a read form")
+check(A._fetch_hibob_questions({"url": "https://example.com/x"}) == "", "hibob: non-hibob url")
+DEEL_FORM = {"id": "f", "pages": [{"id": "p", "sections": [{"id": "s", "questions": [
+    {"title": "Will you require visa sponsorship to work in the location where this job is based?", "type": "SingleSelection", "isRequired": True,
+     "options": [{"title": "Yes"}, {"title": "No"}]}, {"title": "First name", "type": "Text", "isRequired": True}]}]}]}
+DEEL_HTML = "<html><script>self.__next_f.push([1," + json.dumps(json.dumps(DEEL_FORM)) + "])</script></html>"
+deel_seen = {}
+
+
+def fake_sync_deel(url, **kw):
+    deel_seen["url"] = url
+    return R(DEEL_HTML, 200, url)
+
+
+A._get_requests_sync = fake_sync_deel
+djob = {"url": "https://jobs.deel.com/klarna/job-details/396853ef-cdd6/overview"}
+dq = A._fetch_deel_questions(djob)
+check("Application Question: Will you require visa sponsorship" in dq and "Application Question: First name" not in dq and djob.get("_form_status") == "ok"
+      and deel_seen["url"] == "https://jobs.deel.com/klarna/job-details/396853ef-cdd6/application", f"deel questions {dq!r} {deel_seen}")
+A._get_requests_sync = lambda url, **kw: R("<html>nothing</html>", 200, url)
+check(A._fetch_deel_questions({"url": "https://jobs.deel.com/klarna/job-details/x/overview"}) == "", "deel: page without a form payload")
+A._get_requests_sync = _orig_sync
+check("HiBob" in A.QUESTION_FETCHERS and "Deel" in A.QUESTION_FETCHERS, "hibob/deel question fetchers registered")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

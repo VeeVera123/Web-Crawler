@@ -6686,13 +6686,11 @@ def scrape_gem(slug: str) -> list[dict]:
     — this is purely a URL_TO_SLUG/CC_PLATFORM_PATTERNS/OpenPostings-map
     discovery target, no bonus source to lean on.
 
-    URL caveat: the per-job page path on jobs.gem.com uses a THIRD opaque
-    ID encoding, different from both the GraphQL "id" and "extId" fields
-    (confirmed live — navigating to jobs.gem.com/{slug}/{id} using the
-    GraphQL "id" value 404'd as "Job not found"; no field in this query
-    set decodes to the real page-path token). Rather than construct and
-    ship a link confirmed to be wrong, `url` below points at the board's
-    listing page instead of a per-job deep link."""
+    URL note (2026-10 FIX): the per-job page path is jobs.gem.com/{slug}/{extId}. The 2026-09 note here said the path
+    used a third opaque id because the GraphQL "id" 404s as "Job not found" - but the posting's "extId" is the token
+    (checked in a real browser: the extId opens the job page with its real title, a made-up id falls back to the board,
+    the GraphQL "id" shows "Job not found"). Until now `url` was the board page for EVERY job, so a board's postings
+    all shared one URL."""
     list_resp = _gem_graphql_batch([
         {"operationName": "JobBoardList", "query": _GEM_LIST_QUERY, "variables": {"boardId": slug}}
     ])
@@ -6752,7 +6750,7 @@ def scrape_gem(slug: str) -> list[dict]:
 
         jobs.append({
             "title": title,
-            "url": f"https://jobs.gem.com/{slug}",  # see docstring URL caveat
+            "url": f"https://jobs.gem.com/{slug}/{ext_id}",  # see docstring URL note
             "company": company_name,
             "location": location,
             "country": "",
@@ -10585,6 +10583,131 @@ def _fetch_jobvite_questions(job: dict) -> str:
     return _format_auth_questions(found)
 
 
+# ── Gem ──
+# 2026-10: the job page's own request (seen in a real browser) carries oatsJobPostFieldsAndQuestions next to the posting;
+# the same keyless public GraphQL endpoint scrape_gem uses. questions = the custom screening questions (text,
+# isRequired, options); fields = the standard inputs. A response with a questions list is a form that was READ.
+_GEM_QUESTIONS_QUERY = """
+query JobQuestions($boardId: String!, $extId: String!) {
+  oatsJobPostFieldsAndQuestions(jobBoardVanityPath: $boardId, jobPostExtId: $extId) {
+    fields { fieldType isRequired }
+    questions { extId answerType displayType text description isRequired options { extId value } }
+  }
+}
+"""
+_GEM_JOB_URL_RE = re.compile(r"https?://jobs\.gem\.com/([^/?#]+)/([^/?#]+)", re.I)
+
+
+def _fetch_gem_questions(job: dict) -> str:
+    m = _GEM_JOB_URL_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    resp = _gem_graphql_batch([{"operationName": "JobQuestions", "query": _GEM_QUESTIONS_QUERY,
+                                "variables": {"boardId": m.group(1), "extId": m.group(2)}}])
+    try:
+        form = resp[0]["data"]["oatsJobPostFieldsAndQuestions"]
+        questions = form["questions"]
+    except Exception:
+        return ""
+    if not isinstance(questions, list):
+        return ""
+    job["_form_status"] = "ok"
+    return _format_auth_questions([
+        {"label": q.get("text") or "", "required": bool(q.get("isRequired")),
+         "options": _option_texts({"options": q.get("options")})}
+        for q in questions if isinstance(q, dict)])
+
+
+# ── HiBob ──
+# 2026-10: the apply page's own request, GET {origin}/api/job-ad/{id}/application-form (needs the board origin as Referer,
+# like /api/job-ad): data.jobAd.applicationForm["/applicationForm/questions"].value is the list of custom screening
+# questions, each with /question/text, /question/isMandatory and /question/options (each /questionOption/text). The
+# standard inputs (name, email, resume ...) are under /applicationForm/fields and are not questions. A response carrying
+# the questions list is a form that was READ, even when the list is empty.
+_HIBOB_JOB_RE = re.compile(r"https?://([a-z0-9-]+)\.careers\.hibob\.com/jobs/([0-9a-f-]{8,})", re.I)
+
+
+def _hibob_value(node, key: str):
+    v = node.get(key) if isinstance(node, dict) else None
+    return v.get("value") if isinstance(v, dict) else None
+
+
+def _fetch_hibob_questions(job: dict) -> str:
+    m = _HIBOB_JOB_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    origin = f"https://{m.group(1)}.careers.hibob.com"
+    r = _get_requests_sync(f"{origin}/api/job-ad/{m.group(2)}/application-form",
+                           headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json", "Referer": f"{origin}/"})
+    try:
+        questions = _hibob_value(r.json()["data"]["jobAd"]["applicationForm"], "/applicationForm/questions")
+    except Exception:
+        return ""
+    if not isinstance(questions, list):
+        return ""
+    job["_form_status"] = "ok"
+    fields = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        opts = _hibob_value(q, "/question/options")
+        fields.append({
+            "label": _hibob_value(q, "/question/text") or "",
+            "required": bool(_hibob_value(q, "/question/isMandatory")),
+            "options": [_hibob_value(o, "/questionOption/text") or "" for o in (opts if isinstance(opts, list) else [])],
+        })
+    return _format_auth_questions(fields)
+
+
+# ── Deel ──
+# 2026-10: jobs.deel.com/{org}/job-details/{id}/application is a Next.js page whose HTML inlines the form definition in
+# its flight payload (self.__next_f.push chunks): "pages":[{"sections":[{"questions":[{"title","type","isRequired",
+# "options":[{"title"}]}]}]}]. The standard inputs (name, email, resume) are not in it, so every entry is a screening
+# question. Seen on klarna's Milan posting: "Will you require visa sponsorship to work in the location where this job is based?".
+_DEEL_JOB_RE = re.compile(r"(https?://jobs\.deel\.com/[^/?#]+/job-details/[^/?#]+)", re.I)
+_NEXT_FLIGHT_RE = re.compile(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)')
+
+
+def _next_flight_text(html: str) -> str:
+    chunks = []
+    for raw in _NEXT_FLIGHT_RE.findall(html):
+        try:
+            chunks.append(json.loads('"' + raw + '"'))
+        except Exception:
+            continue
+    return "".join(chunks)
+
+
+def _fetch_deel_questions(job: dict) -> str:
+    m = _DEEL_JOB_RE.match(job.get("url", "") or "")
+    if not m:
+        return ""
+    r = _get_requests_sync(m.group(1) + "/application", headers={"User-Agent": random.choice(USER_AGENTS)})
+    if not r or getattr(r, "status_code", 0) != 200:
+        return ""
+    text = _next_flight_text(r.text)
+    form_pages = None
+    for pm in re.finditer(r'"pages"\s*:\s*', text):
+        try:
+            cand, _ = json.JSONDecoder().raw_decode(text, pm.end())
+        except Exception:
+            continue
+        if isinstance(cand, list) and cand and isinstance(cand[0], dict) and "sections" in cand[0]:
+            form_pages = cand
+            break
+    if form_pages is None:
+        return ""
+    job["_form_status"] = "ok"
+    fields = []
+    for page in form_pages:
+        for section in (page.get("sections") or []) if isinstance(page, dict) else []:
+            for q in (section.get("questions") or []) if isinstance(section, dict) else []:
+                if isinstance(q, dict) and q.get("title"):
+                    fields.append({"label": q["title"], "required": bool(q.get("isRequired")),
+                                   "options": [o.get("title") or "" for o in (q.get("options") or []) if isinstance(o, dict)]})
+    return _format_auth_questions(fields)
+
+
 # ── Dispatch table: source_ats (as stored on job dicts) → fetcher ──
 QUESTION_FETCHERS = {
     "Greenhouse": _fetch_greenhouse_questions,
@@ -10609,6 +10732,9 @@ QUESTION_FETCHERS = {
     "Taleo": _fetch_taleo_questions,
     "Paylocity": _fetch_paylocity_questions,
     "Jobvite": _fetch_jobvite_questions,
+    "Gem": _fetch_gem_questions,
+    "HiBob": _fetch_hibob_questions,
+    "Deel": _fetch_deel_questions,
 }
 
 
