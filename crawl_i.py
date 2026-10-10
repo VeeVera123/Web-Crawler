@@ -218,6 +218,8 @@ PLATFORM_WORKERS = {
     "hibob": 12, "deel": 12,
     # 2026-10: Getro = ~12 role-query searches (1-8 pages each) per network, all on api.getro.com.
     "getro": 4,
+    # 2026-10: Himalayas = a few hundred paged searches against himalayas.app (virtual board, no archive_i row).
+    "himalayas": 2,
 }
 
 
@@ -280,6 +282,11 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
                         f"a retired/renamed ATS? consider deleting them from "
                         f"Supabase directly).")
     pairs = supported
+    # Virtual boards (aggregators with no archive_i row, e.g. Himalayas): added here, hash-sharded like real boards so
+    # exactly one shard scrapes each.
+    from ats_scrapers import VIRTUAL_BOARDS
+    pairs += [(a, s) for a, s in VIRTUAL_BOARDS
+              if a in SCRAPERS and (total_shards <= 1 or _shard_of(f"{a}|{s}", total_shards) == shard)]
 
     if total_shards > 1:
         log.info(f"Shard {shard}/{total_shards}: {len(pairs)} boards assigned")

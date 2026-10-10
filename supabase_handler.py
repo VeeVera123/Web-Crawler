@@ -69,7 +69,10 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #       classifier rightly read as Global (Rank 1) for UK-only roles; bumped so revalidation re-checks stored rows.
 #  12 - 2026-10-09: Recruitee scraper stored the label "Remote job" instead of the offer's real city/country
 #       (remote postings pinned to e.g. Warsaw read as bare Remote and ranked Global); bumped to re-check stored rows.
-CLASSIFIER_VERSION = 12
+#  13 - 2026-10-10: audit of employer-declared-worldwide jobs (Himalayas). Loosened: a pin emoji before a non-location
+#       "Label: value" (Team: Sales) is not a named place; pay-band sentences ("salary range ... for US-based employees")
+#       are not hiring restrictions. Tightened: the plain "must be / need to be US-based" phrasing now rejects.
+CLASSIFIER_VERSION = 13
 
 import os
 from dotenv import load_dotenv

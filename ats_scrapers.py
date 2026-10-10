@@ -7133,6 +7133,83 @@ async def scrape_getro(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Himalayas (himalayas.app) ─────────────────────────────────────────────────
+# 2026-10. A remote-jobs aggregator with a free, keyless, documented API (https://himalayas.app/docs/remote-jobs-api):
+# ~118k remote jobs, each with the FULL description and structured eligibility: `locationRestrictions` (countries where
+# applicants must live; an empty list means worldwide) and `timezoneRestrictions` (accepted UTC offsets; empty = all).
+# That is exactly what the location classifier needs, so the aggregator's own filters do the heavy lifting:
+#     GET /jobs/api/search?q=<role term>&worldwide=true            -> worldwide-friendly jobs   (slug "worldwide")
+#     GET /jobs/api/search?q=<term>&country=NG&exclude_worldwide=true -> jobs restricted to a region incl. NG (slug "africa")
+# 20 results per page max, 429 when too fast, data refreshes daily. Terms: attribution link required only if the data
+# is displayed publicly. Not an ATS: a "virtual board" (see VIRTUAL_BOARDS), so there is no archive_i row for it.
+_HIMALAYAS_SEARCH = "https://himalayas.app/jobs/api/search"
+_HIMALAYAS_AFRICA = ("NG", "KE", "ZA", "GH", "EG", "MA", "TZ", "UG", "RW", "ET", "SN", "CI")
+_HIMALAYAS_MAX_PAGES = {"worldwide": 12, "africa": 4}
+VIRTUAL_BOARDS: list[tuple[str, str]] = [("himalayas", "worldwide"), ("himalayas", "africa")]
+
+
+def _himalayas_location(job: dict) -> str:
+    restrictions = [r for r in (job.get("locationRestrictions") or []) if isinstance(r, str) and r]
+    tz = [t for t in (job.get("timezoneRestrictions") or []) if isinstance(t, (int, float))]
+    if restrictions:
+        return "Remote - " + ", ".join(restrictions)
+    if tz and len(tz) < 20:  # a partial set of UTC offsets is a real restriction even when no country is named
+        lo, hi = min(tz), max(tz)
+        fmt = lambda v: f"UTC{'+' if v >= 0 else '-'}{abs(v):g}"
+        return f"Remote (time zones {fmt(lo)} to {fmt(hi)} only)"
+    return "Remote - Worldwide"
+
+
+async def scrape_himalayas(slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    if slug not in _HIMALAYAS_MAX_PAGES:
+        return []
+    headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/json"}
+    if slug == "worldwide":
+        variants = [{"worldwide": "true"}]
+    else:
+        variants = [{"country": c, "exclude_worldwide": "true"} for c in _HIMALAYAS_AFRICA]
+    seen: dict = {}
+    for term in _GETRO_QUERIES:  # same role families as everywhere else
+        for extra in variants:
+            for page in range(1, _HIMALAYAS_MAX_PAGES[slug] + 1):
+                r = await _get(_HIMALAYAS_SEARCH, headers=headers,
+                               params={"q": term, "sort": "recent", "page": page, **extra})
+                if not r or r.status_code != 200:
+                    break
+                try:
+                    batch = r.json().get("jobs") or []
+                except Exception:
+                    break
+                for j in batch:
+                    if isinstance(j, dict) and j.get("applicationLink") and j.get("title"):
+                        seen.setdefault(j.get("guid") or j["applicationLink"], j)
+                if len(batch) < 19:  # last page (the API sometimes returns 19)
+                    break
+    jobs = []
+    for j in seen.values():
+        desc = _snippet(j.get("description") or "")
+        sal = ""
+        if j.get("minSalary") or j.get("maxSalary"):
+            sal = f"{j.get('currency') or ''} {j.get('minSalary') or ''}-{j.get('maxSalary') or ''} per {j.get('salaryPeriod') or 'annual'}".strip()
+        cats = j.get("parentCategories") or []
+        jobs.append({
+            "title": _text(j["title"]),
+            "url": j["applicationLink"],
+            "company": _text(j.get("companyName")) or "Unknown",
+            "location": _himalayas_location(j),
+            "country": "",
+            "department": _text(cats[0]) if cats else "",
+            "workplace_type": "Remote",
+            "employment_type": _text(j.get("employmentType")),
+            "salary": sal or _extract_salary(desc),
+            "description_snippet": desc,
+            "source_ats": "Himalayas",
+            "slug": slug,
+        })
+    return jobs
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7216,6 +7293,7 @@ SCRAPERS = {
     "easyapply": scrape_easyapply,
     "hibob": scrape_hibob,
     "getro": scrape_getro,
+    "himalayas": scrape_himalayas,
     "deel": scrape_deel,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or

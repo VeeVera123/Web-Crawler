@@ -463,10 +463,37 @@ def _walk_job_lists(obj, parent_key: str = "", depth: int = 0, budget: list | No
                 yield from _walk_job_lists(v, str(k), depth + 1, budget)
 
 
+def _id_lookups(data) -> dict[str, dict]:
+    """{"location": {19704: "Amsterdam"}, "department": {...}} from every list of {id, name} records in the JSON (jobs often
+    carry only location_id / department_id and ship the tables beside them)."""
+    out: dict[str, dict] = {}
+    for parent_key, dicts in _walk_job_lists(data):
+        if not parent_key or not dicts or not all("id" in d and ("name" in d or "label" in d) and "title" not in d and "url" not in d for d in dicts[:5]):
+            continue
+        base = re.sub(r"(?:ies|s)$", lambda m: "y" if m.group(0) == "ies" else "", parent_key.lower())
+        out.setdefault(base, {}).update({str(d["id"]): _first_str(d, ("name", "label")) for d in dicts if d.get("id") is not None})
+    return out
+
+
+def _resolve_ids(item: dict, lookups: dict) -> dict:
+    """Copy of `item` where X_id / Xid keys are resolved to names under X (location_id -> location, department_id -> department)."""
+    extra = {}
+    for k, v in item.items():
+        m = re.fullmatch(r"(.+?)(?:_id|Id)", k)
+        if m and v is not None and not isinstance(v, (dict, list)):
+            name = lookups.get(m.group(1).lower(), {}).get(str(v))
+            if name and m.group(1) not in item:
+                extra[m.group(1)] = name
+    return {**item, **extra} if extra else item
+
+
 def _jobs_from_json(data, base_url: str, company: str) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
+    lookups = _id_lookups(data)
     for parent_key, dicts in _walk_job_lists(data):
+        if lookups:
+            dicts = [_resolve_ids(d, lookups) for d in dicts]
         if len(dicts) > 1500:
             continue
         built = [(d, _job_from_state_item(d, base_url, company)) for d in dicts]
@@ -490,7 +517,10 @@ _SCRIPT_BLOCK_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.I | re.S)
 _WINDOW_ASSIGN_RE = re.compile(r"(?:window|self|globalThis)\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*[\"']([^\"']+)[\"']\s*\])\s*=\s*(?=[\[{])")
 _VAR_ASSIGN_RE = re.compile(r"\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?=[\[{])")
 _INPUT_VALUE_RE = re.compile(r"<input\b[^>]*?\bvalue=\"((?:\[|\{|&#91;|&#123;|&lbrack;|&lbrace;)[^\"]*)\"", re.I)
-_DATA_ATTR_RE = re.compile(r"\bdata-(?:props|page|react-props|jobs|job-list|positions|state|initial-state|vacancies|openings)=\"([^\"]+)\"", re.I)
+_DATA_ATTR_RE = re.compile(
+    r"(?:\bdata-(?:props|page|react-props|jobs|job-list|positions|state|initial-state|vacancies|openings)"
+    # Vue SSR props (Homerun: <job-list v-bind="{&quot;content&quot;:{&quot;vacancies&quot;:[...]}}">), :prop="{...}"
+    r"|\bv-bind|\s:[a-z][a-z0-9-]*)=\"([^\"]+)\"", re.I)
 _JSON_DECODER = json.JSONDecoder()
 
 

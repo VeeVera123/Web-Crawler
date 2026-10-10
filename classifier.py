@@ -4509,7 +4509,11 @@ _ANY_RESIDENCE_PLACE_RE = re.compile(r"\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r
 
 _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
     r"\b(?:teams?|offices?|headquarters|hq|compan(?:y|ies)|organizations?|"
-    r"organisations?|orgs?|departments?|divisions?|studios?|founders?)\b",
+    r"organisations?|orgs?|departments?|divisions?|studios?|founders?)\b"
+    # 2026-10: other ways a posting describes ITS OWN location: "a law firm based in California", "an innovation platform
+    # based in Amsterdam", "our startup is headquartered in Berlin" (found auditing employer-declared-worldwide jobs).
+    r"|\b(?:firm|startup|start-up|platform|agency|business|group|lab|network|foundation|institute|non-?profit|collective|"
+    r"consultancy|corporation|marketplace|fund|brand)\b[^.?!]{0,40}\b(?:based|headquartered|located)\s+(?:in|at|out\s+of)\b",
     re.I,
 )
 
@@ -4545,7 +4549,36 @@ def _split_into_sentences(text: str) -> list[str]:
             parts[-1] = parts[-1] + " " + part
         else:
             parts.append(part)
-    return parts
+    return [p for p in parts if not _is_pay_band_sentence(p)]
+
+
+# 2026-10: pay-transparency boilerplate ("Compensation for US-based employees: the salary range listed above is for
+# US-based employees", "Salary for candidates based in London is GBP 60-70k") names a place only to say which pay band
+# applies; it is not a hiring restriction, yet every sentence-level residence / "for X-based" check read it as one.
+# Real false reject: the Pulitzer Center's worldwide Program Coordinator. Dropped from sentence scanning unless the same
+# sentence also carries an actual requirement cue.
+_PAY_BAND_RE = re.compile(
+    r"\b(?:salary|compensation|pay(?:\s+(?:range|band|scale|rate))?|base\s+pay|wage|ote|remuneration|"
+    r"per\s+(?:year|annum|hour)|annual(?:ly)?|\$\s?\d|\u00a3\s?\d|\u20ac\s?\d|usd|eur|gbp)\b|[$\u00a3\u20ac]\s?\d", re.I)
+_RESTRICTION_CUE_RE = re.compile(
+    r"\b(?:must|only|required|requires?|requirement|eligible|eligibility|restricted|residen\w+|authori[sz]ed|legally|citizen\w*|"
+    r"work\s+permit|visa|reside|relocat\w+|no\s+(?:remote|outside))\b", re.I)
+
+
+_EXPLICIT_PAY_DISCLOSURE_RE = re.compile(
+    r"\b(?:pay|salary|compensation|base\s+(?:pay|salary)|wage)\s+(?:range|band|scale)\b|\bstarting\s+(?:pay|salary)\b|"
+    r"\bsalary\s+(?:for|of|is)\b|\brange\s+for\s+this\s+(?:position|role)\b", re.I)
+
+
+def _is_pay_band_sentence(sentence: str) -> bool:
+    if not _PAY_BAND_RE.search(sentence):
+        return False
+    if _EXPLICIT_PAY_DISCLOSURE_RE.search(sentence):
+        # an explicit pay disclosure that merely scopes the band to a place ("For U.S. based applicants only, the starting
+        # pay range is ...") -- "only" there belongs to the pay band; real eligibility words still count
+        return not re.search(r"\b(?:must|required|requires?|eligible|eligibility|restricted|residen\w+|authori[sz]ed|legally|"
+                             r"citizen\w*|work\s+permit|visa|reside|relocat\w+)\b", sentence, re.I)
+    return not _RESTRICTION_CUE_RE.search(sentence)
 
 # 2026-09 NEW (cross-LLM review, real posting: Prolific's Montreal listing —
 # job-boards.eu.greenhouse.io/prolificacademicltd — "currently based in,
@@ -5106,7 +5139,30 @@ _METADATA_LOCATION_LINE_RE = re.compile(r"^Metadata Location:\s*(.+)$", re.M)
 # Rank 4 rows) is not a location, so it must never count as one.
 _LOCATION_SYMBOL_LINE_RE = re.compile(r"Location Symbol:[ \t]*([^|\n]+)")
 _LOCATION_SYMBOL_JUNK_RE = re.compile(
-    r"\{\{|\}\}|\{%|<%|\$\{|\bloading\b|\bplaceholder\b|\bundefined\b|\bnull\b", re.I)
+    r"\{\{|\}\}|\{%|<%|\$\{|\bloading\b|\bplaceholder\b|\bundefined\b|\bnull\b"
+    # 2026-10: a pin / pushpin emoji is also used as a plain bullet before OTHER labelled facts ("📍 Team: Sales",
+    # "📌 Level: Senior", "📍 Salary: ...") -- a "Label: value" whose label is not about location names no place. Real
+    # false reject: Eleken's worldwide Account Manager (Team: Sales) was dropped as "named a specific place".
+    r"|^\s*(?!(?:location|locations|office|offices|city|country|region|based|where|place|site|address|area|hub)\b)"
+    r"[A-Za-z][A-Za-z /&-]{1,24}:\s", re.I)
+
+
+_SYMBOL_NON_PLACE_LEAD_RE = re.compile(
+    r"^\s*(?:about|over|send|apply|overview|details?|description|summary|responsibilit\w+|requirements?|benefits?|perks|"
+    r"what|why|who|how|our|your|the|we|you|international\s+scope|remote|hybrid|on-?site|full[- ]?time|part[- ]?time|"
+    r"contract|salary|compensation|team|level|type|job|role|position)\b", re.I)
+
+
+def _symbol_value_is_placelike(value: str) -> bool:
+    """A glyph-adjacent text must read like a PLACE to count as one: short, proper-noun-ish, not a sentence or a heading.
+    The pin emoji is often just a bullet ("📍 About this role", "📍 Over 200,000 users worldwide", "📍 Send your resume to
+    ..."); those used to be read as "the posting names a specific place" and hard-rejected worldwide jobs."""
+    v = value.strip()
+    if len(v) > 70 or len(v.split()) > 8 or re.search(r"[.!?]\s", v) or v.endswith((".", "!", "?")):
+        return False
+    if _SYMBOL_NON_PLACE_LEAD_RE.match(v):
+        return False
+    return bool(re.search(r"\b[A-Z][a-zA-Z\u00c0-\u024f.'-]{1,}", v))
 
 
 def has_hard_location_symbol_signal(job: dict) -> bool:
@@ -5124,7 +5180,7 @@ def has_hard_location_symbol_signal(job: dict) -> bool:
         return False
     for m in _LOCATION_SYMBOL_LINE_RE.finditer(desc):
         value = m.group(1).strip()
-        if not value or _LOCATION_SYMBOL_JUNK_RE.search(value):
+        if not value or _LOCATION_SYMBOL_JUNK_RE.search(value) or not _symbol_value_is_placelike(value):
             continue
         if _has_multi_region_breadth(value):
             continue
@@ -5966,7 +6022,7 @@ _TIMEZONE_LOCATION_RE = re.compile(
     # another short code — the negative lookaheads keep those excluded
     # consistent with removing them from the explicit list above.
     r"(?:us|u\.s\.|uk|u\.k\.|north american?|european?|apac|latam|"
-    r"gmt|est|cst|mst|pst|cet|(?!emea\b)(?!africa\b)[a-z]{2,4})?\s*time\s*zone\b"
+    r"gmt|est|cst|mst|pst|cet|(?!emea\b)(?!africa\b)(?!(?:your|their|our|own|any|each|same|one|the|a|an)\b)[a-z]{2,4})?\s*time\s*zone\b"
     r"|\b(?:located|based|reside|residing|resides|live|living|lives)\s+"
     r"in\s+the\s+same\s+time\s*zone\s+as\b"
     # 2026-09 BUG FIX (explicit user-commissioned adversarial fuzz test):
@@ -6019,7 +6075,12 @@ _HYPHENATED_BASED_ONLY_RE = re.compile(
     r"\b(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\s+"
     r"(?:candidates?|applicants?|employees?|team\s+members?)?\s*only\b"
     r"|\bonly\s+(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\s+"
-    r"(?:candidates?|applicants?|employees?)\b",
+    r"(?:candidates?|applicants?|employees?)\b"
+    # 2026-10: the plainest phrasing of all was missing -- "Candidates must be US-based." / "You need to be UK based" /
+    # "applicants have to be Canada-based". Found by auditing employer-declared-worldwide jobs: this slipped through as a
+    # Rank 1 match. Same guards apply (global evidence in the sentence, team/company context, "not restricted to").
+    r"|\b(?:must|need(?:s)?\s+to|has\s+to|have\s+to|required\s+to|should|will\s+need\s+to)\s+(?:be|live|reside|work)\s+"
+    r"(?:an?\s+|currently\s+)?(?:" + _RESIDENCE_PLACE_RE_FRAGMENT + r")[\s\-]based\b",
     re.I,
 )
 
@@ -6262,7 +6323,7 @@ _WORKPLACE_LABEL_VALUE_RE = re.compile(
 # word, which has no plausible non-workplace reading.
 _STANDALONE_NON_REMOTE_PHRASE_RE = re.compile(
     r"\bhybrid\s*working\b|\bworking\s*hybrid\b|\bon[\s\-]?site\s*working\b|"
-    r"\bin[\s\-]?office\s*working\b|\bin[\s\-]?person\s*working\b|"
+    r"\bin[\s\-]?office\s*working\b|\bin[\s\-]?person\s*working\b(?!\s*(?:sessions?|meetings?|events?|retreats?|workshops?|offsites?|weeks?|days?))|"
     r"\bhybrid\s*work\s*(?:model|arrangement|environment|policy|schedule)\b"
     # 2026-09 NEW (explicit user report, real posting: European Dynamics'
     # Workable "Customer relationship manager" listing, Brussels — the
@@ -6321,7 +6382,17 @@ def has_non_remote_labeled_text_signal(job: dict) -> bool:
     if not text.strip():
         return False
 
-    if _STANDALONE_NON_REMOTE_PHRASE_RE.search(text):
+    for sentence in _split_into_sentences(text):
+        m = _STANDALONE_NON_REMOTE_PHRASE_RE.search(sentence)
+        if not m:
+            continue
+        # 2026-10: not a statement about THIS job's workplace when it is (a) a skill requirement ("experience managing
+        # teams in a remote/hybrid work environment") or (b) offered alongside a remote option ("Global / Remote or Hybrid
+        # Working Environment"); both fired on employer-declared-worldwide jobs.
+        if re.search(r"\b(?:experience|experienced|managing|managed|leading|led|comfortable|familiar)\b", sentence, re.I):
+            continue
+        if re.search(r"\bremote\b", sentence[max(0, m.start() - 40):m.end() + 40], re.I):
+            continue
         return True
 
     for m in _WORKPLACE_LABEL_RE.finditer(text):
@@ -6447,6 +6518,7 @@ _RANK4_COUNTRY_TIED_RESTRICTION_RE = re.compile(
 
 
 _RANK4_BENEFIT_FRAMING_RE = re.compile(
+    r"\b(?:may|might|could|can)\s+(?:be\s+able\s+to\s+)?(?:provide|offer|sponsor|assist|support)\b|\bable\s+to\s+(?:provide|offer|sponsor|assist)\b|"
     r"\bwe\s+(?:can\s+|will\s+|would\s+)?(?:offer|provide|help|assist|support)\b"
     r"|\b(?:relocation|visa|sponsorship|residency|immigration)\s+(?:assistance|support|help)\b"
     r"|\bhelp(?:ing)?\s+(?:you\s+|candidates?\s+)?(?:secur\w*|obtain\w*|get\w*)\b",
@@ -6519,6 +6591,10 @@ def has_country_tied_sponsorship_permit_residency_signal(job: dict) -> bool:
         if _has_multi_region_breadth(sentence):
             continue
         if not _RANK4_COUNTRY_TIED_RESTRICTION_RE.search(sentence):
+            continue
+        # 2026-10: an OFFER ("we may be able to provide visa sponsorship to the US or UK") is the opposite of a restriction
+        if re.search(r"\b(?:we|company|employer)\b[^.?!]{0,30}\b(?:may|might|can|could|will|are\s+able\s+to)\b[^.?!]{0,25}\b"
+                     r"(?:be\s+able\s+to\s+)?(?:provide|offer|sponsor|assist)\b[^.?!]{0,30}\b(?:visa|sponsorship|relocation)", sentence, re.I):
             continue
         if (_RANK4_BENEFIT_FRAMING_RE.search(sentence)
                 and not _RANK4_REQUIREMENT_FRAMING_RE.search(sentence)):
@@ -6986,7 +7062,11 @@ _JD_BINDING_FAMILIES = tuple(re.compile(pat, re.I) for pat in (
     r"\b(?:following|listed|supported|approved|eligible|specified)\s+(?:employment\s+)?(?:countries|states|locations|"
     r"regions|jurisdictions|provinces)\b",
     # entity / EOR / payroll / tax
-    r"\b(?:legal\s+entit(?:y|ies)|employing\s+entit(?:y|ies)|subsidiar(?:y|ies)|employer[- ]of[- ]record|\bEOR\b|payroll)\b",
+    # 2026-10: needs a NEGATION / absence cue before the entity word ("we have no legal entity in your country"). The bare
+    # mention fired on "not only ... payroll", "B2B only - own legal entity" and the positive "we partner with an Employer
+    # of Record" (found auditing employer-declared-worldwide jobs).
+    r"\b(?:no|without|lack\w*|don'?t|do\s+not|doesn'?t|does\s+not|not(?!\s+only\b))\b[^.?!]{0,40}\b(?:legal\s+entit(?:y|ies)|employing\s+entit(?:y|ies)|"
+    r"subsidiar(?:y|ies)|employer[- ]of[- ]record|EOR)\b",
     r"\bwhere\s+we\s+(?:have|operate)\s+(?:an?\s+)?(?:\w+\s+){0,2}(?:entity|entities|subsidiary|presence)\b|"
     r"\btied\s+to\s+(?:our|the)\s+(?:\w+\s+){0,2}entity\b|\b(?:employed|hired|contracted|engaged|onboarded)\s+(?:through|by|via)\s+"
     r"(?:our|the)\s+(?:\w+\s+){0,2}(?:entity|subsidiary)\b",
@@ -7046,6 +7126,12 @@ def has_candidate_binding_jd_signal(job: dict) -> bool:
         if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not re.search(r"\bmust\b|\bonly\b|\bcannot\b|\bunable\b", sentence, re.I):
             continue
         if not (_JD_SUBJECT_RE.search(sentence) or _JD_STRONG_RE.search(sentence)):
+            continue
+        # 2026-10: sentences that are explicitly optional / negated are not binding ("we not only support remote but also
+        # offer the possibility to work from our office", "these roles do not require a security clearance")
+        if re.search(r"\bnot\s+only\b|\boptional(?:ly)?\b|\bpossibility\s+to\b|\bif\s+you\s+(?:want|wish|prefer)\b|"
+                     r"\b(?:do(?:es)?\s+not|don'?t|doesn'?t)\s+(?:require|need)\b|\bnot\s+required\b|\bno\s+(?:security\s+)?clearance\b",
+                     sentence, re.I):
             continue
         if any(rx.search(sentence) for rx in _JD_BINDING_FAMILIES):
             return True
