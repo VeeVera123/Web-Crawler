@@ -156,6 +156,7 @@ for ats in ("hibob", "deel"):
     check(ats in D.URL_TO_SLUG and ats in D.SUPPORTED_ATS and ats in A.SCRAPERS and ats in D._CC_LIVE_CHECK, f"{ats} registered")
 
 import asyncio  # noqa: E402
+import re  # noqa: E402
 
 HB = {"jobAdDetails": [
     {"id": "11", "title": "Customer Success Manager", "department": "CS", "employmentType": "Permanent", "site": "Remote", "country": "Portugal",
@@ -702,6 +703,21 @@ async def fake_wd_get_none(url, **kw):
 A._get = fake_wd_get_none
 check(asyncio.run(A.scrape_workday("solera|wd5|international_career_site")) == [] and len(wd_posts) == 1, "workday: no robots.txt site -> no retry")
 A._post, A._get = _post0, _get0
+
+# ── Discovery coverage guard: every supported ATS reaches every discovery source that can see it (2026-10) ──
+import node as _node  # noqa: E402
+_vend = _node._ATS_VENDOR_DOMAINS
+_no_url = {"successfactors"}  # recognised by page fingerprint, not URL
+_no_cc = {"getro", "successfactors"}  # getro: own --source getro sweep
+check(all(a in D.URL_TO_SLUG for a in D.SUPPORTED_ATS - _no_url), f"URL_TO_SLUG covers {sorted(D.SUPPORTED_ATS - _no_url - set(D.URL_TO_SLUG))}")
+check(all(a in D.CC_PLATFORM_PATTERNS and a in D.CC_EXTRACTORS for a in D.SUPPORTED_ATS - _no_cc), "Common Crawl / Wayback patterns cover every platform")
+_op_targets = set(D._OPENPOSTINGS_ATS_MAP_RAW.values())
+check(not (D.SUPPORTED_ATS - _op_targets - {"successfactors"}), f"OpenPostings labels cover {sorted(D.SUPPORTED_ATS - _op_targets - {'successfactors'})}")
+check({"applicantpro", "careerplug", "homerun", "factorial"} <= set(D._GITHUB_REGISTRY_ATS_MAP.values()), "openroles registry maps the four new platforms")
+check({"freshteam", "comeet"} <= set(D.HTTPARCHIVE_ATS_TECH_NAMES), "HTTP Archive fingerprints for Freshteam / Comeet")
+_missing_vendor = [(a, p) for a, ps in D.CC_PLATFORM_PATTERNS.items() for p in ps
+                   if not any(re.sub(r"^\*\.", "", p.split("/")[0]).lower() in (v, ) or re.sub(r"^\*\.", "", p.split("/")[0]).lower().endswith("." + v) for v in _vend)]
+check(not _missing_vendor, f"node vendor domains missing {_missing_vendor}")
 
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}

@@ -453,6 +453,11 @@ HTTPARCHIVE_ATS_TECH_NAMES = {
     # confirmed absent from the i.json technology file — so it's left out
     # of this dict entirely, same as Pinpoint/Flatchr/Occupop/etc above.
     "hireology": "Hireology",
+    # 2026-10: Freshteam and Comeet have Wappalyzer fingerprints (category 101, recruitment) in the HTTP Archive technology files;
+    # none of the other platforms added this month do (checked ApplicantPro, CareerPlug, PeopleForce, Factorial, Loxo, Recruiterflow,
+    # Homerun, Keka, Jobsoid, Traffit, HiBob, Deel, Dayforce, Gem, Manatal, JobScore, Crelate, HireHive).
+    "freshteam": "Freshteam",
+    "comeet": "Comeet",
 }
 
 # ATS platforms we have working scrapers for (20 active)
@@ -755,6 +760,17 @@ _OPENPOSTINGS_ATS_MAP_RAW = {
     # literal string their own data will actually contain, plus the
     # sane spellings as defensive aliases in case their real ATS_name
     # field values differ from the README's own typo.
+    # 2026-10: label variants for the platforms added since (OpenPostings' README lists hibob, Recruiterflow, PeopleForce, Manatal,
+    # Loxo, Homerun, Getro, Freshteam, Factorial, Dayforce, Crelate, Comeet, CareerPlug and ApplicantPro; the rest are defensive
+    # spellings). An unmatched label only falls into the "unmapped ATS" log, it cannot produce a wrong match.
+    "hibob": "hibob", "hi bob": "hibob", "bob": "hibob", "deel": "deel", "keka": "keka", "keka hire": "keka", "traffit": "traffit",
+    "jobsoid": "jobsoid", "recruiterflow": "recruiterflow", "recruiter flow": "recruiterflow", "peopleforce": "peopleforce",
+    "people force": "peopleforce", "manatal": "manatal", "loxo": "loxo", "homerun": "homerun", "getro": "getro", "freshteam": "freshteam",
+    "fresh team": "freshteam", "factorial": "factorial", "factorial hr": "factorial", "dayforce": "dayforce", "dayforce hcm": "dayforce",
+    "ceridian": "dayforce", "crelate": "crelate", "comeet": "comeet", "careerplug": "careerplug", "career plug": "careerplug",
+    "applicantpro": "applicantpro", "applicant pro": "applicantpro", "jobscore": "jobscore", "hirehive": "hirehive", "hire hive": "hirehive",
+    "csod": "csod", "cornerstone": "csod", "cornerstone ondemand": "csod", "emply": "emply", "cats": "cats", "catsone": "cats",
+    "elmo": "elmo", "easyapply": "easyapply", "easy apply": "easyapply",
     "hireology": "hireology",
     "isolvisolvedhire": "isolvedhire",
     "isolvedhire": "isolvedhire",
@@ -7025,6 +7041,13 @@ GITHUB_REGISTRY_REPOS = [
 # own tenant file carries no such value directly, so it must be resolved,
 # not just read).
 _GITHUB_REGISTRY_ATS_MAP = {
+    # 2026-10: datascry/openroles also ships live-probed tenant lists for four platforms we now scrape (ApplicantPro ~6.7k,
+    # CareerPlug ~4.4k, Homerun ~1.9k, Factorial ~0.5k; only entries with status "live" are read). Their bare slug is the
+    # subdomain our scrapers take.
+    "applicantpro": "applicantpro",
+    "careerplug": "careerplug",
+    "homerun": "homerun",
+    "factorial": "factorial",
     "ashby": "ashby",
     "bamboohr": "bamboohr",
     "breezy": "breezyhr",
