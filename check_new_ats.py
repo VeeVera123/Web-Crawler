@@ -783,6 +783,22 @@ _t = _LP('<div class="jobs-listing-card"><div><a class="job-title" href="/job/ab
          '<div class="job-location"><i class="material-icons">location_on</i> Grande Prairie, Alberta, Canada </div></div>')
 check(A._card_loxo(_t.css_first("a.job-title")) == {"location": "Grande Prairie, Alberta, Canada", "employment_type": "Contract"}, "loxo: card reader returns place and type")
 
+# ── Taleo Business Edition (tbe|instance|org|site|cws) ──
+check(D._url_to_slug_taleo("https://phf.tbe.taleo.net/phf02/ats/careers/v2/jobSearch?cws=63&org=PERISHER") == "tbe|phf|PERISHER|phf02|63"
+      and D._url_to_slug_taleo("https://phh.tbe.taleo.net/phh01/ats/careers/v2/viewRequisition?org=GRANTTHORNTON&cws=66&rid=11561") == "tbe|phh|GRANTTHORNTON|phh01|66"
+      and D._url_to_slug_taleo("https://tre.tbe.taleo.net/tre01/ats/careers/v2/jobSearch?org=NVRINC") is None
+      and D._url_to_slug_taleo("https://capps.taleo.net/careersection/ex/jobdetail.ftl?job=1") == "capps|ex",
+      "taleo: TBE URL -> tbe|instance|org|site|cws (needs cws), classic careersection unchanged")
+check([A._tbe_label_kind(x) for x in ("Office Location", "Alternate Location", "Employment Category", "Department", "Posted")]
+      == ["location", "location", "employment_type", "department", ""], "taleo TBE: column labels map to fields")
+_tj = {"url": "https://x.tbe.taleo.net/x01/ats/careers/v2/viewRequisition?org=O&cws=1&rid=2", "location": ""}
+_ld = ('<script type="application/ld+json">{"@type":"JobPosting","title":"T","employmentType":"Full time","description":"<p>' + "Real description. " * 20 +
+       '</p>","jobLocation":{"@type":"Place","address":{"addressLocality":"Toronto, ON","addressRegion":"Ontario","addressCountry":{"name":"CA"}}}}</script>')
+_td = A._fetch_taleo_tbe_description(_tj, _ld)
+check(_td.startswith("Real description") and _tj["location"] == "Toronto, ON, Ontario, CA" and _tj["country"] == "CA" and _tj["employment_type"] == "Full time",
+      f"taleo TBE: JSON-LD gives description + location + country + type {_tj}")
+check(A._fetch_taleo_questions(_tj) == "" and A._scrape_taleo_tbe_sync("tbe|bad") == [] and asyncio.run(A.scrape_taleo("tbe|a|b")) == [], "taleo TBE: no questions, bad slugs -> []")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)

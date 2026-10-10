@@ -1896,11 +1896,87 @@ async def scrape_smartrecruiters(slug: str) -> list[dict]:
 
 # ── Taleo (Oracle legacy) ────────────────────────────────
 
+_TBE_SORT_COL_RE = re.compile(r"sortColumn=(\d+)[^>]*>\s*([^<]+?)\s*<")
+
+
+def _tbe_label_kind(label: str) -> str:
+    l = label.lower()
+    if "location" in l or "city" in l or "region" in l or "country" in l or "site" in l:
+        return "location"
+    if "categor" in l or "type" in l or "employment" in l or "schedule" in l or "status" in l:
+        return "employment_type"
+    if "department" in l or "team" in l or "function" in l or "division" in l or "group" in l:
+        return "department"
+    return ""
+
+
+def _scrape_taleo_tbe_sync(slug: str) -> list[dict]:
+    """Taleo Business Edition (the small-company Taleo; NOT the careersection product). Slug: tbe|{instance}|{org}|{site}|{cws}
+    (discovery._url_to_slug_taleo). The list page needs the cws number and a session cookie: it serves 10 rows a page and the
+    "next" link (searchResults?next&rowFrom=N) is only valid inside the cookie session that loaded page 1. The columns after
+    the title are whatever the customer configured; their names are in the sort drop-down, in the same order, so each cell is
+    mapped by label (Office Location -> location, Employment Category -> employment type)."""
+    parts = slug.split("|")
+    if len(parts) != 5 or parts[0] != "tbe":
+        return []
+    _, inst, org, site, cws = parts
+    root = f"https://{inst}.tbe.taleo.net"
+    base = f"{root}/{site}/ats/careers/v2/"
+    sess = requests.Session()
+    sess.headers["User-Agent"] = random.choice(USER_AGENTS)
+    jobs: list[dict] = []
+    seen: set[str] = set()
+    company = org.replace("-", " ").replace("_", " ").title()
+    url, params = base + "searchResults", {"org": org, "cws": cws}
+    for _page in range(120):  # 1,200 postings is far past any TBE tenant
+        try:
+            r = sess.get(url, params=params, timeout=REQUEST_TIMEOUT, allow_redirects=False)
+        except requests.RequestException:
+            break
+        if r.status_code != 200:  # 302 = unknown org/cws combination
+            break
+        html = r.text
+        params = None
+        tree = LexborHTMLParser(html)
+        kinds = [_tbe_label_kind(unescape(lbl)) for _col, lbl in _TBE_SORT_COL_RE.findall(html)[1:]]
+        new = 0
+        for head in tree.css(".oracletaleocwsv2-accordion-head-info"):
+            a = head.css_first("a.viewJobLink")
+            href = (a.attributes.get("href") or "") if a is not None else ""
+            m = re.search(r"[?&]rid=(\d+)", href)
+            if not m or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            new += 1
+            cells = [re.sub(r"\s+", " ", d.text(deep=True, separator=" ", strip=True)).strip() for d in head.iter() if d.tag == "div"]
+            row = {"location": "", "employment_type": "", "department": ""}
+            for i, cell in enumerate(cells):
+                kind = kinds[i] if i < len(kinds) else ""
+                if cell and kind and not row[kind]:
+                    row[kind] = cell
+            jobs.append({
+                "title": re.sub(r"\s+", " ", a.text(deep=True, separator=" ", strip=True)).strip(),
+                "url": href if href.startswith("http") else root + href, "company": company,
+                "location": row["location"], "country": "", "department": row["department"], "workplace_type": "",
+                "employment_type": row["employment_type"], "salary": "", "description_snippet": "",
+                "source_ats": "Taleo", "slug": slug,
+            })
+        nxt = re.search(r'href="([^"]*searchResults\?next&(?:amp;)?rowFrom=[^"]*)"', html)
+        if not new or not nxt:
+            break
+        url = urljoin(base, unescape(nxt.group(1)))
+        time.sleep(0.25)
+    return jobs
+
+
 async def scrape_taleo(slug: str) -> list[dict]:
     """Taleo REST API scraper — direct POST, no session/CSRF needed.
-    Slug format: 'company|section|portal_id' or 'company|section' (portal auto-discovered)."""
+    Slug format: 'company|section|portal_id' or 'company|section' (portal auto-discovered).
+    Taleo Business Edition tenants use 'tbe|instance|org|site|cws' (see _scrape_taleo_tbe_sync)."""
     import json as _json
     parts = slug.split("|")
+    if parts[0] == "tbe":
+        return await asyncio.to_thread(_scrape_taleo_tbe_sync, slug)
     if len(parts) == 3:
         company, section, portal_id = parts
     elif len(parts) == 2:
@@ -8557,11 +8633,42 @@ def _fetch_adp_description(job: dict) -> str:
     return _snippet(desc_html) if desc_html else ""
 
 
+def _fetch_taleo_tbe_description(job: dict, html: str) -> str:
+    """Taleo Business Edition posting page: a complete schema.org JobPosting JSON-LD (description, place with country, employment
+    type, posting date). Fills location/country/employment type when the list row had none."""
+    for blob in re.findall(r'<script[^>]*ld\+json[^>]*>(.*?)</script>', html, re.S | re.I):
+        try:
+            ld = json.loads(blob)
+        except ValueError:
+            continue
+        if isinstance(ld, list):
+            ld = next((x for x in ld if isinstance(x, dict) and x.get("@type") == "JobPosting"), None)
+        if not isinstance(ld, dict) or ld.get("@type") != "JobPosting":
+            continue
+        addr = ((ld.get("jobLocation") or {}).get("address") or {}) if isinstance(ld.get("jobLocation"), dict) else {}
+        country = addr.get("addressCountry")
+        country = (country.get("name") if isinstance(country, dict) else country) or ""
+        if not job.get("location"):
+            loc = ", ".join(p for p in (str(addr.get("addressLocality") or "").strip(), str(addr.get("addressRegion") or "").strip(),
+                                        str(country).strip()) if p)
+            if loc:
+                job["location"] = loc
+        if not job.get("country") and country:
+            job["country"] = str(country)
+        if not job.get("employment_type") and ld.get("employmentType"):
+            job["employment_type"] = str(ld["employmentType"])
+        return _snippet(ld.get("description") or "")
+    return ""
+
+
 def _fetch_taleo_description(job: dict) -> str:
     """Fetch full description from a Taleo job detail page."""
     r = _get_requests_sync(job["url"], headers={"User-Agent": random.choice(USER_AGENTS)})
     if not r:
         return ""
+    if "/ats/careers/v2/viewRequisition" in job["url"]:
+        _enrich_cache_put(job, job["url"], r.text)
+        return _fetch_taleo_tbe_description(job, r.text)
     # Taleo's own question fetcher (_fetch_taleo_questions) falls back to
     # this exact same URL when the dedicated jobapply.ftl page yields
     # nothing -- stash it so that fallback can reuse this fetch instead of
@@ -10730,8 +10837,8 @@ def _fetch_taleo_questions(job: dict) -> str:
     falls back to the plain posting URL if the swap doesn't apply (no
     jobdetail.ftl in the URL) or the apply page yields nothing."""
     url = job.get("url", "")
-    if not url:
-        return ""
+    if not url or "/ats/careers/v2/" in url:
+        return ""  # Taleo Business Edition: the apply flow needs an account
     if "jobdetail.ftl" in url:
         apply_url = url.replace("jobdetail.ftl", "jobapply.ftl")
         found = _fetch_generic_form_questions(apply_url)

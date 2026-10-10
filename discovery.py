@@ -1415,8 +1415,19 @@ def _url_to_slug_taleo(url: str) -> str | None:
         qs = parse_qs(parsed.query)
         org = (qs.get("org") or [None])[0]
         tbe_instance = host[: -len(".tbe.taleo.net")]
-        if org and tbe_instance and org.lower() not in SKIP_SLUGS:
-            return f"{tbe_instance}|{org}"
+        # 2026-10: a TBE list page needs the SITE code (first path segment,
+        # e.g. phf02 — the instance plus a two-digit site number) and the
+        # `cws` career-section number as well as the org; with only
+        # instance|org the list URL just 302s, so every TBE board used to
+        # scrape to 0 jobs. The slug now carries all four, marked by a
+        # leading "tbe" so it can never be mistaken for a classic
+        # company|section pair: tbe|{instance}|{org}|{site}|{cws}.
+        site = next((p for p in parsed.path.split("/") if p), "").lower()
+        cws = (qs.get("cws") or [None])[0]
+        if (org and tbe_instance and org.lower() not in SKIP_SLUGS
+                and re.fullmatch(r"[a-z0-9]+", tbe_instance) and re.fullmatch(r"[a-z0-9]+", site)
+                and re.fullmatch(r"[A-Za-z0-9_-]+", org) and cws and re.fullmatch(r"\d{1,4}", cws)):
+            return f"tbe|{tbe_instance}|{org}|{site}|{cws}"
         return None
     if "taleo.net" in host:
         company = host.replace(".taleo.net", "").lower()
@@ -4359,7 +4370,8 @@ _CC_LIVE_CHECK = {
     "eploy": _via_verification("eploy", lambda slug: _cc_dns_dead_check(
         f"https://{slug}.eploy.net/candidate/jobboard/vacancysearchresults.aspx")),
     "taleo": _via_verification("taleo", lambda slug: _cc_dns_dead_check(
-        f"https://{slug.split('|', 1)[0]}.taleo.net/")),
+        f"https://{slug.split('|')[1]}.tbe.taleo.net/" if slug.startswith("tbe|") and slug.count("|") == 4
+        else f"https://{slug.split('|', 1)[0]}.taleo.net/")),
     "isolvedhire": _via_verification("isolvedhire", _cc_check_isolvedhire),
     "jazzhr": _via_verification("jazzhr", _cc_check_jazzhr),
     "breezyhr": _via_verification("breezyhr", _cc_check_breezyhr),

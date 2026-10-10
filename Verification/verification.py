@@ -759,8 +759,12 @@ async def _verify_taleo(session: aiohttp.ClientSession, slug: str) -> bool:
     to the same shared load-balancer IP every real tenant on that wdN
     instance uses — Workday's DNS is NOT tenant-specific, so this same
     trick does not apply there. Workday stays in _UNVERIFIABLE_ATS."""
-    company = slug.split("|", 1)[0]
-    return await _dns_dead_check(session, f"https://{company}.taleo.net/")
+    parts = slug.split("|")
+    if parts[0] == "tbe" and len(parts) == 5:
+        # Taleo Business Edition: tbe|{instance}|{org}|{site}|{cws}, hosted on {instance}.tbe.taleo.net (a fake instance
+        # fails DNS, a real one resolves). The org itself is not DNS-visible, so only a dead instance counts as dead.
+        return await _dns_dead_check(session, f"https://{parts[1]}.tbe.taleo.net/")
+    return await _dns_dead_check(session, f"https://{parts[0]}.taleo.net/")
 
 
 async def _verify_hireology(session: aiohttp.ClientSession, slug: str) -> bool:
