@@ -929,6 +929,27 @@ async def _verify_traffit(session: aiohttp.ClientSession, slug: str) -> bool:
         return True
 
 
+async def _verify_freshteam(session: aiohttp.ClientSession, slug: str) -> bool:
+    """An unknown tenant answers 200 as well, with an 'invalid-domain-wrapper' page (confirmed live), so read the body."""
+    async with session.get(f"https://{slug}.freshteam.com/jobs", timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
+        if r.status == 404:
+            return False
+        r.raise_for_status()
+        return "invalid-domain-wrapper" not in await r.text()
+
+
+async def _verify_peopleforce(session: aiohttp.ClientSession, slug: str) -> bool:
+    return await _verify_by_status(session, f"https://{slug}.peopleforce.io/careers")
+
+
+async def _verify_factorial(session: aiohttp.ClientSession, slug: str) -> bool:
+    return await _verify_by_status(session, f"https://{slug}.factorial.com/")
+
+
+async def _verify_loxo(session: aiohttp.ClientSession, slug: str) -> bool:
+    return await _verify_by_status(session, f"https://app.loxo.co/{slug}")
+
+
 async def _verify_getro(session: aiohttp.ClientSession, slug: str) -> bool:
     """A Getro board is live when its network has jobs. slug is a {tenant} (read the network id from the board page) or
     a numeric network id."""
@@ -1127,6 +1148,10 @@ ARCHIVE_II_VERIFIERS = {
     "deel": _verify_deel,
     "applicantpro": _verify_applicantpro,
     "traffit": _verify_traffit,
+    "freshteam": _verify_freshteam,
+    "peopleforce": _verify_peopleforce,
+    "factorial": _verify_factorial,
+    "loxo": _verify_loxo,
     "getro": _verify_getro,
     "isolvedhire": _verify_isolvedhire,
     # 2026-09: Gem — see _verify_gem's own docstring above for the full

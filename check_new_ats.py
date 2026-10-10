@@ -270,6 +270,51 @@ check(tf_pages == [1, 2] and len(tfj) == 3 and tfj[0]["location"] == "Poznan, Po
       and tfj[1]["workplace_type"] == "Remote", f"traffit {tf_pages} {tfj}")
 check(asyncio.run(A.scrape_traffit("Bad_Slug!")) == [], "traffit: bad slug")
 
+# ── Freshteam / PeopleForce / Factorial / Loxo (HTML boards, 2026-10) ──
+for fn, url, want in [
+    (D._url_to_slug_freshteam, "https://ninjacart.freshteam.com/jobs/abc/x", "ninjacart"), (D._url_to_slug_freshteam, "https://support.freshteam.com/a", None),
+    (D._url_to_slug_peopleforce, "https://takenos.peopleforce.io/careers/v/1-x", "takenos"), (D._url_to_slug_peopleforce, "https://peopleforce.io/", None),
+    (D._url_to_slug_factorial, "https://digitail.factorial.com/job_posting/x-1", "digitail"), (D._url_to_slug_factorial, "https://www.factorial.com/", None),
+    (D._url_to_slug_loxo, "https://app.loxo.co/mastec-purnell-canada-inc", "mastec-purnell-canada-inc"),
+    (D._url_to_slug_loxo, "https://app.loxo.co/job/MzE0=", None), (D._url_to_slug_loxo, "https://www.loxo.co/", None),
+]:
+    check(fn(url) == want, f"{fn.__name__}({url}) = {fn(url)!r}, want {want!r}")
+for ats in ("freshteam", "peopleforce", "factorial", "loxo"):
+    check(ats in D.URL_TO_SLUG and ats in D.SUPPORTED_ATS and ats in A.SCRAPERS and ats in D._CC_LIVE_CHECK, f"{ats} registered")
+FT = ('<div class="job-list"><a href="/jobs/-QkLte4ZHEi9/hands-on-frontend-tech-lead" data-portal-location="Tel Aviv, Israel" data-portal-remote-location="false">'
+      '<div class="row"><div class="job-title">Hands-on Frontend Tech Lead</div><div class="job-location">Tel Aviv</div></div></a>'
+      '<a href="/jobs/vSPE4N8_ul1R/xp-implementation-consultant" data-portal-location="Remote" data-portal-remote-location="true"><div class="job-title">Implementation Consultant</div></a>'
+      '<a href="/jobs/x">bad</a></div>')
+PF = ('<div class="tw-p-4"><h4><a href="/careers/v/241620-paid-media-analyst">Paid Media Analyst</a></h4><div class="small"><div><i class="fas fa-briefcase fa-fw"></i>Growth <span>·</span></div>'
+      '<div><i class="fas fa-clock fa-fw"></i>Full-time <span>·</span></div><div><i class="fas fa-map-marker-alt fa-fw"></i>Buenos Aires </div></div></div>')
+FA = ('<div class="row"><span class="md:w-3/6"><div class="font-bold">Platform Support Engineer </div></span><div class="flex-grow md:w-1/6"><div>Platform Engineering </div></div>'
+      '<div class="flex-grow md:w-1/6"><div>Hybrid </div></div><div><a href="https://digitail.factorial.com/job_posting/platform-support-engineer-325008">Apply now </a></div></div>')
+LX = '<div class="data-cell"><a class="job-title" href="/job/MzE0NzMtM3ppaWd0eGJvaHl4cDF5ag==">MasTec - Apprentice Pipefitter</a></div>'
+HTMLS = {"freshteam": FT, "peopleforce": PF, "factorial": FA, "loxo": LX}
+
+
+def make_html_get(kind):
+    async def g(url, **kw):
+        return R(HTMLS[kind], 200, url)
+    return g
+
+
+for kind in HTMLS:
+    A._get = make_html_get(kind)
+    hj = asyncio.run(getattr(A, "scrape_" + kind)("Acme"))
+    if kind == "freshteam":
+        check(len(hj) == 2 and hj[0]["location"] == "Tel Aviv, Israel" and hj[0]["title"] == "Hands-on Frontend Tech Lead"
+              and hj[1]["workplace_type"] == "Remote" and hj[0]["url"] == "https://acme.freshteam.com/jobs/-QkLte4ZHEi9/hands-on-frontend-tech-lead", f"freshteam {hj}")
+    elif kind == "peopleforce":
+        check(len(hj) == 1 and hj[0]["location"] == "Buenos Aires" and hj[0]["department"] == "Growth" and hj[0]["employment_type"] == "Full-time"
+              and hj[0]["title"] == "Paid Media Analyst", f"peopleforce {hj}")
+    elif kind == "factorial":
+        check(len(hj) == 1 and hj[0]["title"] == "Platform Support Engineer" and hj[0]["department"] == "Platform Engineering"
+              and hj[0]["workplace_type"] == "Hybrid", f"factorial {hj}")
+    else:
+        check(len(hj) == 1 and hj[0]["url"] == "https://app.loxo.co/job/MzE0NzMtM3ppaWd0eGJvaHl4cDF5ag==" and hj[0]["title"].endswith("Pipefitter"), f"loxo {hj}")
+    check(asyncio.run(getattr(A, "scrape_" + kind)("Bad Slug!")) == [], f"{kind}: bad slug")
+
 # ── Getro (2026-10) ──
 GP = {"tenant_page": '<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"network": {"id": "36986"}}}}) + "</script></html>"}
 GJOBS = {"results": {"count": 3, "jobs": [

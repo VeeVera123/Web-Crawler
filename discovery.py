@@ -597,6 +597,8 @@ SUPPORTED_ATS = {
     "applicantpro",
     # 2026-10: Traffit (Polish/CEE ATS): {tenant}.traffit.com, public /public/job_posts/published JSON.
     "traffit",
+    # 2026-10: Freshteam / PeopleForce / Factorial / Loxo: server-rendered HTML boards read by ats_scrapers._scrape_html_board.
+    "freshteam", "peopleforce", "factorial", "loxo",
     # 2026-10: Getro VC portfolio job boards. slug = the {tenant} of {tenant}.getro.com (1,892 already in archive_i from
     # earlier discovery, never scraped until now) or a numeric network id (the manual --source getro id sweep).
     "getro",
@@ -2167,6 +2169,44 @@ def _url_to_slug_traffit(url: str) -> str | None:
     return None if tenant in _TRAFFIT_NON_TENANTS else tenant
 
 
+_HTML_BOARD_NON_TENANTS = frozenset({"support", "developers", "api", "help", "docs", "blog", "status", "community", "learn", "marketplace",
+                                     "partners", "careers", "jobs", "go", "info", "mail", "email", "admin", "login", "my", "static", "assets",
+                                     "cdn", "app", "apps", "demo", "sandbox", "staging", "test"})
+
+
+def _html_board_tenant(url: str, suffix: str) -> str | None:
+    tenant = _tenant_of(urlparse(url).hostname, suffix)
+    return None if tenant in _HTML_BOARD_NON_TENANTS else tenant
+
+
+def _url_to_slug_freshteam(url: str) -> str | None:
+    """Freshteam (2026-10): {tenant}.freshteam.com -> tenant (support./developers. are Freshworks' own sites)."""
+    return _html_board_tenant(url, ".freshteam.com")
+
+
+def _url_to_slug_peopleforce(url: str) -> str | None:
+    """PeopleForce (2026-10): {tenant}.peopleforce.io -> tenant."""
+    return _html_board_tenant(url, ".peopleforce.io")
+
+
+def _url_to_slug_factorial(url: str) -> str | None:
+    """Factorial (2026-10): {tenant}.factorial.com (the careers site), or factorialhr's {tenant}.factorialhr.com -> tenant."""
+    return _html_board_tenant(url, ".factorial.com")
+
+
+def _url_to_slug_loxo(url: str) -> str | None:
+    """Loxo (2026-10): app.loxo.co/{tenant}[/...] -> tenant. Job pages are app.loxo.co/job/{id} (no tenant), so only the
+    board URL identifies a company."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() != "app.loxo.co":
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts or parts[0].lower() in ("job", "jobs", "login", "users", "api", "assets", "static", "careers"):
+        return None
+    slug = parts[0].lower()
+    return slug if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug) else None
+
+
 _DEEL_NON_SLUGS = frozenset({"auth", "login", "signup", "guest", "api", "deelapi", "job-boards", "job-details"})
 
 
@@ -2586,6 +2626,10 @@ URL_TO_SLUG = {
     "deel": _url_to_slug_deel,
     "applicantpro": _url_to_slug_applicantpro,
     "traffit": _url_to_slug_traffit,
+    "freshteam": _url_to_slug_freshteam,
+    "peopleforce": _url_to_slug_peopleforce,
+    "factorial": _url_to_slug_factorial,
+    "loxo": _url_to_slug_loxo,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": _url_to_slug_gem,
@@ -3296,6 +3340,10 @@ CC_PLATFORM_PATTERNS = {
     "deel": ["jobs.deel.com/*"],
     "applicantpro": ["*.applicantpro.com/*"],
     "traffit": ["*.traffit.com/*"],
+    "freshteam": ["*.freshteam.com/jobs*"],
+    "peopleforce": ["*.peopleforce.io/careers*"],
+    "factorial": ["*.factorial.com/job_posting/*"],
+    "loxo": ["app.loxo.co/*"],
     # New (2026-09): Gem — see SUPPORTED_ATS comment above.
     "gem": ["jobs.gem.com/*"],
     # New (2026-09): RecruiterBox / Trakstar Hire — see SUPPORTED_ATS
@@ -3386,6 +3434,10 @@ CC_EXTRACTORS = {
     "deel": _url_to_slug_deel,
     "applicantpro": _url_to_slug_applicantpro,
     "traffit": _url_to_slug_traffit,
+    "freshteam": _url_to_slug_freshteam,
+    "peopleforce": _url_to_slug_peopleforce,
+    "factorial": _url_to_slug_factorial,
+    "loxo": _url_to_slug_loxo,
     "isolvedhire": _url_to_slug_isolvedhire,
     # New (2026-09): Gem — see CC_PLATFORM_PATTERNS above.
     "gem": _url_to_slug_gem,
@@ -3738,6 +3790,38 @@ def _cc_check_traffit(slug: str) -> bool | None:
     if r.status_code == 200:
         return True
     return False if r.status_code == 503 and "text/html" in r.headers.get("content-type", "") else None
+
+
+def _cc_check_html_board(url: str) -> bool | None:
+    """Liveness of a server-rendered HTML board: 200 = live tenant, 404 / a redirect away = gone."""
+    try:
+        r = requests.get(url, timeout=10, allow_redirects=False, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    return True if r.status_code == 200 else (False if r.status_code in (301, 302, 303, 307, 308, 404) else None)
+
+
+def _cc_check_freshteam(slug: str) -> bool | None:
+    """An unknown Freshteam tenant answers 200 too, with an 'invalid-domain-wrapper' page (confirmed live), so read the body."""
+    try:
+        r = requests.get(f"https://{slug}.freshteam.com/jobs", timeout=10, headers={"User-Agent": _ROBOTS_UA})
+    except Exception:
+        return None
+    if r.status_code == 200:
+        return "invalid-domain-wrapper" not in r.text
+    return False if r.status_code == 404 else None
+
+
+def _cc_check_peopleforce(slug: str) -> bool | None:
+    return _cc_check_html_board(f"https://{slug}.peopleforce.io/careers")
+
+
+def _cc_check_factorial(slug: str) -> bool | None:
+    return _cc_check_html_board(f"https://{slug}.factorial.com/")
+
+
+def _cc_check_loxo(slug: str) -> bool | None:
+    return _cc_check_html_board(f"https://app.loxo.co/{slug}")
 
 
 def _cc_check_pageup(slug: str) -> bool | None:
@@ -4153,6 +4237,10 @@ _CC_LIVE_CHECK = {
     "deel": _via_verification("deel", _cc_check_deel),
     "applicantpro": _via_verification("applicantpro", _cc_check_applicantpro),
     "traffit": _via_verification("traffit", _cc_check_traffit),
+    "freshteam": _via_verification("freshteam", _cc_check_freshteam),
+    "peopleforce": _via_verification("peopleforce", _cc_check_peopleforce),
+    "factorial": _via_verification("factorial", _cc_check_factorial),
+    "loxo": _via_verification("loxo", _cc_check_loxo),
     "getro": _via_verification("getro", _cc_check_getro),
     "pageup": _via_verification("pageup", _cc_check_pageup),
     "workday": _via_verification("workday", _cc_check_workday),
@@ -4239,7 +4327,7 @@ _CC_SHARED_HOST_CONCURRENCY = 20
 _CC_SHARED_HOST_ATS = {
     "greenhouse", "ashby", "workable", "rippling", "joincom", "lever",
     "jobvite", "paylocity", "hireology", "pageup", "gem", "dayforce",
-    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel", "getro",
+    "manatal", "jobscore", "crelate", "comeet", "emply", "cats", "elmo", "easyapply", "hibob", "deel", "getro", "loxo",
 }
 _CC_SHARED_HOST_SEMAPHORES = {
     ats: threading.Semaphore(_CC_SHARED_HOST_CONCURRENCY) for ats in _CC_SHARED_HOST_ATS
@@ -7075,6 +7163,7 @@ _GITHUB_GENERIC_ATS_ALIASES = {
     "manatal": "manatal", "jobscore": "jobscore", "crelate": "crelate",
     "comeet": "comeet", "emply": "emply", "cats": "cats", "catsone": "cats", "elmo": "elmo", "easyapply": "easyapply", "hibob": "hibob", "deel": "deel",
     "applicantpro": "applicantpro", "traffit": "traffit",
+    "freshteam": "freshteam", "peopleforce": "peopleforce", "factorial": "factorial", "loxo": "loxo",
 }
 
 _GITHUB_ATS_HOST_HINTS = (
@@ -7095,6 +7184,7 @@ _GITHUB_ATS_HOST_HINTS = (
     ("jobs.crelate.com", "crelate"), ("comeet.com", "comeet"),
     ("career.emply.com", "emply"), ("catsone.com", "cats"), ("elmotalent.com.au", "elmo"), ("easyapply.co", "easyapply"), ("careers.hibob.com", "hibob"), ("jobs.deel.com", "deel"),
     ("applicantpro.com", "applicantpro"), ("traffit.com", "traffit"),
+    ("freshteam.com", "freshteam"), ("peopleforce.io", "peopleforce"), ("factorial.com", "factorial"), ("app.loxo.co", "loxo"),
 )
 
 

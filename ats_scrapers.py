@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from config import REQUEST_TIMEOUT, MAX_RETRIES
 import geo
 import page_extract
+from selectolax.lexbor import LexborHTMLParser
 from discovery import _GH_JID_RE, extract_greenhouse_embed_token
 
 log = logging.getLogger(__name__)
@@ -7339,6 +7340,123 @@ async def scrape_traffit(slug: str) -> list[dict]:
     return jobs
 
 
+# ── Server-rendered HTML boards: Freshteam, PeopleForce, Factorial, Loxo ──────
+# 2026-10. None of these has a public JSON feed, but each tenant's list page is plain HTML with one link per job, so one
+# parser (page_extract's link/next-page finders + a per-platform card reader for the fields the list shows) covers them.
+# Description and, where the list shows none (Factorial, Loxo), location come from the job page via
+# _fetch_generic_description. Verified live: Freshteam (ninjacart, fintastic), PeopleForce (takenos), Factorial (digitail),
+# Loxo (mastec-purnell-canada-inc).
+_HTML_BOARD_MAX_PAGES = 15
+
+
+def _card_text(node, selector: str) -> str:
+    n = node.css_first(selector) if node is not None else None
+    return re.sub(r"\s+", " ", n.text(deep=True, separator=" ", strip=True)).strip() if n is not None else ""
+
+
+def _ancestor(node, levels: int):
+    for _ in range(levels):
+        if node is None or node.parent is None:
+            break
+        node = node.parent
+    return node
+
+
+def _card_freshteam(a) -> dict:
+    return {"location": (a.attributes.get("data-portal-location") or "").strip(),
+            "workplace_type": "Remote" if a.attributes.get("data-portal-remote-location") == "true" else "",
+            "title": _card_text(a, ".job-title")}
+
+
+def _card_peopleforce(a) -> dict:
+    card = _ancestor(a, 3)
+    out = {}
+    for icon, key in ((".fa-map-marker-alt", "location"), (".fa-briefcase", "department"), (".fa-clock", "employment_type")):
+        i = card.css_first(icon) if card is not None else None
+        if i is not None and i.parent is not None:
+            out[key] = re.sub(r"[\s·]+$", "", re.sub(r"\s+", " ", i.parent.text(deep=True, separator=" ", strip=True))).strip()
+    return out
+
+
+def _card_factorial(a) -> dict:
+    row = _ancestor(a, 2)
+    cells = [re.sub(r"\s+", " ", d.text(deep=True, separator=" ", strip=True)).strip() for d in row.css("div.flex-grow")] if row is not None else []
+    out = {"title": _card_text(row, "span")}
+    if cells:
+        out["department"] = cells[0]
+    if len(cells) > 1 and cells[1].lower() in ("remote", "hybrid", "on-site", "onsite", "on site"):
+        out["workplace_type"] = cells[1]
+    return out
+
+
+_HTML_BOARDS = {
+    # kind: (display name, list URL, job-link href regex, card reader, hosts the job links may use)
+    "freshteam": ("Freshteam", "https://{slug}.freshteam.com/jobs", r"^/jobs/[A-Za-z0-9_-]{6,}(?:/|$)", _card_freshteam),
+    "peopleforce": ("PeopleForce", "https://{slug}.peopleforce.io/careers", r"/careers/v/\d+", _card_peopleforce),
+    "factorial": ("Factorial", "https://{slug}.factorial.com/", r"/job_posting/", _card_factorial),
+    "loxo": ("Loxo", "https://app.loxo.co/{slug}", r"^/job/[A-Za-z0-9=_-]+$", lambda a: {}),
+}
+
+
+async def _scrape_html_board(kind: str, slug: str) -> list[dict]:
+    slug = (slug or "").strip().lower()
+    label, list_url, href_pat, read_card = _HTML_BOARDS[kind]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        return []
+    href_re = re.compile(href_pat)
+    url, seen_pages, jobs, seen_urls = list_url.format(slug=slug), set(), [], set()
+    company = slug.replace("-", " ").replace("_", " ").title()
+    while url and url not in seen_pages and len(seen_pages) < _HTML_BOARD_MAX_PAGES:
+        seen_pages.add(url)
+        r = await _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+        if not r or r.status_code != 200:
+            break
+        html = r.text
+        try:
+            tree = LexborHTMLParser(html)
+        except Exception:
+            break
+        page_url = str(r.url)
+        for a in tree.css("a[href]"):
+            href = (a.attributes.get("href") or "").strip()
+            if not href_re.search(href):
+                continue
+            full = urljoin(page_url, href).split("#")[0]
+            if full in seen_urls:
+                continue
+            card = read_card(a)
+            title = _text(card.pop("title", "") or re.sub(r"\s+", " ", a.text(deep=True, separator=" ", strip=True)))
+            if not title or page_extract.GENERIC_LINK_TEXT_RE.match(title):
+                title = page_extract.card_title(a)
+            if not title:
+                continue
+            seen_urls.add(full)
+            jobs.append({
+                "title": title, "url": full, "company": company,
+                "location": card.get("location", ""), "country": "", "department": card.get("department", ""),
+                "workplace_type": card.get("workplace_type", ""), "employment_type": card.get("employment_type", ""),
+                "salary": "", "description_snippet": "", "source_ats": label, "slug": slug,
+            })
+        url = page_extract.find_next_page_url(html, page_url)
+    return jobs
+
+
+async def scrape_freshteam(slug: str) -> list[dict]:
+    return await _scrape_html_board("freshteam", slug)
+
+
+async def scrape_peopleforce(slug: str) -> list[dict]:
+    return await _scrape_html_board("peopleforce", slug)
+
+
+async def scrape_factorial(slug: str) -> list[dict]:
+    return await _scrape_html_board("factorial", slug)
+
+
+async def scrape_loxo(slug: str) -> list[dict]:
+    return await _scrape_html_board("loxo", slug)
+
+
 SCRAPERS = {
     "rippling": scrape_rippling,
     "greenhouse": scrape_greenhouse,
@@ -7426,6 +7544,10 @@ SCRAPERS = {
     "deel": scrape_deel,
     "applicantpro": scrape_applicantpro,
     "traffit": scrape_traffit,
+    "freshteam": scrape_freshteam,
+    "peopleforce": scrape_peopleforce,
+    "factorial": scrape_factorial,
+    "loxo": scrape_loxo,
     # No scraper exists for occupop, ukg, or phenom — all 3 confirmed
     # genuinely unscrapeable (robots.txt disallow, JS-only rendering, or
     # an auth-gated API with no public alternative). Full evidence for
@@ -8614,6 +8736,10 @@ DESCRIPTION_FETCHERS = {
     # way to recover it.
     "Zoho": _fetch_generic_description,
     "ApplicantPro": _fetch_generic_description,
+    "Freshteam": _fetch_generic_description,
+    "PeopleForce": _fetch_generic_description,
+    "Factorial": _fetch_generic_description,
+    "Loxo": _fetch_generic_description,
     "BambooHR": _fetch_generic_description,
     # 2026-09: Paycom — the search endpoint's description field is
     # truncated; the real full text (plus salary/category) only comes

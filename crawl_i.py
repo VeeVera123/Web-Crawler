@@ -220,6 +220,8 @@ PLATFORM_WORKERS = {
     "applicantpro": 12,
     # 2026-10: Traffit = one JSON call per 100 jobs.
     "traffit": 12,
+    # 2026-10: HTML boards = 1 list page per tenant (plus pagination); descriptions come from one fetch per kept job.
+    "freshteam": 12, "peopleforce": 12, "factorial": 12, "loxo": 8,
     # 2026-10: Getro = ~12 role-query searches (1-8 pages each) per network, all on api.getro.com.
     "getro": 4,
     # 2026-10: Himalayas = a few hundred paged searches against himalayas.app (virtual board, no archive_i row).
