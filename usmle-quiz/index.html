@@ -1,0 +1,1899 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-surface="glass">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USMLE Quiz</title>
+<meta name="description" content="A focused, timed USMLE practice quiz with explanations, a built-in calculator and a study playlist.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23E4502B'/%3E%3Cpath d='M16 8v16M8 16h16' stroke='white' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap">
+
+<!-- Apply the saved theme before first paint so there is no light/dark flash. -->
+<script>
+  (function () {
+    var root = document.documentElement;
+    function read(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; } }
+    var theme = read('usmle-quiz:theme');
+    if (theme !== 'light' && theme !== 'dark') {
+      theme = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+    root.dataset.theme = theme;
+    root.dataset.surface = read('usmle-quiz:surface') === 'solid' ? 'solid' : 'glass';
+  })();
+</script>
+
+<style>
+/* ==========================================================================
+   1. DESIGN TOKENS
+   Everything visual is driven from here. Components never hard-code colour.
+   ========================================================================== */
+:root {
+  --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Instrument Serif", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --dur-1: 140ms;
+  --dur-2: 240ms;
+  --dur-3: 420ms;
+  --dur-4: 640ms;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  --topbar-h: 64px;
+  --surface: var(--surface-glass);
+}
+:root[data-surface="solid"] { --surface: var(--surface-solid); }
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #F2EFE9;
+  --ink: #1B1813;
+  --ink-2: #514B42;
+  --ink-3: #6F695F;
+  --line: rgba(27, 24, 19, .10);
+  --line-strong: rgba(27, 24, 19, .20);
+  --surface-glass: rgba(255, 255, 255, .76);
+  --surface-solid: #FFFFFF;
+  --surface-hover: rgba(27, 24, 19, .05);
+  --fill: rgba(27, 24, 19, .045);
+  --accent: #E4502B;
+  --accent-ink: #FFFFFF;
+  --accent-text: #BF3A18;
+  --accent-soft: rgba(228, 80, 43, .10);
+  --teal: #0B7A85;
+  --teal-soft: rgba(11, 122, 133, .10);
+  --good: #14774A;
+  --good-soft: rgba(20, 119, 74, .10);
+  --bad: #C0283A;
+  --bad-soft: rgba(192, 40, 58, .09);
+  --warn: #B7640A;
+  --shadow-md: 0 1px 2px rgba(27, 24, 19, .05), 0 14px 34px -14px rgba(27, 24, 19, .20);
+  --shadow-lg: 0 2px 4px rgba(27, 24, 19, .06), 0 30px 70px -20px rgba(27, 24, 19, .32);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0B0B0D;
+  --ink: #F4F2EE;
+  --ink-2: #B9B5AD;
+  --ink-3: #8C8880;
+  --line: rgba(255, 255, 255, .09);
+  --line-strong: rgba(255, 255, 255, .17);
+  --surface-glass: rgba(20, 20, 24, .74);
+  --surface-solid: #151519;
+  --surface-hover: rgba(255, 255, 255, .06);
+  --fill: rgba(255, 255, 255, .05);
+  --accent: #FF8B66;
+  --accent-ink: #1D0B04;
+  --accent-text: #FF9B7B;
+  --accent-soft: rgba(255, 139, 102, .15);
+  --teal: #62D2DC;
+  --teal-soft: rgba(98, 210, 220, .13);
+  --good: #4ADE9A;
+  --good-soft: rgba(74, 222, 154, .12);
+  --bad: #FF7A89;
+  --bad-soft: rgba(255, 122, 137, .12);
+  --warn: #F5B454;
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px -16px rgba(0, 0, 0, .7);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, .5), 0 34px 80px -24px rgba(0, 0, 0, .85);
+}
+
+/* ==========================================================================
+   2. BASE
+   ========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.55;
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button:disabled { cursor: default; }
+img { display: block; max-width: 100%; }
+p { margin: 0; }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -.015em; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+::selection { background: var(--accent-soft); }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.eyebrow {
+  font: 600 11px/1 var(--font-mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+kbd {
+  font: 500 11px/1 var(--font-mono);
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-2);
+}
+
+/* ==========================================================================
+   3. SHELL  (topbar · stage · dock)
+   ========================================================================== */
+.app {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* Ambient photo wall. Calm, dimmed, never competes with content. */
+.backdrop { position: absolute; inset: 0; z-index: -1; overflow: hidden; background: var(--bg); }
+.backdrop::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: radial-gradient(120% 90% at 50% 35%,
+    color-mix(in srgb, var(--bg) 92%, transparent),
+    color-mix(in srgb, var(--bg) 80%, transparent));
+}
+.backdrop-cols {
+  --gap: clamp(10px, 1.6vw, 22px);
+  position: absolute; inset: 0 clamp(8px, 3vw, 44px);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--gap);
+}
+.backdrop-col {
+  display: flex; flex-direction: column;
+  gap: var(--gap);
+  padding-bottom: var(--gap);
+  animation: drift 90s linear infinite;
+  will-change: transform;
+}
+.backdrop-col:nth-child(even) { animation-direction: reverse; animation-duration: 120s; }
+.backdrop-col:nth-child(3) { animation-duration: 105s; }
+.backdrop-col img {
+  flex: none; width: 100%; aspect-ratio: 3 / 4; object-fit: cover;
+  border-radius: var(--r-lg);
+  filter: saturate(.85);
+}
+@keyframes drift { to { transform: translateY(-50%); } }
+
+/* Topbar */
+.topbar {
+  flex: none;
+  display: flex; align-items: center; gap: 16px;
+  height: var(--topbar-h);
+  padding: 0 clamp(12px, 2vw, 24px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  backdrop-filter: blur(18px) saturate(1.4);
+  z-index: 5;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
+.brand-mark {
+  width: 28px; height: 28px; border-radius: 9px;
+  display: grid; place-items: center;
+  background: var(--accent); color: var(--accent-ink);
+}
+.topbar-spacer { flex: 1; }
+.toolbar { display: flex; align-items: center; gap: 8px; }
+
+.timer {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  font: 500 14px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  transition: color var(--dur-2), border-color var(--dur-2), background var(--dur-2);
+}
+.timer.is-warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.timer.is-crit {
+  color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, transparent);
+  background: var(--bad-soft); animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: .65; } }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 40px; padding: 0 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  font-size: 14px; font-weight: 500; white-space: nowrap;
+  transition: background var(--dur-1), border-color var(--dur-1), color var(--dur-1), transform var(--dur-1) var(--ease-out);
+}
+.btn:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--ink-3); }
+.btn:active:not(:disabled) { transform: scale(.97); }
+.btn:disabled { opacity: .4; }
+.btn-icon { width: 40px; padding: 0; }
+.btn[aria-pressed="true"], .btn.is-open {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent-text);
+}
+.btn-primary { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.btn-primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn-ghost { border-color: transparent; background: transparent; }
+.btn-music { max-width: 280px; }
+.btn-music .btn-label { overflow: hidden; text-overflow: ellipsis; }
+.btn svg { flex: none; }
+
+/* Workspace = stage + dock side by side. The dock pushes the stage; nothing overlaps. */
+.workspace { flex: 1; min-height: 0; display: flex; }
+.stage { position: relative; flex: 1; min-width: 0; container: stage / inline-size; }
+.screen {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  overflow-x: hidden; overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.dock {
+  --dock-w: 0px;
+  position: relative; flex: none;
+  width: var(--dock-w);
+  overflow: hidden;
+  transition: width var(--dur-4) var(--ease-out);
+}
+.app[data-dock="music"] .dock { --dock-w: clamp(320px, 30vw, 420px); }
+.app[data-dock="calc"]  .dock { --dock-w: 304px; }
+.dock-panel {
+  position: absolute; top: 0; bottom: 0; right: 0;
+  width: var(--panel-w);
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  backdrop-filter: blur(18px) saturate(1.3);
+  opacity: 0; visibility: hidden;
+  transform: translateX(24px);
+  transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out), visibility 0s var(--dur-3);
+}
+.dock-panel[data-panel="music"] { --panel-w: clamp(320px, 30vw, 420px); }
+.dock-panel[data-panel="calc"]  { --panel-w: 304px; }
+.dock-panel.is-active {
+  opacity: 1; visibility: visible; transform: none;
+  transition-delay: 60ms, 60ms, 0s;
+}
+.dock-head {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 16px 12px 20px;
+}
+.dock-head h2 { font-size: 15px; }
+.dock-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding: 4px 16px 24px; }
+.dock-scrim { display: none; }
+
+/* Surfaces */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-md);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  backdrop-filter: blur(18px) saturate(1.3);
+}
+
+/* ==========================================================================
+   4. INTRO
+   ========================================================================== */
+.intro {
+  position: absolute; inset: 0; z-index: 50;
+  display: grid; place-items: center; align-content: center; gap: 28px;
+  background: #0A0A0C; color: #F4F2EE;
+  cursor: pointer;
+  transition: opacity var(--dur-4) var(--ease-in-out), transform var(--dur-4) var(--ease-in-out);
+}
+.intro.is-leaving { opacity: 0; transform: scale(1.03); pointer-events: none; }
+.intro-text {
+  min-height: 1.2em;
+  font: 400 clamp(44px, 9vw, 104px)/1.1 var(--font-display);
+  letter-spacing: -.02em;
+}
+.caret {
+  display: inline-block; width: 3px; height: .8em; margin-left: 6px;
+  background: #FF8B66; vertical-align: -.05em;
+  animation: blink 1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+.intro-skip {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: 13px; color: #A8A49C;
+}
+.intro-skip:hover { color: #F4F2EE; }
+.intro kbd { color: #A8A49C; border-color: rgba(255, 255, 255, .2); }
+
+/* ==========================================================================
+   5. QUIZ
+   ========================================================================== */
+.quiz { align-items: center; padding: clamp(16px, 3vh, 32px) 24px 32px; }
+.quiz-progress { width: min(100%, 560px); margin-bottom: clamp(16px, 3vh, 28px); transition: width var(--dur-4) var(--ease-out); }
+.quiz-progress.is-wide { width: min(100%, 1000px); }
+.quiz-progress-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 10px;
+}
+.quiz-hint { font-size: 12px; color: var(--ink-3); }
+.rail { display: flex; gap: 6px; }
+.rail-seg { flex: 1; height: 4px; border-radius: 999px; background: var(--line-strong); overflow: hidden; }
+.rail-seg > span {
+  display: block; height: 100%; border-radius: inherit; background: var(--accent);
+  transform: scaleX(0); transform-origin: left;
+  transition: transform var(--dur-4) var(--ease-out);
+}
+.rail-seg.is-done > span { transform: scaleX(1); }
+.rail-seg.is-current > span { transform: scaleX(.5); }
+
+.deck {
+  width: 100%;
+  margin-block: auto;
+  display: grid;
+  justify-items: center; align-items: center;
+  overflow-x: clip;
+}
+.qcard {
+  --o: 0;
+  --card-w: 560px;
+  grid-area: 1 / 1;
+  width: min(100%, var(--card-w));
+  padding: clamp(20px, 3vw, 32px);
+  opacity: 0; z-index: 1; pointer-events: none;
+  transform: translateX(calc(var(--o) * 72%)) scale(.93);
+  transition: transform var(--dur-4) var(--ease-out), opacity var(--dur-3) var(--ease-out);
+}
+.qcard.has-image { --card-w: 1000px; }
+.qcard[data-state="near"] { opacity: .32; z-index: 2; }
+.qcard[data-state="active"] { opacity: 1; z-index: 3; pointer-events: auto; transform: none; }
+.qcard-body { display: grid; gap: 24px; }
+.qcard-main { min-width: 0; }
+.qcard-kicker { margin-bottom: 14px; color: var(--accent-text); }
+.qimage {
+  margin: 0; min-width: 0;
+  display: grid; place-items: center;
+  padding: 12px;
+  border-radius: var(--r-lg);
+  background: var(--fill);
+  border: 1px solid var(--line);
+}
+.qimage img { max-height: min(52vh, 480px); object-fit: contain; border-radius: var(--r-md); }
+@container stage (min-width: 880px) {
+  .qcard.has-image .qcard-body { grid-template-columns: minmax(0, .42fr) minmax(0, .58fr); align-items: start; }
+}
+
+.qtext { font-size: 17px; line-height: 1.7; font-weight: 450; margin-bottom: 24px; text-wrap: pretty; }
+.wave-word { display: inline-block; }
+.wave.is-waving .wave-word {
+  animation: wave 900ms var(--ease-in-out) both;
+  animation-delay: calc(var(--i) * 22ms + 450ms);
+}
+@keyframes wave {
+  0%, 100% { transform: translateY(0); color: inherit; }
+  50% { transform: translateY(-6px); color: var(--accent-text); }
+}
+
+.options { display: grid; gap: 8px; }
+.option {
+  position: relative;
+  display: flex; align-items: center; gap: 14px;
+  width: 100%; padding: 12px 14px; text-align: left;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+  background: var(--fill);
+  font-weight: 500; font-size: 15px; line-height: 1.4;
+  transition: background var(--dur-1), border-color var(--dur-1), opacity var(--dur-2), transform var(--dur-2) var(--ease-out);
+}
+.option-key {
+  flex: none; width: 28px; height: 28px; border-radius: 9px;
+  display: grid; place-items: center;
+  font: 600 12px/1 var(--font-mono);
+  color: var(--ink-2);
+  border: 1px solid var(--line-strong);
+  transition: inherit;
+}
+.option-label { flex: 1; min-width: 0; }
+.option:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--ink-3); transform: translateX(3px); }
+.option.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.option.is-selected .option-key { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.option.is-dim { opacity: .4; }
+
+/* ==========================================================================
+   6. RESULTS
+   ========================================================================== */
+.results {
+  width: min(100%, 1180px); margin: 0 auto;
+  padding: clamp(20px, 4vh, 40px) clamp(16px, 3vw, 32px) 56px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.results-head { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; }
+.display {
+  font: 400 clamp(38px, 5vw, 60px)/1.02 var(--font-display);
+  letter-spacing: -.02em;
+  margin: 10px 0 8px;
+}
+.muted { color: var(--ink-3); }
+.sub { font-size: 14px; color: var(--ink-3); }
+.actions { display: flex; gap: 10px; }
+
+.grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@container stage (min-width: 620px) {
+  .grid.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container stage (min-width: 980px) {
+  .grid.metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid.analytics { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+}
+
+.reveal { animation: rise 700ms var(--ease-out) both; animation-delay: calc(var(--d, 0) * 1ms); }
+@keyframes rise { from { opacity: 0; transform: translateY(18px); } }
+
+.metric { padding: 22px; min-height: 176px; display: flex; flex-direction: column; justify-content: space-between; gap: 14px; transition: border-color var(--dur-2), transform var(--dur-3) var(--ease-out); }
+.metric:hover { border-color: var(--line-strong); transform: translateY(-3px); }
+.metric-head { display: flex; justify-content: space-between; align-items: center; }
+.chip {
+  width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--fill); border: 1px solid var(--line); color: var(--ink-2);
+}
+.big { font: 400 56px/1 var(--font-display); letter-spacing: -.02em; font-variant-numeric: lining-nums; }
+.big small { font-size: .5em; color: var(--ink-3); }
+.meter { height: 4px; border-radius: 999px; background: var(--line-strong); overflow: hidden; margin: 12px 0 8px; }
+.meter > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); animation: fill 1.2s var(--ease-out) .5s both; }
+@keyframes fill { from { width: 0; } }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+
+.ring { position: relative; flex: none; display: grid; place-items: center; }
+.ring svg { transform: rotate(-90deg); overflow: visible; }
+.ring-track { stroke: var(--line-strong); }
+.ring-bar { stroke: var(--accent); stroke-linecap: round; animation: ring 1.5s var(--ease-out) .4s both; }
+@keyframes ring { from { stroke-dashoffset: var(--c); } }
+.ring-label { position: absolute; font: 400 34px/1 var(--font-display); font-variant-numeric: lining-nums; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px;
+  font: 600 11px/1.5 var(--font-mono); white-space: nowrap;
+  animation: pop .5s var(--ease-out) 1.1s both;
+}
+.pill.up { color: var(--good); background: var(--good-soft); }
+.pill.down { color: var(--bad); background: var(--bad-soft); }
+.pill.plain { animation: none; }
+@keyframes pop { from { opacity: 0; transform: scale(.5); } }
+
+.bars { display: flex; align-items: flex-end; gap: 5px; height: 40px; }
+.bars span {
+  width: 8px; border-radius: 999px; background: var(--line-strong); transform-origin: bottom;
+  animation: grow .7s var(--ease-out) both; animation-delay: calc(.6s + var(--i) * 70ms);
+}
+.bars span:last-child { background: var(--accent); }
+@keyframes grow { from { transform: scaleY(0); } }
+
+.panel { padding: 24px; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 12px; }
+.panel-head h3 { font-size: 16px; margin-top: 6px; }
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px; background: var(--fill); border: 1px solid var(--line); }
+.seg button { padding: 5px 12px; border-radius: 8px; font-size: 12px; font-weight: 500; color: var(--ink-3); transition: background var(--dur-1), color var(--dur-1); }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--surface-solid); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, .15); }
+.chart { position: relative; height: 280px; }
+
+.break-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 10px; border-radius: var(--r-md); border-bottom: 1px solid var(--line); }
+.break-row:last-of-type { border-bottom: 0; }
+.break-row:hover { background: var(--fill); }
+.break-row > div { display: flex; align-items: center; gap: 12px; }
+.break-row p { font-size: 14px; font-weight: 600; line-height: 1.3; }
+.break-row span.sub { font-size: 12px; }
+.stat { padding: 18px 22px; display: flex; align-items: center; justify-content: space-between; }
+.stat-value { font: 500 22px/1.2 var(--font-mono); margin-top: 8px; letter-spacing: -.02em; }
+.tone-good { color: var(--good); } .tone-bad { color: var(--bad); }
+.tone-accent { color: var(--accent-text); } .tone-teal { color: var(--teal); }
+
+/* ==========================================================================
+   7. REVIEW + IMAGE VIEWER
+   ========================================================================== */
+.review {
+  width: min(100%, 1180px); margin: 0 auto;
+  padding: clamp(16px, 3vh, 32px) clamp(16px, 3vw, 32px) 40px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.review-title { font-size: 18px; font-weight: 600; }
+.review-grid { display: grid; gap: 16px; align-items: start; }
+@container stage (min-width: 900px) {
+  .review-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
+}
+.pane-title { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+.pane-badge {
+  width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center;
+  font: 600 12px/1 var(--font-mono);
+}
+.pane-badge.q { background: var(--accent); color: var(--accent-ink); }
+.pane-badge.e { background: var(--teal); color: var(--bg); }
+.pane-title h2 { font-size: 16px; }
+.review-q-image { margin: 0 0 18px; }
+.review-q-image img { width: 100%; border-radius: var(--r-md); border: 1px solid var(--line); }
+.review-stem { font-size: 15px; line-height: 1.7; margin-bottom: 20px; }
+.answer {
+  display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 14px;
+  border: 1px solid var(--line); background: var(--fill);
+  font-size: 14px; font-weight: 500; color: var(--ink-2);
+}
+.answer + .answer { margin-top: 8px; }
+.answer.is-correct { border-color: color-mix(in srgb, var(--good) 55%, transparent); background: var(--good-soft); color: var(--good); }
+.answer.is-wrong { border-color: color-mix(in srgb, var(--bad) 55%, transparent); background: var(--bad-soft); color: var(--bad); }
+.answer-tag { margin-left: auto; font: 600 10px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.answer svg { flex: none; }
+
+.prose { font-size: 15px; line-height: 1.75; color: var(--ink); }
+.prose p + p { margin-top: 14px; }
+.prose .choice { color: var(--ink-2); }
+.prose .choice b { color: var(--accent-text); font-weight: 600; }
+.callout {
+  margin-top: 20px; padding: 16px 18px;
+  border-radius: var(--r-md);
+  background: var(--teal-soft);
+  border-left: 3px solid var(--teal);
+}
+.callout .eyebrow { color: var(--teal); margin-bottom: 8px; }
+
+.thumbs { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 16px; scroll-snap-type: x mandatory; scrollbar-width: thin; }
+.thumb {
+  flex: 0 0 min(78%, 280px); scroll-snap-align: start; position: relative;
+  border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line);
+  transition: border-color var(--dur-1), transform var(--dur-2) var(--ease-out);
+}
+.thumb:hover { border-color: var(--accent); transform: translateY(-2px); }
+.thumb img { width: 100%; height: 160px; object-fit: cover; }
+.thumb-zoom {
+  position: absolute; right: 8px; bottom: 8px; width: 28px; height: 28px; border-radius: 9px;
+  display: grid; place-items: center; background: rgba(0, 0, 0, .6); color: #fff;
+}
+
+.pager { display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap; }
+.dots { display: flex; gap: 8px; align-items: center; padding: 0 6px; }
+.dot { width: 8px; height: 8px; border-radius: 999px; background: var(--line-strong); transition: width var(--dur-3) var(--ease-out), background var(--dur-2); }
+.dot.is-current { width: 24px; background: var(--accent); }
+
+.viewer {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  animation: fade var(--dur-3) var(--ease-out);
+}
+@keyframes fade { from { opacity: 0; } }
+.viewer-bar { flex: none; display: flex; justify-content: space-between; align-items: center; }
+.viewer-body { flex: 1; min-height: 0; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+.viewer-side { display: none; padding: 22px; overflow-y: auto; scrollbar-width: thin; }
+@container stage (min-width: 1100px) {
+  .viewer-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr); }
+  .viewer-side { display: block; }
+}
+.carousel { position: relative; min-height: 0; display: flex; flex-direction: column; overflow: hidden; touch-action: pan-y; cursor: grab; }
+.carousel-track {
+  flex: 1; min-height: 0; display: flex;
+  transform: translateX(calc(var(--idx) * -100%));
+  transition: transform var(--dur-4) var(--ease-out);
+}
+.carousel-slide { flex: 0 0 100%; min-width: 0; min-height: 0; display: grid; place-items: center; padding: 20px; }
+.carousel-slide img { width: 100%; height: 100%; object-fit: contain; border-radius: var(--r-md); user-select: none; -webkit-user-drag: none; }
+.carousel-foot { flex: none; display: flex; justify-content: center; align-items: center; gap: 12px; padding: 0 0 16px; }
+
+/* ==========================================================================
+   8. MUSIC + CALCULATOR PANELS
+   ========================================================================== */
+.now { display: flex; flex-direction: column; gap: 16px; padding: 18px; border-radius: var(--r-lg); background: var(--fill); border: 1px solid var(--line); margin-bottom: 20px; }
+.now-top { display: flex; gap: 14px; align-items: center; }
+.vinyl {
+  position: relative; flex: none; width: 68px; height: 68px; border-radius: 50%; overflow: hidden;
+  border: 1px solid var(--line-strong);
+  animation: spin 9s linear infinite; animation-play-state: paused;
+}
+.vinyl::after { content: ""; position: absolute; inset: 0; margin: auto; width: 14px; height: 14px; border-radius: 50%; background: var(--bg); border: 1px solid var(--line-strong); }
+.is-playing .vinyl, .vinyl.is-playing { animation-play-state: running; }
+.vinyl img { width: 100%; height: 100%; object-fit: cover; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.now-meta { min-width: 0; flex: 1; }
+.now-meta .title { font-weight: 600; font-size: 15px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.now-meta .sub { margin-top: 2px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.controls { display: flex; justify-content: center; align-items: center; gap: 10px; }
+.play { width: 48px; height: 48px; border-radius: 50%; background: var(--ink); color: var(--bg); display: grid; place-items: center; transition: transform var(--dur-2) var(--ease-out), background var(--dur-1); }
+.play:hover { background: var(--accent); color: var(--accent-ink); transform: scale(1.06); }
+.play:active { transform: scale(.95); }
+.seek-row { display: flex; align-items: center; gap: 10px; font: 500 11px/1 var(--font-mono); color: var(--ink-3); }
+.seek {
+  flex: 1; height: 4px; border-radius: 999px; appearance: none; -webkit-appearance: none; cursor: pointer;
+  background: linear-gradient(to right, var(--accent) var(--p, 0%), var(--line-strong) var(--p, 0%));
+}
+.seek::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--ink); border: 0; }
+.seek::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--ink); border: 0; }
+.error-note { font-size: 12px; color: var(--bad); text-align: center; }
+
+.playlist + .playlist { margin-top: 22px; }
+.playlist-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.playlist-head img { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; }
+.playlist-head h3 { font-size: 14px; }
+.track {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 10px; border-radius: 10px; text-align: left;
+  font-size: 14px; color: var(--ink-2); transition: background var(--dur-1), color var(--dur-1);
+}
+.track:hover { background: var(--surface-hover); color: var(--ink); }
+.track.is-current { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.track-n { flex: none; width: 20px; display: grid; place-items: center; font: 500 12px/1 var(--font-mono); color: var(--ink-3); }
+.track.is-current .track-n { color: inherit; }
+.track-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; }
+.eq i { width: 3px; height: 100%; border-radius: 2px; background: currentColor; transform-origin: bottom; animation: eq .9s ease-in-out infinite alternate; }
+.eq i:nth-child(2) { animation-delay: -.3s; }
+.eq i:nth-child(3) { animation-delay: -.6s; }
+@keyframes eq { from { transform: scaleY(.3); } to { transform: scaleY(1); } }
+
+.calc { padding: 8px 16px 20px; }
+.calc-screen { padding: 18px 8px 14px; text-align: right; min-height: 104px; display: flex; flex-direction: column; justify-content: flex-end; }
+.calc-expr { min-height: 18px; font: 500 13px/1 var(--font-mono); color: var(--ink-3); }
+.calc-value { font: 500 44px/1.15 var(--font-mono); letter-spacing: -.04em; font-variant-numeric: tabular-nums; word-break: break-all; }
+.calc-value.is-small { font-size: 28px; }
+.calc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.calc-key {
+  height: 56px; border-radius: 16px;
+  font: 500 19px/1 var(--font-mono);
+  background: var(--fill); border: 1px solid var(--line);
+  transition: transform var(--dur-1) var(--ease-out), background var(--dur-1), filter var(--dur-1);
+}
+.calc-key:hover { background: var(--surface-hover); border-color: var(--line-strong); }
+.calc-key:active { transform: scale(.93); }
+.calc-key.fn { color: var(--ink-2); background: var(--surface-hover); }
+.calc-key.op { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+.calc-key.op:hover { filter: brightness(1.1); }
+.calc-key.op.is-pending, .calc-key.equals { background: var(--accent); color: var(--accent-ink); }
+.calc-key.equals:hover { filter: brightness(1.08); }
+.calc-key.wide { grid-column: span 2; text-align: left; padding-left: 24px; }
+
+/* ==========================================================================
+   9. RESPONSIVE + MOTION PREFERENCES
+   ========================================================================== */
+@media (max-width: 1100px) {
+  .btn-music .btn-label { display: none; }
+  .btn-music { width: 40px; padding: 0; }
+}
+@media (max-width: 820px) {
+  .brand-name, .quiz-hint { display: none; }
+  .backdrop-cols { grid-template-columns: repeat(3, 1fr); }
+  .backdrop-col:nth-child(n+4) { display: none; }
+  .quiz { padding-inline: 14px; }
+  .qcard[data-state="near"] { opacity: 0; }
+
+  /* On narrow screens the dock becomes a bottom sheet over a dimmed stage. */
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    width: auto !important;
+    height: min(74dvh, 600px);
+    border-radius: 22px 22px 0 0;
+    border-top: 1px solid var(--line-strong);
+    background: var(--surface-solid);
+    box-shadow: var(--shadow-lg);
+    transform: translateY(110%);
+    transition: transform var(--dur-4) var(--ease-out);
+  }
+  .app:not([data-dock="none"]) .dock { transform: none; }
+  .dock-panel { width: auto !important; left: 0; border-left: 0; background: transparent; transform: none; }
+  .dock-scrim {
+    display: block; position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, .45);
+    animation: fade var(--dur-3) var(--ease-out);
+  }
+  .calc-grid { max-width: 340px; margin-inline: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    transition-delay: 0ms !important;
+  }
+  .backdrop-col { animation: none !important; }
+}
+
+/* Optional content protection (see CONFIG.protectContent in the script). */
+.app.is-obscured .stage { filter: blur(24px); }
+</style>
+</head>
+<body>
+<noscript>This quiz needs JavaScript to run.</noscript>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js" crossorigin></script>
+
+<script>
+(() => {
+'use strict';
+
+/* ==========================================================================
+   1. CONFIG
+   ========================================================================== */
+const { useState, useEffect, useRef, useReducer, useMemo, useCallback, memo, Fragment } = React;
+const html = htm.bind(React.createElement);
+
+const CONFIG = {
+  durationSeconds: 1800,
+  feedbackMs: 420,
+  /* Blocks copy / right-click and blurs the page when the tab loses focus. Off by default. */
+  protectContent: false,
+};
+const KEY = {
+  theme: 'usmle-quiz:theme',
+  surface: 'usmle-quiz:surface',
+  history: 'usmle-quiz:history',
+};
+const LETTERS = 'ABCDEFGH';
+
+/* ==========================================================================
+   2. CONTENT
+   ========================================================================== */
+const QUESTIONS = [
+  {
+    id: 'q1',
+    stem: "A 63-year-old man comes to the office due to poor urine flow for several months. The patient says that it takes about 10 seconds to initiate a urinary stream. He also needs to strain when urinating or the stream just stops before his bladder is empty. He has tried behavioral modifications, but the symptoms continue to be bothersome. The patient takes lisinopril for hypertension. He has smoked a pack of cigarettes a day for 30 years. His father had urothelial cancer of the bladder. He reports significant improvement several months after starting finasteride. A therapeutic effect on which of the following structures is most likely responsible for this patient's symptomatic improvement?",
+    options: ['Structure A', 'Structure B', 'Structure C', 'Structure D', 'Structure E', 'Structure F'],
+    answer: 2,
+    image: 'https://github.com/Bluegates77/Question-Images/blob/main/Question%201.png?raw=true',
+    explanation: {
+      text: `This patient has signs of bladder outlet obstruction (eg, urinary hesitancy, need to strain) most likely due to benign prostatic hyperplasia (BPH), a condition that is present in >90% of men age >80. The diagnosis is based on history of urinary symptoms and digital rectal examination showing a smooth, homogenously enlarged prostate. The prostate is located just anterior to the anal canal (Choice D) and posterior to the symphysis pubis (the above CT image is just superior to the joining of the left and right pubic bones).\n\nBPH may cause static urinary obstruction (androgen-mediated enlargement of the prostate) or dynamic obstruction (prostate smooth muscle contraction via α-adrenoceptors). 5-α reductase inhibitors (eg, finasteride) inhibit the action of androgens on the prostate gland, preventing the conversion of testosterone to dihydrotestosterone and thereby limiting further prostate enlargement. α-adrenergic blockers (eg, tamsulosin) relax the smooth muscle in the bladder neck and prostate gland and are also used to control symptoms of BPH.\n\n(Choice B) The distal end of the anterior bladder wall may or may not be visible at this level depending on patient positioning and bladder filling.\n\nEducational objective:\nThe prostate is located between the pubic symphysis and the anal canal and is visible on inferior sections of the pelvis on CT scan. Benign prostatic hyperplasia is a common, age-related condition that causes urinary symptoms (eg, hesitancy, straining, incomplete voiding). It can be medically treated with α-adrenergic blockers and 5-α reductase inhibitors.`,
+      images: [
+        'https://github.com/Bluegates77/Question-Images/blob/main/Answer%201.jpeg?raw=true',
+        'https://github.com/Bluegates77/Question-Images/blob/main/Benign%20prostatic%20hyperplasia%20%28BPH%29.jpeg?raw=true',
+        'https://github.com/Bluegates77/Question-Images/blob/main/Benign%20prostatic%20hyperplasia.jpeg?raw=true',
+      ],
+    },
+  },
+  {
+    id: 'q2',
+    stem: 'A 54-year-old man comes to the office due to difficulty maintaining an erection for the last several weeks. He says, "One night I was having sex with my wife and could not maintain an erection. Since then, it has continued to be a problem." The patient still has morning erections. His medical history is significant for hypertension, coronary artery disease, and depression. He has been married for 20 years but reports that he and his wife have been arguing since he began spending more time at work following a promotion 2 months ago. His current medications include amlodipine, lisinopril, and bupropion. Physical examination is unremarkable. Which of the following is the most likely cause of this patient\'s erectile dysfunction?',
+    options: ['Advancing age', 'Antidepressant-induced sexual dysfunction', 'Antihypertensive-induced adverse effect', 'Psychological distress', 'Vascular insufficiency'],
+    answer: 3,
+    image: null,
+    explanation: {
+      text: `The temporal association between this patient's arguments with his wife and subsequent onset of erectile dysfunction (ED) makes psychogenic factors the most likely cause of his ED. The presence of spontaneous nocturnal erections is another important diagnostic clue as this demonstrates the integrity of neurologic reflexes and corpus cavernosa blood flow. Loss of normal nocturnal erections occurs in men with organic ED but is not seen with psychogenic etiologies.\n\nED can be caused by organic factors, psychogenic factors, or a combination of both. Psychogenic causes include performance anxiety, depression, sexual trauma, and/or relationship problems and are typically associated with an abrupt onset triggered by stress, as in this patient. In contrast, men suffering from organic causes of ED (eg, vascular insufficiency) tend to have a slower progression of symptoms, with intermittent ED later becoming more persistent in nature (Choice E).\n\n(Choice A) There tends to be an increase in the incidence of ED with advancing age. However, the sudden onset of this patient's dysfunction during a time of relationship and work stress makes a psychogenic cause more likely.\n\n(Choices B and C) Antidepressants, particularly selective serotonin reuptake inhibitors, have been associated with sexual dysfunction. However, the norepinephrine-dopamine reuptake inhibitor bupropion has not been associated with sexual dysfunction. Of the antihypertensive agents, thiazide diuretics and sympathetic blockers (eg, clonidine, methyldopa) have the greatest risk for ED. Angiotensin-converting enzyme inhibitors (eg, lisinopril) and calcium channel blockers (eg, amlodipine) have the least risk.\n\nEducational objective:\nPsychogenic causes of erectile dysfunction include performance anxiety, depression, sexual trauma, relationship problems, and stress. Important clues include sudden-onset and normal nocturnal erections.`,
+      images: [],
+    },
+  },
+  {
+    id: 'q3',
+    stem: 'A 21-year-old previously healthy man comes to the emergency department with acute onset of severe left scrotal pain and nausea. The pain started after he returned home from the gym following an intense workout. He denies any trauma, fever, or dysuria. Examination shows a swollen and tender left testis that lies higher than the right testis. Doppler ultrasound shows decreased arterial blood flow in the left spermatic cord entering the testis. Which of the following is the likely origin of the artery involved in this patient\'s condition?',
+    options: ['Abdominal aorta', 'External iliac artery', 'Internal iliac artery', 'Internal pudendal artery', 'Obturator artery', 'Renal artery'],
+    answer: 0,
+    image: null,
+    explanation: {
+      text: `The gonadal arteries arise from the abdominal aorta slightly below the renal arteries. Each gonadal artery courses obliquely downward and laterally within the retroperitoneal space near the psoas major muscle. After crossing anteriorly over the ureter, the gonadal arteries run parallel to the external iliac vessels and eventually traverse the inguinal canal to supply the testes via the spermatic cord in males.\n\nThis patient most likely has testicular torsion, which is usually due to inadequate fixation of the lower pole of the testis to the tunica vaginalis. Testicular torsion is caused by twisting of the spermatic cord, resulting in compression of the pampiniform plexus of the testicular vein and reduced venous outflow. Arterial blood flow in the testicular arteries is initially preserved or slightly decreased, leading to engorgement and eventual hemorrhagic infarction. Torsion is characterized by acute, severe pain with nausea/vomiting, an asymmetrically high-riding testis, and absent cremasteric reflex (elevation of testis while pinching the skin in upper thigh).\n\n(Choices B and C) The external and internal iliac arteries arise from the common iliac artery. The external iliac artery travels underneath the inguinal ligament and becomes the femoral artery, which supplies the lower extremity. The internal iliac artery provides blood supply to the pelvic wall/viscera, buttock, female reproductive organs, bladder, and medial thigh.\n\n(Choice D) The internal pudendal artery is a branch of the internal iliac artery and provides blood supply to the anal canal, scrotum, and penis. However, it does not provide blood supply to the testis.\n\n(Choice E) The obturator artery arises from the internal iliac artery and provides blood supply to the pelvis, bladder, and parts of the femoral head and medial thigh muscles.\n\n(Choice F) The renal artery provides blood supply to the kidney. Branches of the renal artery supply the ureter but do not travel to the testis. Unlike the gonadal arteries, the gonadal veins arise from different structures. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.\n\nEducational objective:\nTesticular torsion is due to twisting of the testis around the spermatic cord (containing the gonadal artery), which can eventually lead to ischemia. The gonadal arteries arise from the abdominal aorta. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.`,
+      images: [],
+    },
+  },
+];
+
+const GALLERY_ROWS = [
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images@main/Download%202.jpg', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Black%20Car.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Brunch.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Mirror.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/book.jfif'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Asthetic%20Polo.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/2000s%20fashion.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Aesthetic%20Cafe%20Vibe.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Studio%20setup%20_%20Oakywood%20Classic%20Desk.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Coffe.jfif'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/KayandTay.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/%40__nigrum.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/Black%20friends%20(2).jpg', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/Chicken%20.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/fdoc!.jfif'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/Model.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/IMG_6225.JPG', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/%40sophiacuerquis.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/Khaki_Brown_Blue.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/rich%20life.jfif'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Call%20me%20daddy%20lol.jpg', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Blob.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Fucking%20Aura.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Thongs.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Legs%20in%20the%20air%20.jpg'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Black%20and%20fucking%20beautiful.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Crossed%20legs%20(2).jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Guitar.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Plus-size%20Butter%20lemon%20Yellow%20Oversize%20Outfit%20Men%20Women%20Casual%20CompfyFall%20Ideas.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Dread.jfif'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Jeans%20and%20cups.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Multicolored%20car.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Sunflowers%20.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Sunset.jfif', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Spiddey.jfif'],
+  ['https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Hands.JPG', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Girls.JPG', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Go%20girl.JPG', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Green%20car.JPG', 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Haha.JPG'],
+];
+/* The wall scrolls in vertical strips, so turn the 8 x 5 grid into 5 columns of 8. */
+const GALLERY_COLUMNS = GALLERY_ROWS[0].map((_, col) => GALLERY_ROWS.map((row) => row[col]).filter(Boolean));
+
+const SONG_BASE = 'https://github.com/Bluegates77/Songs/raw/refs/heads/';
+const PLAYLISTS = [
+  {
+    id: 'im-not-okay', name: "I'm <not> Okay",
+    cover: 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/IMG_6225.JPG',
+    songs: [
+      { title: 'Butterflies - Tom Odell', url: SONG_BASE + "I'm-%3CNot%3E-Okay/Butterflies%20-%20Tom%20Odell.mp4" },
+      { title: 'Friends - Aubory', url: SONG_BASE + "I'm-%3CNot%3E-Okay/Friends%20-Aubory.mp3" },
+      { title: 'Supermarket Flowers - Ed Sheeran', url: SONG_BASE + "I'm-%3CNot%3E-Okay/Supermarket%20Flowers%20-%20Ed%20Sheeran%20.mp4" },
+      { title: 'Still Mine - Ashley Sighn', url: SONG_BASE + "I'm-%3CNot%3E-Okay/Still%20Mine%20-%20Ashley%20Sighn.mp4" },
+      { title: 'Uncalled For - Emily James', url: SONG_BASE + "I'm-%3CNot%3E-Okay/Uncalled%20For%20-%20Emily%20James%20.mp4" },
+    ],
+  },
+  {
+    id: 'night-drive', name: 'Night Drive',
+    cover: 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Sunflowers%20.jfif',
+    songs: [
+      { title: 'All Girls Are The Same - Juice', url: SONG_BASE + 'Night-Drive/All%20Girls%20Are%20The%20Same%20-%20Juice%20.mp3' },
+      { title: 'Dear God - Dax', url: SONG_BASE + 'Night-Drive/Dear%20God%20-%20Dax.mp3' },
+      { title: 'Fast - Juice Wrld', url: SONG_BASE + 'Night-Drive/Fast%20-%20Juice%20Wrld.mp3' },
+      { title: 'Let You Down - NF', url: SONG_BASE + 'Night-Drive/Let%20You%20Down%20-%20NF.mp3' },
+      { title: 'Lie - NF', url: SONG_BASE + 'Night-Drive/Lie%20-%20NF.mp3' },
+    ],
+  },
+  {
+    id: 'trybe', name: 'Trybe',
+    cover: 'https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Spiddey.jfif',
+    songs: [
+      { title: 'Die Hard - Kendrick Lamar', url: SONG_BASE + 'Trybe/Die%20Hard%20-%20Kendrick%20Lamar%20.mp3' },
+      { title: 'Hotline Bling - Drake', url: SONG_BASE + 'Trybe/Hotline%20Bling%20-%20Drake.mp3' },
+      { title: 'Passionfruit - Drake', url: SONG_BASE + 'Trybe/Passionfruit%20-%20%20Drake.mp3' },
+      { title: 'Pretty Little Fears - 6LACK ft J Cole', url: SONG_BASE + 'Trybe/Pretty%20Little%20Fears%20-%206LACK%20ft%20J%20Cole.mp3' },
+      { title: 'Tranquility - Jack Harlow', url: SONG_BASE + 'Trybe/Tranquility%20-%20Jack%20Harlow.mp3' },
+    ],
+  },
+];
+
+/* Typewriter script for the intro: type / delete / pause steps. */
+const INTRO_SEQUENCE = [
+  { type: 'type', text: 'Hi', speed: 150 }, { type: 'pause', ms: 700 },
+  { type: 'delete', speed: 80 }, { type: 'pause', ms: 400 },
+  { type: 'type', text: 'Fuck this', speed: 120 }, { type: 'pause', ms: 1000 },
+  { type: 'delete', speed: 70 }, { type: 'pause', ms: 400 },
+  { type: 'type', text: 'Hello world...', speed: 130 }, { type: 'pause', ms: 1200 },
+];
+
+/* ==========================================================================
+   3. UTILITIES
+   ========================================================================== */
+const cx = (...parts) => parts.filter(Boolean).join(' ');
+const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+const pad2 = (n) => String(n).padStart(2, '0');
+const formatClock = (secs) => {
+  const s = Math.max(0, Math.round(secs || 0));
+  return `${pad2(Math.floor(s / 60))}:${pad2(s % 60)}`;
+};
+const prefersReducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const hidePicture = (e) => { e.currentTarget.style.visibility = 'hidden'; };
+
+const store = {
+  get(key, fallback) {
+    try { const raw = localStorage.getItem(key); return raw === null ? fallback : JSON.parse(raw); }
+    catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
+  },
+};
+
+function loadHistory() {
+  const saved = store.get(KEY.history, []);
+  if (!Array.isArray(saved)) return [];
+  return saved.filter((a) => a && Number.isFinite(a.score) && Number.isFinite(a.total) && a.total > 0 && Number.isFinite(a.timeUsed));
+}
+
+const countCorrect = (answers) => answers.reduce((n, choice, i) => n + (choice === QUESTIONS[i].answer ? 1 : 0), 0);
+const percentOf = (attempt) => Math.round((attempt.score / attempt.total) * 100);
+
+/* Turns [{type:'type',...}] into a flat list of {text, wait} frames to play back. */
+function buildFrames(sequence) {
+  const frames = [];
+  let text = '';
+  for (const step of sequence) {
+    if (step.type === 'type') {
+      for (const ch of step.text) { text += ch; frames.push({ text, wait: step.speed }); }
+    } else if (step.type === 'delete') {
+      while (text.length) { text = text.slice(0, -1); frames.push({ text, wait: step.speed }); }
+    } else {
+      frames.push({ text, wait: step.ms });
+    }
+  }
+  return frames;
+}
+
+/* ==========================================================================
+   4. ICONS  (24px stroke set, inlined so there is no icon-font request)
+   ========================================================================== */
+const ICONS = {
+  music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><path d="M16 10h.01M12 10h.01M8 10h.01M16 14h.01M12 14h.01M8 14h.01M16 18h.01M12 18h.01M8 18h.01"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-2.93 1.41-1.41M17.66 6.34l1.41-1.41M2 12h2m16 0h2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+  play: '<polygon points="6 3 20 12 6 21 6 3" fill="currentColor"/>',
+  pause: '<rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor"/><rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor"/>',
+  skipBack: '<polygon points="19 20 9 12 19 4 19 20" fill="currentColor"/><line x1="5" x2="5" y1="19" y2="5"/>',
+  skipForward: '<polygon points="5 4 15 12 5 20 5 4" fill="currentColor"/><line x1="19" x2="19" y1="5" y2="19"/>',
+  chevronLeft: '<path d="m15 18-6-6 6-6"/>',
+  chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  arrowLeft: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  arrowRight: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  retry: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  fileText: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8M16 13H8M16 17H8"/>',
+  timer: '<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>',
+  trophy: '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>',
+  trend: '<path d="M22 7 13.5 15.5 8.5 10.5 2 17"/><path d="M16 7h6v6"/>',
+  stack: '<line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  zoom: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+};
+function Icon({ name, size = 18, className }) {
+  return html`<svg className=${className} width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+    dangerouslySetInnerHTML=${{ __html: ICONS[name] }} />`;
+}
+const Equalizer = () => html`<span className="eq" aria-hidden="true"><i /><i /><i /></span>`;
+
+/* ==========================================================================
+   5. HOOKS
+   ========================================================================== */
+
+/* Deadline-based countdown: stays accurate even if the tab is throttled. */
+function useCountdown({ total, running, onExpire }) {
+  const [remaining, setRemaining] = useState(total);
+  const remainingRef = useRef(total);
+  const onExpireRef = useRef(onExpire);
+  onExpireRef.current = onExpire;
+
+  useEffect(() => {
+    if (!running) return undefined;
+    const endsAt = Date.now() + remainingRef.current * 1000;
+    const id = setInterval(() => {
+      const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      remainingRef.current = left;
+      setRemaining(left);
+      if (left === 0) { clearInterval(id); onExpireRef.current(); }
+    }, 250);
+    return () => clearInterval(id);
+  }, [running]);
+
+  const reset = useCallback(() => { remainingRef.current = total; setRemaining(total); }, [total]);
+  return { remaining, remainingRef, reset };
+}
+
+/* One <audio> element for the whole app. Refs keep the event handlers free of stale state. */
+function useAudioPlayer(playlists) {
+  const audioRef = useRef(null);
+  const [track, setTrack] = useState({ playlistId: playlists[0].id, index: 0 });
+  const trackRef = useRef(track);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [progress, setProgress] = useState({ current: 0, duration: 0 });
+  const [failed, setFailed] = useState(false);
+
+  const playlistOf = useCallback((id) => playlists.find((p) => p.id === id), [playlists]);
+
+  const load = useCallback((next, autoplay) => {
+    const audio = audioRef.current;
+    trackRef.current = next;
+    setTrack(next);
+    setFailed(false);
+    setProgress({ current: 0, duration: 0 });
+    audio.src = playlistOf(next.playlistId).songs[next.index].url;
+    if (autoplay) audio.play().catch(() => setIsPlaying(false));
+  }, [playlistOf]);
+
+  const step = useCallback((dir) => {
+    const { playlistId, index } = trackRef.current;
+    const count = playlistOf(playlistId).songs.length;
+    load({ playlistId, index: (index + dir + count) % count }, true);
+  }, [load, playlistOf]);
+
+  useEffect(() => {
+    const audio = new Audio();
+    audio.preload = 'none';
+    audio.volume = 0.35;
+    audio.src = playlistOf(trackRef.current.playlistId).songs[trackRef.current.index].url;
+    audioRef.current = audio;
+
+    const on = {
+      play: () => setIsPlaying(true),
+      pause: () => setIsPlaying(false),
+      ended: () => step(1),
+      error: () => { setFailed(true); setIsPlaying(false); },
+      timeupdate: () => setProgress({ current: audio.currentTime, duration: audio.duration || 0 }),
+      loadedmetadata: () => setProgress({ current: audio.currentTime, duration: audio.duration || 0 }),
+    };
+    Object.entries(on).forEach(([name, fn]) => audio.addEventListener(name, fn));
+    return () => {
+      Object.entries(on).forEach(([name, fn]) => audio.removeEventListener(name, fn));
+      audio.pause();
+      audio.removeAttribute('src');
+      audioRef.current = null;
+    };
+  }, [playlistOf, step]);
+
+  const toggle = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) audio.play().catch(() => setFailed(true)); else audio.pause();
+  }, []);
+
+  const playTrack = useCallback((playlistId, index) => {
+    const cur = trackRef.current;
+    if (cur.playlistId === playlistId && cur.index === index) toggle();
+    else load({ playlistId, index }, true);
+  }, [load, toggle]);
+
+  const seek = useCallback((seconds) => { if (audioRef.current) audioRef.current.currentTime = seconds; }, []);
+
+  const playlist = playlistOf(track.playlistId);
+  return { playlists, playlist, track, song: playlist.songs[track.index], isPlaying, progress, failed, toggle, playTrack, seek, next: () => step(1), prev: () => step(-1) };
+}
+
+/* ==========================================================================
+   6. QUIZ STATE
+   ========================================================================== */
+const initialQuizState = () => ({
+  phase: 'intro',            // intro | quiz | results | review
+  index: 0,
+  answers: QUESTIONS.map(() => null),
+  locked: false,
+  timeUp: false,
+  timeUsed: 0,
+  reviewIndex: 0,
+  viewerIndex: null,         // index of the open explanation image, or null
+});
+
+function quizReducer(state, action) {
+  switch (action.type) {
+    case 'START':
+      return state.phase === 'intro' ? { ...state, phase: 'quiz' } : state;
+    case 'SELECT': {
+      if (state.phase !== 'quiz' || state.locked) return state;
+      const answers = state.answers.slice();
+      answers[state.index] = action.choice;
+      return { ...state, answers, locked: true };
+    }
+    case 'NEXT':
+      return { ...state, index: state.index + 1, locked: false };
+    case 'FINISH':
+      return { ...state, phase: 'results', locked: false, timeUp: action.timeUp, timeUsed: action.timeUsed };
+    case 'RETRY':
+      return { ...initialQuizState(), phase: 'quiz' };
+    case 'REVIEW':
+      return { ...state, phase: 'review', reviewIndex: action.index ?? 0, viewerIndex: null };
+    case 'RESULTS':
+      return { ...state, phase: 'results', viewerIndex: null };
+    case 'REVIEW_GO':
+      return { ...state, reviewIndex: clamp(action.index, 0, QUESTIONS.length - 1) };
+    case 'VIEWER_OPEN':
+      return { ...state, viewerIndex: action.index };
+    case 'VIEWER_GO': {
+      const count = QUESTIONS[state.reviewIndex].explanation.images.length;
+      return { ...state, viewerIndex: clamp(action.index, 0, count - 1) };
+    }
+    case 'VIEWER_CLOSE':
+      return { ...state, viewerIndex: null };
+    default:
+      return state;
+  }
+}
+
+/* ==========================================================================
+   7. CALCULATOR LOGIC
+   ========================================================================== */
+const CALC_INITIAL = { display: '0', acc: null, op: null, fresh: true };
+const CALC_OPS = { '+': (a, b) => a + b, '-': (a, b) => a - b, '*': (a, b) => a * b, '/': (a, b) => a / b };
+const CALC_SYMBOL = { '+': '+', '-': '−', '*': '×', '/': '÷' };
+
+function formatCalc(n) {
+  if (!Number.isFinite(n)) return 'Error';
+  const s = String(parseFloat(n.toPrecision(10)));
+  return s.length > 12 ? n.toExponential(5) : s;
+}
+
+function calcReducer(s, a) {
+  const isError = s.display === 'Error';
+  switch (a.type) {
+    case 'digit':
+      if (s.fresh || s.display === '0') return { ...s, display: a.value, fresh: false };
+      if (s.display.replace(/[-.]/g, '').length >= 10) return s;
+      return { ...s, display: s.display + a.value };
+    case 'dot':
+      if (s.fresh) return { ...s, display: '0.', fresh: false };
+      return s.display.includes('.') ? s : { ...s, display: s.display + '.' };
+    case 'op': {
+      if (isError) return s;
+      const current = parseFloat(s.display);
+      if (s.op && s.acc !== null && !s.fresh) {
+        const result = CALC_OPS[s.op](s.acc, current);
+        const ok = Number.isFinite(result);
+        return { display: formatCalc(result), acc: ok ? result : null, op: ok ? a.value : null, fresh: true };
+      }
+      return { ...s, acc: current, op: a.value, fresh: true };
+    }
+    case 'equals': {
+      if (!s.op || s.acc === null) return s;
+      return { display: formatCalc(CALC_OPS[s.op](s.acc, parseFloat(s.display))), acc: null, op: null, fresh: true };
+    }
+    case 'clear':
+      return CALC_INITIAL;
+    case 'negate':
+      if (isError || s.display === '0') return s;
+      return { ...s, display: s.display.startsWith('-') ? s.display.slice(1) : '-' + s.display };
+    case 'percent':
+      return isError ? s : { ...s, display: formatCalc(parseFloat(s.display) / 100), fresh: true };
+    case 'back': {
+      if (s.fresh) return s;
+      const next = s.display.slice(0, -1);
+      return { ...s, display: next === '' || next === '-' ? '0' : next };
+    }
+    default:
+      return s;
+  }
+}
+
+const CALC_KEYS = [
+  { label: 'C', kind: 'fn', action: { type: 'clear' } },
+  { label: '±', kind: 'fn', action: { type: 'negate' } },
+  { label: '%', kind: 'fn', action: { type: 'percent' } },
+  { label: '÷', kind: 'op', action: { type: 'op', value: '/' } },
+  ...['7', '8', '9'].map((d) => ({ label: d, kind: 'num', action: { type: 'digit', value: d } })),
+  { label: '×', kind: 'op', action: { type: 'op', value: '*' } },
+  ...['4', '5', '6'].map((d) => ({ label: d, kind: 'num', action: { type: 'digit', value: d } })),
+  { label: '−', kind: 'op', action: { type: 'op', value: '-' } },
+  ...['1', '2', '3'].map((d) => ({ label: d, kind: 'num', action: { type: 'digit', value: d } })),
+  { label: '+', kind: 'op', action: { type: 'op', value: '+' } },
+  { label: '0', kind: 'num wide', action: { type: 'digit', value: '0' } },
+  { label: '.', kind: 'num', action: { type: 'dot' } },
+  { label: '=', kind: 'equals', action: { type: 'equals' } },
+];
+
+function calcActionForKey(e) {
+  const k = e.key;
+  if (/^[0-9]$/.test(k)) return { type: 'digit', value: k };
+  if (k === '.' || k === ',') return { type: 'dot' };
+  if (k === '+' || k === '-' || k === '*' || k === '/') return { type: 'op', value: k };
+  if (k === 'x' || k === 'X') return { type: 'op', value: '*' };
+  if (k === 'Enter' || k === '=') return { type: 'equals' };
+  if (k === 'Backspace') return { type: 'back' };
+  if (k === 'c' || k === 'C' || k === 'Delete') return { type: 'clear' };
+  if (k === '%') return { type: 'percent' };
+  return null;
+}
+
+/* ==========================================================================
+   8. SMALL COMPONENTS
+   ========================================================================== */
+function Backdrop() {
+  return html`<div className="backdrop" aria-hidden="true">
+    <div className="backdrop-cols">
+      ${GALLERY_COLUMNS.map((urls, c) => html`
+        <div className="backdrop-col" key=${c}>
+          ${[...urls, ...urls].map((url, i) => html`<img key=${i} src=${url} alt="" loading="lazy" decoding="async" onError=${hidePicture} />`)}
+        </div>`)}
+    </div>
+  </div>`;
+}
+const MemoBackdrop = memo(Backdrop, () => true);
+
+function Intro({ leaving, onDone }) {
+  const [text, setText] = useState('');
+  useEffect(() => {
+    const frames = buildFrames(INTRO_SEQUENCE);
+    let i = 0;
+    let timer;
+    const tick = () => {
+      if (i >= frames.length) { onDone(); return; }
+      const frame = frames[i++];
+      setText(frame.text);
+      timer = setTimeout(tick, frame.wait);
+    };
+    timer = setTimeout(tick, 300);
+    return () => clearTimeout(timer);
+  }, [onDone]);
+
+  return html`<div className=${cx('intro', leaving && 'is-leaving')} onClick=${onDone} role="dialog" aria-label="Welcome">
+    <p className="intro-text" aria-live="off">${text}<span className="caret" /></p>
+    <button className="intro-skip" onClick=${onDone}>Skip intro <kbd>Space</kbd></button>
+  </div>`;
+}
+
+function WaveText({ text, play }) {
+  const words = useMemo(() => text.split(/\s+/), [text]);
+  return html`<p className=${cx('qtext', 'wave', play && 'is-waving')}>
+    ${words.map((word, i) => html`<${Fragment} key=${i}>
+      <span className="wave-word" style=${{ '--i': i }}>${word}</span>${i < words.length - 1 ? ' ' : ''}
+    <//>`)}
+  </p>`;
+}
+
+function AnimatedNumber({ value, suffix = '', duration = 1000 }) {
+  const [shown, setShown] = useState(prefersReducedMotion() ? value : 0);
+  useEffect(() => {
+    if (prefersReducedMotion()) { setShown(value); return undefined; }
+    const start = performance.now();
+    let raf;
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      setShown(Math.round(value * (1 - Math.pow(1 - t, 4))));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration]);
+  return html`<${Fragment}>${shown}${suffix}<//>`;
+}
+
+const Pill = ({ tone, children, plain }) => html`<span className=${cx('pill', tone, plain && 'plain')}>${children}</span>`;
+
+/* ==========================================================================
+   9. TOPBAR + DOCK
+   ========================================================================== */
+function Topbar({ phase, remaining, theme, surface, dock, isPlaying, onToggleDock, onToggleTheme, onToggleSurface }) {
+  const timerState = remaining <= 60 ? 'is-crit' : remaining <= 300 ? 'is-warn' : '';
+  return html`<header className="topbar">
+    <div className="brand">
+      <span className="brand-mark"><${Icon} name="plus" size=${18} /></span>
+      <span className="brand-name">USMLE Quiz</span>
+    </div>
+    ${phase === 'quiz' && html`<div className=${cx('timer', timerState)} role="timer" aria-label="Time remaining">
+      <${Icon} name="timer" size=${15} />${formatClock(remaining)}
+    </div>`}
+    <div className="topbar-spacer" />
+    <div className="toolbar">
+      <button className=${cx('btn btn-music', dock === 'music' && 'is-open')} onClick=${() => onToggleDock('music')}
+        aria-expanded=${dock === 'music'} aria-label="Music" title="Music">
+        ${isPlaying ? html`<${Equalizer} />` : html`<${Icon} name="music" />`}
+        <span className="btn-label">Songs my cat thinks are cool</span>
+      </button>
+      <button className=${cx('btn btn-icon', dock === 'calc' && 'is-open')} onClick=${() => onToggleDock('calc')}
+        aria-expanded=${dock === 'calc'} aria-label="Calculator" title="Calculator">
+        <${Icon} name="calculator" />
+      </button>
+      <button className="btn btn-icon" onClick=${onToggleSurface} aria-pressed=${surface === 'solid'}
+        aria-label="Solid surfaces" title="Solid surfaces (more contrast over the photo wall)">
+        <${Icon} name="layers" />
+      </button>
+      <button className="btn btn-icon" onClick=${onToggleTheme} aria-label=${theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        title=${theme === 'dark' ? 'Light theme' : 'Dark theme'}>
+        <${Icon} name=${theme === 'dark' ? 'sun' : 'moon'} />
+      </button>
+    </div>
+  </header>`;
+}
+
+function DockPanel({ id, title, active, onClose, children }) {
+  return html`<section className=${cx('dock-panel', active && 'is-active')} data-panel=${id}
+    aria-hidden=${!active} inert=${active ? undefined : ''} aria-label=${title}>
+    <div className="dock-head">
+      <h2>${title}</h2>
+      <button className="btn btn-icon btn-ghost" onClick=${onClose} aria-label=${`Close ${title.toLowerCase()}`}><${Icon} name="x" /></button>
+    </div>
+    ${children}
+  </section>`;
+}
+
+function MusicPanel({ player, active, onClose }) {
+  const { playlists, playlist, track, song, isPlaying, progress, failed, toggle, playTrack, seek, next, prev } = player;
+  const pct = progress.duration ? (progress.current / progress.duration) * 100 : 0;
+  return html`<${DockPanel} id="music" title="Music" active=${active} onClose=${onClose}>
+    <div className="dock-body">
+      <div className=${cx('now', isPlaying && 'is-playing')}>
+        <div className="now-top">
+          <div className="vinyl"><img src=${playlist.cover} alt="" onError=${hidePicture} /></div>
+          <div className="now-meta">
+            <p className="eyebrow">Now playing</p>
+            <p className="title" style=${{ marginTop: 8 }}>${song.title}</p>
+            <p className="sub">${playlist.name}</p>
+          </div>
+        </div>
+        <div className="seek-row">
+          <span className="mono">${formatClock(progress.current)}</span>
+          <input className="seek" type="range" min="0" max=${progress.duration || 0} step="1" value=${progress.current}
+            style=${{ '--p': pct + '%' }} aria-label="Seek" onChange=${(e) => seek(Number(e.target.value))} disabled=${!progress.duration} />
+          <span className="mono">${formatClock(progress.duration)}</span>
+        </div>
+        <div className="controls">
+          <button className="btn btn-icon btn-ghost" onClick=${prev} aria-label="Previous track"><${Icon} name="skipBack" /></button>
+          <button className="play" onClick=${toggle} aria-label=${isPlaying ? 'Pause' : 'Play'}><${Icon} name=${isPlaying ? 'pause' : 'play'} size=${20} /></button>
+          <button className="btn btn-icon btn-ghost" onClick=${next} aria-label="Next track"><${Icon} name="skipForward" /></button>
+        </div>
+        ${failed && html`<p className="error-note">This track could not be loaded. Try another one.</p>`}
+      </div>
+      ${playlists.map((list) => html`<div className="playlist" key=${list.id}>
+        <div className="playlist-head">
+          <img src=${list.cover} alt="" loading="lazy" onError=${hidePicture} />
+          <h3>${list.name}</h3>
+        </div>
+        ${list.songs.map((s, i) => {
+          const current = track.playlistId === list.id && track.index === i;
+          return html`<button key=${i} className=${cx('track', current && 'is-current')} onClick=${() => playTrack(list.id, i)}>
+            <span className="track-n">${current && isPlaying ? html`<${Equalizer} />` : i + 1}</span>
+            <span className="track-title">${s.title}</span>
+          </button>`;
+        })}
+      </div>`)}
+    </div>
+  <//>`;
+}
+
+function CalculatorPanel({ active, onClose }) {
+  const [calc, dispatch] = useReducer(calcReducer, CALC_INITIAL);
+
+  /* While the calculator is docked it owns the keyboard, so digits don't answer questions. */
+  useEffect(() => {
+    if (!active) return undefined;
+    const onKey = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const action = calcActionForKey(e);
+      if (!action) return;
+      e.preventDefault();
+      dispatch(action);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [active]);
+
+  const pending = calc.fresh ? calc.op : null;
+  const expr = calc.op && calc.acc !== null ? `${formatCalc(calc.acc)} ${CALC_SYMBOL[calc.op]}` : '';
+  return html`<${DockPanel} id="calc" title="Calculator" active=${active} onClose=${onClose}>
+    <div className="calc">
+      <div className="calc-screen" aria-live="polite">
+        <div className="calc-expr">${expr}</div>
+        <div className=${cx('calc-value', calc.display.length > 9 && 'is-small')}>${calc.display}</div>
+      </div>
+      <div className="calc-grid">
+        ${CALC_KEYS.map((key) => html`<button key=${key.label} type="button"
+          className=${cx('calc-key', key.kind, key.action.type === 'op' && key.action.value === pending && 'is-pending')}
+          onMouseDown=${(e) => e.preventDefault()} onClick=${() => dispatch(key.action)}>${key.label}</button>`)}
+      </div>
+    </div>
+  <//>`;
+}
+
+/* ==========================================================================
+   10. QUIZ SCREEN
+   ========================================================================== */
+function QuizProgress({ index }) {
+  const total = QUESTIONS.length;
+  return html`<div className=${cx('quiz-progress', QUESTIONS[index].image && 'is-wide')}>
+    <div className="quiz-progress-meta">
+      <span className="eyebrow">Question <span className="mono">${pad2(index + 1)} / ${pad2(total)}</span></span>
+      <span className="quiz-hint">Press <kbd>1</kbd>–<kbd>${QUESTIONS[index].options.length}</kbd> to answer</span>
+    </div>
+    <div className="rail" aria-hidden="true">
+      ${QUESTIONS.map((q, i) => html`<div key=${q.id} className=${cx('rail-seg', i < index && 'is-done', i === index && 'is-current')}><span /></div>`)}
+    </div>
+    <p className="sr-only" aria-live="polite">Question ${index + 1} of ${total}</p>
+  </div>`;
+}
+
+const QuestionCard = memo(function QuestionCard({ q, index, offset, selected, locked, playing, onSelect }) {
+  const state = offset === 0 ? 'active' : Math.abs(offset) === 1 ? 'near' : 'far';
+  const answered = locked && selected !== null;
+  return html`<article className=${cx('qcard card', q.image && 'has-image')} data-state=${state} style=${{ '--o': offset }}
+    aria-hidden=${offset !== 0} inert=${offset === 0 ? undefined : ''} aria-label=${`Question ${index + 1}`}>
+    <div className="qcard-body">
+      ${q.image && html`<figure className="qimage"><img src=${q.image} alt="Illustration for the question" onError=${hidePicture} /></figure>`}
+      <div className="qcard-main">
+        <p className="eyebrow qcard-kicker">Question ${index + 1}</p>
+        <${WaveText} text=${q.stem} play=${playing && offset === 0} />
+        <div className="options" role="group" aria-label="Answer choices">
+          ${q.options.map((opt, i) => html`<button key=${i} className=${cx('option', selected === i && 'is-selected', answered && selected !== i && 'is-dim')}
+            disabled=${locked || offset !== 0} onClick=${() => onSelect(i)} aria-label=${`Option ${LETTERS[i]}: ${opt}`}>
+            <span className="option-key" aria-hidden="true">${LETTERS[i]}</span>
+            <span className="option-label">${opt}</span>
+          </button>`)}
+        </div>
+      </div>
+    </div>
+  </article>`;
+});
+
+function QuizScreen({ state, onSelect }) {
+  return html`<section className="screen quiz" aria-label="Quiz">
+    <${QuizProgress} index=${state.index} />
+    <div className="deck">
+      ${QUESTIONS.map((q, i) => html`<${QuestionCard} key=${q.id} q=${q} index=${i} offset=${i - state.index}
+        selected=${state.answers[i]} locked=${state.locked && i === state.index} playing=${state.phase === 'quiz'} onSelect=${onSelect} />`)}
+    </div>
+  </section>`;
+}
+
+/* ==========================================================================
+   11. RESULTS SCREEN
+   ========================================================================== */
+function ScoreRing({ percent, size = 120 }) {
+  const stroke = 10;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  return html`<div className="ring" style=${{ width: size, height: size }}>
+    <svg width=${size} height=${size} viewBox=${`0 0 ${size} ${size}`} aria-hidden="true">
+      <circle className="ring-track" cx=${size / 2} cy=${size / 2} r=${r} fill="none" strokeWidth=${stroke} />
+      <circle className="ring-bar" cx=${size / 2} cy=${size / 2} r=${r} fill="none" strokeWidth=${stroke}
+        strokeDasharray=${c} strokeDashoffset=${c * (1 - percent / 100)} style=${{ '--c': c }} />
+    </svg>
+    <span className="ring-label"><${AnimatedNumber} value=${percent} suffix="%" duration=${1400} /></span>
+  </div>`;
+}
+
+function AttemptBars({ history }) {
+  return html`<div className="bars" aria-hidden="true">
+    ${history.slice(-6).map((a, i) => html`<span key=${a.at + '-' + i} style=${{ '--i': i, height: `${Math.max(18, percentOf(a))}%` }} title=${`${percentOf(a)}%`} />`)}
+  </div>`;
+}
+
+function withAlpha(hex, alpha) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+function HistoryChart({ scores, theme }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    if (!canvasRef.current || typeof Chart === 'undefined') return undefined;
+    const css = getComputedStyle(document.documentElement);
+    const token = (name) => css.getPropertyValue(name).trim();
+    const accent = token('--accent');
+    const canvas = canvasRef.current;
+    const gradient = canvas.getContext('2d').createLinearGradient(0, 0, 0, canvas.clientHeight || 280);
+    gradient.addColorStop(0, withAlpha(accent, 0.28));
+    gradient.addColorStop(1, withAlpha(accent, 0));
+    const tickFont = { family: 'Inter', size: 11 };
+
+    const chart = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels: scores.map((_, i) => `#${i + 1}`),
+        datasets: [{
+          data: scores, borderColor: accent, borderWidth: 2.5, backgroundColor: gradient, fill: true, tension: 0.35,
+          pointRadius: scores.length > 1 ? 3.5 : 5, pointHoverRadius: 6,
+          pointBackgroundColor: token('--surface-solid'), pointBorderColor: accent, pointBorderWidth: 2,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: prefersReducedMotion() ? 0 : 900, easing: 'easeOutQuart' },
+        interaction: { intersect: false, mode: 'index' },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: token('--surface-solid'), titleColor: token('--ink-3'), bodyColor: token('--ink'),
+            borderColor: token('--line-strong'), borderWidth: 1, padding: 12, displayColors: false,
+            titleFont: tickFont, bodyFont: { family: 'JetBrains Mono', size: 13, weight: '600' },
+            callbacks: { label: (c) => `${c.raw}%` },
+          },
+        },
+        scales: {
+          x: { grid: { display: false }, border: { display: false }, ticks: { color: token('--ink-3'), font: tickFont } },
+          y: {
+            min: 0, max: 100, border: { display: false }, grid: { color: token('--line') },
+            ticks: { stepSize: 25, callback: (v) => `${v}%`, color: token('--ink-3'), font: tickFont },
+          },
+        },
+      },
+    });
+    return () => chart.destroy();
+  }, [scores.join(','), theme]);
+  return html`<div className="chart"><canvas ref=${canvasRef} role="img" aria-label=${`Score history: ${scores.join('%, ')}%`} /></div>`;
+}
+
+function ResultsScreen({ state, history, theme, onReview, onRetry }) {
+  const [range, setRange] = useState('all');
+  const attempt = history[history.length - 1];
+  const prev = history.length > 1 ? history[history.length - 2] : null;
+
+  const scorePct = percentOf(attempt);
+  const bestPct = Math.max(...history.map(percentOf));
+  const avgPct = Math.round(history.reduce((sum, a) => sum + percentOf(a), 0) / history.length);
+  const totalTime = history.reduce((sum, a) => sum + a.timeUsed, 0);
+  const scoreDelta = prev ? scorePct - percentOf(prev) : null;
+  const timeDelta = prev ? prev.timeUsed - attempt.timeUsed : null;
+  const timePct = Math.min(100, Math.round((attempt.timeUsed / CONFIG.durationSeconds) * 100));
+  const chartScores = (range === 'all' ? history : history.slice(-5)).map(percentOf);
+  const stagger = (n) => ({ '--d': 80 + n * 80 });
+
+  const stats = [
+    { label: 'Correct answers', value: `${attempt.score}/${attempt.total}`, icon: 'check', tone: 'tone-good' },
+    { label: 'Average score', value: `${avgPct}%`, icon: 'trend', tone: 'tone-accent' },
+    { label: 'Total study time', value: formatClock(totalTime), icon: 'clock', tone: 'tone-teal' },
+  ];
+
+  return html`<section className="screen" aria-label="Results"><div className="results">
+    <div className="results-head reveal">
+      <div>
+        <p className="eyebrow tone-accent">Session report</p>
+        <h1 className="display">${state.timeUp ? "Time's up." : 'Quiz complete.'}</h1>
+        <p className="sub">${attempt.total} questions · Attempt ${history.length} · ${new Date(attempt.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
+      </div>
+      <div className="actions">
+        <button className="btn" onClick=${() => onReview(0)}><${Icon} name="fileText" size=${16} />Review answers</button>
+        <button className="btn btn-primary" onClick=${onRetry}><${Icon} name="retry" size=${16} />Retry</button>
+      </div>
+    </div>
+
+    <div className="grid metrics">
+      <article className="card metric reveal" style=${stagger(0)}>
+        <div className="row" style=${{ flexWrap: 'nowrap', gap: 18 }}>
+          <${ScoreRing} percent=${scorePct} />
+          <div style=${{ display: 'grid', gap: 8 }}>
+            <span className="eyebrow">Score</span>
+            <span className="sub">${attempt.score} of ${attempt.total} correct</span>
+            ${scoreDelta !== null && html`<${Pill} tone=${scoreDelta >= 0 ? 'up' : 'down'}>${scoreDelta >= 0 ? '▲' : '▼'} ${Math.abs(scoreDelta)} pts vs prev<//>`}
+          </div>
+        </div>
+      </article>
+
+      <article className="card metric reveal" style=${stagger(1)}>
+        <div className="metric-head"><span className="eyebrow">Time used</span><span className="chip"><${Icon} name="timer" size=${16} /></span></div>
+        <div>
+          <div className="big mono" style=${{ fontFamily: 'var(--font-display)' }}>${formatClock(attempt.timeUsed)}</div>
+          <div className="meter"><span style=${{ width: `${timePct}%` }} /></div>
+          <div className="row">
+            <span className="sub" style=${{ fontSize: 12 }}>${timePct}% of ${formatClock(CONFIG.durationSeconds)}</span>
+            ${timeDelta !== null && timeDelta !== 0 && html`<${Pill} tone=${timeDelta > 0 ? 'up' : 'down'}>${Math.abs(timeDelta)}s ${timeDelta > 0 ? 'faster' : 'slower'}<//>`}
+          </div>
+        </div>
+      </article>
+
+      <article className="card metric reveal" style=${stagger(2)}>
+        <div className="metric-head"><span className="eyebrow">Best score</span><span className="chip"><${Icon} name="trophy" size=${16} /></span></div>
+        <div>
+          <div className="big"><${AnimatedNumber} value=${bestPct} suffix="%" /></div>
+          <div className="row" style=${{ marginTop: 10 }}>
+            <span className="sub" style=${{ fontSize: 12 }}>across ${history.length} attempt${history.length === 1 ? '' : 's'}</span>
+            ${history.length > 1 && scorePct >= bestPct && html`<${Pill} tone="up">★ Personal best<//>`}
+          </div>
+        </div>
+      </article>
+
+      <article className="card metric reveal" style=${stagger(3)}>
+        <div className="metric-head"><span className="eyebrow">Attempts</span><span className="chip"><${Icon} name="stack" size=${16} /></span></div>
+        <div className="row" style=${{ alignItems: 'flex-end', flexWrap: 'nowrap' }}>
+          <div className="big"><${AnimatedNumber} value=${history.length} /></div>
+          <${AttemptBars} history=${history} />
+        </div>
+      </article>
+    </div>
+
+    <div className="grid analytics">
+      <article className="card panel reveal" style=${stagger(4)}>
+        <div className="panel-head">
+          <div><p className="eyebrow">Analytics</p><h3>Performance history</h3></div>
+          <div className="seg" role="group" aria-label="History range">
+            <button aria-pressed=${range === 'all'} onClick=${() => setRange('all')}>All</button>
+            <button aria-pressed=${range === 'last'} onClick=${() => setRange('last')}>Last 5</button>
+          </div>
+        </div>
+        <${HistoryChart} scores=${chartScores} theme=${theme} />
+      </article>
+
+      <article className="card panel reveal" style=${stagger(5)}>
+        <div className="panel-head">
+          <div><p className="eyebrow">Breakdown</p><h3>Question results</h3></div>
+          <span className="pill plain tone-accent mono" style=${{ background: 'var(--accent-soft)' }}>${attempt.score}/${attempt.total}</span>
+        </div>
+        ${QUESTIONS.map((q, i) => {
+          const choice = state.answers[i];
+          const right = choice === q.answer;
+          return html`<button key=${q.id} className="break-row" style=${{ width: '100%', textAlign: 'left' }} onClick=${() => onReview(i)}>
+            <div>
+              <span className="chip" style=${{ color: right ? 'var(--good)' : 'var(--bad)' }}><${Icon} name=${right ? 'check' : 'x'} size=${16} /></span>
+              <div><p>Question ${i + 1}</p><span className="sub">${right ? 'Correct' : choice === null ? 'Unanswered' : 'Incorrect'}</span></div>
+            </div>
+            <${Icon} name="chevronRight" size=${16} />
+          </button>`;
+        })}
+      </article>
+    </div>
+
+    <div className="grid stats">
+      ${stats.map((s, i) => html`<article key=${s.label} className="card stat reveal" style=${stagger(6 + i)}>
+        <div><p className="eyebrow">${s.label}</p><p className="stat-value">${s.value}</p></div>
+        <span className=${cx('chip', s.tone)}><${Icon} name=${s.icon} size=${16} /></span>
+      </article>`)}
+    </div>
+  </div></section>`;
+}
+
+/* ==========================================================================
+   12. REVIEW SCREEN + IMAGE VIEWER
+   ========================================================================== */
+function Explanation({ text }) {
+  return html`<div className="prose">
+    ${text.split(/\n\n+/).map((para, i) => {
+      if (para.startsWith('Educational objective:')) {
+        return html`<div className="callout" key=${i}>
+          <p className="eyebrow">Educational objective</p>
+          <p>${para.replace(/^Educational objective:\s*/, '')}</p>
+        </div>`;
+      }
+      const choice = para.match(/^\((Choices? [A-F](?: and [A-F])?)\)\s*([\s\S]*)$/);
+      if (choice) return html`<p className="choice" key=${i}><b>${choice[1]}</b> ${choice[2]}</p>`;
+      return html`<p key=${i}>${para}</p>`;
+    })}
+  </div>`;
+}
+
+function ReviewAnswers({ q, chosen }) {
+  return html`<div role="list">
+    ${q.options.map((opt, i) => {
+      const correct = i === q.answer;
+      const wrong = i === chosen && !correct;
+      return html`<div key=${i} role="listitem" className=${cx('answer', correct && 'is-correct', wrong && 'is-wrong')}>
+        <${Icon} name=${correct ? 'check' : wrong ? 'x' : 'plus'} size=${16} className=${correct || wrong ? '' : 'sr-only'} />
+        <span>${opt}</span>
+        ${correct && html`<span className="answer-tag">Correct</span>`}
+        ${wrong && html`<span className="answer-tag">Your answer</span>`}
+      </div>`;
+    })}
+  </div>`;
+}
+
+function ImageViewer({ q, index, dispatch }) {
+  const images = q.explanation.images;
+  const startX = useRef(null);
+  const closeRef = useRef(null);
+  useEffect(() => { if (closeRef.current) closeRef.current.focus(); }, []);
+
+  const onPointerDown = (e) => { startX.current = e.clientX; };
+  const onPointerUp = (e) => {
+    if (startX.current === null) return;
+    const dx = e.clientX - startX.current;
+    startX.current = null;
+    if (Math.abs(dx) > 40) dispatch({ type: 'VIEWER_GO', index: index + (dx < 0 ? 1 : -1) });
+  };
+
+  return html`<div className="viewer" role="dialog" aria-modal="true" aria-label="Explanation images">
+    <div className="viewer-bar">
+      <span className="eyebrow">Image <span className="mono">${index + 1} / ${images.length}</span></span>
+      <button ref=${closeRef} className="btn" onClick=${() => dispatch({ type: 'VIEWER_CLOSE' })}><${Icon} name="x" size=${16} />Close</button>
+    </div>
+    <div className="viewer-body">
+      <aside className="card viewer-side">
+        <div className="pane-title"><span className="pane-badge q">${QUESTIONS.indexOf(q) + 1}</span><h2>Question</h2></div>
+        <p className="review-stem" style=${{ fontSize: 13 }}>${q.stem}</p>
+      </aside>
+      <div className="card carousel" onPointerDown=${onPointerDown} onPointerUp=${onPointerUp} onPointerCancel=${() => { startX.current = null; }}>
+        <div className="carousel-track" style=${{ '--idx': index }}>
+          ${images.map((url, i) => html`<div className="carousel-slide" key=${i}><img src=${url} alt=${`Explanation image ${i + 1}`} draggable="false" /></div>`)}
+        </div>
+        <div className="carousel-foot">
+          <button className="btn btn-icon" onClick=${() => dispatch({ type: 'VIEWER_GO', index: index - 1 })} disabled=${index === 0} aria-label="Previous image"><${Icon} name="chevronLeft" /></button>
+          <div className="dots">${images.map((_, i) => html`<button key=${i} className=${cx('dot', i === index && 'is-current')} onClick=${() => dispatch({ type: 'VIEWER_GO', index: i })} aria-label=${`Image ${i + 1}`} />`)}</div>
+          <button className="btn btn-icon" onClick=${() => dispatch({ type: 'VIEWER_GO', index: index + 1 })} disabled=${index === images.length - 1} aria-label="Next image"><${Icon} name="chevronRight" /></button>
+        </div>
+      </div>
+      <aside className="card viewer-side">
+        <div className="pane-title"><span className="pane-badge e">i</span><h2>Explanation</h2></div>
+        <${Explanation} text=${q.explanation.text} />
+      </aside>
+    </div>
+  </div>`;
+}
+
+function ReviewScreen({ state, dispatch }) {
+  const i = state.reviewIndex;
+  const q = QUESTIONS[i];
+  const chosen = state.answers[i];
+  const images = q.explanation.images;
+  const last = QUESTIONS.length - 1;
+
+  return html`<${Fragment}>
+    <section className="screen" aria-label="Review"><div className="review">
+      <div className="review-head">
+        <button className="btn" onClick=${() => dispatch({ type: 'RESULTS' })}><${Icon} name="arrowLeft" size=${16} />Results</button>
+        <h1 className="review-title">Question ${i + 1} <span className="muted">of ${QUESTIONS.length}</span></h1>
+        <span style=${{ width: 100 }} className="topbar-spacer" />
+      </div>
+
+      <div className="review-grid">
+        <article className="card panel">
+          <div className="pane-title"><span className="pane-badge q">${i + 1}</span><h2>Question</h2></div>
+          ${q.image && html`<figure className="review-q-image"><img src=${q.image} alt="Illustration for the question" onError=${hidePicture} /></figure>`}
+          <p className="review-stem">${q.stem}</p>
+          <${ReviewAnswers} q=${q} chosen=${chosen} />
+          ${chosen === null && html`<p className="sub" style=${{ marginTop: 12 }}>You didn't answer this question.</p>`}
+        </article>
+
+        <article className="card panel">
+          <div className="pane-title"><span className="pane-badge e">i</span><h2>Explanation</h2></div>
+          ${images.length > 0 && html`<div className="thumbs">
+            ${images.map((url, n) => html`<button key=${n} className="thumb" onClick=${() => dispatch({ type: 'VIEWER_OPEN', index: n })} aria-label=${`Open explanation image ${n + 1}`}>
+              <img src=${url} alt="" loading="lazy" onError=${hidePicture} />
+              <span className="thumb-zoom"><${Icon} name="zoom" size=${14} /></span>
+            </button>`)}
+          </div>`}
+          <${Explanation} text=${q.explanation.text} />
+        </article>
+      </div>
+
+      <nav className="pager" aria-label="Review navigation">
+        <button className="btn" disabled=${i === 0} onClick=${() => dispatch({ type: 'REVIEW_GO', index: i - 1 })}><${Icon} name="chevronLeft" size=${16} />Previous</button>
+        <div className="dots">${QUESTIONS.map((x, n) => html`<button key=${x.id} className=${cx('dot', n === i && 'is-current')} onClick=${() => dispatch({ type: 'REVIEW_GO', index: n })} aria-label=${`Question ${n + 1}`} />`)}</div>
+        <button className="btn" disabled=${i === last} onClick=${() => dispatch({ type: 'REVIEW_GO', index: i + 1 })}>Next<${Icon} name="chevronRight" size=${16} /></button>
+      </nav>
+    </div></section>
+    ${state.viewerIndex !== null && html`<${ImageViewer} q=${q} index=${state.viewerIndex} dispatch=${dispatch} />`}
+  <//>`;
+}
+
+/* ==========================================================================
+   13. APP
+   ========================================================================== */
+function App() {
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme);
+  const [surface, setSurface] = useState(() => document.documentElement.dataset.surface);
+  const [dock, setDock] = useState(null);                    // null | 'music' | 'calc'
+  const [history, setHistory] = useState(loadHistory);
+  const [state, dispatch] = useReducer(quizReducer, undefined, initialQuizState);
+  const [introVisible, setIntroVisible] = useState(true);
+  const [obscured, setObscured] = useState(false);
+
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const dockRef = useRef(dock);
+  dockRef.current = dock;
+
+  const player = useAudioPlayer(PLAYLISTS);
+
+  /* ---- finishing a run ---- */
+  const countdownRef = useRef(null);
+  const finish = useCallback((timeUp) => {
+    const s = stateRef.current;
+    if (s.phase !== 'quiz') return;
+    const timeUsed = timeUp ? CONFIG.durationSeconds : CONFIG.durationSeconds - countdownRef.current.remainingRef.current;
+    const attempt = { at: Date.now(), score: countCorrect(s.answers), total: QUESTIONS.length, timeUsed, timeUp };
+    setHistory((h) => [...h, attempt]);
+    dispatch({ type: 'FINISH', timeUp, timeUsed });
+  }, []);
+
+  const countdown = useCountdown({ total: CONFIG.durationSeconds, running: state.phase === 'quiz', onExpire: () => finish(true) });
+  countdownRef.current = countdown;
+
+  useEffect(() => { store.set(KEY.history, history.slice(-50)); }, [history]);
+
+  /* Show feedback briefly, then move on (or finish after the last question). */
+  useEffect(() => {
+    if (!state.locked) return undefined;
+    const timer = setTimeout(() => {
+      if (stateRef.current.index + 1 < QUESTIONS.length) dispatch({ type: 'NEXT' });
+      else finish(false);
+    }, CONFIG.feedbackMs);
+    return () => clearTimeout(timer);
+  }, [state.locked, state.index, finish]);
+
+  /* ---- appearance ---- */
+  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
+  useEffect(() => { document.documentElement.dataset.surface = surface; }, [surface]);
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e) => { if (store.get(KEY.theme, null) === null) setTheme(e.matches ? 'dark' : 'light'); };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  const toggleTheme = () => { const next = theme === 'dark' ? 'light' : 'dark'; store.set(KEY.theme, next); setTheme(next); };
+  const toggleSurface = () => { const next = surface === 'solid' ? 'glass' : 'solid'; store.set(KEY.surface, next); setSurface(next); };
+  const toggleDock = useCallback((name) => setDock((cur) => (cur === name ? null : name)), []);
+  const closeDock = useCallback(() => setDock(null), []);
+
+  /* ---- intro ---- */
+  const startQuiz = useCallback(() => dispatch({ type: 'START' }), []);
+  useEffect(() => {
+    if (state.phase === 'intro') return undefined;
+    const timer = setTimeout(() => setIntroVisible(false), 700);
+    return () => clearTimeout(timer);
+  }, [state.phase]);
+
+  /* ---- actions ---- */
+  const selectOption = useCallback((choice) => dispatch({ type: 'SELECT', choice }), []);
+  const retry = useCallback(() => { countdownRef.current.reset(); dispatch({ type: 'RETRY' }); }, []);
+  const openReview = useCallback((index) => dispatch({ type: 'REVIEW', index }), []);
+
+  /* ---- keyboard ---- */
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target.closest && e.target.closest('input[type="text"], textarea, select, [contenteditable]')) return;
+      const s = stateRef.current;
+
+      if (e.key === 'Escape') {
+        if (s.viewerIndex !== null) dispatch({ type: 'VIEWER_CLOSE' });
+        else if (dockRef.current) setDock(null);
+        return;
+      }
+      if (s.phase === 'intro') {
+        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); dispatch({ type: 'START' }); }
+        return;
+      }
+      if (dockRef.current === 'calc') return;   // the calculator owns the keyboard
+
+      if (s.phase === 'quiz' && /^[1-9]$/.test(e.key)) {
+        const choice = Number(e.key) - 1;
+        if (choice < QUESTIONS[s.index].options.length && !s.locked) { e.preventDefault(); dispatch({ type: 'SELECT', choice }); }
+      } else if (s.phase === 'results' && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault(); countdownRef.current.reset(); dispatch({ type: 'RETRY' });
+      } else if (s.phase === 'review') {
+        const dir = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (!dir) return;
+        e.preventDefault();
+        if (s.viewerIndex !== null) dispatch({ type: 'VIEWER_GO', index: s.viewerIndex + dir });
+        else dispatch({ type: 'REVIEW_GO', index: s.reviewIndex + dir });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  /* ---- optional content protection ---- */
+  useEffect(() => {
+    if (!CONFIG.protectContent) return undefined;
+    const block = (e) => e.preventDefault();
+    const hide = () => setObscured(true);
+    const show = () => setObscured(false);
+    const onVisibility = () => setObscured(document.hidden);
+    ['contextmenu', 'copy', 'cut', 'dragstart', 'selectstart'].forEach((n) => document.addEventListener(n, block));
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('blur', hide);
+    window.addEventListener('focus', show);
+    return () => {
+      ['contextmenu', 'copy', 'cut', 'dragstart', 'selectstart'].forEach((n) => document.removeEventListener(n, block));
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('blur', hide);
+      window.removeEventListener('focus', show);
+    };
+  }, []);
+
+  const { phase } = state;
+  return html`<div className=${cx('app', obscured && 'is-obscured')} data-dock=${dock || 'none'}>
+    <${MemoBackdrop} />
+    <${Topbar} phase=${phase} remaining=${countdown.remaining} theme=${theme} surface=${surface} dock=${dock}
+      isPlaying=${player.isPlaying} onToggleDock=${toggleDock} onToggleTheme=${toggleTheme} onToggleSurface=${toggleSurface} />
+
+    <div className="workspace">
+      <main className="stage" id="main">
+        ${(phase === 'intro' || phase === 'quiz') && html`<${QuizScreen} state=${state} onSelect=${selectOption} />`}
+        ${phase === 'results' && html`<${ResultsScreen} key=${history.length} state=${state} history=${history} theme=${theme} onReview=${openReview} onRetry=${retry} />`}
+        ${phase === 'review' && html`<${ReviewScreen} state=${state} dispatch=${dispatch} />`}
+      </main>
+      <aside className="dock" aria-label="Tools">
+        <${MusicPanel} player=${player} active=${dock === 'music'} onClose=${closeDock} />
+        <${CalculatorPanel} active=${dock === 'calc'} onClose=${closeDock} />
+      </aside>
+    </div>
+
+    ${dock && html`<div className="dock-scrim" onClick=${closeDock} />`}
+    ${introVisible && html`<${Intro} leaving=${phase !== 'intro'} onDone=${startQuiz} />`}
+  </div>`;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+})();
+</script>
+</body>
+</html>
