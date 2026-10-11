@@ -384,3 +384,14 @@ JD_BENIGN [AMBIGUOUS] Candidates must be located in an EMEA time zone.
 # because they name another region than the job's own location, which is correct there.
 # Not added (they fail for reasons that predate and are separate from the time-zone rule): "located in Europe or Africa ..."
 # is rejected by the country-based detector, and "within 3 hours of <time zone>" by the commuting-distance family.
+# 2026-10 additions: ordinary screening questions; the two AMBIGUOUS ones are Rank 4-binding by design.
+EXP_Q [BENIGN] How did you hear about this role?
+EXP_Q [AMBIGUOUS] What is your current country of residence?
+EXP_Q [AMBIGUOUS] Where are you currently located?
+EXP_Q [BENIGN] What time zone are you in?
+EXP_Q [BENIGN] Are you comfortable working remotely?
+EXP_Q [BENIGN] Do you have a reliable internet connection?
+EXP_Q [BENIGN] What is your expected salary?
+EXP_Q [BENIGN] Please share your LinkedIn profile.
+EXP_Q [BENIGN] Which languages do you speak?
+EXP_Q [BENIGN] Are you able to start within 30 days?

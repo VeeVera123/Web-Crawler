@@ -1,8 +1,15 @@
-"""Offline checks for the 2026-10 platforms Emply, CATS, Elmo Talent and Easy Apply: URL -> slug extraction and the
-parsing of each scraper against fixtures copied from real pages. No network.
+"""Offline checks for ATS scrapers, URL->slug extraction, discovery sources and node page detection (no network).
 
-    python check_new_ats.py
+Each section below was its own script; they are one file now so a check lives with the thing it checks.
+Run: python check_ats_scrapers.py
 """
+import sys as _sys
+
+_FAILED = 0
+
+# ====================================================================================================
+# SECTION: check_new_ats - Offline checks for the 2026-10 platforms Emply, CATS, Elmo Talent and Easy Apply: URL -> slug extraction and the
+# ====================================================================================================
 import json
 import os
 import sys
@@ -817,4 +824,195 @@ check({("greenhouse", "acme1"), ("ashby", "acme2"), ("workable", "acme3"), ("sma
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)
-sys.exit(1 if fails else 0)
+_FAILED += len(fails)
+
+# ====================================================================================================
+# SECTION: check_comeet - Offline checks for the Comeet platform: URL -> slug extraction, location text, and scrape_comeet's parsing
+# ====================================================================================================
+import json
+import os
+import sys
+
+for _k in ("SUPABASE_URL", "SUPABASE_KEY", "CEREBRAS_API_KEY", "GROQ_API_KEY", "GROQ_API_KEY_C",
+           "OPENAI_API_KEY", "NVIDIA_API_KEY", "ANTHROPIC_API_KEY"):
+    os.environ.setdefault(_k, "x")
+import logging  # noqa: E402
+
+logging.disable(logging.CRITICAL)
+import ats_scrapers as A  # noqa: E402
+import discovery as D  # noqa: E402
+
+fails, n = [], 0
+
+
+def check(cond, msg):
+    global n
+    n += 1
+    if not cond:
+        fails.append(msg)
+
+
+# ── URL -> slug ──
+for url, want in [("https://www.comeet.com/jobs/liveu/90.00C", "liveu|90.00C"),
+                  ("https://www.comeet.com/jobs/mitiga/26.00B/principal-cloud-security-researcher/45.768", "mitiga|26.00B"),
+                  ("https://www.comeet.co/jobs/Primusgroup/59.007", "primusgroup|59.007"),
+                  ("https://www.comeet.com/jobs/hub-technologies/07.00f", "hub-technologies|07.00F"),
+                  ("https://www.comeet.com/", None), ("https://www.comeet.com/jobs/x", None),
+                  ("https://www.comeet.com/blog/post/12.345", None), ("https://www.comeet.com/jobs/liveu/notauid", None),
+                  ("https://example.com/jobs/liveu/90.00C", None)]:
+    check(D._url_to_slug_comeet(url) == want, f"{url} -> {D._url_to_slug_comeet(url)!r}, want {want!r}")
+check("comeet" in D.URL_TO_SLUG and "comeet" in D.SUPPORTED_ATS and "comeet" in A.SCRAPERS, "comeet registered")
+
+# ── location text ──
+for p, want in [({"location": {"name": "Israel", "city": "Kefar Sava", "country": "IL"}, "workplace_type": "Hybrid"}, ("Kefar Sava, Israel", "Hybrid")),
+                ({"location": {"name": "United States", "city": "remote"}, "workplace_type": "Remote"}, ("Remote, United States", "Remote")),
+                ({"location": {"name": "Germany", "city": "Berlin", "is_remote": True}}, ("Remote, Berlin, Germany", "Remote")),
+                ({"location": {"name": "Germany", "city": "Germany"}, "workplace_type": "On-site"}, ("Germany", "On-site")),
+                ({"location": {}, "workplace_type": "Remote"}, ("Remote", "Remote")), ({"location": None}, ("", ""))]:
+    got = A._comeet_location(p)
+    check(got == want, f"_comeet_location({p}) = {got}, want {want}")
+
+# ── scrape_comeet with a stubbed network ──
+PAGE = ('<script>var COMPANY_DATA; COMPANY_DATA = ' + json.dumps({"name": "LiveU", "company_uid": "90.00C", "token": "TOK"}) +
+        '; var COMPANY_POSITIONS_DATA; COMPANY_POSITIONS_DATA = ' +
+        json.dumps([{"name": "Bookkeeper", "uid": "7E.F62", "url_active_page": "https://www.comeet.com/jobs/liveu/90.00C/bookkeeper/7E.F62",
+                     "location": {"name": "Israel", "city": "Kefar Sava"}, "workplace_type": "Hybrid"}]) + ';</script>')
+API = [{"name": "Customer Success Manager", "uid": "AA.111", "company_name": "LiveU", "department": "CS",
+        "url_active_page": "https://www.comeet.com/jobs/liveu/90.00C/csm/AA.111?utm=x", "employment_type": "Permanent",
+        "location": {"name": "United Kingdom", "city": "London"}, "workplace_type": "Remote",
+        "details": [{"name": "Description", "value": "<p>Own the accounts. Salary $90,000 - $110,000.</p>"}]},
+       {"name": "Customer Success Manager", "uid": "AA.111", "url_active_page": "https://www.comeet.com/jobs/liveu/90.00C/csm/AA.111",
+        "location": {}},                                  # duplicate url
+       {"name": "Internal only", "uid": "BB.222", "is_internal": True, "url_active_page": "https://www.comeet.com/jobs/liveu/90.00C/x/BB.222"},
+       {"name": "", "url_active_page": "https://www.comeet.com/jobs/liveu/90.00C/y/CC.333"}]    # no title
+
+
+class R:
+    def __init__(self, status, text="", data=None):
+        self.status_code, self.text, self._d = status, text, data
+
+    def json(self):
+        if self._d is None:
+            raise ValueError("no json")
+        return self._d
+
+
+def stub(api_ok):
+    def get(url, **kw):
+        if "careers-api" in url:
+            return R(200, data=API) if api_ok else R(500)
+        return R(200, PAGE) if "liveu/90.00C" in url else R(302)
+    return get
+
+
+A._get_requests_sync = stub(True)
+jobs = A.scrape_comeet("LiveU|90.00c")           # case-insensitive slug
+check(len(jobs) == 1, f"API path: duplicate / internal / untitled positions dropped, got {len(jobs)}")
+j = jobs[0]
+check(j["title"] == "Customer Success Manager" and j["url"].endswith("/AA.111") and "?" not in j["url"], f"url/title: {j['url']}")
+check(j["location"] == "Remote, London, United Kingdom" and j["workplace_type"] == "Remote" and j["country"] == "", f"location: {j['location']!r}")
+check("Own the accounts" in j["description_snippet"] and j["source_ats"] == "Comeet" and j["slug"] == "LiveU|90.00c" and j["department"] == "CS",
+      f"fields: {j}")
+A._get_requests_sync = stub(False)               # API down -> the page's embedded positions (no description)
+jobs = A.scrape_comeet("liveu|90.00C")
+check(len(jobs) == 1 and jobs[0]["title"] == "Bookkeeper" and jobs[0]["description_snippet"] == "", f"fallback: {jobs}")
+check(A.scrape_comeet("nosuchcompany|00.000") == [] and A.scrape_comeet("bad") == [] and A.scrape_comeet("") == [] and A.scrape_comeet(None) == [],
+      "unknown tenant / bad slugs return []")
+
+print(f"comeet checks: {n - len(fails)}/{n} passed")
+for f in fails:
+    print("  FAIL", f)
+_FAILED += len(fails)
+
+# ====================================================================================================
+# SECTION: check_eploy - Offline checks for the Eploy location extractor (label vs value) and the postback pager.
+# ====================================================================================================
+import os
+import sys
+
+for _k in ("SUPABASE_URL", "SUPABASE_KEY", "CEREBRAS_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    os.environ.setdefault(_k, "x")
+import logging  # noqa: E402
+
+logging.disable(logging.CRITICAL)
+from bs4 import BeautifulSoup  # noqa: E402
+import ats_scrapers as A  # noqa: E402
+
+fails, n = [], 0
+
+
+def check(cond, msg):
+    global n
+    n += 1
+    if not cond:
+        fails.append(msg)
+
+
+def card(val: str) -> str:
+    return (f'<div class="vsr-job-big"><h3><a href="22497/graduate-project-manager--leeds.html">GPM</a></h3>'
+            f'<ul><li id="li_VacV_AllLocations_22497"><div class="label">All Locations:</div>'
+            f'<div class="content"><span id="x_lblReadonlySelected">{val}</span></div></li></ul></div>')
+
+
+for val, want in [("Leeds", "Leeds"), ("Not Specified", "Not Specified"), ("Cardiff, Bristol", "Cardiff, Bristol")]:
+    a = BeautifulSoup(card(val), "html.parser").find("a")
+    got, st = A._eploy_card_location(a)
+    check(got == want and st == "extracted", f"{val!r} -> {got!r},{st}")
+for val in ("", "All Locations:"):
+    a = BeautifulSoup(card(val), "html.parser").find("a")
+    got, st = A._eploy_card_location(a)
+    check(got == "" and st == "marker_found_empty", f"empty {val!r} -> {got!r},{st}")
+a = BeautifulSoup('<div><a href="1/x.html">x</a></div>', "html.parser").find("a")
+check(A._eploy_card_location(a) == ("", "marker_not_found"), "no marker")
+
+page = ('<form action="r.aspx"><input type="hidden" name="__VIEWSTATE" value="vs"><input name="q" value="">'
+        '<a href="javascript:__doPostBack(&#39;ctl00$C$VacancyPager&#39;,&#39;2&#39;)">2</a></form>')
+f = A._eploy_next_page_form(page, 1)
+check(f is not None and f[0]["__EVENTTARGET"] == "ctl00$C$VacancyPager" and f[0]["__EVENTARGUMENT"] == "2"
+      and f[0]["__VIEWSTATE"] == "vs", f"form {f}")
+check(A._eploy_next_page_form(page, 2) is None, "no page 3 link")
+
+import json  # noqa: E402
+
+_off = {"offers": [{"title": "PM", "slug": "pm", "remote": True, "city": "Warsaw", "country": "Poland", "location": "Remote job",
+                    "locations": [{"city": "Warsaw", "name": "Warsaw", "state": "Mazowieckie", "country": "Poland"}]},
+                   {"title": "X", "slug": "x", "remote": True, "location": "Remote job", "locations": []}]}
+
+
+class _R:
+    def json(self):
+        return _off
+
+
+_orig = A._get_requests_sync
+A._get_requests_sync = lambda *a, **k: _R()
+_jobs = A.scrape_recruitee("t")
+A._get_requests_sync = _orig
+check(_jobs[0]["location"] == "Warsaw, Mazowieckie, Poland" and _jobs[0]["workplace_type"] == "Remote", f"recruitee {_jobs[0]['location']}")
+check(_jobs[1]["location"] == "Remote", f"recruitee bare {_jobs[1]['location']}")
+
+_blob = ('[{&#34;Posting_Title&#34;:&#34;Head of Ops&#34;,&#34;id&#34;:&#34;1&#34;,&#34;Remote_Job&#34;:true,&#34;City&#34;:null,'
+         '&#34;Country&#34;:null,&#34;Job_Description&#34;:&#34;We&#39;re hiring; it\'s great&#34;,'
+         '&#34;Department_Name&#34;:{&#34;name&#34;:&#34;Ops&#34;,&#34;id&#34;:&#34;9&#34;},&#34;Publish&#34;:true},'
+         '{&#34;Posting_Title&#34;:&#34;Rep&#34;,&#34;id&#34;:&#34;2&#34;,&#34;Remote_Job&#34;:false,&#34;City&#34;:&#34;Leeds&#34;,'
+         '&#34;State&#34;:null,&#34;Country&#34;:&#34;UK&#34;,&#34;Publish&#34;:true}]')
+
+
+class _Z:
+    text = f'<html><input type="hidden" value="{_blob}" id="jobs"></html>'
+
+
+A._get_requests_sync = lambda *a, **k: _Z()
+_zj = A.scrape_zoho("acme")
+A._get_requests_sync = _orig
+check(len(_zj) == 2, f"zoho count {len(_zj)}")
+if len(_zj) == 2:
+    check(_zj[0]["location"] == "Remote" and _zj[0]["workplace_type"] == "Remote" and _zj[0]["department"] == "Ops", f"zoho0 {_zj[0]}")
+    check(_zj[1]["location"] == "Leeds" and _zj[1]["workplace_type"] == "" and _zj[1]["country"] == "UK", f"zoho1 {_zj[1]}")
+
+print(f"{n} checks, {len(fails)} failures")
+for m in fails:
+    print("FAIL", m)
+_FAILED += len(fails)
+
+_sys.exit(1 if _FAILED else 0)

@@ -628,3 +628,104 @@ EUROPEAN_LANGUAGE [BARE] ¿Necesita patrocinio de visa?
 EUROPEAN_LANGUAGE [BARE] ¿Necesita un permiso de trabajo?
 EUROPEAN_LANGUAGE [BARE] ¿Es ciudadano?
 EUROPEAN_LANGUAGE [BARE] ¿Reside actualmente?
+# 2026-10 additions: per-country work-authorization / residence / citizenship / sponsorship / relocation questions.
+EXP_Q [NAMED] Are you legally authorized to work in the United States?
+EXP_Q [NAMED] Do you currently reside in the United States?
+EXP_Q [NAMED] Are you a citizen of the United States?
+EXP_Q [NAMED] Will you require visa sponsorship to work in the United States?
+EXP_Q [NAMED] Are you willing to relocate to the United States?
+EXP_Q [NAMED] Are you legally authorized to work in Canada?
+EXP_Q [NAMED] Do you currently reside in Canada?
+EXP_Q [NAMED] Are you a citizen of Canada?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Canada?
+EXP_Q [NAMED] Are you willing to relocate to Canada?
+EXP_Q [NAMED] Are you legally authorized to work in Germany?
+EXP_Q [NAMED] Do you currently reside in Germany?
+EXP_Q [NAMED] Are you a citizen of Germany?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Germany?
+EXP_Q [NAMED] Are you willing to relocate to Germany?
+EXP_Q [NAMED] Are you legally authorized to work in France?
+EXP_Q [NAMED] Do you currently reside in France?
+EXP_Q [NAMED] Are you a citizen of France?
+EXP_Q [NAMED] Will you require visa sponsorship to work in France?
+EXP_Q [NAMED] Are you willing to relocate to France?
+EXP_Q [NAMED] Are you legally authorized to work in Nigeria?
+EXP_Q [NAMED] Do you currently reside in Nigeria?
+EXP_Q [NAMED] Are you a citizen of Nigeria?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Nigeria?
+EXP_Q [NAMED] Are you willing to relocate to Nigeria?
+EXP_Q [NAMED] Are you legally authorized to work in Kenya?
+EXP_Q [NAMED] Do you currently reside in Kenya?
+EXP_Q [NAMED] Are you a citizen of Kenya?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Kenya?
+EXP_Q [NAMED] Are you willing to relocate to Kenya?
+EXP_Q [NAMED] Are you legally authorized to work in South Africa?
+EXP_Q [NAMED] Do you currently reside in South Africa?
+EXP_Q [NAMED] Are you a citizen of South Africa?
+EXP_Q [NAMED] Will you require visa sponsorship to work in South Africa?
+EXP_Q [NAMED] Are you willing to relocate to South Africa?
+EXP_Q [NAMED] Are you legally authorized to work in Egypt?
+EXP_Q [NAMED] Do you currently reside in Egypt?
+EXP_Q [NAMED] Are you a citizen of Egypt?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Egypt?
+EXP_Q [NAMED] Are you willing to relocate to Egypt?
+EXP_Q [NAMED] Are you legally authorized to work in Ghana?
+EXP_Q [NAMED] Do you currently reside in Ghana?
+EXP_Q [NAMED] Are you a citizen of Ghana?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Ghana?
+EXP_Q [NAMED] Are you willing to relocate to Ghana?
+EXP_Q [NAMED] Are you legally authorized to work in India?
+EXP_Q [NAMED] Do you currently reside in India?
+EXP_Q [NAMED] Are you a citizen of India?
+EXP_Q [NAMED] Will you require visa sponsorship to work in India?
+EXP_Q [NAMED] Are you willing to relocate to India?
+EXP_Q [NAMED] Are you legally authorized to work in Brazil?
+EXP_Q [NAMED] Do you currently reside in Brazil?
+EXP_Q [NAMED] Are you a citizen of Brazil?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Brazil?
+EXP_Q [NAMED] Are you willing to relocate to Brazil?
+EXP_Q [NAMED] Are you legally authorized to work in Mexico?
+EXP_Q [NAMED] Do you currently reside in Mexico?
+EXP_Q [NAMED] Are you a citizen of Mexico?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Mexico?
+EXP_Q [NAMED] Are you willing to relocate to Mexico?
+EXP_Q [NAMED] Are you legally authorized to work in Australia?
+EXP_Q [NAMED] Do you currently reside in Australia?
+EXP_Q [NAMED] Are you a citizen of Australia?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Australia?
+EXP_Q [NAMED] Are you willing to relocate to Australia?
+EXP_Q [NAMED] Are you legally authorized to work in Spain?
+EXP_Q [NAMED] Do you currently reside in Spain?
+EXP_Q [NAMED] Are you a citizen of Spain?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Spain?
+EXP_Q [NAMED] Are you willing to relocate to Spain?
+EXP_Q [NAMED] Are you legally authorized to work in Poland?
+EXP_Q [NAMED] Do you currently reside in Poland?
+EXP_Q [NAMED] Are you a citizen of Poland?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Poland?
+EXP_Q [NAMED] Are you willing to relocate to Poland?
+EXP_Q [NAMED] Are you legally authorized to work in Ethiopia?
+EXP_Q [NAMED] Do you currently reside in Ethiopia?
+EXP_Q [NAMED] Are you a citizen of Ethiopia?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Ethiopia?
+EXP_Q [NAMED] Are you willing to relocate to Ethiopia?
+EXP_Q [NAMED] Are you legally authorized to work in Rwanda?
+EXP_Q [NAMED] Do you currently reside in Rwanda?
+EXP_Q [NAMED] Are you a citizen of Rwanda?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Rwanda?
+EXP_Q [NAMED] Are you willing to relocate to Rwanda?
+EXP_Q [NAMED] Are you legally authorized to work in Uganda?
+EXP_Q [NAMED] Do you currently reside in Uganda?
+EXP_Q [NAMED] Are you a citizen of Uganda?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Uganda?
+EXP_Q [NAMED] Are you willing to relocate to Uganda?
+EXP_Q [NAMED] Are you legally authorized to work in Tanzania?
+EXP_Q [NAMED] Do you currently reside in Tanzania?
+EXP_Q [NAMED] Are you a citizen of Tanzania?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Tanzania?
+EXP_Q [NAMED] Are you willing to relocate to Tanzania?
+EXP_Q [NAMED] Are you legally authorized to work in Senegal?
+EXP_Q [NAMED] Do you currently reside in Senegal?
+EXP_Q [NAMED] Are you a citizen of Senegal?
+EXP_Q [NAMED] Will you require visa sponsorship to work in Senegal?
+EXP_Q [NAMED] Are you willing to relocate to Senegal?
