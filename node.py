@@ -665,6 +665,39 @@ def _extract_jsonld_urls(html: str) -> set[str]:
     return urls
 
 
+# 2026-10: a custom career page that embeds an ATS often never links to the board - its script fetches the vendor's JSON API
+# straight from the browser, so the only trace is an API URL in the page source. URL_TO_SLUG reads board/page URLs; these read
+# the API shapes (verified against each vendor's public docs / live endpoints).
+_VENDOR_API_URL_RES = (
+    ("greenhouse", re.compile(r"^https?://boards-api\.greenhouse\.io/v1/boards/([A-Za-z0-9_-]+)", re.I)),
+    ("ashby", re.compile(r"^https?://api\.ashbyhq\.com/posting-api/job-board/([A-Za-z0-9._-]+)", re.I)),
+    ("workable", re.compile(r"^https?://(?:apply|www)\.workable\.com/api/(?:v\d/)?(?:widget/)?accounts/([A-Za-z0-9_-]+)", re.I)),
+    ("smartrecruiters", re.compile(r"^https?://api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9_-]+)", re.I)),
+    ("gem", re.compile(r"^https?://api\.gem\.com/job_board/v0/([A-Za-z0-9._-]+)", re.I)),
+)
+# JS embed calls that name the board directly: populateGreenhouseJobs("acme"), Grnhse board tokens, lever "site" options
+_SCRIPT_EMBED_RES = (
+    ("greenhouse", re.compile(r"populateGreenhouseJobs\(\s*[\"']([A-Za-z0-9_-]{2,60})[\"']")),
+    ("greenhouse", re.compile(r"Grnhse\.Settings\s*=\s*\{[^}]{0,200}?board(?:_token)?\s*:\s*[\"']([A-Za-z0-9_-]{2,60})[\"']", re.S)),
+)
+
+
+def _detect_vendor_api_and_embed_hits(urls: set[str], html: str) -> list[tuple[str, str, str]]:
+    hits, seen = [], set()
+    for url in urls:
+        for ats, rx in _VENDOR_API_URL_RES:
+            m = rx.match(url)
+            if m and (ats, m.group(1)) not in seen:
+                seen.add((ats, m.group(1)))
+                hits.append((ats, m.group(1), url))
+    for ats, rx in _SCRIPT_EMBED_RES:
+        for m in rx.finditer(html or ""):
+            if (ats, m.group(1)) not in seen:
+                seen.add((ats, m.group(1)))
+                hits.append((ats, m.group(1), f"script-embed:{m.group(1)}"))
+    return hits
+
+
 def _detect_ats_hits(urls: set[str]) -> list[tuple[str, str, str]]:
     """Every candidate URL through discovery.py's real URL_TO_SLUG
     converters — the one trusted detection path, not reinvented here."""
@@ -817,6 +850,9 @@ def _parse_detect(html: str, base_url: str, target_geo_countries: set[str]
     crawl_one/PARSE_WORKERS)."""
     urls = _extract_candidate_urls(html, base_url) | _extract_jsonld_urls(html)
     hits = _detect_ats_hits(urls)
+    for h in _detect_vendor_api_and_embed_hits(urls, html):
+        if not any(x[0] == h[0] and x[1] == h[1] for x in hits):
+            hits = hits + [h]
     sf_hit = _detect_successfactors_hit(html, base_url)
     if sf_hit and not any(h[0] == sf_hit[0] and h[1] == sf_hit[1] for h in hits):
         hits = hits + [sf_hit]

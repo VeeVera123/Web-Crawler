@@ -806,6 +806,14 @@ _rows = _w.build_rows("Domain\t#Quads\t#Entities\tProps\nacme.co.uk\t9\t5\t{}\ns
 check(_rows == [("acme", "acme.co.uk", ""), ("big", "big.example.org", "")], f"wdc_seed: >=3 postings, vendors/boards dropped {_rows}")
 check(callable(D.fetch_scholarweave_slugs) and callable(D.fetch_hireheat_slugs), "scholarweave + hireheat discovery sources defined")
 
+# ── node: ATS found only through a vendor API URL / JS embed call in the page source ──
+_api_html = ('<script>fetch("https://boards-api.greenhouse.io/v1/boards/acme1/jobs");fetch("https:\\/\\/api.ashbyhq.com\\/posting-api\\/job-board\\/acme2");'
+             'fetch("https://apply.workable.com/api/v1/widget/accounts/acme3");fetch("https://api.smartrecruiters.com/v1/companies/Acme4/postings");'
+             'populateGreenhouseJobs("acme5");</script><p>Join our team we are hiring engineers apply now to open positions</p>')
+_ah = {(a, s) for a, s, _ in N._parse_detect(_api_html, "https://example.com/careers", set())[0]}
+check({("greenhouse", "acme1"), ("ashby", "acme2"), ("workable", "acme3"), ("smartrecruiters", "Acme4"), ("greenhouse", "acme5")} <= _ah,
+      f"node: vendor API URLs and populateGreenhouseJobs() embed give tenants {sorted(_ah)}")
+
 print(f"new-platform checks: {n - len(fails)}/{n} passed")
 for f in fails:
     print("  FAIL", f)
