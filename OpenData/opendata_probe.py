@@ -94,6 +94,7 @@ def read_seed_csv(limit: int = OPENDATA_ROW_LIMIT, countries: set[str] | None = 
     total_rows = 0
     kept_before_shard = 0
     skipped_wrong_country = 0
+    rows_with_country = 0
     start = time.monotonic()
 
     try:
@@ -124,6 +125,8 @@ def read_seed_csv(limit: int = OPENDATA_ROW_LIMIT, countries: set[str] | None = 
                 if len(row) <= domain_i or len(row) <= name_i:
                     continue
 
+                if country_i is not None and len(row) > country_i and row[country_i].strip():
+                    rows_with_country += 1
                 if country_i is not None and countries_lower:
                     row_country = row[country_i].strip().lower() if len(row) > country_i else ""
                     if row_country not in countries_lower:
@@ -144,6 +147,11 @@ def read_seed_csv(limit: int = OPENDATA_ROW_LIMIT, countries: set[str] | None = 
     except Exception as e:
         log.error(f"Failed to read filtered seed CSV: {e}")
         return []
+
+    if countries_lower and total_rows and rows_with_country == 0:
+        # a list with no country values at all (the Web Data Commons seed) can't be country-filtered: read it unfiltered
+        log.warning("Seed CSV has no country values - ignoring the country filter")
+        return read_seed_csv(limit, None, shard_index, shard_count)
 
     elapsed = time.monotonic() - start
     filter_note = f", {skipped_wrong_country:,} skipped by country filter" if countries_lower else ""

@@ -202,7 +202,7 @@ jobs:
             RESTART_ARGS+=(--all-countries)
           fi
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
-            RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
+            RESTART_ARGS+=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
           python OpenData/opendata_probe.py \
             --shard-index ${{ matrix.shard }} \
