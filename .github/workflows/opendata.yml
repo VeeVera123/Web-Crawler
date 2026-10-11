@@ -7,27 +7,25 @@ name: OpenData
 #          occasional — not part of the daily schedule.
 #
 #   probe: downloads the Release chunks, shards the crawl across N jobs.
+#
+# `list` picks the company list (wdc = ~39k sites that publish their own job postings, opendata = 86M orgs, needs the secret URL);
+# its Release tag is chosen automatically (wdc-organizations / opendata-organizations). `mode` picks seed, crawl or both.
 
 on:
   workflow_dispatch:
     inputs:
-      run_seed:
-        description: "Seed only (skip crawling)"
-        required: false
-        type: boolean
-        default: false
-      release_tag:
-        description: "Release tag to use (use wdc-organizations with seed_source=wdc)"
-        required: false
-        default: "opendata-organizations"
-      seed_source:
-        description: "Seed from: opendata (86M-org dataset, needs the secret URL) or wdc (Web Data Commons JobPosting domains, ~39k career sites, no secret)"
-        required: false
+      list:
+        description: "Company list"
         type: choice
-        options: [opendata, wdc]
-        default: opendata
+        options: [wdc, opendata]
+        default: wdc
+      mode:
+        description: "seed = build the list, crawl = probe the saved list, seed_then_crawl = both"
+        type: choice
+        options: [seed_then_crawl, crawl, seed]
+        default: seed_then_crawl
       restart_id:
-        description: "Resume seed from this row. 0 = start over"
+        description: "Resume seed from this row (0 = restart)"
         required: false
         default: "0"
       shard_count:
@@ -35,15 +33,15 @@ on:
         required: false
         default: "15"
       concurrency:
-        description: "Companies crawled in parallel per shard"
+        description: "Parallel companies per shard"
         required: false
         default: "400"
       run_time_minutes:
-        description: "Self-stop after this many minutes"
+        description: "Stop after N minutes"
         required: false
         default: "330"
       restart_index:
-        description: "Resume override per shard. Blank = auto-resume. 0 = full restart"
+        description: "Per-shard resume (blank = auto, 0 = restart)"
         required: false
         default: ""
 
@@ -66,7 +64,7 @@ concurrency:
 
 jobs:
   seed:
-    if: ${{ github.event.inputs.run_seed == 'true' }}
+    if: ${{ github.event.inputs.mode != 'crawl' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360   # the hard ceiling — see module docstring; this step cannot be sharded
     steps:
@@ -93,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
+          TAG="${{ github.event.inputs.list == 'wdc' && 'wdc-organizations' || 'opendata-organizations' }}"
           if gh release download "$TAG" --pattern "opendata_chunk_*.csv" --dir chunks 2>/dev/null; then
             cat chunks/opendata_chunk_*.csv > opendata_organizations_filtered.csv
             echo "Rejoined prior partial output: $(wc -l < opendata_organizations_filtered.csv) lines"
@@ -102,11 +100,11 @@ jobs:
           fi
 
       - name: Build the Web Data Commons JobPosting domain seed
-        if: ${{ github.event.inputs.seed_source == 'wdc' }}
+        if: ${{ github.event.inputs.list == 'wdc' }}
         run: python OpenData/wdc_seed.py --output opendata_organizations_filtered.csv
 
       - name: Download + stream-filter opendata.org Organizations
-        if: ${{ github.event.inputs.seed_source != 'wdc' }}
+        if: ${{ github.event.inputs.list != 'wdc' }}
         env:
           OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
         run: |
@@ -128,7 +126,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
+          TAG="${{ github.event.inputs.list == 'wdc' && 'wdc-organizations' || 'opendata-organizations' }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
             --title "OpenData Organizations (filtered)" \
             --notes "Filtered opendata.org Organizations dataset — see OpenData/opendata_seed.py. Regenerated $(date -u +%Y-%m-%d)."
@@ -157,10 +155,8 @@ jobs:
 
   crawl:
     needs: [seed, prepare-matrix]
-    # Checking run_seed means "seed only" — skip crawl entirely that run.
-    # Unchecked means "crawl only" (seed itself is skipped via its own
-    # `if`, so `always()` here just means "don't block on a skipped seed").
-    if: ${{ always() && github.event.inputs.run_seed != 'true' }}
+    # mode=seed skips the crawl; mode=crawl skips the seed (needs.seed.result == 'skipped'); seed_then_crawl runs both in order.
+    if: ${{ always() && github.event.inputs.mode != 'seed' && (needs.seed.result == 'success' || needs.seed.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 345
     strategy:
@@ -182,7 +178,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.release_tag || 'opendata-organizations' }}"
+          TAG="${{ github.event.inputs.list == 'wdc' && 'wdc-organizations' || 'opendata-organizations' }}"
           gh release download "$TAG" --pattern "opendata_chunk_*.csv" --dir chunks
           # Header-only-on-first-chunk (see the seed job's split step) — a
           # plain concatenation is a valid single CSV.
@@ -202,7 +198,7 @@ jobs:
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
           RESTART_ARGS=()
           # the WDC seed carries no country column (blank), so the default country filter would skip every row
-          if [ "${{ github.event.inputs.seed_source }}" = "wdc" ]; then
+          if [ "${{ github.event.inputs.list }}" = "wdc" ]; then
             RESTART_ARGS+=(--all-countries)
           fi
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
