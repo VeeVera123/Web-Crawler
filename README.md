@@ -8,7 +8,7 @@ platforms, and syncs the matches to Notion for tracking.
 This file explains the moving parts and how they fit together. For the
 full reasoning behind each classification rule (real postings that
 motivated it), see **`CLASSIFICATION.md`**. For a pure table-format
-reference (no prose), see **`RANKING_REFERENCE.md`**.
+reference (no prose), see the **Ranking quick reference** appendix of `CLASSIFICATION.md`.
 
 ## The three pipelines
 

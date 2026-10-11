@@ -25,7 +25,7 @@ The callers (crawl_i.py, crawl_ii.py) enrich the stale rows' description and
 application questions with the normal enrichment functions, call decide() on
 each, mark vetoed rows via supabase_handler.mark_jobs_vetoed(), and stamp the
 rest with supabase_handler.CLASSIFIER_VERSION so each row is re-checked once per
-version, not every run. postfix_notion.py later archives the Notion page and
+version, not every run. notion_sync.py (postfix) later archives the Notion page and
 deletes the vetoed rows (supabase_handler.purge_vetoed_jobs).
 """
 import logging

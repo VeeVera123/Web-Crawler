@@ -7,8 +7,8 @@ reason a CORS relay was ever on the table).
 
 2026-09 (second pass, at explicit user instruction): split OUT of
 crawl_i.py/crawl_ii.py entirely and into two standalone CI steps that
-bookend the actual crawl shards — see prefix_supabase.py and
-postfix_notion.py. crawl_i.py/crawl_ii.py no longer import this module at
+bookend the actual crawl shards — see notion_sync.py (prefix) and
+notion_sync.py (postfix). crawl_i.py/crawl_ii.py no longer import this module at
 all; they're back to being pure Supabase writers. Reasoning: each shard
 runs as its own GitHub Actions job with no shared memory, so "push
 whatever THIS shard just inserted" doesn't compose cleanly across N
@@ -18,7 +18,7 @@ Notion writes Supabase; crawl-i/crawl-ii only ever touch Supabase;
 "Postfix - Notion" reads Supabase writes Notion, then does the regular
 cleanup).
 
-  1. sync_notion_statuses_to_supabase() — called once by prefix_supabase.py
+  1. sync_notion_statuses_to_supabase() — called once by notion_sync.py (prefix)
      BEFORE any shard starts. Reads every page's Status property out of
      the Notion working-set database, writes whatever isn't "Not Applied"
      back into Supabase's jobs.application_status. Applied/Rejected/etc.
@@ -26,7 +26,7 @@ cleanup).
      this only ever reads Notion and writes Supabase, never touches the
      Notion page itself.
 
-  2. push_pending_jobs_to_notion() — called once by postfix_notion.py
+  2. push_pending_jobs_to_notion() — called once by notion_sync.py (postfix)
      AFTER every crawl-i/crawl-ii shard has finished. Reads every
      Supabase row that's never been pushed to Notion (jobs.notion_synced_at
      IS NULL — see supabase_handler.get_jobs_pending_notion_sync()),
@@ -425,7 +425,7 @@ def archive_notion_pages_for_supabase_ids(ids: list[int]) -> int:
 
 
 def push_pending_jobs_to_notion() -> dict:
-    """Called once by postfix_notion.py, after every crawl-i/crawl-ii
+    """Called once by notion_sync.py (postfix), after every crawl-i/crawl-ii
     shard has finished. Fetches every Supabase row with no Notion page
     yet (see supabase_handler.get_jobs_pending_notion_sync()), creates a
     page for each, and marks the successful ones synced so they're never
@@ -566,6 +566,142 @@ def backfill_rank_property(dry_run: bool = True) -> dict:
     return summary
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# CI entrypoints (were notion_sync.py (prefix) and notion_sync.py (postfix))
+#   python notion_sync.py prefix
+#   python notion_sync.py postfix [--run-crawl-ii-cleanup] [--run-crawl-iii-cleanup]
+#   python notion_sync.py backfill-rank [--apply]
+# ════════════════════════════════════════════════════════════════════════════
+#
+# PREFIX - SUPABASE  (was notion_sync.py (prefix))
+#
+# Runs ONCE, before any crawl-i/crawl-ii shard starts (gated with `needs:`
+# in CI). Named for what it writes TO: it reads the Notion working-set
+# database's current Status values and writes them into Supabase's
+# jobs.application_status — see notion_sync.py for the actual logic, this
+# is just the CI entrypoint.
+#
+# Running this before the shards start (rather than, say, at the very end)
+# means any status you set in Notion is recorded in Supabase before this
+# run's own dedup/classification pass looks at the table — the crawl and
+# the status reconciliation never race each other.
+#
+# Usage: python notion_sync.py (prefix)
+
+def run_prefix() -> None:
+    log.info("=" * 60)
+    log.info("PREFIX — SUPABASE  (Notion statuses -> Supabase)")
+    log.info("=" * 60)
+
+    summary = sync_notion_statuses_to_supabase()
+
+    log.info("── Summary ──")
+    log.info(f"  {summary['pages_read']} Notion pages read, "
+             f"{summary['statuses_synced']} statuses written to Supabase")
+
+
+# POSTFIX - NOTION  (was notion_sync.py (postfix))
+#
+# Runs ONCE, after every crawl-i AND crawl-ii shard has finished (gated with
+# `needs: [crawl-i, crawl-ii]` + `if: always()` in CI, same reasoning as the
+# old crawl_i.py/crawl_ii.py `--finalize` split this replaces). Named for
+# what it writes TO: it takes whatever's new in Supabase and pushes it to
+# Notion, then runs the regular stale-job cleanup.
+#
+# Steps, done in this order, each its own clearly-marked section in the log
+# (2026-10: a "Step 1b" was added between 1 and 2 — see below):
+#
+#   1. Push every Supabase job that's never been mirrored to Notion yet
+#      (jobs.notion_synced_at IS NULL — see supabase_handler.
+#      get_jobs_pending_notion_sync()) to the Notion working-set database.
+#      Covers new rows from BOTH pipelines in one pass — no need to know
+#      which pipeline inserted which row, and safe to run any number of
+#      times a day (a row is only ever offered here once).
+#
+#   1b. (2026-10) Purge the jobs the shards' re-validation pass vetoed
+#      (revalidate.py: stored jobs classified under older rules that today's
+#      deterministic rules now contradict, marked clearance='vetoed'): archive
+#      their Notion pages, then delete the rows. A vetoed row that was never
+#      pushed is simply never offered to Notion in step 1
+#      (get_jobs_pending_notion_sync skips vetoed rows).
+#
+#   2. The regular stale-job cleanup — previously `crawl_i.py --finalize`
+#      and `crawl_ii.py --finalize`, run as two separate CI jobs. Merged
+#      here since this step already runs after both pipelines are done.
+#      Crawl II's cleanup only runs when Crawl II itself ran this cycle
+#      (--run-crawl-ii-cleanup), preserving the exact same "Crawl II never
+#      runs unattended" behavior the old crawl-ii-finalize job's `if:`
+#      condition enforced — merging the two jobs must not, by itself,
+#      start cleaning up Crawl II's rows on days Crawl II never scanned
+#      them.
+#
+#   3. Crawl III's cleanup (2026-09) — same conditional-on-having-run
+#      pattern as Crawl II, via --run-crawl-iii-cleanup. crawl_iii.
+#      run_finalize() does its own two-step job internally (archive stale
+#      Notion pages FIRST, then hard-delete the same-day-stale Supabase
+#      rows — see that function's docstring), so this file just calls it;
+#      no separate Notion-archiving step is needed here.
+#
+#   4. Excluded-jobs cache finalize (2026-09, explicit user request — see
+#      excluded_cache.py's module docstring): each crawl's own
+#      merge_excluded_cache(), gated identically to its run_finalize() call
+#      above — by the time this runs, the CI workflow has already downloaded
+#      every shard's newly-excluded partial file (per crawl) AND the
+#      existing canonical cache into the working directory; this just does
+#      the actual merge, and the workflow uploads the result back as the new
+#      canonical Release asset afterward.
+#
+# Usage: python notion_sync.py (postfix) [--run-crawl-ii-cleanup] [--run-crawl-iii-cleanup]
+
+def run_postfix(run_crawl_ii_cleanup: bool = False, run_crawl_iii_cleanup: bool = False) -> None:
+    # imported here, not at module top: the crawl modules import notion_sync
+    import crawl_i
+    import crawl_ii
+    import crawl_iii
+    import supabase_handler
+
+    log.info("=" * 60)
+    log.info("POSTFIX — NOTION")
+    log.info("=" * 60)
+
+    log.info("── Step 1: pushing new Supabase jobs to Notion ──")
+    push_summary = push_pending_jobs_to_notion()
+    log.info(f"  {push_summary['created']}/{push_summary['attempted']} "
+             f"new jobs created in Notion")
+
+    log.info("── Step 1b: purging duplicate postings + jobs vetoed by re-validation ──")
+    # Same posting stored under two job_url spellings (e.g. a board registered as
+    # both /ashby/ and /Ashby/, scraped by two shards in one run): veto the extra
+    # row here so the purge below archives its Notion page and deletes it.
+    dupes = supabase_handler.mark_duplicate_jobs_vetoed()
+    log.info(f"  {dupes['groups']} duplicate postings, {dupes['vetoed']} extra rows vetoed")
+    purge = supabase_handler.purge_vetoed_jobs(archive_notion_fn=archive_notion_pages_for_supabase_ids)
+    log.info(f"  {purge['deleted']}/{purge['vetoed']} vetoed jobs deleted "
+             f"({purge['archived']} Notion pages archived)")
+
+    log.info("── Step 2: Crawl I cleanup ──")
+    crawl_i.run_finalize()
+    crawl_i.merge_excluded_cache()
+
+    if run_crawl_ii_cleanup:
+        log.info("── Step 3: Crawl II cleanup ──")
+        crawl_ii.run_finalize()
+        crawl_ii.merge_excluded_cache()
+    else:
+        log.info("── Step 3: Crawl II cleanup — skipped (Crawl II did not run this cycle) ──")
+
+    if run_crawl_iii_cleanup:
+        log.info("── Step 4: Crawl III cleanup ──")
+        crawl_iii.run_finalize()
+        crawl_iii.merge_excluded_cache()
+    else:
+        log.info("── Step 4: Crawl III cleanup — skipped (Crawl III did not run this cycle) ──")
+
+    log.info("=" * 60)
+    log.info("POSTFIX — NOTION complete")
+    log.info("=" * 60)
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -574,17 +710,21 @@ if __name__ == "__main__":
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    _parser = argparse.ArgumentParser(description="Notion sync — one-off maintenance operations")
-    _parser.add_argument("--backfill-rank", action="store_true",
-                          help="Set/update the Rank select property on every existing Notion page "
-                               "from its Supabase location_priority. Defaults to a dry run (logs "
-                               "only) — pass --apply too to actually write.")
-    _parser.add_argument("--apply", action="store_true",
-                          help="Actually write changes for --backfill-rank, instead of just "
-                               "logging what would change.")
+    _parser = argparse.ArgumentParser(description="Notion sync - CI entrypoints and one-off maintenance")
+    _sub = _parser.add_subparsers(dest="command", required=True)
+    _sub.add_parser("prefix", help="Notion statuses -> Supabase (runs once before the crawl shards)")
+    _post = _sub.add_parser("postfix", help="Supabase -> Notion push + stale-job cleanup (runs once after the shards)")
+    _post.add_argument("--run-crawl-ii-cleanup", action="store_true",
+                       help="Also run Crawl II's stale-job cleanup - only on runs where Crawl II's shards ran this cycle")
+    _post.add_argument("--run-crawl-iii-cleanup", action="store_true",
+                       help="Also run Crawl III's stale-job cleanup - only on runs where Crawl III's shards ran this cycle")
+    _bf = _sub.add_parser("backfill-rank", help="Set/update the Rank select property on every Notion page from location_priority")
+    _bf.add_argument("--apply", action="store_true", help="Actually write; default is a dry run that only logs")
     _args = _parser.parse_args()
 
-    if _args.backfill_rank:
-        backfill_rank_property(dry_run=not _args.apply)
+    if _args.command == "prefix":
+        run_prefix()
+    elif _args.command == "postfix":
+        run_postfix(_args.run_crawl_ii_cleanup, _args.run_crawl_iii_cleanup)
     else:
-        _parser.print_help()
+        backfill_rank_property(dry_run=not _args.apply)

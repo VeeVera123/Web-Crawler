@@ -1,4 +1,40 @@
-"""Job-URL identity: when are two job_urls the same posting?
+"""Identity: when are two things the same?  (1) board-slug case, (2) job-URL identity.
+
+One module because the two problems are one problem - the same board / posting reached through two spellings - and their
+fixes reference each other. Pure functions, no I/O.
+
+=== PART 1: board-slug case ===
+Board-slug case: one board must be one registry row.
+
+archive_i is unique on (ats, slug) with a CASE-SENSITIVE compare, but for many
+ATSs the slug is case-insensitive on the ATS side: `Ashby` and `ashby` are the
+same board. Discovery sources spell slugs however the URL they saw spelled them,
+so the registry ended up holding ~10k boards twice (Workday 5,862, SmartRecruiters
+2,831, Ashby 884, ...). Registry sharding is `id % 1000` computed in the database,
+so the two spellings land in DIFFERENT shards and each shard scraped "its" copy:
+every such board was fetched, role-filtered and enriched twice per run (and its
+jobs inserted twice, see identity.py).
+
+Two defences, both driven by CASE_INSENSITIVE_SLUG_ATS:
+
+  * on write (canonical_registry_rows): slugs of these ATSs are stored
+    lowercase, so a rediscovery never creates a new spelling;
+  * on load (drop_case_twins, used by supabase_handler.get_all_slugs): a
+    mixed-case row whose all-lowercase twin exists in the registry is not
+    scraped. The twin's own shard scrapes the board once. Nothing is deleted,
+    so a wrong entry here costs a skipped duplicate at worst, never lost data.
+
+CASE_INSENSITIVE_SLUG_ATS is deliberately an allow-list. Each entry was checked
+by running that ATS's real scraper on both spellings of several registry twins
+and getting identical job lists (2026-10). Lever is NOT in it: `ContactOut`
+returned a job and `contactout` returned none. Taleo and PageUp are not in it
+because every sampled pair was an empty board (inconclusive). Add an ATS only
+after repeating that check.
+
+Pure functions, no I/O.
+
+=== PART 2: job-URL identity ===
+Job-URL identity: when are two job_urls the same posting?
 
 `jobs.job_url` is the table's unique key, and every "have we seen this job?"
 check used to compare raw URL strings. That treats the same posting reached
@@ -39,13 +75,81 @@ two genuinely different postings do not occur (checked against every row in
 
 Pure functions, no I/O, no imports from the rest of the project.
 """
-
 from __future__ import annotations
 
 import re
 from typing import Iterable, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# PART 1: board-slug case
+# ════════════════════════════════════════════════════════════════════════════
+CASE_INSENSITIVE_SLUG_ATS = frozenset({
+    "ashby",             # also visible in prod: both spellings produced job rows
+    "workday",           # slug is "tenant|wdN|site"; tenant is already lowercase
+    "smartrecruiters",
+    "greenhouse",
+    "dayforce",
+    "oracle_cloud_hcm",  # slug is "host|SITE"
+    "paycom",            # hex client key
+})
+
+
+def is_case_insensitive(ats: str) -> bool:
+    return (ats or "").lower() in CASE_INSENSITIVE_SLUG_ATS
+
+
+def canonical_slug(ats: str, slug: str) -> str:
+    """The spelling a registry row is stored under."""
+    if slug and is_case_insensitive(ats):
+        return slug.lower()
+    return slug
+
+
+def canonical_registry_rows(rows: list[dict]) -> list[dict]:
+    """Rows about to be upserted into archive_i ({ats, slug, ...}): canonical
+    slugs, and one row per (ats, slug) — two spellings of one board arriving in
+    the same batch would otherwise make Postgres reject the whole statement
+    ("ON CONFLICT DO UPDATE command cannot affect row a second time")."""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        slug = r.get("slug")
+        if slug:
+            canon = canonical_slug(r.get("ats", ""), slug)
+            if canon != slug:
+                r = {**r, "slug": canon}
+            key = (r.get("ats", ""), canon)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(r)
+    return out
+
+
+def twin_candidates(pairs: list[tuple[str, str]]) -> dict[str, list[str]]:
+    """{ats: sorted lowercase slugs} for the mixed-case rows whose all-lowercase
+    twin might exist, i.e. the ones get_all_slugs has to look up."""
+    found: dict[str, set[str]] = {}
+    for ats, slug in pairs:
+        if slug and slug != slug.lower() and is_case_insensitive(ats):
+            found.setdefault(ats, set()).add(slug.lower())
+    return {a: sorted(s) for a, s in found.items()}
+
+
+def drop_case_twins(pairs: list[tuple[str, str]], present: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Drop every mixed-case (ats, slug) whose (ats, slug.lower()) is in
+    `present` (the lowercase rows that exist in the registry)."""
+    return [
+        (ats, slug) for ats, slug in pairs
+        if not (slug and slug != slug.lower() and is_case_insensitive(ats) and (ats, slug.lower()) in present)
+    ]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# PART 2: job-URL identity
+# ════════════════════════════════════════════════════════════════════════════
 # Query parameters that describe HOW a visitor arrived, never WHICH job.
 _TRACKING_PARAMS = frozenset({
     "refid", "trackingid", "position", "pagenum", "currentjobid", "trk", "trkinfo",
@@ -208,3 +312,49 @@ def duplicate_groups(rows: list[dict]) -> list[list[dict]]:
         if u:
             by_key.setdefault(url_key(u), []).append(r)
     return [g for g in by_key.values() if len(g) > 1]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# One-off cleanup SQL (was identity.py (SQL at the bottom)) - optional: the crawler already skips these rows
+# ════════════════════════════════════════════════════════════════════════════
+# -- Delete the mixed-case duplicate boards from archive_i.
+# --
+# -- A "duplicate" here is a row like  ashby / Tempo  when  ashby / tempo  also
+# -- exists. The lowercase row is kept, so no board is lost. Only the ATSs in
+# -- identity.py's CASE_INSENSITIVE_SLUG_ATS are touched (keep the two lists in
+# -- sync). Optional: the crawler already skips these rows (supabase_handler.
+# -- get_all_slugs), this just removes the clutter.
+# --
+# -- Run in the Supabase SQL editor. Step 1 changes nothing; step 2 deletes.
+#
+# -- ── Step 1: preview (read-only). Expect ~9,974 rows on 2026-10-07 ─────────
+# select a.ats, count(*) as rows_to_delete
+# from archive_i a
+# where a.ats in ('ashby','workday','smartrecruiters','greenhouse','dayforce','oracle_cloud_hcm','paycom')
+#   and a.slug <> lower(a.slug)
+#   and exists (select 1 from archive_i b where b.ats = a.ats and b.slug = lower(a.slug))
+# group by a.ats
+# order by rows_to_delete desc;
+#
+# -- ── Step 2: delete. All-or-nothing; aborts if it would delete >15,000 rows ─
+# do $$
+# declare
+#   n bigint;
+# begin
+#   delete from archive_i a
+#   where a.ats in ('ashby','workday','smartrecruiters','greenhouse','dayforce','oracle_cloud_hcm','paycom')
+#     and a.slug <> lower(a.slug)
+#     and exists (select 1 from archive_i b where b.ats = a.ats and b.slug = lower(a.slug));
+#   get diagnostics n = row_count;
+#   if n > 15000 then
+#     raise exception 'refusing: would delete % rows (expected ~10,000); nothing was changed', n;
+#   end if;
+#   raise notice 'deleted % mixed-case duplicate boards', n;
+# end $$;
+#
+# -- ── Step 3: verify (read-only). Expect 0 ──────────────────────────────────
+# select count(*) as remaining_duplicates
+# from archive_i a
+# where a.ats in ('ashby','workday','smartrecruiters','greenhouse','dayforce','oracle_cloud_hcm','paycom')
+#   and a.slug <> lower(a.slug)
+#   and exists (select 1 from archive_i b where b.ats = a.ats and b.slug = lower(a.slug));

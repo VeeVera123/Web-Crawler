@@ -130,10 +130,10 @@ from supabase_handler import (  # noqa: E402
     log_egress_summary, bump_scan_report, finish_scan_report_for_pipeline,
 )
 from supabase_handler import CLASSIFIER_VERSION  # noqa: E402
-from job_url import UrlSet, split_known_jobs  # noqa: E402
+from identity import UrlSet, split_known_jobs  # noqa: E402
 import revalidate  # noqa: E402
 # 2026-09 (second pass): Notion sync moved OUT of this file entirely, into
-# prefix_supabase.py (before shards)/postfix_notion.py (after shards) —
+# notion_sync.py (prefix) (before shards)/notion_sync.py (postfix) (after shards) —
 # see notion_sync.py's module docstring for why. This file is back to
 # being a pure Supabase writer.
 
@@ -2060,7 +2060,7 @@ def run_finalize() -> None:
 def merge_excluded_cache() -> None:
     """Excluded-jobs cache finalize pass for Crawl II — call ONCE, after
     every Crawl II shard has finished (same timing as run_finalize() above,
-    called right alongside it from postfix_notion.py). See crawl_i.py's
+    called right alongside it from notion_sync.py (postfix)). See crawl_i.py's
     merge_excluded_cache for the full design — identical logic, just this
     crawl's own separate "Excluded 2" file."""
     count = excluded_cache.merge_excluded_caches(

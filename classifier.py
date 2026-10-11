@@ -5192,6 +5192,10 @@ def has_strict_accepted_geography_evidence(job: dict) -> bool:
     return False
 
 
+_COMPANY_PAID_RE = re.compile(
+    r"\b(?:(?:we|company|employer)\s+(?:will\s+)?(?:pay|cover|fund|reimburse|arrange|book|provide)\w*|(?:fully\s+)?(?:paid|covered|funded|reimbursed)\s+(?:for\s+)?by\s+(?:us|the\s+company|the\s+employer)|"
+    r"(?:travel|flights?|accommodation|hotel|expenses?)\s+(?:is|are|will\s+be)?\s*(?:fully\s+)?(?:paid|covered|funded|reimbursed|provided)|"
+    r"at\s+(?:our|the\s+company'?s)\s+(?:cost|expense)|all\s+expenses\s+paid|expenses\s+paid)\b", re.I)
 _SOFT_PREFERENCE_RE = re.compile(
     r"\b(?:prefer(?:ably|red|ence)?|ideal(?:ly)?|bonus|nice[\s\-]to[\s\-]have|a\s+plus|an\s+advantage|advantageous|close\s+to|"
     r"around|roughly|approximately|similar\s+to|near|would\s+be\s+great|is\s+a\s+plus|desirable|welcome)\b", re.I)
@@ -6902,6 +6906,12 @@ _NONENGLISH_AND_ONSITE_RES = [re.compile(p, re.I) for p in (
     r"\bonly\s+(?:considering|accepting|hiring|looking\s+at|open\s+to)\s+(?:candidates|applicants|people)\b[^.?!]{0,30}\b(?:in|within|on|from)\s+(?:the\s+)?"
     r"(?:pacific|eastern|central|mountain|est|edt|cst|cdt|mst|mdt|pst|pdt|cet|cest|gmt|bst|ist|aest|jst)\b(?:\s+(?:time|timezone|time\s+zone|standard\s+time))?\b",
     r"\bmust\s+(?:be\s+)?(?:located|based|working|live|living|reside|residing)\s+(?:in|within|on)\s+(?:the\s+)?(?:pacific|eastern|central|mountain)\s+(?:time\s*zone|timezone|time)\b",
+    # ── English: in-person interview / meeting / onboarding / office visit that is required, expected or possible (policy: reject unless paid)
+    r"\b(?:attend|attending|come|travel|be\s+present|be\s+(?:in|at)|visit|visiting|join\s+us)\b[^.?!]{0,50}\bin[\s\-]person\b[^.?!]{0,40}\b(?:interview|meeting|meetings|onboarding|training|assessment|session|day)s?\b",
+    r"\bin[\s\-]person\s+(?:interview|meeting|onboarding|training|assessment|session)s?\b[^.?!]{0,80}\b(?:required|mandatory|must|may\s+be\s+(?:asked|required|needed)|might\s+be\s+(?:asked|required)|expected|will\s+be\s+(?:held|required)|needed)\b",
+    r"\b(?:required|expected|asked|need(?:ed)?|must|may\s+be\s+asked|might\s+be\s+asked|may\s+be\s+required|might\s+be\s+required|have\s+to)\b[^.?!]{0,30}\bto\s+(?:visit|attend|come\s+(?:in)?to|travel\s+to|be\s+at|report\s+to)\b[^.?!]{0,40}\b(?:our|the)\s+(?:\w+\s+){0,2}(?:office|offices|headquarters|hq|site|premises|campus)\b",
+    r"\binterviews?\b[^.?!]{0,40}\b(?:held|conducted|take\s+place|taking\s+place|done|are)\b[^.?!]{0,20}\b(?:in[\s\-]person|on[\s\-]?site|at\s+(?:our|the)\s+(?:\w+\s+){0,2}office)\b",
+    r"\bon[\s\-]?site\s+(?:interview|assessment)s?\b",
     # ── English: "Eligibility to work in X is required", "Citizenship of X is required", "X work eligibility"
     r"\beligibility\s+to\s+work\s+(?:in|within|for)\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT + r"\b",
     r"\b(?:citizenship|nationality|residency|residence)\s+(?:of|in)\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT + r"\b[^.?!]{0,20}\b(?:is\s+|are\s+)?(?:required|mandatory|needed|necessary)\b",
@@ -6985,6 +6995,8 @@ def has_nonenglish_or_explicit_onsite_signal(job: dict) -> bool:
         if not any(rx.search(sentence) for rx in _NONENGLISH_AND_ONSITE_RES):
             continue
         if _NONENGLISH_NEGATION_RE.search(sentence) or _NX_GLOBAL_SCOPE_RE.search(sentence) or _CITIZEN_RESIDENT_NEGATION_RE.search(sentence):
+            continue
+        if _COMPANY_PAID_RE.search(sentence) or re.search(r"\b(?:optional|voluntary|if\s+you\s+(?:wish|want|like|prefer)|not\s+required|not\s+mandatory|virtual|remote(?:ly)?\s+interview)\b", sentence, re.I):
             continue
         if _has_multi_region_breadth(sentence):
             continue
@@ -7516,12 +7528,9 @@ def has_candidate_binding_jd_signal(job: dict) -> bool:
             continue
         if _JD_SKILL_RE.search(sentence):
             continue
-        # 2026-10: a conditional / possible requirement is not a binding one ("applicants who progress to the offer stage may be
-        # asked to attend an in-person interview", "you might be required to visit our office occasionally")
-        if re.search(r"\b(?:may|might|could|can)\s+(?:also\s+)?(?:be\s+)?(?:asked|invited|required|expected|requested)\s+to\b|"
-                     r"\b(?:if|when|should)\s+(?:you(?:'re|\s+are)?\s+)?(?:invited|selected|shortlisted|progress(?:ed)?|advance[ds]?)\b|"
-                     r"\boffer\s+stage\b|\boccasional(?:ly)?\b|\bfrom\s+time\s+to\s+time\b", sentence, re.I) \
-                and not re.search(r"\b(?:must|only|exclusively|required\s+to\s+(?:live|reside|be\s+based))\b", sentence, re.I):
+        # 2026-10 (explicit user policy): a required or possible in-person interview / meeting / office visit is a "no" unless the
+        # company pays for it - so only a sentence saying the company covers the cost is exempt here
+        if _COMPANY_PAID_RE.search(sentence):
             continue
         if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not re.search(r"\bmust\b|\bonly\b|\bcannot\b|\bunable\b", sentence, re.I):
             continue
@@ -8443,7 +8452,7 @@ def location_prefilter_keep(job: dict, rank4_enabled: bool | None = None) -> boo
 
     Almost every role-matched job is rejected on its structured location alone: crawl_i sees ~130k role matches
     per run and ~100 of them survive, and each one used to cost two page/API fetches before that verdict. The
-    verdict for a NAMED place never depends on the description (§2 step 3 of RANKING_REFERENCE: only a bare /
+    verdict for a NAMED place never depends on the description (§2 step 3 of the CLASSIFICATION.md ranking appendix: only a bare /
     blank location gets the loose title+JD scan), so a job can only succeed if
 
       * the keyword location stage, run WITHOUT any description, says 'match' or 'unsure' (broad/bare/blank

@@ -157,7 +157,7 @@ from supabase_handler import (
     cleanup_stale_jobs, get_stale_job_ids,
     log_egress_summary,
 )
-from job_url import split_known_jobs
+from identity import split_known_jobs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -489,7 +489,7 @@ def run_finalize() -> None:
 def merge_excluded_cache() -> None:
     """Excluded-jobs cache finalize pass for Crawl III — call ONCE, after
     every Crawl III shard has finished (same timing as run_finalize()
-    above, called right alongside it from postfix_notion.py). See
+    above, called right alongside it from notion_sync.py (postfix)). See
     crawl_i.py's merge_excluded_cache for the full design — identical
     logic, just this crawl's own separate "Excluded 3" file."""
     count = excluded_cache.merge_excluded_caches(

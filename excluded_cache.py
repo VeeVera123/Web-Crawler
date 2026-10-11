@@ -9,7 +9,7 @@ same URL gets reclassified by the LLM on every subsequent crawl that still
 finds it. This module is the fix: each crawl pipeline persists the URLs it
 excludes after AI classification to a GitHub Release asset (see .github/
 workflows/crawl.yml's download/upload steps around each crawl's shard step,
-and the finalize-merge step in postfix_notion.py), and loads that cache back
+and the finalize-merge step in notion_sync.py (postfix)), and loads that cache back
 at the start of its next run to skip the LLM call for anything still in it.
 
 Storage shape: one JSON object per crawl (excluded_1.json / excluded_2.json

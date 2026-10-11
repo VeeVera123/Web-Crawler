@@ -13,8 +13,8 @@ from urllib.parse import quote
 
 import requests as http_requests
 
-from job_url import UrlSet, canonical_job_url, duplicate_groups, url_key
-from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, twin_candidates
+from identity import UrlSet, canonical_job_url, duplicate_groups, url_key
+from identity import canonical_registry_rows, canonical_slug, drop_case_twins, twin_candidates
 
 # Rules version stamped onto every row of `jobs` (jobs.classifier_version).
 # Lives here, not in config.py/classifier.py: this module must stay importable
@@ -93,7 +93,11 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #       needed ... remote" is not a restriction; customers' locations are not a rule for Rank 4. Tightened: every country geo.py
 #       knows (Ethiopia, Rwanda, Senegal, Tanzania, Uganda ... were missing from the detector lists), 40 more nationality
 #       adjectives, "Eligibility to work in X is required", "Citizenship of X is required".
-CLASSIFIER_VERSION = 17
+#  18 - 2026-10-11: explicit user policy - an in-person interview, meeting, onboarding or office visit that is required, expected
+#       or merely possible ("applicants who progress to the offer stage may be asked to attend an in-person interview", "ability
+#       to travel for in-person working sessions") now rejects unless the same sentence says the company pays for it. Company
+#       retreats / offsites with no stated requirement stay unsure.
+CLASSIFIER_VERSION = 18
 
 import os
 from dotenv import load_dotenv
@@ -445,7 +449,7 @@ def resolve_oracle_slug(old_slug: str, new_slug: str) -> bool:
     Best-effort: any failure is logged and swallowed so a Supabase hiccup
     never breaks the actual scrape that's already in progress.
     """
-    # Same canonical spelling every other registry writer stores (slug_case.py):
+    # Same canonical spelling every other registry writer stores (identity.py):
     # Oracle's site code arrives as "CX_1"/"cx_1" depending on the tenant, and a
     # second spelling of the resolved board would be scraped twice per run.
     new_slug = canonical_slug("oracle_cloud_hcm", new_slug)
@@ -501,7 +505,7 @@ def _lowercase_slugs_present(ats: str, slugs: list[str]) -> set[str]:
 def _drop_duplicate_case_boards(pairs: list[tuple[str, str]],
                                 full_table: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
     """Drop the mixed-case spelling of a board whose lowercase spelling is also
-    in the registry (see slug_case.py): the registry holds both, they sit in
+    in the registry (see identity.py): the registry holds both, they sit in
     different shards, and each shard scraped its own copy. `full_table` is the
     whole registry when the caller already has it (no lookups needed);
     otherwise the lowercase twins are looked up. Fails OPEN: on a fetch error
@@ -522,7 +526,7 @@ def _drop_duplicate_case_boards(pairs: list[tuple[str, str]],
     kept = drop_case_twins(pairs, present)
     if len(kept) != len(pairs):
         log.info(f"Skipped {len(pairs) - len(kept)} boards whose lowercase twin is scraped by another shard "
-                 f"(slug-case duplicates, see slug_case.py)")
+                 f"(slug-case duplicates, see identity.py)")
     return kept
 
 
@@ -530,7 +534,7 @@ def get_all_slugs(shard_index: int | None = None, shard_count: int | None = None
     """
     Fetch (ats, slug) pairs from archive_i (formerly slug_registry).
 
-    2026-10: for ATSs whose slugs are case-insensitive (slug_case.py) the
+    2026-10: for ATSs whose slugs are case-insensitive (identity.py) the
     registry holds some boards under two spellings that land in different
     shards; the mixed-case spelling is dropped here when its lowercase twin
     exists, so each board is scraped once per run.
@@ -684,7 +688,7 @@ def get_existing_urls() -> UrlSet:
 
     Returns a UrlSet: membership is by job_url IDENTITY (job_url.url_key), so
     a posting stored as .../Ashby/<id> is recognised when a shard scrapes
-    .../ashby/<id> (see job_url.py for the spellings seen in production).
+    .../ashby/<id> (see identity.py for the spellings seen in production).
 
     Unlike get_all_slugs(), a fetch failure here is tolerated: worst case
     we treat a few already-known jobs as "new" and re-upsert them, which is
@@ -756,7 +760,7 @@ def mark_jobs_vetoed(jobs: list[dict]) -> int:
     clearance='vetoed', is_active=false, stamped with the current rules
     version. Deliberately NOT a delete here — the shard has no Notion
     credentials in scope and a vetoed row may already have a Notion page;
-    purge_vetoed_jobs() (run once by postfix_notion.py) archives the page and
+    purge_vetoed_jobs() (run once by notion_sync.py (postfix)) archives the page and
     then deletes the row. Marking first also keeps the job out of the
     pending-Notion push (see get_jobs_pending_notion_sync).
 
@@ -792,7 +796,7 @@ def mark_jobs_vetoed(jobs: list[dict]) -> int:
 
 
 def mark_duplicate_jobs_vetoed(max_fraction: float = 0.10) -> dict:
-    """Self-healing duplicate sweep, run once per crawl by postfix_notion.py
+    """Self-healing duplicate sweep, run once per crawl by notion_sync.py (postfix)
     right BEFORE purge_vetoed_jobs(): finds stored rows that are the same
     posting under different job_url spellings (job_url.url_key — board-slug
     case, trailing slash, tracking params), keeps one and marks the others

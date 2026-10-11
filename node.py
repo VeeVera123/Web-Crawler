@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(_ROOT, "Main"))  # geo.py/discovery.py live here
 
 import geo  # noqa: E402
 import page_extract  # noqa: E402 — charset-aware decode_html for _fetch_page
-from slug_case import canonical_registry_rows  # noqa: E402
+from identity import canonical_registry_rows  # noqa: E402
 from discovery import (  # noqa: E402
     URL_TO_SLUG, extract_gh_jid_ids, extract_greenhouse_embed_token,
 )
@@ -2551,7 +2551,7 @@ async def write_ats_hits_to_archive_i(session: aiohttp.ClientSession, rows: list
     future source-specific bug elsewhere shouldn't be able to write this
     class of garbage again without also breaking this backstop."""
     # canonical_registry_rows: lowercase the slug of ATSs whose slugs are
-    # case-insensitive and keep one row per board — see slug_case.py for why a
+    # case-insensitive and keep one row per board — see identity.py for why a
     # second spelling of a board costs a duplicate scrape every run.
     slim_rows = canonical_registry_rows(
         [{"ats": r["ats"], "slug": r["slug"], "source": r["discovery_method"]}

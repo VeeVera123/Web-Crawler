@@ -195,7 +195,7 @@ from urllib.parse import urlparse, parse_qs, urljoin, unquote
 import requests
 from dotenv import load_dotenv
 
-from slug_case import canonical_registry_rows
+from identity import canonical_registry_rows
 
 load_dotenv()
 
@@ -8332,7 +8332,7 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
 
         # name (company name, when a source has one) has nowhere to go -- archive_i has no such column -- so it is
         # dropped here. canonical_registry_rows lowercases case-insensitive slugs and merges same-board spellings
-        # (slug_case.py); done for the whole ATS at once so the merge is counted, not just done per chunk.
+        # (identity.py); done for the whole ATS at once so the merge is counted, not just done per chunk.
         all_rows = canonical_registry_rows([{"ats": ats, "slug": slug, "source": source} for slug in slug_dict])
         row_stats["collapsed"] = len(slug_dict) - len(all_rows)
 

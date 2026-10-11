@@ -220,7 +220,7 @@ jobs:
   # 2026-09 (explicit user instruction): runs ONCE, before any crawl shard
   # starts, regardless of which crawls are enabled — it's read Notion,
   # write Supabase, which has nothing to do with which crawl pipeline runs
-  # this cycle. Named for what it writes TO. See prefix_supabase.py /
+  # this cycle. Named for what it writes TO. See notion_sync.py (prefix) /
   # notion_sync.py.
   prefix-supabase:
     runs-on: ubuntu-latest
@@ -243,7 +243,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: exec python prefix_supabase.py
+        run: exec python notion_sync.py prefix
 
   # ── Crawl I — known ATS boards (archive_i) ───────────────────────────────
   # Runs on the scheduled cron trigger (all three run there — see the
@@ -471,10 +471,10 @@ jobs:
   # `always()`, does NOT run if the whole workflow run was manually
   # cancelled). Named for what it writes TO: it takes whatever's new in
   # Supabase and pushes it to Notion, THEN does the regular stale-job
-  # cleanup — see postfix_notion.py for the clearly-separated steps and
+  # cleanup — see notion_sync.py (postfix) for the clearly-separated steps and
   # why Crawl II's/Crawl III's cleanup are each conditional on that
   # pipeline having actually run this cycle (Crawl I's cleanup always
-  # runs unconditionally inside postfix_notion.py — see that file).
+  # runs unconditionally inside notion_sync.py (postfix) — see that file).
   postfix-notion:
     needs: [crawl-i, crawl-ii, crawl-iii]
     if: ${{ !cancelled() }}
@@ -495,7 +495,7 @@ jobs:
 
       # 2026-09 (explicit user request — excluded-jobs cache, see
       # excluded_cache.py's module docstring): pull in everything
-      # postfix_notion.py's merge_excluded_cache() calls need — every
+      # notion_sync.py (postfix)'s merge_excluded_cache() calls need — every
       # shard's newly-excluded partial file from THIS run, and each
       # crawl's existing canonical cache (if any). A missing Release/
       # pattern match (first run ever, or a crawl that produced zero new
@@ -532,7 +532,7 @@ jobs:
           if [ "${{ github.event_name == 'schedule' || inputs.run_crawl_iii }}" = "true" ]; then
             ARGS="$ARGS --run-crawl-iii-cleanup"
           fi
-          exec python postfix_notion.py $ARGS
+          exec python notion_sync.py postfix $ARGS
 
       # 2026-09 (explicit user request): publishes the merged canonical
       # excluded_1.json (always — Crawl I's merge always runs above) and
