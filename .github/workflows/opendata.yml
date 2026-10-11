@@ -17,9 +17,15 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: "Release tag to use"
+        description: "Release tag to use (use wdc-organizations with seed_source=wdc)"
         required: false
         default: "opendata-organizations"
+      seed_source:
+        description: "Seed from: opendata (86M-org dataset, needs the secret URL) or wdc (Web Data Commons JobPosting domains, ~39k career sites, no secret)"
+        required: false
+        type: choice
+        options: [opendata, wdc]
+        default: opendata
       restart_id:
         description: "Resume seed from this row. 0 = start over"
         required: false
@@ -95,7 +101,12 @@ jobs:
             echo "No prior Release assets found for tag $TAG — starting fresh despite Restart ID being set."
           fi
 
+      - name: Build the Web Data Commons JobPosting domain seed
+        if: ${{ github.event.inputs.seed_source == 'wdc' }}
+        run: python OpenData/wdc_seed.py --output opendata_organizations_filtered.csv
+
       - name: Download + stream-filter opendata.org Organizations
+        if: ${{ github.event.inputs.seed_source != 'wdc' }}
         env:
           OPENDATA_SOURCE_URL: ${{ secrets.OPENDATA_SOURCE_URL }}
         run: |
@@ -190,6 +201,10 @@ jobs:
         run: |
           ulimit -n 65536   # high --concurrency can exceed the runner's default 1024 fd limit and crash aiodns/c-ares (native segfault, not a catchable Python error)
           RESTART_ARGS=()
+          # the WDC seed carries no country column (blank), so the default country filter would skip every row
+          if [ "${{ github.event.inputs.seed_source }}" = "wdc" ]; then
+            RESTART_ARGS+=(--all-countries)
+          fi
           if [ -n "${{ github.event.inputs.restart_index }}" ]; then
             RESTART_ARGS=(--restart-index "${{ github.event.inputs.restart_index }}")
           fi
