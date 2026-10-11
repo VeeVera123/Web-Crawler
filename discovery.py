@@ -8380,6 +8380,12 @@ def upsert_to_supabase(slugs_by_ats: dict[str, set | dict], source: str,
                 # response body, a genuine schema mismatch looks identical
                 # to a transient network blip. Always log it when we have it.
                 body = f" — response: {r.text[:500]}" if r is not None else ""
+                if r is not None and "archive_i_source_check" in r.text:
+                    # every further row would fail the same way - say so once, with the fix, and stop
+                    log.error(f"archive_i_source_check rejects source={source!r}: add it to the constraint "
+                              f"(ALTER TABLE archive_i DROP/ADD CONSTRAINT archive_i_source_check ...) and re-run; "
+                              f"nothing from this source was written. {e}{body}")
+                    return total
                 log.error(f"Supabase upsert failed for {ats}: {e}{body}")
 
         if row_stats["written"]:
