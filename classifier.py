@@ -1534,8 +1534,8 @@ STANDALONE_GLOBAL_RE = re.compile(
     r"[\U0001F30D\U0001F30E\U0001F30F\U0001F310]\uFE0F?\s*(?:(?:fully\s*)?remote|virtual)?"
     r"|(?:[\U0001F30D\U0001F30E\U0001F30F\U0001F310]\uFE0F?\s*)?(?:"
     r"global(?:ly)?|worldwide|world\s*wide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|earth|planet\s*earth|"
-    r"distributed|borderless|everywhere|"
-    r"(?:(?:100\s*%|fully|completely)\s*)?(?:remote|virtual|telecommute|telework|home[\-\s]*based)\s*[\-–—/,|:()]?\s*"
+    r"distributed|borderless|everywhere|world|not\s*location[\-\s]*specific|location[\-\s]*agnostic|"
+    r"(?:(?:100\s*%|fully|completely)\s*)?(?:remote|virtual|telecommute|telework|home[\-\s]*based|work[\-\s]*from[\-\s]*home|wfh|flexible|distributed)\s*[\-–—/,|:()]?\s*"
     r"(?:global(?:\s+remote)?|worldwide|anywhere(?:\s+(?:on|in)\s+(?:earth|the\s+world))?|international|wfa|distributed|everywhere|world|"
     r"open\s*to\s*all(?:\s*(?:locations?|countries|regions))?|not\s*location[\-\s]*specific|location[\-\s]*agnostic|any\s*(?:location|country))"
     r")"
@@ -1547,6 +1547,7 @@ NON_GEO_WORDS_RE = re.compile(
     r"\b("
     r"remote|fully|completely|"                             # remote modifiers
     r"remot[oa]|t[eé]l[eé]travail|teletrabajo|teletrabalho|fernarbeit|thuiswerk|lavoro|trabajo|trabalho|travail|arbeit|"
+    r"virtual|telecommute|telework|wfh|work\s*from\s*home|home[\-\s]*based|distributed|nomad|"
     r"full[\-\s]*time|part[\-\s]*time|"                     # employment types
     r"contract(?:or|ual)?|permanent|temporary|temp|"
     r"freelance|intern(?:ship)?|hourly|salaried|"
@@ -2006,7 +2007,7 @@ def _broad_scope_check(loc: str, loc_lower: str) -> tuple[str, str | None]:
         # country"); without this "EMEA - All Countries" / "EMEA Wide" left "all countries"/"wide" as residue and
         # was rejected as a qualified (non-bare) EMEA value although none of those words name a place.
         check = _EMEA_FILLER_RE.sub("", check)
-        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|]+", " ", check).strip()
+        check = re.sub(r"[\s/\-–—,|()·•:;\[\]0-9&|%]+", " ", check).strip()
         if not check:
             return "match", PRIORITY_AFRICA
         return "no_match", None
@@ -3693,7 +3694,11 @@ _SPONSOR_NON_VISA_RE = re.compile(
     r"|\bsponsor(?:s|ed|ing)?\s+(?:of\s+)?(?:the\s+|a\s+|an\s+)?(?:local\s+)?"
     r"(?:pride|parade|meet-?up|conference|hackathon|charity|non-?profit|scholarship|"
     r"employee\s+resource\s+groups?|erg\b)"
-    r"|\bconference[\s-]?sponsorship\b",
+    r"|\bconference[\s-]?sponsorship\b"
+    # 2026-10: export-control boilerplate ("authorization to receive technology controlled under U.S. export laws without
+    # sponsorship for an export license") is about licences, not visas - it rejected Cloudflare postings
+    r"|\b(?:export|import)\s+(?:licen[cs]es?|controls?|laws?|regulations?)\b|\bsponsorship\s+for\s+(?:an?\s+)?(?:export|import)\b"
+    r"|\bsponsor(?:s|ed|ing)?\s+(?:a\s+|an\s+|the\s+)?(?:podcast|newsletter|webinar|event|meetup|open[\s-]?source|team|league|race|film)\b",
     re.I,
 )
 
@@ -3761,6 +3766,11 @@ _VISA_YES_RE = re.compile(
 
 
 _SPONSOR_NOT_NEEDED_REMOTE_RE = re.compile(
+    # "No visa sponsorship is needed for this remote role." / "You do not need a work permit for X as you work from your home country."
+    r"\b(?:no|not|without)\b[^.?!;]{0,40}\b(?:visa|sponsorship|work\s+permit|relocation)\b[^.?!;]{0,30}\b(?:necessary|needed|required)\b"
+    r"[^.?!;]{0,40}\b(?:remote(?:ly)?|work(?:ing)?\s+from\s+(?:home|your)|home\s+country|your\s+(?:own\s+)?country)\b"
+    r"|\b(?:do(?:es)?\s+not|don'?t|doesn'?t)\s+need\s+(?:a\s+|an\s+|any\s+)?(?:visa|work\s+permit|sponsorship|relocat\w+)\b[^.?!;]{0,50}"
+    r"\b(?:remote(?:ly)?|work(?:ing)?\s+from\s+(?:home|your)|home\s+country|your\s+(?:own\s+)?country)\b|"
     r"\b(?:no|not)\b[^.?!;]{0,40}\b(?:visa|sponsorship|work\s+permit|relocation)\b[^.?!;]{0,30}\b(?:necessary|needed|required|an?\s+issue)\b"
     r"[^.?!;]{0,60}\b(?:because|since|as|given|when)\b[^.?!;]{0,40}\b(?:remote(?:ly)?|from\s+(?:your\s+)?(?:own\s+)?(?:home|country)|home\s+country)\b"
     r"|\b(?:because|since|as|given)\b[^.?!;]{0,40}\b(?:remote(?:ly)?|from\s+(?:your\s+)?(?:own\s+)?(?:home|country)|home\s+country)\b"
@@ -3810,6 +3820,8 @@ def _sponsorship_sentence_has_negative_signal(text: str) -> bool:
             if _SPONSOR_NOT_NEEDED_REMOTE_RE.search(clause):
                 continue
             if _SPONSOR_WITHOUT_TOPIC_RE.search(clause):
+                if _SPONSOR_NON_VISA_RE.search(clause):
+                    continue  # "...without sponsorship for an export license" is about licences, not visas
                 return True
             has_genuine_topic = False
             for m in _SPONSOR_TOPIC_RE.finditer(clause):
@@ -4053,6 +4065,18 @@ _COUNTRY_AUTH_NAMES_RE_FRAGMENT = (
     # _REGION_ONLY_WORDS_RE below.
     r"uk\s*(?:&|and)\s*ireland|british\s+isles"
 )
+
+# 2026-10 vocabulary pass: the hand-written list above missed whole countries (Ethiopia, Rwanda, Senegal, Tanzania, Uganda ...), so
+# "authorized to work in Rwanda" passed as global. Every country geo.py knows is appended (ambiguous words excluded), once, for
+# every consumer of this fragment.
+def _geo_country_alternation() -> str:
+    skip = {"chad"}
+    names = sorted({n for n in set(geo.COUNTRY_CONTINENT) | set(geo.COUNTRY_ALIASES.values()) if n.lower() not in skip},
+                   key=len, reverse=True)
+    return "|".join(re.escape(n).replace(r"\ ", r"\s+").replace(r"\-", r"[\s\-]") for n in names)
+
+
+_COUNTRY_AUTH_NAMES_RE_FRAGMENT = _COUNTRY_AUTH_NAMES_RE_FRAGMENT + "|" + _geo_country_alternation()
 
 # 2026-09 BUG FIX (explicit user report, real posting: International EOR's
 # Greenhouse listing — "Are you legally authorized to work in London,
@@ -4805,6 +4829,7 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
     # concrete value and not one of the accepted broad scopes, reject it.
     loc = str(location).strip()
     if loc and not PLACEHOLDER_LOC_RE.match(loc):
+        loc = re.sub(r"\b\d{1,3}\s*%\s*", "", loc).strip() or loc  # "100% Remote - EMEA"
         normalized = re.sub(r"[\s,|/()\-–—]+", " ", loc).strip()
         # 2026-10 (adversarial-coverage pass, real bug: "Remote - Global",
         # "Global (Remote)", "Remote, Worldwide", "Anywhere - Remote" were
@@ -4879,6 +4904,11 @@ def has_role_specific_place_restriction_signal(job: dict) -> bool:
         # Never treat company/HQ/team/office descriptions as candidate
         # restrictions.
         if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
+            continue
+        # 2026-10: a preference is uncertain (Rank 3), and Africa / EMEA in the same sentence is accepted geography
+        if _is_soft_preference(sentence):
+            continue
+        if _text_has_africa_or_emea_evidence(sentence) and not re.search(r"\b(?:except|excluding|excluded|outside|not\s+(?:in|from|open))\b", sentence, re.I):
             continue
         for rx in (_ROLE_SPECIFIC_PLACE_RE, _CANDIDATE_PLACE_RE):
             for m in rx.finditer(sentence):
@@ -5162,6 +5192,20 @@ def has_strict_accepted_geography_evidence(job: dict) -> bool:
     return False
 
 
+_SOFT_PREFERENCE_RE = re.compile(
+    r"\b(?:prefer(?:ably|red|ence)?|ideal(?:ly)?|bonus|nice[\s\-]to[\s\-]have|a\s+plus|an\s+advantage|advantageous|close\s+to|"
+    r"around|roughly|approximately|similar\s+to|near|would\s+be\s+great|is\s+a\s+plus|desirable|welcome)\b", re.I)
+_HARD_WORDING_RE = re.compile(
+    r"\b(?:must|only|exclusively|solely|required|requires?|mandatory|need\s+to|have\s+to|cannot|can'?t|unable|not\s+be\s+considered|"
+    r"will\s+not\s+be|won'?t\s+be|no\s+exceptions|strictly)\b", re.I)
+
+
+def _is_soft_preference(sentence: str) -> bool:
+    """A preference ("ideally based in Europe", "preferably a time zone close to EST") is not an eligibility rule: it is uncertain,
+    so the job continues down the unsure route (Rank 3) rather than being hard-rejected."""
+    return bool(_SOFT_PREFERENCE_RE.search(sentence)) and not _HARD_WORDING_RE.search(sentence)
+
+
 def has_hard_country_based_restriction_signal(job: dict) -> bool:
     """Deterministic, pre-AI hard filter, sibling to
     has_hard_country_specific_auth_signal above but for a different
@@ -5200,6 +5244,12 @@ def has_hard_country_based_restriction_signal(job: dict) -> bool:
         if _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
             continue
         if _has_multi_region_breadth(sentence):
+            continue
+        # 2026-10: Africa / EMEA named in the sentence ("based in East Africa", "based in Europe and Africa") is accepted
+        # geography, and a mere preference is uncertain, not a rule
+        if _is_soft_preference(sentence):
+            continue
+        if _text_has_africa_or_emea_evidence(sentence) and not re.search(r"\b(?:except|excluding|excluded|outside|not\s+(?:in|from|open))\b", sentence, re.I):
             continue
         if _COUNTRY_BASED_RESTRICTION_RE.search(sentence):
             return True
@@ -6269,7 +6319,7 @@ def has_timezone_relocation_or_hyphenated_restriction_signal(job: dict) -> bool:
     for sentence in _split_into_sentences(text):
         if not sentence.strip():
             continue
-        if "overlap" in sentence.lower():
+        if "overlap" in sentence.lower() or _is_soft_preference(sentence):
             continue
         if _text_has_global_evidence(sentence):
             continue
@@ -6738,6 +6788,9 @@ def has_country_tied_sponsorship_permit_residency_signal(job: dict) -> bool:
             continue
         if not _RANK4_COUNTRY_TIED_RESTRICTION_RE.search(sentence):
             continue
+        # 2026-10: "you do not need a work permit for X as you work from your home country", "no visa needed" - the opposite of a rule
+        if _SPONSOR_NOT_NEEDED_REMOTE_RE.search(sentence) or _REQUIREMENT_NEGATED_RE.search(sentence):
+            continue
         # 2026-10: an OFFER ("we may be able to provide visa sponsorship to the US or UK") is the opposite of a restriction
         if re.search(r"\b(?:we|company|employer)\b[^.?!]{0,30}\b(?:may|might|can|could|will|are\s+able\s+to)\b[^.?!]{0,25}\b"
                      r"(?:be\s+able\s+to\s+)?(?:provide|offer|sponsor|assist)\b[^.?!]{0,30}\b(?:visa|sponsorship|relocation)", sentence, re.I):
@@ -6757,7 +6810,10 @@ def has_country_tied_sponsorship_permit_residency_signal(job: dict) -> bool:
 # status itself (citizens / residents / residency / citizenship) next to the country.
 _NATIONALITY_ADJ_FRAGMENT = (
     r"(?:American|(?-i:U\.S\.?|US)|Canadian|British|Australian|German|French|Irish|Indian|Mexican|Brazilian|Spanish|Italian|Dutch|Polish|"
-    r"Singaporean|Japanese|Chinese|Filipino|Philippine|Nigerian|South\s+African|Kenyan|Emirati|New\s+Zealand|Swiss|Swedish|Danish|Norwegian)"
+    r"Singaporean|Japanese|Chinese|Filipino|Philippine|Nigerian|South\s+African|Kenyan|Emirati|New\s+Zealand|Swiss|Swedish|Danish|Norwegian|"
+    r"Ethiopian|Ghanaian|Egyptian|Tanzanian|Ugandan|Rwandan|Senegalese|Moroccan|Algerian|Tunisian|Zambian|Zimbabwean|Cameroonian|Ivorian|"
+    r"Israeli|Turkish|Russian|Ukrainian|Argentin(?:e|ian)|Colombian|Chilean|Peruvian|Saudi|Qatari|Pakistani|Bangladeshi|Vietnamese|Thai|"
+    r"Indonesian|Malaysian|Korean|Taiwanese|Greek|Portuguese|Belgian|Austrian|Finnish|Czech|Hungarian|Romanian|Bulgarian|Croatian|Serbian)"
 )
 _STATUS_COUNTRY_FRAGMENT = r"(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r"|" + _NATIONALITY_ADJ_FRAGMENT + r")"
 _CITIZEN_RESIDENT_ONLY_RES = [re.compile(p, re.I) for p in (
@@ -6846,6 +6902,10 @@ _NONENGLISH_AND_ONSITE_RES = [re.compile(p, re.I) for p in (
     r"\bonly\s+(?:considering|accepting|hiring|looking\s+at|open\s+to)\s+(?:candidates|applicants|people)\b[^.?!]{0,30}\b(?:in|within|on|from)\s+(?:the\s+)?"
     r"(?:pacific|eastern|central|mountain|est|edt|cst|cdt|mst|mdt|pst|pdt|cet|cest|gmt|bst|ist|aest|jst)\b(?:\s+(?:time|timezone|time\s+zone|standard\s+time))?\b",
     r"\bmust\s+(?:be\s+)?(?:located|based|working|live|living|reside|residing)\s+(?:in|within|on)\s+(?:the\s+)?(?:pacific|eastern|central|mountain)\s+(?:time\s*zone|timezone|time)\b",
+    # ── English: "Eligibility to work in X is required", "Citizenship of X is required", "X work eligibility"
+    r"\beligibility\s+to\s+work\s+(?:in|within|for)\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT + r"\b",
+    r"\b(?:citizenship|nationality|residency|residence)\s+(?:of|in)\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT + r"\b[^.?!]{0,20}\b(?:is\s+|are\s+)?(?:required|mandatory|needed|necessary)\b",
+    r"\b(?:must|need(?:s)?\s+to)\s+(?:be\s+)?(?:eligible|authori[sz]ed|permitted|allowed)\s+to\s+work\s+(?:in|within)\s+(?:the\s+)?" + _STATUS_COUNTRY_FRAGMENT + r"\b",
     # ── English: "must be a California / UK resident", "Texas residents only"
     r"\b(?:must|need(?:s)?\s+to|have\s+to|should)\s+be\s+(?:a\s+|an\s+)?(?:current\s+|legal\s+|permanent\s+|full[\-\s]time\s+)*(?:" + _US_STATE_FULL_NAMES_FRAGMENT
     + r"|" + _STATUS_COUNTRY_FRAGMENT + r")\s+(?:resident|residents|citizen|citizens)\b",
@@ -7456,6 +7516,13 @@ def has_candidate_binding_jd_signal(job: dict) -> bool:
             continue
         if _JD_SKILL_RE.search(sentence):
             continue
+        # 2026-10: a conditional / possible requirement is not a binding one ("applicants who progress to the offer stage may be
+        # asked to attend an in-person interview", "you might be required to visit our office occasionally")
+        if re.search(r"\b(?:may|might|could|can)\s+(?:also\s+)?(?:be\s+)?(?:asked|invited|required|expected|requested)\s+to\b|"
+                     r"\b(?:if|when|should)\s+(?:you(?:'re|\s+are)?\s+)?(?:invited|selected|shortlisted|progress(?:ed)?|advance[ds]?)\b|"
+                     r"\boffer\s+stage\b|\boccasional(?:ly)?\b|\bfrom\s+time\s+to\s+time\b", sentence, re.I) \
+                and not re.search(r"\b(?:must|only|exclusively|required\s+to\s+(?:live|reside|be\s+based))\b", sentence, re.I):
+            continue
         if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not re.search(r"\bmust\b|\bonly\b|\bcannot\b|\bunable\b", sentence, re.I):
             continue
         if not (_JD_SUBJECT_RE.search(sentence) or _JD_STRONG_RE.search(sentence)):
@@ -7941,7 +8008,7 @@ def has_rank4_region_residency_enforcement_signal(job: dict) -> bool:
     for sentence in _split_into_sentences(text):
         if not _RANK4_REGION_RESIDENCY_ENFORCEMENT_RE.search(sentence):
             continue
-        if _RANK4_WORKFORCE_DESCRIPTION_RE.search(sentence):
+        if _RANK4_WORKFORCE_DESCRIPTION_RE.search(sentence) or _TEAM_OR_COMPANY_CONTEXT_RE.search(sentence):
             continue
         return True
     return False

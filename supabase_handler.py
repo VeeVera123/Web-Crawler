@@ -85,7 +85,15 @@ from slug_case import canonical_registry_rows, canonical_slug, drop_case_twins, 
 #       residency statements in those languages. Tightened: explicit "not a remote position" / "100% on-site" / "in-person
 #       presence required", passport and "must be a California/UK resident" gates, a lone eligible time zone, entity-bound
 #       eligibility, and the residency / work-permit / office-presence wording of es/fr/pt/de/it/nl postings.
-CLASSIFIER_VERSION = 16
+#  17 - 2026-10-11: second vocabulary pass over ~2,900 generated cases + real postings. Loosened: preferences ("ideally based in
+#       Europe", "a time zone close to EST") go down the unsure route (Rank 3) instead of rejecting; Africa / EMEA named in a
+#       sentence ("based in East Africa", "Europe and Africa") is accepted geography; "100% Remote - EMEA", "Work from home -
+#       World", bare "World"/"Not location specific"; export-control boilerplate ("sponsorship for an export license") is not
+#       visa sponsorship; "may be asked to attend an in-person interview" is conditional, not binding; "no visa/work permit
+#       needed ... remote" is not a restriction; customers' locations are not a rule for Rank 4. Tightened: every country geo.py
+#       knows (Ethiopia, Rwanda, Senegal, Tanzania, Uganda ... were missing from the detector lists), 40 more nationality
+#       adjectives, "Eligibility to work in X is required", "Citizenship of X is required".
+CLASSIFIER_VERSION = 17
 
 import os
 from dotenv import load_dotenv
