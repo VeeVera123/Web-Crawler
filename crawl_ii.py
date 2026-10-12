@@ -1857,6 +1857,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
     report_stats = {"total_jobs_raw": 0, "csm_roles": 0, "global_jobs": 0, "duplicates": 0}
 
     log.info(f"── Crawling entries ({len(pages)} pages) ──")
+    _pages_progress = run_log.Progress("pages", total=len(pages))
     for i in range(0, len(pages), batch_size):
         if time.monotonic() - crawl_start >= time_budget_seconds:
             time_budget_hit = True
@@ -1882,8 +1883,7 @@ async def crawl_batch_ii(pages: list[dict], session: aiohttp.ClientSession, sem:
         done = min(i + batch_size, len(pages))
         elapsed = time.monotonic() - crawl_start
         rate = stats["requests_attempted"] / elapsed if elapsed > 0 else 0
-        log.info(f"  {done}/{len(pages)} pages checked — {rate:.1f}/sec — {elapsed:.0f}s so far — "
-                 f"{len(batch_candidates)} postings found this batch ({len(all_candidate_jobs)} total)")
+        _pages_progress.update(done, postings=len(all_candidate_jobs))
 
     pages_done = min(len(pages), i + batch_size) if pages else 0
 

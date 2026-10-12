@@ -3069,6 +3069,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
     elapsed, rate = 0.0, 0.0
     time_budget_hit = False
     deadline = crawl_start + time_budget_seconds
+    _unit_progress = run_log.Progress(unit_label, total=len(tasks))
     for i in range(0, len(tasks), batch_size):
         if time.monotonic() >= deadline:
             for t in tasks[i:]:
@@ -3136,7 +3137,7 @@ async def crawl_batch(domains: list[str], session: aiohttp.ClientSession, sem: a
         rate = stats["companies_attempted"] / elapsed if elapsed > 0 else 0
         hit_n = stats["hits_from_homepage"] + stats["hits_from_career_path"] + stats["hits_from_sitemap"]
         dup_note = f", {duplicates_collapsed} dup collapsed" if duplicates_collapsed else ""
-        log.info(f"  {done}/{len(tasks)} {unit_label} — {rate:.1f}/sec — {elapsed:.0f}s elapsed")
+        _unit_progress.update(done, hits=len(found_rows))
         log.info(f"    → {written}/{len(batch_rows)} written to {ARCHIVE_I_TABLE} ({new_written} new{dup_note}) — "
                  f"{len(found_rows)} hits total, {stats.get('new_slugs_added', 0)} new so far "
                  f"(hit rate so far: {hit_n / max(stats['companies_attempted'], 1) * 100:.2f}%)")

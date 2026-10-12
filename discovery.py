@@ -4629,9 +4629,8 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 50) -
         # real production symptom (false "keep" verdicts from OUR OWN
         # load, not the tenant's real state) are addressed together.
         log.info(f"{label}: live pre-check starting on {total_work} candidate slug(s) "
-                 f"({max_workers} at a time — this step has no per-slug log line "
-                 f"otherwise, so progress is reported every "
-                 f"{_DROP_DEAD_PROGRESS_EVERY} slugs below)")
+                 f"({max_workers} at a time)")
+        _precheck_progress = run_log.Progress(f"{label} live pre-check", total=total_work)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_check_one, ats, slug, name) for ats, slug, name in work]
             for future in as_completed(futures):
@@ -4641,9 +4640,7 @@ def _drop_dead_cc_slugs(slugs_by_ats: dict, label: str, max_workers: int = 50) -
                     dropped += 1
                 else:
                     kept_by_ats[ats][slug] = name
-                if checked % _DROP_DEAD_PROGRESS_EVERY == 0 or checked == total_work:
-                    log.info(f"{label}: live pre-check progress: {checked}/{total_work} "
-                             f"checked, {dropped} confirmed dead so far")
+                _precheck_progress.update(checked, dead=dropped)
 
     for ats in kept_by_ats:
         kept = kept_by_ats[ats]

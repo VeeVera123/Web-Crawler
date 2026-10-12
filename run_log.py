@@ -126,3 +126,59 @@ def setup(level: int = logging.INFO) -> None:
             logging.getLogger(name).setLevel(logging.ERROR)
         atexit.register(flush)
         _installed = True
+
+
+# ── Progress ────────────────────────────────────────────────────────────────
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{round(seconds / 60)}m"
+    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+
+
+class Progress:
+    """One status line at most every `every_s` seconds: how far along, the speed, and the time left at that speed.
+
+        prog = run_log.Progress("pages", total=31808)
+        ... prog.update(done, postings=11777)      # call as often as you like; it only prints when due
+        prog.finish(done, postings=11777)          # final line
+
+    Prints like:  ▸ pages 26,700/31,808 · 83.9% · 27.2/s · ~3m left · postings 11,777
+    """
+
+    def __init__(self, label: str, total: int | None = None, every_s: float = 120.0, unit: str = "") -> None:
+        import time as _time
+        self._time = _time
+        self.label, self.total, self.every_s, self.unit = label, total, every_s, unit
+        self.start = _time.monotonic()
+        self._last = self.start
+        self._lock = threading.Lock()
+        self._log = logging.getLogger("progress")
+
+    def _line(self, done: int, stats: dict, final: bool) -> str:
+        elapsed = max(self._time.monotonic() - self.start, 0.001)
+        rate = done / elapsed
+        parts = [f"▸ {self.label} {done:,}" + (f"/{self.total:,}" if self.total else "")]
+        if self.total:
+            parts.append(f"{done / self.total * 100:.1f}%")
+        parts.append(f"{rate:.1f}/s")
+        if final:
+            parts.append(f"done in {_fmt_duration(elapsed)}")
+        elif self.total and done and done < self.total:
+            parts.append(f"~{_fmt_duration((self.total - done) / max(rate, 1e-9))} left")
+        parts.extend(f"{k.replace('_', ' ')} {v:,}" if isinstance(v, int) else f"{k.replace('_', ' ')} {v}" for k, v in stats.items())
+        return " · ".join(parts)
+
+    def update(self, done: int, **stats) -> None:
+        now = self._time.monotonic()
+        with self._lock:
+            if now - self._last < self.every_s:
+                return
+            self._last = now
+        self._log.info(self._line(done, stats, False), extra={"keep": True})
+
+    def finish(self, done: int, **stats) -> None:
+        self._log.info(self._line(done, stats, True), extra={"keep": True})

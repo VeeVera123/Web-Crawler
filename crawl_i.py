@@ -336,6 +336,8 @@ async def _scrape_all_async(boards: list[tuple[str, str]]) -> tuple[list[dict], 
     total_ok = 0
     total_failed = 0
     boards_with_roles: set[tuple[str, str]] = set()
+    _boards_done = [0]
+    _boards_progress = run_log.Progress("boards", total=len(boards))
 
     # Group boards by ATS to apply per-platform concurrency
     by_ats = {}
@@ -352,7 +354,11 @@ async def _scrape_all_async(boards: list[tuple[str, str]]) -> tuple[list[dict], 
 
         async def _do_scrape(slug):
             async with sem:
-                return slug, await scrape_board(ats, slug)
+                try:
+                    return slug, await scrape_board(ats, slug)
+                finally:
+                    _boards_done[0] += 1
+                    _boards_progress.update(_boards_done[0])
 
         results = await asyncio.gather(
             *(_do_scrape(s) for s in slugs), return_exceptions=True
