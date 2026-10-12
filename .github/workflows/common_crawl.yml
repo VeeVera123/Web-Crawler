@@ -266,8 +266,12 @@ jobs:
           # count and could trigger a loop even when every shard from the
           # CURRENT request has already finished.
           SHARD_COUNT="${{ github.event.inputs.shard_count || '10' }}"
-          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&shard_count=eq.$SHARD_COUNT&select=shard_index" \
-            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+          # 2026-10 FIX (infinite 45-second loop): a shard that ran clean to the end stores a `__DONE__` marker row (see
+          # common_crawl_probe.py's _DONE_SENTINEL) instead of deleting its checkpoint. This used to count EVERY row, markers
+          # included, so once all shards were done REMAINING stayed at the shard count forever, every shard exited at once
+          # ("already fully completed"), and finalize re-dispatched ~every 45 s (500 runs). Only rows that are NOT done count.
+          REMAINING=$(curl -sS "$SUPABASE_URL/rest/v1/crawl_checkpoints?source=eq.common_crawl_probe&shard_count=eq.$SHARD_COUNT&select=shard_index,partition" \
+            -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" | python3 -c "import json,sys; print(sum(1 for r in json.load(sys.stdin) if r.get('partition') != '__DONE__'))")
           echo "Shards with a remaining checkpoint: $REMAINING"
           echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
 
@@ -281,6 +285,16 @@ jobs:
 
           if [ "${{ github.event.inputs.loop_runs }}" != "true" ]; then
             echo "Files left, but loop_runs is off — not auto-redispatching (run again manually, or with Loop until done checked)."
+            exit 0
+          fi
+
+          # Second guard: a run that made no real progress ends within minutes. Never re-dispatch after one, whatever the
+          # checkpoint table says, so a future bug of this kind costs one extra run instead of hundreds.
+          STARTED=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq .run_started_at)
+          ELAPSED=$(( $(date +%s) - $(date -d "$STARTED" +%s) ))
+          if [ "$ELAPSED" -lt 300 ]; then
+            echo "This run lasted only ${ELAPSED}s (<300s) - no real progress, so NOT re-dispatching (loop guard)."
+            echo "status_line=STOPPED — last run ended in ${ELAPSED}s with checkpoints still present; check the shard logs" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
