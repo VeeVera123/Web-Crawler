@@ -9,6 +9,7 @@ import asyncio
 import re
 import json
 import logging
+import run_log
 import os
 import random
 import threading
@@ -250,9 +251,15 @@ def log_scrape_failure_summary() -> None:
     """Convenience wrapper: log the grouped summary (if any) at WARNING
     level and clear the collector for the next run. No-op, no log line at
     all, when nothing failed this run."""
-    summary = get_scrape_failure_summary(clear=True)
-    if summary:
-        log.warning("── Scrape failures (grouped) ──\n" + summary)
+    # 2026-10: reported through the shared error digest (run_log.py) - per platform: how many boards failed, the error code and
+    # one example - instead of a free-form block of their own.
+    with _scrape_failures_lock:
+        groups = list(_scrape_failures.items())
+        _scrape_failures.clear()
+    for (ats, reason), identifiers in groups:
+        m = re.search(r"\b(\d{3})\b", reason)
+        run_log.add(ats, len(identifiers), f"{identifiers[0]}: {reason}",
+                    f"HTTP {m.group(1)}" if m else reason.split(" (")[0][:14], "ERROR")
 
 
 def _categorize_scrape_error(err: Exception) -> str:
@@ -1569,7 +1576,7 @@ async def scrape_workday(slug: str, _site_retry: bool = False) -> list[dict]:
             if offset == 0 and not _site_retry and r.status_code in (403, 404, 422):
                 alt = [x for x in await _workday_robots_sites(base_url) if x.lower() != site_id.lower()]
                 if alt:
-                    log.info(f"[workday] {slug!r}: site {site_id!r} refused (HTTP {r.status_code}); robots.txt names {alt[0]!r}, retrying")
+                    log.debug(f"[workday] {slug!r}: site {site_id!r} refused (HTTP {r.status_code}); robots.txt names {alt[0]!r}, retrying")
                     return await scrape_workday(f"{company}|{wd}|{alt[0]}", _site_retry=True)
             reason = f"HTTP {r.status_code}" + (f" ({error_code})" if error_code else "")
             _record_scrape_failure("workday", company, reason)

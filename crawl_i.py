@@ -42,6 +42,7 @@ import asyncio
 import hashlib
 import sys
 import logging
+import run_log
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
@@ -75,11 +76,7 @@ import revalidate
 # see notion_sync.py's module docstring for why. This file is back to
 # being a pure Supabase writer.
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+run_log.setup()
 log = logging.getLogger(__name__)
 
 # httpx logs one INFO-level "HTTP Request: ..." line per request by
@@ -927,6 +924,7 @@ def _run_pipeline(boards: list[tuple[str, str]], shard: int = 0) -> None:
             # failures into the same grouped collector, not just
             # Workday's, so this one call surfaces all of them.
             log_scrape_failure_summary()
+            run_log.flush("Scrape errors")
 
         # 2026-09: repurpose archive_i.last_seen to mean "last time this
         # slug had ANY role at all" (per explicit user instruction) rather

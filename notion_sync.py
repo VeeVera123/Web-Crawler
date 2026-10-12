@@ -90,6 +90,7 @@ that's the point to revisit, not before.
 """
 
 import logging
+import run_log
 import os
 import time
 
@@ -705,11 +706,7 @@ def run_postfix(run_crawl_ii_cleanup: bool = False, run_crawl_iii_cleanup: bool 
 if __name__ == "__main__":
     import argparse
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    run_log.setup()
     _parser = argparse.ArgumentParser(description="Notion sync - CI entrypoints and one-off maintenance")
     _sub = _parser.add_subparsers(dest="command", required=True)
     _sub.add_parser("prefix", help="Notion statuses -> Supabase (runs once before the crawl shards)")

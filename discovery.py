@@ -180,6 +180,7 @@ import argparse
 import gzip
 import json
 import logging
+import run_log
 import os
 import random
 import re
@@ -199,11 +200,7 @@ from identity import canonical_registry_rows
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+run_log.setup()
 log = logging.getLogger(__name__)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")

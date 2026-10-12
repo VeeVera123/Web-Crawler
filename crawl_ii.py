@@ -76,6 +76,7 @@ import hashlib
 import html as html_lib
 import json
 import logging
+import run_log
 import os
 import re
 import sys
@@ -137,11 +138,7 @@ import revalidate  # noqa: E402
 # see notion_sync.py's module docstring for why. This file is back to
 # being a pure Supabase writer.
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+run_log.setup()
 log = logging.getLogger("crawl_ii")
 
 SOURCE_PIPELINE = "crawl_ii"

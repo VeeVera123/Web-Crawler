@@ -21,6 +21,7 @@ import errno
 import gzip
 import json
 import logging
+import run_log
 import os
 import re
 import signal
@@ -46,8 +47,7 @@ from discovery import (  # noqa: E402
     URL_TO_SLUG, extract_gh_jid_ids, extract_greenhouse_embed_token,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s",
-                     datefmt="%H:%M:%S")
+run_log.setup()
 log = logging.getLogger("node")
 
 # 2026-08, REVERTED (SIGTERM only — see 2026-09 below for SIGINT):

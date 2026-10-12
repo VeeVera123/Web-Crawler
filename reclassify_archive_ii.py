@@ -49,6 +49,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import logging
+import run_log
 import os
 import sys
 import time
@@ -71,10 +72,7 @@ from supabase_handler import (  # noqa: E402
     SupabaseFetchError, log_egress_summary,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-)
+run_log.setup()
 log = logging.getLogger("reclassify_archive_ii")
 
 CONCURRENCY = int(os.environ.get("RECLASSIFY_CONCURRENCY", "60"))

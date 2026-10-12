@@ -142,6 +142,7 @@ import csv
 import hashlib
 import io
 import logging
+import run_log
 import sys
 
 import aiohttp
@@ -159,11 +160,7 @@ from supabase_handler import (
 )
 from identity import split_known_jobs
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+run_log.setup()
 log = logging.getLogger(__name__)
 
 SOURCE_PIPELINE = "crawl_iii"

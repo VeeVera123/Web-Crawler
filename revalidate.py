@@ -29,6 +29,7 @@ version, not every run. notion_sync.py (postfix) later archives the Notion page 
 deletes the vetoed rows (supabase_handler.purge_vetoed_jobs).
 """
 import logging
+import run_log
 import os
 
 from classifier import (
@@ -241,7 +242,7 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true",
                     help="write vetoes + version stamps (default: dry run, writes nothing)")
     args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
+    run_log.setup()
 
     import ats_scrapers
     import supabase_handler as sh
