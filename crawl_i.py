@@ -300,7 +300,7 @@ def load_slugs(shard: int = 0, total_shards: int = 1) -> list[tuple[str, str]]:
     # exactly one shard scrapes each.
     from ats_scrapers import VIRTUAL_BOARDS
     pairs += [(a, s) for a, s in VIRTUAL_BOARDS
-              if a in SCRAPERS and (total_shards <= 1 or _shard_of(f"{a}|{s}", total_shards) == shard)]
+              if a in SCRAPERS and (total_shards <= 1 or _shard_of(a, s, total_shards) == shard)]
 
     if total_shards > 1:
         log.info(f"Shard {shard}/{total_shards}: {len(pairs)} boards assigned")
