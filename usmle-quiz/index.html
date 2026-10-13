@@ -1087,6 +1087,46 @@
         @media (max-width: 760px) { .vg-ring { --cw: clamp(130px, 40vw, 180px); } .vg-stage { height: 46svh; } .vg-sub { font-size: 15px; } }
         .vg-hero .nf-sizer, .vg-hero .name-field input { padding: 0 .14em 0 .02em; }
 
+        /* ===== v4: library pure black + vivid cards, orange CTA restored, nicer stats, skeleton ===== */
+        .sec[data-tone] { background: #000; }
+        .sec .hl, .files-h .hl, .ex-head h2 .hl { color: #fff; }
+        .bs-cta { background-color: #FF7040; background-image: linear-gradient(135deg, #FF8356, #FF5A2B); color: #1b0d06; }
+        .bs-cta p { color: #3a1a0c; } .bs-cta h2 em { color: #1b0d06; }
+        .file { --c: #C6F135; color: #0b0b0b; } .file.c2 { --c: #FF7AB6; } .file.c3 { --c: #6F8CFF; } .file.c4 { --c: #FFC93C; }
+        .file::before { opacity: .35; mix-blend-mode: soft-light; }
+        .file .spine b, .file .body h3 { color: #0b0b0b; }
+        .file .obj { border-left-color: #0b0b0b; } .file .wiki { background: rgba(255,255,255,.5); }
+        .file .acts .primary { background: #0b0b0b; color: #fff; }
+        .wk-card { border-color: rgba(255,255,255,.2); background: linear-gradient(160deg, #1b1b22, #0d0d10); }
+        .wk-save.on { background: #C6F135; border-color: #C6F135; color: #0b0b0b; }
+        .wk-meta { color: #C6F135; }
+        .pillseg .pill-thumb { background: #C6F135; } .pillseg button[aria-pressed="true"], .pillseg .on { color: #0b0b0b; }
+        .skel { margin: clamp(56px, 9vw, 110px) 0 0; }
+        .skel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+        .skel-head h3 { font: 400 clamp(40px, 5vw, 72px)/1 'Bebas Neue', sans-serif; letter-spacing: .01em; margin: 0; text-transform: uppercase; }
+        .skel-head a { color: #fff; opacity: .7; font: 600 13px 'Montserrat'; text-decoration: none; } .skel-head a:hover { opacity: 1; }
+        .skel-frame { border-radius: 28px; overflow: hidden; background: #fff; border: 1px solid rgba(255,255,255,.18); height: min(78vh, 760px); }
+        .skel-frame iframe { width: 100%; height: 100%; border: 0; display: block; }
+        .skel-credit { font-size: 12.5px; opacity: .5; margin: 12px 0 0; }
+        /* stats */
+        .bs-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .bs-stat { position: relative; display: flex; flex-direction: column; justify-content: space-between; min-height: 300px; padding: 26px 28px 28px; border-radius: 30px; text-align: left; overflow: hidden;
+                   background: linear-gradient(165deg, #17171a, #070708); border: 1px solid rgba(255,255,255,.1); transition: transform .5s var(--ease), border-color .3s; }
+        .bs-stat:hover { transform: translateY(-6px); border-color: rgba(255,255,255,.3); }
+        .bs-stat::after { content: ""; position: absolute; inset: auto -20% -45% -20%; height: 70%; background: radial-gradient(closest-side, rgba(255,255,255,.12), transparent); pointer-events: none; }
+        .bs-stat small { align-self: flex-start; padding: 8px 14px; border-radius: 999px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); font: 600 11px/1 'Space Grotesk', monospace !important; letter-spacing: .14em; text-transform: uppercase; opacity: 1; color: #f5f5f7; }
+        .bs-stat b { display: block; font-size: clamp(88px, 10vw, 150px) !important; line-height: .9; margin: 18px 0 8px; background: linear-gradient(180deg, #fff 35%, #6d6d72 120%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+        .bs-stat b em { -webkit-text-fill-color: #fff; }
+        .bs-stat > span { font: 500 15px/1.4 'Montserrat', sans-serif; color: #a1a1a6; max-width: 24ch; }
+        @media (max-width: 860px) { .bs-stats { grid-template-columns: 1fr; } .bs-stat { min-height: 220px; } }
+        .rd-fig { margin: 22px 0; padding: 12px; border-radius: 16px; background: #fff; border: 1px solid rgba(35,35,26,.12); }
+        .rd-fig img { display: block; width: 100%; height: auto; border-radius: 8px; }
+        .rd-fig figcaption { font-size: 12.5px; line-height: 1.5; opacity: .65; margin-top: 10px; }
+        .vg-hero .name-field { overflow: visible; } .vg-hero .name-field input { text-align: left; }
+        .vg-hero .nf-sizer, .vg-hero .name-field input { font-family: inherit !important; font-style: normal !important; font-weight: inherit !important; letter-spacing: inherit !important; }
+        .bs-stats { border: 0 !important; } .bs-stat > span { text-align: left; padding: 0 !important; margin: 0 !important; border: 0 !important; display: block; }
+        .vg-hero .nf-sizer, .vg-hero .name-field input { padding: 0 .01em 0 .01em !important; }
+
     </style>
 </head>
 <body>
@@ -3047,12 +3087,21 @@ async function paperFull(pmcid) {
   const doc = new DOMParser().parseFromString(await r.text(), 'text/xml');
   const body = doc.querySelector('body'); const blocks = [];
   const clean = (t) => t.replace(/\s+/g, ' ').trim();
+  const figure = (el) => {
+    const g = el.querySelector('graphic'); const ref = g && (g.getAttribute('xlink:href') || g.getAttribute('href')); if (!ref) return;
+    const cap = el.querySelector('caption'); const lab = el.querySelector('label');
+    blocks.push({ img: 'https://europepmc.org/articles/' + pmcid + '/bin/' + ref + '.jpg', cap: clean((lab ? lab.textContent + ' ' : '') + (cap ? cap.textContent : '')) });
+  };
   const walk = (node, depth) => Array.from(node.children).forEach((el) => {
     if (el.tagName === 'sec') {
       const t = Array.from(el.children).find((c) => c.tagName === 'title');
       if (t) blocks.push({ h: clean(t.textContent), d: depth });
       walk(el, depth + 1);
-    } else if (el.tagName === 'p') { const x = clean(el.textContent); if (x) blocks.push({ p: x }); }
+    } else if (el.tagName === 'fig') figure(el);
+    else if (el.tagName === 'p') {
+      const figs = Array.from(el.querySelectorAll('fig')); const c = el.cloneNode(true); c.querySelectorAll('fig').forEach((f) => f.remove());
+      const x = clean(c.textContent); if (x) blocks.push({ p: x }); figs.forEach(figure);
+    }
     else if (el.tagName === 'list') Array.from(el.querySelectorAll('list-item')).forEach((li) => blocks.push({ p: '• ' + clean(li.textContent) }));
   });
   if (body) walk(body, 0);
@@ -3247,7 +3296,7 @@ const CELLS = [
   { k: 'Tools', title: 'Little helpers, close by', body: 'A calculator sits next to the question, never on top of it.', bg: '#2B1E16', cls: 'on-dark', ico: 'fa-calculator' },
   { k: 'Focus', title: 'Music to settle into', body: 'Pick a playlist, press play, and let the room go quiet around you.', bg: '#4A3527', cls: 'on-dark', ico: 'fa-music' },
   { k: 'Progress', title: 'Your progress stays yours', body: "Your scores live on this device, so you can see how far you've come.", art: 'angiogram', ico: 'fa-chart-line' },
-  { k: 'Library', title: 'The stories behind the answers', body: 'Read a little deeper, save the pages you love, and come back to them.', bg: '#D9C3A0', cls: 'on-light', ico: 'fa-bookmark' },
+  { k: 'Library', title: 'Read more about any case', body: 'Search Wikipedia and journals, highlight what matters, and keep your notes.', bg: '#D9C3A0', cls: 'on-light', ico: 'fa-bookmark' },
 ];
 function Inside({ go }) {
   return html`<section className="home-sec home-light seam-top" data-nav="light" style=${{ padding: 'clamp(90px,13vh,170px) 0' }}>
@@ -3275,8 +3324,8 @@ function Inside({ go }) {
 const STACK = [
   { n: '01', k: 'Show up', title: 'Start small. Just begin.', body: "Open a block, start the clock, and answer the first question. That's the whole job for today. The rest follows.", bg: '#0F0D0B', fg: '#F4F0E6', img: 'angiogram' },
   { n: '02', k: 'Learn the why', title: 'Read the reason behind every answer.', body: "Right or wrong, each question opens into an explanation with the real images beside it. That's where it really sticks.", bg: '#EFE9DA', fg: '#17120e', img: 'heartLungs' },
-  { n: '03', k: 'Notice the pattern', title: 'See what keeps tripping you up.', body: 'Your dashboard keeps quiet track, so you can spot the topics that need another look. No grades, no judgement.', bg: '#3A2A20', fg: '#F4F0E6', img: 'fingerprint' },
-  { n: '04', k: 'Come back tomorrow', title: 'Be gentle. Be consistent.', body: 'A little each day beats a lot once. Keep your streak, save the pages you love, and let the work add up.', bg: '#C98A5E', fg: '#20130a', img: 'center' },
+  { n: '03', k: 'Track your scores', title: 'See which topics need more time.', body: 'The dashboard shows your scores and the questions you miss, so you know where to spend tomorrow.', bg: '#3A2A20', fg: '#F4F0E6', img: 'fingerprint' },
+  { n: '04', k: 'Come back tomorrow', title: 'Keep a steady pace.', body: 'Twenty minutes a day beats one long session a week. Your streak and saved pages are here when you return.', bg: '#C98A5E', fg: '#20130a', img: 'center' },
 ];
 function Stack() {
   const refs = useRef([]);
@@ -3323,9 +3372,9 @@ function Stack() {
 function Stats({ attempts }) {
   const s = summarize(attempts);
   const items = [
-    { n: html`<${AN} value=${CASES.length} />`, k: 'Cases', l: 'to start with, and more on the way' },
-    { n: '30:00', k: 'Per block', l: 'of quiet focus, with nobody watching' },
-    { n: s.n ? html`<${AN} value=${s.best} suffix="%" />` : html`<em>Free</em>`, k: s.n ? 'Personal best' : 'Always', l: s.n ? "so far. Look how far you've come." : 'no sign-up, no cost, no catch' },
+    { n: html`<${AN} value=${CASES.length} />`, k: 'Cases', l: 'with real images, and more soon' },
+    { n: '30:00', k: 'Per block', l: 'on the clock, like exam day' },
+    { n: s.n ? html`<${AN} value=${s.best} suffix="%" />` : html`<em>Free</em>`, k: s.n ? 'Personal best' : 'Always', l: s.n ? 'your highest score so far' : 'no sign-up, no cost' },
   ];
   return html`<section className="home-sec home-dark" data-nav="dark" style=${{ padding: 'clamp(70px,10vh,130px) clamp(18px,5vw,72px)', borderTop: '1px solid rgba(255,255,255,.07)' }}>
     <div className="home-wrap bs-stats">
@@ -3635,13 +3684,35 @@ function WikiReader({ page, onClose }) {
   const saved = useSaved();
   const ann = annOf(useSyncExternalStore(AnnStore.subscribe, AnnStore.get), page.url);
   const [bar, setBar] = useState(null);
+  const bodyRef = useRef(null);
+  const downOnBg = useRef(false);
   const pickSel = () => {
-    const sel = window.getSelection(); const t = sel && sel.toString().replace(/\s+/g, ' ').trim();
-    if (!t || t.length < 3 || t.length > 400 || !sel.rangeCount) return setBar(null);
+    const sel = window.getSelection(); const body = bodyRef.current;
+    if (!sel || !sel.rangeCount || sel.isCollapsed || !body || !(body.contains(sel.anchorNode) || body.contains(sel.focusNode))) return setBar(null);
+    const rg = sel.getRangeAt(0).cloneRange(); const br = document.createRange(); br.selectNodeContents(body);
+    if (rg.compareBoundaryPoints(Range.START_TO_START, br) < 0) rg.setStart(br.startContainer, br.startOffset);
+    if (rg.compareBoundaryPoints(Range.END_TO_END, br) > 0) rg.setEnd(br.endContainer, br.endOffset);
+    const parts = Array.from(body.querySelectorAll('p')).filter((p) => rg.intersectsNode(p)).map((p) => {
+      const pr = document.createRange(); pr.selectNodeContents(p);
+      if (rg.compareBoundaryPoints(Range.START_TO_START, pr) > 0) pr.setStart(rg.startContainer, rg.startOffset);
+      if (rg.compareBoundaryPoints(Range.END_TO_END, pr) < 0) pr.setEnd(rg.endContainer, rg.endOffset);
+      return pr.toString().replace(/\s+/g, ' ').trim().slice(0, 400);
+    }).filter((x) => x.length >= 3);
+    if (!parts.length) return setBar(null);
     const r = sel.getRangeAt(0).getBoundingClientRect();
-    setBar({ t, x: Math.min(Math.max(r.left + r.width / 2, 120), window.innerWidth - 120), y: Math.max(r.top - 8, 60) });
+    setBar({ t: parts, x: Math.min(Math.max(r.left + r.width / 2, 130), window.innerWidth - 130), y: Math.min(Math.max(r.top - 10, 70), window.innerHeight - 60) });
   };
-  const addHl = (also) => { if (!bar) return; if (!ann.hl.includes(bar.t)) setAnn(page.url, { hl: [...ann.hl, bar.t], ...(also ? { note: (ann.note ? ann.note + '\n' : '') + '“' + bar.t + '” — ' } : {}) }); else if (also) setAnn(page.url, { note: (ann.note ? ann.note + '\n' : '') + '“' + bar.t + '” — ' }); window.getSelection().removeAllRanges(); setBar(null); };
+  useEffect(() => {
+    let tm = 0; const on = () => { clearTimeout(tm); tm = setTimeout(pickSel, 120); };
+    document.addEventListener('selectionchange', on);
+    return () => { document.removeEventListener('selectionchange', on); clearTimeout(tm); };
+  });
+  const addHl = (also) => {
+    if (!bar) return;
+    const fresh = bar.t.filter((x) => !ann.hl.includes(x));
+    setAnn(page.url, { hl: [...ann.hl, ...fresh], ...(also ? { note: (ann.note ? ann.note + '\n' : '') + '“' + bar.t.join(' ') + '” — ' } : {}) });
+    window.getSelection().removeAllRanges(); setBar(null);
+  };
   const clickBody = (e) => { const h = e.target.closest && e.target.closest('mark.hlm'); if (h && !window.getSelection().toString()) setAnn(page.url, { hl: ann.hl.filter((x) => x !== h.dataset.h) }); };
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose(); };
@@ -3662,9 +3733,9 @@ function WikiReader({ page, onClose }) {
   }, [page.url]);
   const on = isSaved(saved, page.url);
   const paper = page.source !== 'Wikipedia';
-  return ReactDOM.createPortal(html`<div className="reader" onClick=${(e) => e.target === e.currentTarget && onClose()} role="dialog" aria-modal="true" aria-label=${page.title}>
+  return ReactDOM.createPortal(html`<div className="reader" onMouseDown=${(e) => { downOnBg.current = e.target === e.currentTarget; }} onClick=${(e) => { if (e.target === e.currentTarget && downOnBg.current) onClose(); }} role="dialog" aria-modal="true" aria-label=${page.title}>
     <div className="reader-card narrow"><div className="reader-top"><span>${page.source} · reading here</span><button onClick=${onClose} aria-label="Close"><${Icon} n="fa-xmark" /></button></div>
-      <div className="reader-body" onMouseUp=${pickSel} onTouchEnd=${() => setTimeout(pickSel, 250)} onClick=${clickBody} onScroll=${() => setBar(null)}>
+      <div className="reader-body" ref=${bodyRef} onClick=${clickBody} onScroll=${pickSel}>
         <div>
           ${hero && html`<img className="wk-hero" src=${hero} alt="" onError=${hidePicture} />`}
           <h3>${page.title}</h3>
@@ -3672,7 +3743,7 @@ function WikiReader({ page, onClose }) {
           ${state === 'full' && page.pmcid && html`<p className="rd-badge">Open access · full text</p>`}
           ${state === 'abstract' && paper && html`<p className="rd-badge soft">Abstract only. The full paper may be behind a paywall, so open the original to read it all.</p>`}
           ${!blocks && html`<p className="rd-load">Opening the article…</p>`}
-          ${blocks && blocks.map((b, k) => b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${withHighlights(b.p, ann.hl)}</p>`)}
+          ${blocks && blocks.map((b, k) => b.img ? html`<figure key=${k} className="rd-fig"><img src=${b.img} alt=${b.cap} loading="lazy" onError=${(e) => { e.currentTarget.parentNode.style.display = 'none'; }} /><figcaption>${b.cap}</figcaption></figure>` : b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${withHighlights(b.p, ann.hl)}</p>`)}
           <div className="rd-notes"><h5>Your notes</h5>
             ${ann.hl.length === 0 && html`<p className="rd-hint">Select any text above to highlight it or turn it into a note. Click a highlight to remove it.</p>`}
             ${ann.hl.map((h) => html`<div key=${h} className="rd-hi"><q>${h}</q><button onClick=${() => setAnn(page.url, { hl: ann.hl.filter((x) => x !== h) })} aria-label="Remove highlight"><${Icon} n="fa-xmark" /></button></div>`)}
@@ -3683,7 +3754,7 @@ function WikiReader({ page, onClose }) {
             <button onClick=${() => copyText(page.url, 'Link copied')}><${Icon} n="fa-link" />Copy link</button>
           </div>
         </div>
-      </div>${bar && html`<div className="hl-bar" style=${{ left: bar.x, top: bar.y }} onMouseDown=${(e) => e.preventDefault()}><button onClick=${() => addHl(false)}><${Icon} n="fa-highlighter" />Highlight</button><button onClick=${() => addHl(true)}><${Icon} n="fa-pen" />Add note</button></div>`}</div></div>`, document.body);
+      </div></div></div>${bar && ReactDOM.createPortal(html`<div className="hl-bar" style=${{ left: bar.x, top: bar.y }} onMouseDown=${(e) => e.preventDefault()}><button onClick=${() => addHl(false)}><${Icon} n="fa-highlighter" />Highlight</button><button onClick=${() => addHl(true)}><${Icon} n="fa-pen" />Add note</button></div>`, document.body)}`, document.body);
 }
 
 function Explorer() {
@@ -3744,10 +3815,9 @@ function Explorer() {
 function CasesSection({ pending, onRead, withExplorer }) {
   return html`<section className="sec" data-tone="paper" data-nav="dark" style=${withExplorer ? { paddingTop: 120, minHeight: '100dvh' } : undefined}>
     <div className="wrap">
-      <p className="eyebrow reveal">Case files · the stories behind the answers</p>
       <h2 className="files-h reveal" style=${{ '--d': '80ms', marginTop: 18 }}>Open a case. <span className="hl">Read the story</span> behind the answer.</h2>
       <${CaseFiles} pending=${pending} onRead=${onRead} />
-      ${withExplorer && html`<${Explorer} />`}
+      ${withExplorer && html`<${Fragment}><section className="skel reveal"><div className="skel-head"><h3>Explore the skeleton</h3><a href="https://www.innerbody.com/image/skelfov.html" target="_blank" rel="noopener noreferrer">Open in a new tab <${Icon} n="fa-arrow-up-right-from-square" /></a></div><div className="skel-frame"><iframe src="https://www.innerbody.com/image/skelfov.html" title="Interactive skeleton, courtesy of Innerbody" loading="lazy" referrerPolicy="no-referrer"></iframe></div><p className="skel-credit">Interactive diagram by Innerbody.com, shown here with thanks.</p></section><${Explorer} /><//>`}
     </div>
   </section>`;
 }
