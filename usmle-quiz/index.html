@@ -1127,6 +1127,41 @@
         .bs-stats { border: 0 !important; } .bs-stat > span { text-align: left; padding: 0 !important; margin: 0 !important; border: 0 !important; display: block; }
         .vg-hero .nf-sizer, .vg-hero .name-field input { padding: 0 .01em 0 .01em !important; }
 
+        /* ===== v5: notes drawer, highlight bar, card images ===== */
+        mark.hlm { background: none; padding: .04em .1em; border-radius: 4px; color: inherit; cursor: pointer; transition: box-shadow .3s, filter .3s; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+        mark.hlm.c-y { background: rgba(255,224,102,.7); } mark.hlm.c-g { background: rgba(155,231,165,.7); } mark.hlm.c-p { background: rgba(255,179,209,.7); } mark.hlm.c-b { background: rgba(168,196,255,.7); }
+        mark.hlm:hover { filter: saturate(1.3); } mark.hlm.active { box-shadow: 0 0 0 3px rgba(0,0,0,.18); }
+        .hl-bar { align-items: center; gap: 2px; padding: 6px 8px; border-radius: 999px; background: rgba(21,21,21,.94); backdrop-filter: blur(12px); box-shadow: 0 18px 44px -10px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.1);
+                  transform: translate(-50%, -100%); animation: barIn .5s cubic-bezier(.22,1,.36,1) both; transition: left .25s var(--ease), top .25s var(--ease); }
+        @keyframes barIn { from { opacity: 0; transform: translate(-50%, calc(-100% + 10px)) scale(.92); } to { opacity: 1; transform: translate(-50%, -100%) scale(1); } }
+        .hl-bar .dot, .rdd-card .dot { width: 24px; height: 24px; padding: 0; margin: 0 3px; border-radius: 50%; background: var(--c); border: 2px solid transparent; box-shadow: 0 0 0 1px rgba(255,255,255,.25) inset; transition: transform .25s var(--ease); height: 24px; }
+        .hl-bar .dot:hover, .rdd-card .dot:hover { transform: scale(1.18); background: var(--c); }
+        .hl-bar .sep { width: 1px; height: 20px; background: rgba(255,255,255,.18); margin: 0 6px; }
+        .hl-bar .nbtn { height: 32px; padding: 0 14px 0 12px; }
+        .reader-top .rt-r { display: flex; gap: 8px; align-items: center; }
+        .rt-notes { width: auto !important; padding: 0 14px !important; border-radius: 999px !important; gap: 8px; display: inline-flex; align-items: center; font: 600 13px/1 'Montserrat', sans-serif; }
+        .rt-notes i { font-style: normal; min-width: 20px; height: 20px; border-radius: 10px; display: grid; place-items: center; background: #C6F135; color: #000; font-size: 11px; padding: 0 5px; }
+        .rt-notes.on { background: #fff !important; color: #000 !important; }
+        .rd-drawer { position: fixed; z-index: 380; top: 92px; right: max(16px, calc((100vw - 760px) / 2 - 372px)); bottom: 24px; width: 340px; display: flex; flex-direction: column; border-radius: 24px; background: #fbf9f4; color: #1a1712; box-shadow: 0 30px 80px -20px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.08);
+                     transform: translateX(24px) scale(.97); opacity: 0; pointer-events: none; transition: transform .55s var(--ease-out), opacity .35s; font-family: 'Montserrat', sans-serif; }
+        .rd-drawer.open { transform: none; opacity: 1; pointer-events: auto; }
+        .rdd-top { display: flex; align-items: center; gap: 8px; padding: 16px 16px 14px 20px; border-bottom: 1px solid rgba(0,0,0,.08); }
+        .rdd-top b { font: 400 24px/1 'Bebas Neue', sans-serif; letter-spacing: .02em; } .rdd-top span { flex: 1; font-size: 12px; opacity: .5; }
+        .rdd-top button { width: 34px; height: 34px; border-radius: 50%; border: 0; background: rgba(0,0,0,.06); cursor: pointer; transition: background .25s; } .rdd-top button:hover { background: rgba(0,0,0,.14); }
+        .rdd-list { flex: 1; overflow-y: auto; padding: 14px; display: grid; gap: 10px; align-content: start; }
+        .rdd-card { border-radius: 16px; padding: 12px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-left: 5px solid var(--c); transition: box-shadow .3s, transform .3s; }
+        .rdd-card.active { box-shadow: 0 10px 26px -10px rgba(0,0,0,.25); transform: translateY(-1px); }
+        .rdd-card .q { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 0; cursor: pointer; font: italic 400 14px/1.45 'Fraunces', Georgia, serif; color: #1a1712; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+        .rdd-card textarea, .rdd-gen textarea { width: 100%; min-height: 56px; margin-top: 10px; resize: vertical; border-radius: 12px; border: 1px solid rgba(0,0,0,.12); background: #faf8f2; padding: 10px 12px; font: 400 13.5px/1.5 'Montserrat', sans-serif; color: inherit; outline: none; transition: border-color .25s, background .25s; }
+        .rdd-card textarea:focus, .rdd-gen textarea:focus { border-color: #1a1712; background: #fff; }
+        .rdd-card .row { display: flex; align-items: center; margin-top: 8px; } .rdd-card .dot.on { border-color: #1a1712; }
+        .rdd-card .del { margin-left: auto; border: 0; background: none; cursor: pointer; opacity: .4; font-size: 14px; } .rdd-card .del:hover { opacity: 1; }
+        .rdd-gen { display: block; margin-top: 6px; } .rdd-gen span { font: 700 10.5px/1 'Montserrat'; letter-spacing: .14em; text-transform: uppercase; opacity: .5; }
+        .rd-hint { font-size: 13px; line-height: 1.55; opacity: .6; margin: 4px 2px; }
+        @media (max-width: 1180px) { .rd-drawer { left: 12px; right: 12px; width: auto; top: auto; bottom: 12px; height: 52vh; transform: translateY(30px); } .rd-drawer.open { transform: none; } }
+        .wk-kind { position: absolute; left: 12px; bottom: 12px; z-index: 2; padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; font: 600 10px/1 'Space Grotesk', monospace; letter-spacing: .12em; text-transform: uppercase; }
+        .wk-img img { animation: fadeImg .7s var(--ease-out) both; } @keyframes fadeImg { from { opacity: 0; transform: scale(1.04); } to { opacity: 1; transform: none; } }
+
     </style>
 </head>
 <body>
@@ -2931,10 +2966,12 @@ const LibTab = makeStore('usmle-site:libTab', 'results');
 const AnnStore = makeStore('usmle-site:annotations', {});            /* { [url]: { hl: [text], note } } */
 const annOf = (all, url) => all[url] || { hl: [], note: '' };
 const setAnn = (url, patch) => { const all = AnnStore.get(); AnnStore.set({ ...all, [url]: { ...annOf(all, url), ...patch } }); };
-function withHighlights(text, hls) {
+const HL_COLORS = { y: '#FFE066', g: '#9BE7A5', p: '#FFB3D1', b: '#A8C4FF' };
+const hlList = (ann) => ann.hl.map((h) => (typeof h === 'string' ? { t: h, c: 'y', n: '' } : h));
+function withHighlights(text, hls, active) {
   let parts = [text];
-  hls.forEach((h) => { parts = parts.flatMap((p) => typeof p !== 'string' ? [p] : p.split(h).flatMap((seg, i, arr) => (i < arr.length - 1 ? [seg, { m: h }] : [seg]))); });
-  return parts.map((p, i) => (typeof p === 'string' ? p : html`<mark key=${i} className="hlm" title="Click to remove" data-h=${p.m}>${p.m}</mark>`));
+  hls.forEach((h) => { parts = parts.flatMap((p) => typeof p !== 'string' ? [p] : p.split(h.t).flatMap((seg, i, arr) => (i < arr.length - 1 ? [seg, { m: h }] : [seg]))); });
+  return parts.map((p, i) => (typeof p === 'string' ? p : html`<mark key=${i} className=${cx('hlm', 'c-' + p.m.c, active === p.m.t && 'active')} title=${p.m.n ? p.m.n : 'Click to open the note'} data-h=${p.m.t}>${p.m.t}</mark>`));
 }
 const useUserName = () => useSyncExternalStore(UserStore.subscribe, UserStore.get);
 const useSaved = () => useSyncExternalStore(SavedStore.subscribe, SavedStore.get);
@@ -3081,7 +3118,12 @@ async function searchSources(q, source, signal, per, onUpdate) {
 }
 
 /* Full text for the reader: Europe PMC open-access papers come as JATS XML. */
-async function paperFull(pmcid) {
+const paperMem = {};
+const paperFull = (pmcid) => paperMem[pmcid] || (paperMem[pmcid] = paperFullRaw(pmcid).catch((e) => { delete paperMem[pmcid]; throw e; }));
+const firstFigure = (pmcid) => paperFull(pmcid).then((b) => { const f = b.find((x) => x.img); return f ? f.img : ''; });
+const topicMem = {};
+const topicImage = (q) => topicMem[q] || (topicMem[q] = wikiSearch(q, undefined, 4).then((r) => { const x = r.find((p) => p.thumb); return x ? x.thumb : ''; }).catch(() => ''));
+async function paperFullRaw(pmcid) {
   const r = await fetch('https://www.ebi.ac.uk/europepmc/webservices/rest/' + pmcid + '/fullTextXML');
   if (!r.ok) throw new Error('fulltext ' + r.status);
   const doc = new DOMParser().parseFromString(await r.text(), 'text/xml');
@@ -3656,13 +3698,35 @@ function Reader({ c, onClose }) {
 const SUGGEST = ['Finasteride', 'Benign prostatic hyperplasia', 'Testicular torsion', 'Brainstem stroke', 'Rheumatoid arthritis', 'Omeprazole', 'Parkinson disease'];
 const SRC_TINT = { Wikipedia: '#3A2A20', PubMed: '#2C3B4A', 'Europe PMC': '#3F4A33' };
 
-function WikiCard({ page, saved, onRead, i, showNote }) {
+function useCardImage(page, topic) {
+  const paper = page.source !== 'Wikipedia';
+  const [img, setImg] = useState(page.thumb || '');
+  const [kind, setKind] = useState(page.thumb ? 'own' : '');
+  const ref = useRef(null);
+  useEffect(() => {
+    if (img || !paper || !ref.current) return undefined;
+    let live = true;
+    const go = () => {
+      const fig = page.pmcid ? firstFigure(page.pmcid) : Promise.resolve('');
+      fig.catch(() => '').then((u) => (u ? [u, 'figure'] : topic ? topicImage(topic).then((t) => [t, 'topic']) : ['', '']))
+        .then(([u, k]) => { if (live && u) { setImg(u); setKind(k); } });
+    };
+    const io = 'IntersectionObserver' in window ? new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { io.disconnect(); go(); } }, { rootMargin: '300px' }) : null;
+    if (io) io.observe(ref.current); else go();
+    return () => { live = false; if (io) io.disconnect(); };
+  }, [page.url, topic]);
+  return { img, kind, ref };
+}
+
+function WikiCard({ page: pg, saved, onRead, i, showNote, topic }) {
+  const { img, kind, ref } = useCardImage(pg, topic);
+  const page = img && !pg.thumb ? { ...pg, thumb: img } : pg;
   const paper = page.source !== 'Wikipedia';
   return html`<article className="wk" style=${{ '--i': i }}>
     <div className="wk-card">
-      <div className=${cx('wk-img', paper && 'paper')} style=${paper ? { '--tint': SRC_TINT[page.source] || '#3A2A20' } : undefined}>
+      <div ref=${ref} className=${cx('wk-img', paper && !img && 'paper')} style=${paper ? { '--tint': SRC_TINT[page.source] || '#3A2A20' } : undefined}>
         ${page.thumb ? html`<img src=${page.thumb} alt="" loading="lazy" onError=${hidePicture} />` : paper ? html`<div className="ph"><span>${page.source}</span><b>${page.meta || 'Journal article'}</b></div>` : html`<div className="ph">${page.title.charAt(0)}</div>`}
-        <span className="wk-src">${page.source}</span>
+        <span className="wk-src">${page.source}</span>${kind === 'topic' && html`<span className="wk-kind">Topic image</span>`}${kind === 'figure' && html`<span className="wk-kind">Figure 1</span>`}
         <button className=${cx('wk-save', saved && 'on')} onClick=${() => toggleSaved(page)} aria-pressed=${saved} aria-label=${saved ? 'Remove from saved' : 'Save this page'} title=${saved ? 'Saved' : 'Save for later'}><${Icon} n="fa-bookmark" cls=${saved ? 'fas' : 'far'} /></button>
       </div>
       <div className="wk-body"><h4>${page.title}</h4>${paper && html`<div className="wk-meta">${page.meta}${page.authors ? html`<br /><span>${page.authors}</span>` : ''}</div>`}<p>${page.extract}</p></div>
@@ -3686,8 +3750,13 @@ function WikiReader({ page, onClose }) {
   const [bar, setBar] = useState(null);
   const bodyRef = useRef(null);
   const downOnBg = useRef(false);
+  const hls = hlList(ann);
+  const [drawer, setDrawer] = useState(false);
+  const [active, setActive] = useState('');
+  const down = useRef(false);
   const pickSel = () => {
     const sel = window.getSelection(); const body = bodyRef.current;
+    if (down.current) return;
     if (!sel || !sel.rangeCount || sel.isCollapsed || !body || !(body.contains(sel.anchorNode) || body.contains(sel.focusNode))) return setBar(null);
     const rg = sel.getRangeAt(0).cloneRange(); const br = document.createRange(); br.selectNodeContents(body);
     if (rg.compareBoundaryPoints(Range.START_TO_START, br) < 0) rg.setStart(br.startContainer, br.startOffset);
@@ -3700,20 +3769,29 @@ function WikiReader({ page, onClose }) {
     }).filter((x) => x.length >= 3);
     if (!parts.length) return setBar(null);
     const r = sel.getRangeAt(0).getBoundingClientRect();
-    setBar({ t: parts, x: Math.min(Math.max(r.left + r.width / 2, 130), window.innerWidth - 130), y: Math.min(Math.max(r.top - 10, 70), window.innerHeight - 60) });
+    const x = Math.round(Math.min(Math.max(r.left + r.width / 2, 150), window.innerWidth - 150) / 4) * 4;
+    const y = Math.round(Math.min(Math.max(r.top - 12, 74), window.innerHeight - 70) / 4) * 4;
+    setBar((o) => (o && o.t.join('|') === parts.join('|') && o.x === x && o.y === y ? o : { t: parts, x, y }));
   };
   useEffect(() => {
-    let tm = 0; const on = () => { clearTimeout(tm); tm = setTimeout(pickSel, 120); };
-    document.addEventListener('selectionchange', on);
-    return () => { document.removeEventListener('selectionchange', on); clearTimeout(tm); };
+    let tm = 0; const on = () => { clearTimeout(tm); tm = setTimeout(pickSel, 240); };
+    const dn = (e) => { if (e.target.closest && e.target.closest('.hl-bar')) return; down.current = true; setBar(null); };
+    const up = () => { if (!down.current) return; down.current = false; clearTimeout(tm); tm = setTimeout(pickSel, 260); };
+    document.addEventListener('selectionchange', on); document.addEventListener('mousedown', dn); document.addEventListener('mouseup', up);
+    return () => { document.removeEventListener('selectionchange', on); document.removeEventListener('mousedown', dn); document.removeEventListener('mouseup', up); clearTimeout(tm); };
   });
-  const addHl = (also) => {
+  const addHl = (color, withNote) => {
     if (!bar) return;
-    const fresh = bar.t.filter((x) => !ann.hl.includes(x));
-    setAnn(page.url, { hl: [...ann.hl, ...fresh], ...(also ? { note: (ann.note ? ann.note + '\n' : '') + '“' + bar.t.join(' ') + '” — ' } : {}) });
+    const fresh = bar.t.filter((x) => !hls.some((h) => h.t === x)).map((t) => ({ t, c: color, n: '' }));
+    setAnn(page.url, { hl: [...hls, ...fresh] });
     window.getSelection().removeAllRanges(); setBar(null);
+    if (withNote) { setDrawer(true); setActive(bar.t[0]); }
   };
-  const clickBody = (e) => { const h = e.target.closest && e.target.closest('mark.hlm'); if (h && !window.getSelection().toString()) setAnn(page.url, { hl: ann.hl.filter((x) => x !== h.dataset.h) }); };
+  const patchHl = (t, patch) => setAnn(page.url, { hl: hls.map((h) => (h.t === t ? { ...h, ...patch } : h)) });
+  const delHl = (t) => setAnn(page.url, { hl: hls.filter((h) => h.t !== t) });
+  const clickBody = (e) => { const h = e.target.closest && e.target.closest('mark.hlm'); if (h && window.getSelection().isCollapsed) { setActive(h.dataset.h); setDrawer(true); } };
+  const jump = (t) => { setActive(t); const m = Array.from(bodyRef.current.querySelectorAll('mark.hlm')).find((x) => x.dataset.h === t); if (m) m.scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+  const copyNotes = () => copyText([`${page.title} (${page.source})`, page.url, '', ...hls.map((h) => `• “${h.t}”${h.n ? '\n   ' + h.n : ''}`), ann.note ? '\n' + ann.note : ''].join('\n'), 'Notes copied');
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', k); document.body.style.overflow = 'hidden';
@@ -3734,7 +3812,7 @@ function WikiReader({ page, onClose }) {
   const on = isSaved(saved, page.url);
   const paper = page.source !== 'Wikipedia';
   return ReactDOM.createPortal(html`<div className="reader" onMouseDown=${(e) => { downOnBg.current = e.target === e.currentTarget; }} onClick=${(e) => { if (e.target === e.currentTarget && downOnBg.current) onClose(); }} role="dialog" aria-modal="true" aria-label=${page.title}>
-    <div className="reader-card narrow"><div className="reader-top"><span>${page.source} · reading here</span><button onClick=${onClose} aria-label="Close"><${Icon} n="fa-xmark" /></button></div>
+    <div className="reader-card narrow"><div className="reader-top"><span>${page.source} · reading here</span><div className="rt-r"><button className=${cx('rt-notes', drawer && 'on')} onClick=${() => setDrawer((d) => !d)}><${Icon} n="fa-pen-to-square" />Notes${(hls.length || ann.note) ? html`<i>${hls.length || '•'}</i>` : ''}</button><button onClick=${onClose} aria-label="Close"><${Icon} n="fa-xmark" /></button></div></div>
       <div className="reader-body" ref=${bodyRef} onClick=${clickBody} onScroll=${pickSel}>
         <div>
           ${hero && html`<img className="wk-hero" src=${hero} alt="" onError=${hidePicture} />`}
@@ -3743,18 +3821,27 @@ function WikiReader({ page, onClose }) {
           ${state === 'full' && page.pmcid && html`<p className="rd-badge">Open access · full text</p>`}
           ${state === 'abstract' && paper && html`<p className="rd-badge soft">Abstract only. The full paper may be behind a paywall, so open the original to read it all.</p>`}
           ${!blocks && html`<p className="rd-load">Opening the article…</p>`}
-          ${blocks && blocks.map((b, k) => b.img ? html`<figure key=${k} className="rd-fig"><img src=${b.img} alt=${b.cap} loading="lazy" onError=${(e) => { e.currentTarget.parentNode.style.display = 'none'; }} /><figcaption>${b.cap}</figcaption></figure>` : b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${withHighlights(b.p, ann.hl)}</p>`)}
-          <div className="rd-notes"><h5>Your notes</h5>
-            ${ann.hl.length === 0 && html`<p className="rd-hint">Select any text above to highlight it or turn it into a note. Click a highlight to remove it.</p>`}
-            ${ann.hl.map((h) => html`<div key=${h} className="rd-hi"><q>${h}</q><button onClick=${() => setAnn(page.url, { hl: ann.hl.filter((x) => x !== h) })} aria-label="Remove highlight"><${Icon} n="fa-xmark" /></button></div>`)}
-            <textarea className="rd-note" placeholder="Write your own notes on this page…" value=${ann.note} onChange=${(e) => { setAnn(page.url, { note: e.target.value }); if (isSaved(saved, page.url)) setSavedNote(page.url, e.target.value); }} aria-label="Your notes"></textarea></div>
+          ${blocks && blocks.map((b, k) => b.img ? html`<figure key=${k} className="rd-fig"><img src=${b.img} alt=${b.cap} loading="lazy" onError=${(e) => { e.currentTarget.parentNode.style.display = 'none'; }} /><figcaption>${b.cap}</figcaption></figure>` : b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${withHighlights(b.p, hls, active)}</p>`)}
           <div className="rd-acts">
             <button className=${on ? 'primary' : ''} onClick=${() => toggleSaved(page)}><${Icon} n="fa-bookmark" cls=${on ? 'fas' : 'far'} />${on ? 'Saved' : 'Save for later'}</button>
             <a href=${page.url} target="_blank" rel="noopener noreferrer">Open the original <${Icon} n="fa-arrow-up-right-from-square" /></a>
             <button onClick=${() => copyText(page.url, 'Link copied')}><${Icon} n="fa-link" />Copy link</button>
           </div>
         </div>
-      </div></div></div>${bar && ReactDOM.createPortal(html`<div className="hl-bar" style=${{ left: bar.x, top: bar.y }} onMouseDown=${(e) => e.preventDefault()}><button onClick=${() => addHl(false)}><${Icon} n="fa-highlighter" />Highlight</button><button onClick=${() => addHl(true)}><${Icon} n="fa-pen" />Add note</button></div>`, document.body)}`, document.body);
+      </div></div></div>${bar && ReactDOM.createPortal(html`<div className="hl-bar" style=${{ left: bar.x, top: bar.y }} onMouseDown=${(e) => e.preventDefault()}>
+        ${Object.entries(HL_COLORS).map(([k, c]) => html`<button key=${k} className="dot" style=${{ '--c': c }} onClick=${() => addHl(k, false)} aria-label=${'Highlight ' + k} title="Highlight"></button>`)}
+        <span className="sep"></span><button className="nbtn" onClick=${() => addHl('y', true)}><${Icon} n="fa-pen" />Add note</button></div>`, document.body)}
+      ${ReactDOM.createPortal(html`<aside className=${cx('rd-drawer', drawer && 'open')} aria-hidden=${!drawer}>
+        <div className="rdd-top"><b>Your notes</b><span>${hls.length} highlight${hls.length === 1 ? '' : 's'}</span><button onClick=${copyNotes} title="Copy all notes" aria-label="Copy notes"><${Icon} n="fa-copy" /></button><button onClick=${() => setDrawer(false)} aria-label="Close notes"><${Icon} n="fa-xmark" /></button></div>
+        <div className="rdd-list">
+          ${hls.length === 0 && html`<p className="rd-hint">Select any text in the article. Pick a colour to highlight it, or choose Add note to write about it.</p>`}
+          ${hls.map((h) => html`<div key=${h.t} className=${cx('rdd-card', active === h.t && 'active')} style=${{ '--c': HL_COLORS[h.c] || HL_COLORS.y }}>
+            <button className="q" onClick=${() => jump(h.t)}>${h.t}</button>
+            <textarea value=${h.n} placeholder="Add a note…" onFocus=${() => setActive(h.t)} onChange=${(e) => patchHl(h.t, { n: e.target.value })} ref=${(el) => { if (el && active === h.t && drawer && !h.n && document.activeElement !== el && !el.dataset.f) { el.dataset.f = 1; setTimeout(() => el.focus({ preventScroll: true }), 320); } }}></textarea>
+            <div className="row">${Object.entries(HL_COLORS).map(([k, c]) => html`<button key=${k} className=${cx('dot', h.c === k && 'on')} style=${{ '--c': c }} onClick=${() => patchHl(h.t, { c: k })} aria-label=${'Colour ' + k}></button>`)}<button className="del" onClick=${() => delHl(h.t)} aria-label="Delete highlight"><${Icon} n="fa-trash-can" /></button></div>
+          </div>`)}
+          <label className="rdd-gen"><span>About this page</span><textarea placeholder="Write your own notes on this page…" value=${ann.note} onChange=${(e) => { setAnn(page.url, { note: e.target.value }); if (isSaved(saved, page.url)) setSavedNote(page.url, e.target.value); }}></textarea></label>
+        </div></aside>`, document.body)}`, document.body);
 }
 
 function Explorer() {
@@ -3800,7 +3887,7 @@ function Explorer() {
       ${state === 'error' && html`<p className="ex-msg">We couldn't reach the library just now. Check your connection, then <button className="btn-ghost btn-sm" onClick=${() => setNonce((n) => n + 1)}>try again</button></p>`}
       <div className="ex-grid">
         ${state === 'loading' && [0, 1, 2, 3, 4, 5].map((k) => html`<div key=${k} className="wk sk"><div className="wk-card"></div></div>`)}
-        ${state !== 'loading' && res.map((p, i) => html`<${WikiCard} key=${p.url} page=${p} i=${i} saved=${isSaved(saved, p.url)} onRead=${setReading} />`)}
+        ${state !== 'loading' && res.map((p, i) => html`<${WikiCard} key=${p.url} page=${p} i=${i} saved=${isSaved(saved, p.url)} topic=${q.trim()} onRead=${setReading} />`)}
       </div><//>`}
 
     ${tab === 'saved' && html`<${Fragment}>
