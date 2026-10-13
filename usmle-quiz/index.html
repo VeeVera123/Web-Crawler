@@ -1029,6 +1029,64 @@
         .rd-load { color: #8a7a6a; } .rd-h { font: 400 24px/1.1 'Fraunces', serif; margin: 26px 0 8px; letter-spacing: -.01em; } .rd-h.sub { font-size: 19px; font-style: italic; color: #5a4636; }
         .reader .wk-hero { width: 100%; max-height: 300px; object-fit: cover; border-radius: 18px; margin-bottom: 16px; }
 
+        /* ====================== HERO v3: pure black & white, left-aligned, SF type ====================== */
+        .vg-hero { display: block; height: 230svh; padding: 0; background: #000; color: #f5f5f7; overflow: visible; overflow-x: clip; text-align: left; min-height: 0; }
+        .vg-hero::after { display: none; }
+        .vg-pin { position: sticky; top: 0; height: 100svh; overflow: hidden; background: #000; --ap: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter Tight', 'Helvetica Neue', Arial, sans-serif; }
+        .vg-top { position: absolute; z-index: 6; left: clamp(22px, 5.5vw, 84px); top: clamp(96px, 14vh, 150px); max-width: min(900px, 88vw); transform-origin: 0 0;
+                  transform: translate3d(calc(var(--p) * -1.2vw), calc(var(--p) * -9.5vh), 0) scale(calc(1 - var(--p) * .56)); will-change: transform; }
+        .vg-h { font-family: var(--ap); font-weight: 600; font-style: normal; letter-spacing: -.045em; line-height: 1.02; font-size: clamp(44px, 7.2vw, 112px); margin: 0; color: #f5f5f7; min-height: 2.04em; }
+        .vg-h em, .vg-l2 { font-style: normal; color: #86868b; }
+        .vg-hero .name-field { color: #f5f5f7; }
+        .vg-hero .nf-line path { stroke: rgba(245,245,247,.5); }
+        .vg-caret { display: inline-block; width: .06em; height: .84em; margin-left: .06em; background: #f5f5f7; vertical-align: -.06em; animation: vgBlink 1s steps(1) infinite; }
+        @keyframes vgBlink { 50% { opacity: 0; } }
+        .vg-more { margin-top: 26px; opacity: calc(1 - var(--p) * 3.2); pointer-events: auto; }
+        .vg-sub { font-family: var(--ap); max-width: 520px; margin: 0; font-size: clamp(16px, 1.45vw, 20px); line-height: 1.55; color: #a1a1a6; letter-spacing: -.01em; }
+        .vg-cta { justify-content: flex-start; }
+        .vg-stage { position: absolute; left: 0; right: 0; bottom: 0; height: 66svh; min-height: 0; flex: none; perspective: 1800px; perspective-origin: 50% 20%; display: grid; place-items: start center; }
+        .vg-ring { --cw: clamp(190px, 25vw, 380px); --R: calc((var(--cw) + 60px) / var(--k, .7654)); margin-top: clamp(10px, 3vh, 34px); animation-duration: 70s; }
+        .vg-card { aspect-ratio: 3 / 4.1; border-radius: 26px; background: #0c0c0c; box-shadow: 0 50px 90px -30px rgba(0,0,0,1), 0 0 0 1px rgba(255,255,255,.1); }
+        .vg-card img { filter: grayscale(1) contrast(1.06) brightness(.96); object-position: center; }
+        .vg-card::after { background: linear-gradient(180deg, rgba(0,0,0,0) 45%, rgba(0,0,0,.82) 100%); }
+        .vg-card figcaption { font: 600 clamp(15px, 1.5vw, 21px)/1.15 var(--ap); letter-spacing: -.02em; color: #f5f5f7; }
+        .vg-hero .btn-white { background: #f5f5f7; color: #000; font-family: var(--ap, inherit); font-weight: 600; letter-spacing: -.01em; box-shadow: 0 1px 0 rgba(255,255,255,.6) inset, 0 12px 30px -12px rgba(255,255,255,.35); }
+        .vg-hero .btn-white:hover { background: #fff; transform: translateY(-1px); }
+        .vg-hero .btn-ghost { color: #f5f5f7; border-color: rgba(245,245,247,.28); background: rgba(255,255,255,.04); font-weight: 600; letter-spacing: -.01em; }
+        @media (max-width: 760px) {
+          .vg-hero { height: 210svh; } .vg-top { top: 88px; } .vg-h { font-size: clamp(40px, 12.5vw, 64px); }
+          .vg-ring { --cw: clamp(150px, 46vw, 200px); } .vg-stage { height: 56svh; }
+          .vg-top { transform: translate3d(0, calc(var(--p) * -6vh), 0) scale(calc(1 - var(--p) * .5)); }
+        }
+        @media (prefers-reduced-motion: reduce) { .vg-caret { animation: none; } }
+
+        /* ====================== buttons & numbers: crisper, cooler ====================== */
+        .btn-orange, .btn-white, .btn-dark, .btn-ghost { transition: transform .35s var(--ease), background .25s, box-shadow .35s, border-color .25s; font-weight: 600; letter-spacing: -.005em; }
+        .btn-white:hover, .btn-dark:hover, .btn-orange:hover { transform: translateY(-2px); }
+        .btn-white:active, .btn-dark:active, .btn-orange:active, .btn-ghost:active { transform: scale(.97); }
+        .bs-stat b, .dz-kpi b, .kpi b { font-variant-numeric: tabular-nums; letter-spacing: -.02em; background: linear-gradient(180deg, #fff 30%, #9b9b9b 130%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+        [data-tone="paper"] .bs-stat b, .dz .dz-kpi b { background: none; -webkit-text-fill-color: currentColor; }
+
+        /* ====================== reader: highlights & notes ====================== */
+        mark.hlm { background: linear-gradient(180deg, transparent 8%, rgba(255,214,102,.62) 8%, rgba(255,214,102,.62) 92%, transparent 92%); color: inherit; padding: 0 .08em; border-radius: 3px; cursor: pointer; }
+        .hl-bar { position: fixed; z-index: 400; display: flex; gap: 4px; padding: 5px; border-radius: 999px; background: #151515; box-shadow: 0 14px 40px -8px rgba(0,0,0,.55); transform: translate(-50%, -100%); animation: pop .25s var(--ease-out); }
+        .hl-bar button { height: 34px; padding: 0 14px; border-radius: 999px; border: 0; background: transparent; color: #f5f5f7; font: 600 12.5px/1 'Montserrat', sans-serif; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; }
+        .hl-bar button:hover { background: rgba(255,255,255,.14); }
+        .rd-notes { margin-top: 26px; padding-top: 20px; border-top: 1px solid rgba(35,35,26,.14); }
+        .rd-notes h5 { font: 700 11px/1 'Montserrat'; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 12px; opacity: .6; }
+        .rd-hi { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 8px; font-size: 14px; line-height: 1.5; }
+        .rd-hi q { flex: 1; quotes: none; background: rgba(255,214,102,.45); padding: 2px 6px; border-radius: 4px; }
+        .rd-hi button { border: 0; background: none; cursor: pointer; opacity: .5; font-size: 14px; } .rd-hi button:hover { opacity: 1; }
+        .rd-note { width: 100%; min-height: 96px; resize: vertical; margin-top: 10px; border-radius: 14px; border: 1px solid rgba(35,35,26,.2); background: rgba(255,255,255,.55); padding: 12px 14px; font: 400 14.5px/1.55 'Montserrat', sans-serif; color: inherit; outline: none; }
+        .rd-note:focus { border-color: #1a1a1a; }
+        .rd-hint { font-size: 12.5px; opacity: .55; margin: 0 0 10px; }
+        .vg-hero .name-field, .vg-hero .name-field input { font-family: inherit !important; font-style: normal !important; font-weight: inherit !important; letter-spacing: inherit; }
+        .vg-h { font-size: clamp(42px, 6.2vw, 96px); min-height: 2.04em; }
+        .vg-top { top: clamp(84px, 12vh, 130px); } .vg-more { margin-top: 18px; } .vg-sub { max-width: 640px; font-size: clamp(15px, 1.25vw, 18px); }
+        .vg-stage { height: 50svh; } .vg-ring { --cw: clamp(150px, 19vw, 285px); --R: calc((var(--cw) + 56px) / var(--k, .7654)); margin-top: 8px; }
+        @media (max-width: 760px) { .vg-ring { --cw: clamp(130px, 40vw, 180px); } .vg-stage { height: 46svh; } .vg-sub { font-size: 15px; } }
+        .vg-hero .nf-sizer, .vg-hero .name-field input { padding: 0 .14em 0 .02em; }
+
     </style>
 </head>
 <body>
@@ -2830,6 +2888,14 @@ function makeStore(key, fallback) {
 const UserStore = makeStore('usmle-site:displayName', 'Charles');   /* becomes the real name once there are logins */
 const SavedStore = makeStore('usmle-site:saved', []);                /* bookmarked Wikipedia pages */
 const LibTab = makeStore('usmle-site:libTab', 'results');
+const AnnStore = makeStore('usmle-site:annotations', {});            /* { [url]: { hl: [text], note } } */
+const annOf = (all, url) => all[url] || { hl: [], note: '' };
+const setAnn = (url, patch) => { const all = AnnStore.get(); AnnStore.set({ ...all, [url]: { ...annOf(all, url), ...patch } }); };
+function withHighlights(text, hls) {
+  let parts = [text];
+  hls.forEach((h) => { parts = parts.flatMap((p) => typeof p !== 'string' ? [p] : p.split(h).flatMap((seg, i, arr) => (i < arr.length - 1 ? [seg, { m: h }] : [seg]))); });
+  return parts.map((p, i) => (typeof p === 'string' ? p : html`<mark key=${i} className="hlm" title="Click to remove" data-h=${p.m}>${p.m}</mark>`));
+}
 const useUserName = () => useSyncExternalStore(UserStore.subscribe, UserStore.get);
 const useSaved = () => useSyncExternalStore(SavedStore.subscribe, SavedStore.get);
 
@@ -3070,27 +3136,60 @@ function Tabs({ route, go }) {
    HOME
    ========================================================================== */
 const VOYAGE = [
-  [ART.lovers, 'Where care begins'], [CASES[0].q.image, 'Read the scan'], [ART.harp, 'The body, composed'], [ART.angiogram, 'Every vessel, mapped'],
-  [ART.snakeApple, 'Knowledge has a cost'], [CASES[7].q.image, 'Find what is hidden'], [ART.heartLungs, 'Heart and lungs'], [ART.viscera, 'The whole body'],
-  [ART.fingerprint, 'Look closer'], [CASES[3].q.image, 'What the hands say'], [ART.hand, 'A hand to hold'], [CASES[4].q.image, 'Trace the brainstem'],
+  [ART.hand, 'A hand to hold'], [ART.angiogram, 'Every vessel, mapped'], [ART.heartLungs, 'Heart and lungs'], [ART.viscera, 'The whole body'],
+  [ART.fingerprint, 'Look closer'], [ART.snakeApple, 'Knowledge has a cost'], [ART.harp, 'The body, composed'], [ART.lovers, 'Where care begins'],
 ].filter(([src]) => !!src);
+
+/* Types a line like the quiz intro: "Dear Charles," ... pause ... "you're amazing." */
+function useTyped(name) {
+  const [st, setSt] = useState({ l1: 0, l2: 0, done: false });
+  useEffect(() => {
+    const L1 = ('Dear ' + name + ',').length, L2 = "you're amazing.".length;
+    if (reduceMotion()) { setSt({ l1: L1, l2: L2, done: true }); return undefined; }
+    let t, i = 0, j = 0;
+    const one = () => { i += 1; setSt({ l1: i, l2: 0, done: false }); t = setTimeout(i < L1 ? one : () => { t = setTimeout(two, 1100); }, i < L1 ? 85 : 0); };
+    const two = () => { j += 1; setSt({ l1: L1, l2: j, done: j >= L2 }); if (j < L2) t = setTimeout(two, 70); };
+    t = setTimeout(one, 600);
+    return () => clearTimeout(t);
+  }, []);
+  return st;
+}
 
 function Hero({ go }) {
   const n = VOYAGE.length;
-  return html`<section className="home-sec vg-hero" data-nav="dark">
-    <div className="vg-top fanfade-in">
-      <p className="kquiet">A free place to practise for Step 1</p>
-      <h1 className="vg-h">Dear <${NameField} />,<br /><em>you're amazing.</em></h1>
-      <p className="vg-sub">Somewhere between the late nights and the cold coffee, you decided to become a doctor. This little room is free, and it's yours. Come and practise whenever you need to.</p>
-      <div className="vg-cta">
-        <button className="btn-white" onClick=${() => go('quiz')}>Start a quiz <${Icon} n="fa-arrow-right" /></button>
-        <button className="btn-ghost" onClick=${() => go('library')}>Take a look around</button>
+  const name = useUserName();
+  const ty = useTyped(name);
+  const ref = useRef(null);
+  useEffect(() => {
+    let raf = 0;
+    const paint = () => {
+      raf = 0; const el = ref.current; if (!el) return;
+      const r = el.getBoundingClientRect(), span = Math.max(1, r.height - window.innerHeight);
+      el.style.setProperty('--p', Math.max(0, Math.min(1, -r.top / (span * 0.85))).toFixed(4));
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(paint); };
+    window.addEventListener('scroll', on, { passive: true }); window.addEventListener('resize', on); paint();
+    return () => { window.removeEventListener('scroll', on); window.removeEventListener('resize', on); if (raf) cancelAnimationFrame(raf); };
+  }, []);
+  const l1 = ('Dear ' + name + ',').slice(0, ty.l1), l2 = "you're amazing.".slice(0, ty.l2);
+  const typingL1 = ty.l2 === 0 && !ty.done, typingL2 = ty.l2 > 0 && !ty.done;
+  return html`<section className="home-sec vg-hero" data-nav="dark" ref=${ref} style=${{ '--p': 0 }}>
+    <div className="vg-pin">
+      <div className="vg-top">
+        <h1 className="vg-h"><span className="vg-l1">${ty.l1 >= ('Dear ' + name + ',').length ? html`Dear <${NameField} />,` : l1}${typingL1 && html`<i className="vg-caret"></i>`}</span><br /><span className="vg-l2">${l2}${typingL2 && html`<i className="vg-caret"></i>`}</span></h1>
+        <div className="vg-more">
+          <p className="vg-sub">Somewhere between the late nights and the cold coffee, you decided to become a doctor. This little room is free, and it's yours.</p>
+          <div className="vg-cta">
+            <button className="btn-white" onClick=${() => go('quiz')}>Start a quiz <${Icon} n="fa-arrow-right" /></button>
+            <button className="btn-ghost" onClick=${() => go('library')}>Take a look around</button>
+          </div>
+        </div>
       </div>
-    </div>
-    <div className="vg-stage" aria-hidden="true">
-      <div className="vg-ring" style=${{ '--n': n }}>
-        ${VOYAGE.map(([src, cap], i) => html`<figure key=${i} className="vg-card" style=${{ '--a': ((i * 360) / n) + 'deg' }}>
-          <img src=${src} alt="" onError=${hidePicture} /><figcaption>${cap}</figcaption></figure>`)}
+      <div className="vg-stage" aria-hidden="true">
+        <div className="vg-ring" style=${{ '--n': n, '--k': (2 * Math.sin(Math.PI / n)).toFixed(4) }}>
+          ${VOYAGE.map(([src, cap], i) => html`<figure key=${i} className="vg-card" style=${{ '--a': ((i * 360) / n) + 'deg' }}>
+            <img src=${src} alt="" onError=${hidePicture} /><figcaption>${cap}</figcaption></figure>`)}
+        </div>
       </div>
     </div>
   </section>`;
@@ -3534,6 +3633,16 @@ function WikiReader({ page, onClose }) {
   const [state, setState] = useState('loading');
   const [hero, setHero] = useState(page.thumb || '');
   const saved = useSaved();
+  const ann = annOf(useSyncExternalStore(AnnStore.subscribe, AnnStore.get), page.url);
+  const [bar, setBar] = useState(null);
+  const pickSel = () => {
+    const sel = window.getSelection(); const t = sel && sel.toString().replace(/\s+/g, ' ').trim();
+    if (!t || t.length < 3 || t.length > 400 || !sel.rangeCount) return setBar(null);
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    setBar({ t, x: Math.min(Math.max(r.left + r.width / 2, 120), window.innerWidth - 120), y: Math.max(r.top - 8, 60) });
+  };
+  const addHl = (also) => { if (!bar) return; if (!ann.hl.includes(bar.t)) setAnn(page.url, { hl: [...ann.hl, bar.t], ...(also ? { note: (ann.note ? ann.note + '\n' : '') + '“' + bar.t + '” — ' } : {}) }); else if (also) setAnn(page.url, { note: (ann.note ? ann.note + '\n' : '') + '“' + bar.t + '” — ' }); window.getSelection().removeAllRanges(); setBar(null); };
+  const clickBody = (e) => { const h = e.target.closest && e.target.closest('mark.hlm'); if (h && !window.getSelection().toString()) setAnn(page.url, { hl: ann.hl.filter((x) => x !== h.dataset.h) }); };
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', k); document.body.style.overflow = 'hidden';
@@ -3555,7 +3664,7 @@ function WikiReader({ page, onClose }) {
   const paper = page.source !== 'Wikipedia';
   return ReactDOM.createPortal(html`<div className="reader" onClick=${(e) => e.target === e.currentTarget && onClose()} role="dialog" aria-modal="true" aria-label=${page.title}>
     <div className="reader-card narrow"><div className="reader-top"><span>${page.source} · reading here</span><button onClick=${onClose} aria-label="Close"><${Icon} n="fa-xmark" /></button></div>
-      <div className="reader-body">
+      <div className="reader-body" onMouseUp=${pickSel} onTouchEnd=${() => setTimeout(pickSel, 250)} onClick=${clickBody} onScroll=${() => setBar(null)}>
         <div>
           ${hero && html`<img className="wk-hero" src=${hero} alt="" onError=${hidePicture} />`}
           <h3>${page.title}</h3>
@@ -3563,14 +3672,18 @@ function WikiReader({ page, onClose }) {
           ${state === 'full' && page.pmcid && html`<p className="rd-badge">Open access · full text</p>`}
           ${state === 'abstract' && paper && html`<p className="rd-badge soft">Abstract only. The full paper may be behind a paywall, so open the original to read it all.</p>`}
           ${!blocks && html`<p className="rd-load">Opening the article…</p>`}
-          ${blocks && blocks.map((b, k) => b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${b.p}</p>`)}
+          ${blocks && blocks.map((b, k) => b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${withHighlights(b.p, ann.hl)}</p>`)}
+          <div className="rd-notes"><h5>Your notes</h5>
+            ${ann.hl.length === 0 && html`<p className="rd-hint">Select any text above to highlight it or turn it into a note. Click a highlight to remove it.</p>`}
+            ${ann.hl.map((h) => html`<div key=${h} className="rd-hi"><q>${h}</q><button onClick=${() => setAnn(page.url, { hl: ann.hl.filter((x) => x !== h) })} aria-label="Remove highlight"><${Icon} n="fa-xmark" /></button></div>`)}
+            <textarea className="rd-note" placeholder="Write your own notes on this page…" value=${ann.note} onChange=${(e) => { setAnn(page.url, { note: e.target.value }); if (isSaved(saved, page.url)) setSavedNote(page.url, e.target.value); }} aria-label="Your notes"></textarea></div>
           <div className="rd-acts">
             <button className=${on ? 'primary' : ''} onClick=${() => toggleSaved(page)}><${Icon} n="fa-bookmark" cls=${on ? 'fas' : 'far'} />${on ? 'Saved' : 'Save for later'}</button>
             <a href=${page.url} target="_blank" rel="noopener noreferrer">Open the original <${Icon} n="fa-arrow-up-right-from-square" /></a>
             <button onClick=${() => copyText(page.url, 'Link copied')}><${Icon} n="fa-link" />Copy link</button>
           </div>
         </div>
-      </div></div></div>`, document.body);
+      </div>${bar && html`<div className="hl-bar" style=${{ left: bar.x, top: bar.y }} onMouseDown=${(e) => e.preventDefault()}><button onClick=${() => addHl(false)}><${Icon} n="fa-highlighter" />Highlight</button><button onClick=${() => addHl(true)}><${Icon} n="fa-pen" />Add note</button></div>`}</div></div>`, document.body);
 }
 
 function Explorer() {
