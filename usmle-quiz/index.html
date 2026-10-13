@@ -1289,6 +1289,78 @@
         .bx-word { font-size: clamp(90px, 17.5vw, 320px); }
         .bx-bar { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
 
+        /* ===== Study desk ===== */
+        .study { padding-top: 120px; }
+        .st-h { font: 400 clamp(54px, 8vw, 120px)/.95 'Bebas Neue', sans-serif; letter-spacing: .01em; text-transform: uppercase; margin: 16px 0 28px; color: #0b0b0b; }
+        .st-h .hl { font-family: 'Fraunces', serif; text-transform: none; font-style: italic; color: #0b0b0b; }
+        .st-tabs { margin-bottom: 28px; overflow-x: auto; padding-bottom: 4px; }
+        .st-empty { color: rgba(0,0,0,.55); font-size: 15px; line-height: 1.6; margin: 12px 4px; } .st-empty.big { padding: 60px 20px; text-align: center; border: 1.5px dashed rgba(0,0,0,.2); border-radius: 28px; font-size: 17px; }
+        .study button { font-family: 'Montserrat', sans-serif; }
+        /* notes */
+        .nt { display: grid; grid-template-columns: 280px 1fr; gap: 20px; align-items: start; }
+        .nt-list { display: grid; gap: 8px; position: sticky; top: 90px; }
+        .nt-new { height: 52px; border-radius: 18px; border: 0; background: #0b0b0b; color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; transition: transform .35s var(--ease); } .nt-new:hover { transform: translateY(-2px); }
+        .nt-item { position: relative; padding: 14px 40px 14px 16px; border-radius: 18px; background: #f3f3f1; cursor: pointer; display: grid; gap: 4px; transition: background .25s, transform .3s var(--ease); border: 1.5px solid transparent; }
+        .nt-item:hover { transform: translateX(3px); } .nt-item.on { background: #fff; border-color: #0b0b0b; }
+        .nt-item b { font: 600 15px/1.2 'Montserrat'; } .nt-item small { opacity: .55; font-size: 12px; }
+        .nt-item button { position: absolute; right: 10px; top: 10px; width: 28px; height: 28px; border-radius: 50%; border: 0; background: none; cursor: pointer; opacity: 0; transition: opacity .2s; } .nt-item:hover button { opacity: .6; } .nt-item button:hover { opacity: 1 !important; background: rgba(0,0,0,.08); }
+        .nt-edit { display: grid; gap: 14px; min-width: 0; }
+        .nt-title { font: 400 clamp(34px, 4vw, 54px)/1.05 'Bebas Neue', sans-serif; letter-spacing: .01em; text-transform: uppercase; border: 0; border-bottom: 1.5px solid rgba(0,0,0,.15); padding: 6px 0 12px; background: none; outline: none; color: #0b0b0b; } .nt-title:focus { border-color: #0b0b0b; }
+        .nt-text { min-height: 140px; resize: vertical; border: 1.5px solid rgba(0,0,0,.14); border-radius: 20px; padding: 16px 18px; background: #fafaf8; font: 400 15.5px/1.65 'Montserrat'; color: #0b0b0b; outline: none; } .nt-text:focus { border-color: #0b0b0b; background: #fff; }
+        .sk { border-radius: 26px; border: 1.5px solid rgba(0,0,0,.14); overflow: hidden; background: #fff; }
+        .sk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 18px; padding: 10px 14px; background: #0b0b0b; color: #fff; }
+        .sk-tools { display: flex; gap: 4px; } .sk-tools button { width: 38px; height: 38px; border-radius: 12px; border: 0; background: transparent; color: #fff; cursor: pointer; transition: background .2s, transform .3s var(--ease); } .sk-tools button:hover { background: rgba(255,255,255,.14); } .sk-tools button.on { background: #fff; color: #0b0b0b; }
+        .sk-cols { display: flex; gap: 8px; } .sk-cols .dot { width: 24px; height: 24px; border-radius: 50%; background: var(--c); border: 2px solid transparent; box-shadow: 0 0 0 1.5px rgba(255,255,255,.35); cursor: pointer; padding: 0; transition: transform .3s var(--ease); } .sk-cols .dot.on { transform: scale(1.25); border-color: #fff; box-shadow: 0 0 0 2px #0b0b0b; }
+        .sk-bar input[type=range] { width: 110px; accent-color: #fff; }
+        .sk-stage { position: relative; aspect-ratio: 1000 / 620; background: #fff; }
+        .sk-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; } .sk-stage canvas.ink { touch-action: none; cursor: crosshair; } .sk-stage canvas.ink.eraser { cursor: cell; }
+        .sk-hint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; margin: 0; color: rgba(0,0,0,.28); font: italic 400 24px 'Fraunces', serif; }
+        .sk-src { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; border-top: 1px solid rgba(0,0,0,.08); font-size: 13px; } .sk-src span { opacity: .55; margin-right: 4px; }
+        .sk-src button { height: 34px; padding: 0 14px; border-radius: 999px; border: 1.5px solid rgba(0,0,0,.2); background: #fff; font-weight: 600; font-size: 12.5px; cursor: pointer; transition: background .2s, color .2s; } .sk-src button:hover { background: #0b0b0b; color: #fff; }
+        /* cards */
+        .st-stats { display: flex; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; } .st-stats div { min-width: 130px; padding: 16px 22px; border-radius: 22px; background: #0b0b0b; color: #fff; display: grid; }
+        .st-stats b { font: 400 54px/1 'Bebas Neue'; } .st-stats span { font-size: 12px; opacity: .6; letter-spacing: .06em; text-transform: uppercase; }
+        .cd .pillseg { margin-bottom: 22px; } .cd-review { display: grid; gap: 20px; justify-items: center; }
+        .cd-card { position: relative; width: min(680px, 100%); aspect-ratio: 16 / 10; cursor: pointer; perspective: 1400px; transform-style: preserve-3d; transition: transform .8s var(--ease-out); }
+        .cd-card.flip { transform: rotateY(180deg); }
+        .cd-card .face { position: absolute; inset: 0; border-radius: 30px; padding: 28px 32px; display: flex; flex-direction: column; justify-content: center; gap: 14px; backface-visibility: hidden; -webkit-backface-visibility: hidden; overflow: auto; }
+        .cd-card .front { background: #0b0b0b; color: #fff; } .cd-card .back { background: #FFE600; color: #0b0b0b; transform: rotateY(180deg); }
+        .cd-card small { font: 600 11px 'Space Grotesk', monospace; letter-spacing: .14em; text-transform: uppercase; opacity: .6; }
+        .cd-card p { margin: 0; font: 500 clamp(20px, 2.4vw, 30px)/1.3 'Inter Tight', 'Montserrat', sans-serif; letter-spacing: -.02em; } .cd-card em { font-size: 12.5px; opacity: .5; font-style: normal; }
+        .cd-rate { display: flex; gap: 10px; opacity: .25; pointer-events: none; transition: opacity .4s; } .cd-rate.show { opacity: 1; pointer-events: auto; }
+        .cd-rate button { min-width: 96px; padding: 12px 16px; border-radius: 18px; border: 1.5px solid #0b0b0b; background: #fff; cursor: pointer; display: grid; gap: 3px; transition: background .25s, color .25s, transform .3s var(--ease); } .cd-rate button:hover { background: #0b0b0b; color: #fff; transform: translateY(-3px); }
+        .cd-rate b { font-size: 14px; } .cd-rate small { font-size: 11.5px; opacity: .6; }
+        .cd-add { display: grid; gap: 12px; max-width: 680px; } .cd-add textarea { min-height: 110px; border-radius: 20px; border: 1.5px solid rgba(0,0,0,.2); padding: 14px 18px; font: 400 15.5px/1.55 'Montserrat'; outline: none; resize: vertical; } .cd-add textarea:focus { border-color: #0b0b0b; } .cd-add .lh-btn { margin: 0; justify-self: start; }
+        .cd-list { display: grid; gap: 10px; max-width: 820px; } .cd-row { display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; padding: 16px 18px; border-radius: 20px; background: #f3f3f1; }
+        .cd-row small { font: 600 10.5px 'Space Grotesk', monospace; letter-spacing: .12em; text-transform: uppercase; opacity: .5; } .cd-row p { margin: 6px 0 0; font-size: 15px; line-height: 1.5; } .cd-row em { display: block; margin-top: 6px; font-size: 13px; opacity: .6; font-style: normal; }
+        .cd-row button { flex: none; height: 38px; padding: 0 16px; border-radius: 999px; border: 1.5px solid #0b0b0b; background: #fff; font-weight: 600; font-size: 12.5px; cursor: pointer; transition: background .2s, color .2s; } .cd-row button:hover { background: #0b0b0b; color: #fff; }
+        /* mistakes */
+        .mk { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+        .mk-card { padding: 22px; border-radius: 26px; background: #0b0b0b; color: #fff; display: grid; gap: 12px; align-content: start; transition: transform .45s var(--ease); } .mk-card:hover { transform: translateY(-5px); }
+        .mk-top { display: flex; justify-content: space-between; align-items: center; } .mk-tag { padding: 6px 12px; border-radius: 999px; background: rgba(255,255,255,.12); font: 600 10.5px 'Space Grotesk', monospace; letter-spacing: .12em; text-transform: uppercase; } .mk-tag.hot { background: #FFE600; color: #0b0b0b; } .mk-n { font-size: 12px; opacity: .6; }
+        .mk-card h4 { margin: 0; font: 400 32px/1 'Bebas Neue'; letter-spacing: .01em; text-transform: uppercase; } .mk-card p { margin: 0; font-size: 13.5px; line-height: 1.55; opacity: .7; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+        .mk-act { display: flex; flex-wrap: wrap; gap: 8px; } .mk-act button { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.3); background: transparent; color: #fff; font-weight: 600; font-size: 12px; cursor: pointer; transition: background .2s, color .2s; } .mk-act button:hover { background: #fff; color: #0b0b0b; }
+        /* planner */
+        .pl { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; } .pl > div { padding: 24px; border-radius: 28px; background: #f3f3f1; } .pl small { display: block; font: 600 11px 'Space Grotesk', monospace; letter-spacing: .14em; text-transform: uppercase; opacity: .55; margin-bottom: 12px; }
+        .pl-count { grid-column: span 5; background: #0b0b0b !important; color: #fff; } .pl-count b { display: block; font: 400 clamp(90px, 11vw, 170px)/.9 'Bebas Neue'; } .pl-count p { margin: 6px 0 18px; opacity: .7; font-size: 14px; }
+        .pl-count input[type=date] { height: 44px; padding: 0 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.08); color: #fff; font: 500 14px 'Montserrat'; color-scheme: dark; }
+        .pl-goal { grid-column: span 4; text-align: center; } .pl-ring { --p: 0; width: 170px; height: 170px; border-radius: 50%; margin: 6px auto 16px; display: grid; place-content: center; background: radial-gradient(closest-side, #f3f3f1 76%, transparent 78%), conic-gradient(#0b0b0b calc(var(--p) * 360deg), rgba(0,0,0,.1) 0); transition: background .6s; } .pl-ring b { font: 400 60px/1 'Bebas Neue'; } .pl-ring span { font-size: 11.5px; opacity: .6; }
+        .pl-goal label { font-size: 13px; opacity: .8; } .pl-goal input { width: 70px; height: 34px; border-radius: 10px; border: 1.5px solid rgba(0,0,0,.2); text-align: center; font: 600 14px 'Montserrat'; margin-left: 6px; } .pl-goal p { margin: 12px 0 0; font-size: 13px; opacity: .65; }
+        .pl-week { grid-column: span 3; } .pl-week > div { display: flex; align-items: flex-end; gap: 8px; height: 150px; } .pl-week span { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 6px; } .pl-week i { width: 100%; border-radius: 8px 8px 3px 3px; background: #0b0b0b; transition: height .6s var(--ease-out); } .pl-week em { font-style: normal; font-size: 11px; opacity: .55; }
+        .pl-tasks { grid-column: span 12; } .pl-tasks form { display: flex; gap: 8px; margin-bottom: 14px; max-width: 560px; } .pl-tasks form input { flex: 1; height: 50px; border-radius: 999px; border: 1.5px solid rgba(0,0,0,.2); padding: 0 20px; font: 500 15px 'Montserrat'; outline: none; background: #fff; } .pl-tasks form input:focus { border-color: #0b0b0b; } .pl-tasks .lh-btn { margin: 0; width: 50px; padding: 0; justify-content: center; }
+        .pl-task { display: flex; align-items: center; gap: 12px; padding: 12px 6px; border-bottom: 1px solid rgba(0,0,0,.08); font-size: 15px; cursor: pointer; } .pl-task input { width: 20px; height: 20px; accent-color: #0b0b0b; } .pl-task span { flex: 1; } .pl-task.done span { text-decoration: line-through; opacity: .4; } .pl-task button { border: 0; background: none; cursor: pointer; opacity: .4; } .pl-task button:hover { opacity: 1; }
+        @media (max-width: 960px) { .pl-count, .pl-goal, .pl-week { grid-column: span 12; } .nt { grid-template-columns: 1fr; } .nt-list { position: static; grid-auto-flow: column; grid-auto-columns: 200px; overflow-x: auto; } .nt-new { grid-row: 1; } }
+        /* focus */
+        .fc { display: grid; justify-items: center; gap: 26px; padding: 10px 0 30px; } .fc-ring { position: relative; width: min(320px, 78vw); aspect-ratio: 1; } .fc-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+        .fc-ring circle { fill: none; stroke-width: 12; } .fc-ring .bg { stroke: rgba(0,0,0,.1); } .fc-ring .fg { stroke: #0b0b0b; stroke-linecap: round; transition: stroke-dashoffset .4s linear; }
+        .fc-time { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; } .fc-time b { font: 400 clamp(70px, 14vw, 104px)/1 'Bebas Neue'; letter-spacing: .02em; font-variant-numeric: tabular-nums; } .fc-time span { font-size: 12px; opacity: .55; letter-spacing: .1em; text-transform: uppercase; }
+        .fc-ctl { display: flex; gap: 12px; align-items: center; } .fc-ctl .lh-btn { margin: 0; } .fc-reset { width: 54px; height: 54px; border-radius: 50%; border: 1.5px solid #0b0b0b; background: #fff; cursor: pointer; transition: background .2s, color .2s, transform .4s var(--ease); } .fc-reset:hover { background: #0b0b0b; color: #fff; transform: rotate(-90deg); }
+        .fc-set { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; } .fc-set label { font-size: 13px; display: flex; align-items: center; gap: 8px; } .fc-set input { width: 62px; height: 38px; border-radius: 12px; border: 1.5px solid rgba(0,0,0,.2); text-align: center; font: 600 14px 'Montserrat'; } .fc-set small { opacity: .5; }
+        .fc-sum { margin: 0; font-size: 14px; opacity: .75; text-align: center; }
+        .rdd-card .mkc { margin-left: auto; border: 0; background: none; cursor: pointer; opacity: .45; font-size: 14px; } .rdd-card .mkc:hover { opacity: 1; } .rdd-card .mkc + .del { margin-left: 8px; }
+        .dz-ft { margin: 12px 0 0; font-size: 12.5px; opacity: .6; text-align: center; }
+        @media (max-width: 760px) { .tabs .tab { padding: 0 12px; } .tabs .tab span { font-size: 12px; } .st-h { font-size: clamp(46px, 14vw, 80px); } .cd-card { aspect-ratio: 4 / 3; } }
+
     </style>
 </head>
 <body>
@@ -3056,7 +3128,7 @@ const SAMPLE = (() => {
 /* ---------- hooks ---------- */
 const useAttempts = () => useSyncExternalStore(window.AttemptStore.subscribe, window.AttemptStore.get);
 
-const ROUTES = ['home', 'quiz', 'dashboard', 'library'];
+const ROUTES = ['home', 'quiz', 'dashboard', 'study', 'library'];
 function useRoute() {
   const read = () => { const r = location.hash.replace(/^#\/?/, '').split('?')[0]; return ROUTES.includes(r) ? r : 'home'; };
   const [route, setRoute] = useState(read);
@@ -3325,7 +3397,7 @@ function Seg({ options, value, onChange }) {
 /* ==========================================================================
    NAV
    ========================================================================== */
-const TABS = [['home', 'Home', 'fa-house'], ['quiz', 'Quiz', 'fa-pen-to-square'], ['dashboard', 'Dashboard', 'fa-chart-simple'], ['library', 'Library', 'fa-folder-open']];
+const TABS = [['home', 'Home', 'fa-house'], ['quiz', 'Quiz', 'fa-pen-to-square'], ['dashboard', 'Dashboard', 'fa-chart-simple'], ['study', 'Study', 'fa-graduation-cap'], ['library', 'Library', 'fa-folder-open']];
 
 function SiteNav({ route, go, openFind }) {
   const hide = route === 'quiz';
@@ -3662,6 +3734,9 @@ function Gauge({ parts }) {
 function FocusTimer() {
   const [running, setRunning] = useState(false);
   const [sec, setSec] = useState(0);
+  const logged = useRef(0);
+  const flush = (s) => { logFocus(s - logged.current); logged.current = s; };
+  const log = useStore(FocusLog);
   useEffect(() => {
     if (!running) return undefined;
     const id = setInterval(() => setSec((s) => s + 1), 1000);
@@ -3672,9 +3747,10 @@ function FocusTimer() {
     <h4>Focus timer</h4>
     <div className="dz-clock" role="timer">${hms}</div>
     <div className="dz-ctl">
-      <button className="go" onClick=${() => setRunning((r) => !r)} aria-label=${running ? 'Pause' : 'Start'}><${Icon} n=${running ? 'fa-pause' : 'fa-play'} /></button>
-      <button className="stop" onClick=${() => { setRunning(false); setSec(0); }} aria-label="Reset"><${Icon} n="fa-stop" /></button>
+      <button className="go" onClick=${() => { if (running) flush(sec); setRunning((r) => !r); }} aria-label=${running ? 'Pause' : 'Start'}><${Icon} n=${running ? 'fa-pause' : 'fa-play'} /></button>
+      <button className="stop" onClick=${() => { if (running) flush(sec); setRunning(false); setSec(0); logged.current = 0; }} aria-label="Reset"><${Icon} n="fa-stop" /></button>
     </div>
+    <p className="dz-ft">${focusToday(log)} min focused today</p>
   </article>`;
 }
 
@@ -3982,7 +4058,7 @@ function WikiReader({ page, onClose }) {
   const addHl = (color, withNote) => {
     if (!bar) return;
     const fresh = bar.t.filter((x) => !hls.some((h) => h.t === x)).map((t) => ({ t, c: color, n: '' }));
-    setAnn(page.url, { hl: [...hls, ...fresh] });
+    setAnn(page.url, { hl: [...hls, ...fresh], title: page.title });
     window.getSelection().removeAllRanges(); setBar(null);
     if (withNote) { setDrawer(true); setActive(bar.t[0]); }
   };
@@ -4037,7 +4113,7 @@ function WikiReader({ page, onClose }) {
           ${hls.map((h) => html`<div key=${h.t} className=${cx('rdd-card', active === h.t && 'active')} style=${{ '--c': HL_COLORS[h.c] || HL_COLORS.y }}>
             <button className="q" onClick=${() => jump(h.t)}>${h.t}</button>
             <textarea value=${h.n} placeholder="Add a note…" onFocus=${() => setActive(h.t)} onChange=${(e) => patchHl(h.t, { n: e.target.value })} ref=${(el) => { if (el && active === h.t && drawer && !h.n && document.activeElement !== el && !el.dataset.f) { el.dataset.f = 1; setTimeout(() => el.focus({ preventScroll: true }), 320); } }}></textarea>
-            <div className="row">${Object.entries(HL_COLORS).map(([k, c]) => html`<button key=${k} className=${cx('dot', h.c === k && 'on')} style=${{ '--c': c }} onClick=${() => patchHl(h.t, { c: k })} aria-label=${'Colour ' + k}></button>`)}<button className="del" onClick=${() => delHl(h.t)} aria-label="Delete highlight"><${Icon} n="fa-trash-can" /></button></div>
+            <div className="row">${Object.entries(HL_COLORS).map(([k, c]) => html`<button key=${k} className=${cx('dot', h.c === k && 'on')} style=${{ '--c': c }} onClick=${() => patchHl(h.t, { c: k })} aria-label=${'Colour ' + k}></button>`)}<button className="mkc" onClick=${() => addCard(h.n || 'Recall: ' + page.title, h.t, page.title)} title="Make a flashcard" aria-label="Make a flashcard"><${Icon} n="fa-clone" /></button><button className="del" onClick=${() => delHl(h.t)} aria-label="Delete highlight"><${Icon} n="fa-trash-can" /></button></div>
           </div>`)}
           <label className="rdd-gen"><span>About this page</span><textarea placeholder="Write your own notes on this page…" value=${ann.note} onChange=${(e) => { setAnn(page.url, { note: e.target.value }); if (isSaved(saved, page.url)) setSavedNote(page.url, e.target.value); }}></textarea></label>
         </div></aside>`, document.body)}`, document.body);
@@ -4283,7 +4359,7 @@ function Footer({ go, openFind }) {
         <div><div style=${{ display: 'flex', alignItems: 'center', gap: 10, fontWeight: 700, fontSize: 17 }}><span className="brand-mark"><i className="fas fa-plus"></i></span>USMLE Quiz</div>
           <p className="blurb">A free place to practise for Step 1, made with care for everyone on the long road to a white coat. You've got this.</p>
           <button className="btn-white" onClick=${() => go('quiz')}>Start a quiz <${Icon} n="fa-arrow-right" /></button></div>
-        <div><h5>Wander</h5>${link('home', 'Home')}${link('quiz', 'Quiz')}${link('dashboard', 'Dashboard')}${link('library', 'Library')}</div>
+        <div><h5>Wander</h5>${link('home', 'Home')}${link('quiz', 'Quiz')}${link('dashboard', 'Dashboard')}${link('study', 'Study')}${link('library', 'Library')}</div>
         <div><h5>Little helpers</h5><button className="flink bl" aria-label="Find anything" onClick=${openFind}>${BL('Find anything · ⌘K')}</button>${link('quiz', 'Calculator')}${link('quiz', 'Study playlist')}${link('dashboard', 'Focus timer')}</div>
         <div><h5>Read more</h5>${CASES.slice(0, 5).map((c) => html`<a key=${c.id} href=${'https://en.wikipedia.org/wiki/' + encodeURIComponent(c.wiki.replace(/ /g, '_'))} target="_blank" rel="noopener noreferrer" className="bl" aria-label=${c.wiki}>${BL(c.wiki + ' ↗')}</a>`)}</div>
       </div>
@@ -4390,6 +4466,281 @@ function toneAt(x, y) {
 }
 
 /* ==========================================================================
+   STUDY: notes with a sketch pad, spaced-repetition cards, mistake notebook,
+   planner and a pomodoro timer. Everything is saved on this device.
+   ========================================================================== */
+const NotesStore = makeStore('usmle-site:notes', []);
+const CardStore = makeStore('usmle-site:cards', []);
+const PlanStore = makeStore('usmle-site:plan', { exam: '', goal: 20, tasks: [] });
+const FocusLog = makeStore('usmle-site:focus', []);                 /* [{ at, sec }] finished focus blocks */
+const MasteredStore = makeStore('usmle-site:mastered', []);
+const useStore = (st) => useSyncExternalStore(st.subscribe, st.get);
+const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
+const DAY = 864e5;
+const logFocus = (sec) => { if (sec >= 30) FocusLog.set([...FocusLog.get(), { at: Date.now(), sec }].slice(-500)); };
+const focusToday = (log) => Math.round(log.filter((f) => dayKey(f.at) === new Date().toDateString()).reduce((s, f) => s + f.sec, 0) / 60);
+
+function addCard(front, back, src) {
+  const cards = CardStore.get();
+  if (cards.some((c) => c.front === front && c.back === back)) { toast('That card is already in your deck'); return false; }
+  CardStore.set([{ id: uid(), front, back, src: src || '', due: Date.now(), ivl: 0, ease: 2.4, reps: 0, created: Date.now() }, ...cards]);
+  toast('Added to your flashcards'); return true;
+}
+
+/* ---------- sketch pad ---------- */
+const SK_W = 1000, SK_H = 620;
+const SK_COLORS = ['#111111', '#E5383B', '#2B6CFF', '#16A34A', '#F5A300'];
+function Sketch({ note, onInk }) {
+  const bgRef = useRef(null), inkRef = useRef(null), fileRef = useRef(null);
+  const [tool, setTool] = useState('pen'), [color, setColor] = useState(SK_COLORS[0]), [size, setSize] = useState(4);
+  const undo = useRef([]);
+  const bgData = useRef(note.bg || '');
+  const [hasBg, setHasBg] = useState(!!note.bg);
+  const loadImg = (src, cross) => new Promise((ok, no) => { const im = new Image(); if (cross) im.crossOrigin = 'anonymous'; im.onload = () => ok(im); im.onerror = no; im.src = src; });
+  const paintBg = (im) => {
+    const c = bgRef.current.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, SK_W, SK_H);
+    if (im) { const k = Math.min(SK_W / im.width, SK_H / im.height); const w = im.width * k, h = im.height * k; c.drawImage(im, (SK_W - w) / 2, (SK_H - h) / 2, w, h); }
+  };
+  useEffect(() => {
+    paintBg(null);
+    if (note.bg) loadImg(note.bg).then(paintBg).catch(() => {});
+    if (note.ink) loadImg(note.ink).then((im) => inkRef.current.getContext('2d').drawImage(im, 0, 0)).catch(() => {});
+  }, []);
+  const save = () => onInk({ ink: inkRef.current.toDataURL('image/png'), bg: bgData.current });
+  const setBackground = async (src, cross) => {
+    try {
+      const im = await loadImg(src, cross); paintBg(im);
+      bgData.current = bgRef.current.toDataURL('image/jpeg', 0.82); setHasBg(true); save();
+    } catch { toast('That image could not be loaded'); }
+  };
+  const pos = (e) => { const r = inkRef.current.getBoundingClientRect(); return [(e.clientX - r.left) * SK_W / r.width, (e.clientY - r.top) * SK_H / r.height]; };
+  const stroke = useRef(null);
+  const down = (e) => {
+    e.preventDefault(); inkRef.current.setPointerCapture(e.pointerId);
+    const ctx = inkRef.current.getContext('2d');
+    undo.current = [...undo.current.slice(-19), ctx.getImageData(0, 0, SK_W, SK_H)];
+    const [x, y] = pos(e); stroke.current = { pts: [[x, y]], snap: undo.current[undo.current.length - 1] };
+    draw(e, true);
+  };
+  const style = (ctx, p) => {
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (tool === 'eraser') { ctx.globalCompositeOperation = 'destination-out'; ctx.globalAlpha = 1; ctx.lineWidth = size * 5; }
+    else if (tool === 'hl') { ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 0.35; ctx.strokeStyle = color; ctx.lineWidth = size * 5; }
+    else { ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; ctx.strokeStyle = color; ctx.lineWidth = Math.max(1, size * (0.6 + (p || 0.5) * 0.9)); }
+  };
+  const draw = (e, first) => {
+    const s = stroke.current; if (!s) return;
+    const ctx = inkRef.current.getContext('2d'); const [x, y] = pos(e);
+    if (!first) s.pts.push([x, y]);
+    if (tool === 'hl') {                          /* redraw the whole stroke so overlaps do not darken */
+      ctx.putImageData(s.snap, 0, 0); style(ctx);
+      ctx.beginPath(); s.pts.forEach(([px, py], i) => (i ? ctx.lineTo(px, py) : ctx.moveTo(px, py))); if (s.pts.length === 1) ctx.lineTo(x + 0.01, y); ctx.stroke();
+    } else {
+      style(ctx, e.pressure); const n = s.pts.length; const a = s.pts[n - 2] || s.pts[n - 1], b = s.pts[n - 1];
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0] + (n === 1 ? 0.01 : 0), b[1]); ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  };
+  const move = (e) => { if (stroke.current) draw(e, false); };
+  const up = () => { if (!stroke.current) return; stroke.current = null; save(); };
+  const undoOne = () => { const snap = undo.current.pop(); if (!snap) return; inkRef.current.getContext('2d').putImageData(snap, 0, 0); save(); };
+  const clearAll = () => { if (!confirm('Clear the drawing and the background?')) return; undo.current = []; inkRef.current.getContext('2d').clearRect(0, 0, SK_W, SK_H); paintBg(null); bgData.current = ''; setHasBg(false); save(); };
+  const exportPng = () => {
+    const c = document.createElement('canvas'); c.width = SK_W; c.height = SK_H; const x = c.getContext('2d');
+    x.drawImage(bgRef.current, 0, 0); x.drawImage(inkRef.current, 0, 0);
+    c.toBlob((b) => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = (note.title || 'sketch').replace(/[^\w-]+/g, '-') + '.png'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); });
+  };
+  const onFile = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => setBackground(r.result, false); r.readAsDataURL(f); e.target.value = ''; };
+  const PRESETS = [['Heart & lungs', ART.heartLungs], ['Organs', ART.viscera], ['Vessels', ART.angiogram], ['Hand', ART.hand]];
+  return html`<div className="sk">
+    <div className="sk-bar">
+      <div className="sk-tools">${[['pen', 'fa-pen', 'Pen'], ['hl', 'fa-highlighter', 'Highlighter'], ['eraser', 'fa-eraser', 'Eraser']].map(([k, ic, t]) => html`<button key=${k} className=${cx(tool === k && 'on')} onClick=${() => setTool(k)} title=${t} aria-label=${t}><${Icon} n=${ic} /></button>`)}</div>
+      <div className="sk-cols">${SK_COLORS.map((c) => html`<button key=${c} className=${cx('dot', color === c && 'on')} style=${{ '--c': c }} onClick=${() => { setColor(c); if (tool === 'eraser') setTool('pen'); }} aria-label=${'Colour ' + c}></button>`)}</div>
+      <input type="range" min="1" max="14" value=${size} onChange=${(e) => setSize(+e.target.value)} aria-label="Brush size" />
+      <div className="sk-tools"><button onClick=${undoOne} title="Undo" aria-label="Undo"><${Icon} n="fa-rotate-left" /></button><button onClick=${clearAll} title="Clear" aria-label="Clear"><${Icon} n="fa-trash-can" /></button><button onClick=${exportPng} title="Download PNG" aria-label="Download PNG"><${Icon} n="fa-download" /></button></div>
+    </div>
+    <div className="sk-stage"><canvas ref=${bgRef} width=${SK_W} height=${SK_H}></canvas>
+      <canvas ref=${inkRef} width=${SK_W} height=${SK_H} className=${cx('ink', tool)} onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up}></canvas>
+      ${!hasBg && html`<p className="sk-hint">Draw here, or pick a picture to annotate</p>`}</div>
+    <div className="sk-src"><span>Draw on:</span>${PRESETS.map(([t, u]) => html`<button key=${t} onClick=${() => setBackground(u, true)}>${t}</button>`)}
+      <button onClick=${() => fileRef.current.click()}><${Icon} n="fa-image" /> Your image</button><input ref=${fileRef} type="file" accept="image/*" hidden onChange=${onFile} /></div>
+  </div>`;
+}
+
+/* ---------- notes ---------- */
+function NotesTab() {
+  const notes = useStore(NotesStore);
+  const [id, setId] = useState(() => (NotesStore.get()[0] || {}).id || null);
+  const note = notes.find((n) => n.id === id);
+  const patch = (p) => {
+    const next = NotesStore.get().map((n) => (n.id === id ? { ...n, ...p, updated: Date.now() } : n));
+    try { localStorage.setItem('usmle-site:notes', JSON.stringify(next)); } catch { toast('This device is out of storage. Download the sketch, then clear some notes.'); return; }
+    NotesStore.set(next);
+  };
+  const create = () => { const n = { id: uid(), title: '', text: '', ink: '', bg: '', updated: Date.now() }; NotesStore.set([n, ...NotesStore.get()]); setId(n.id); };
+  const remove = (nid) => { if (!confirm('Delete this note?')) return; const rest = NotesStore.get().filter((n) => n.id !== nid); NotesStore.set(rest); if (id === nid) setId((rest[0] || {}).id || null); };
+  return html`<div className="nt">
+    <aside className="nt-list">
+      <button className="nt-new" onClick=${create}><${Icon} n="fa-plus" /> New note</button>
+      ${notes.length === 0 && html`<p className="st-empty">Your notes live here. Write, sketch, or draw on top of a picture.</p>`}
+      ${notes.map((n) => html`<div key=${n.id} className=${cx('nt-item', n.id === id && 'on')} onClick=${() => setId(n.id)}>
+        <b>${n.title || 'Untitled note'}</b><small>${new Date(n.updated).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}${n.ink ? ' · sketch' : ''}</small>
+        <button onClick=${(e) => { e.stopPropagation(); remove(n.id); }} aria-label="Delete note"><${Icon} n="fa-xmark" /></button></div>`)}
+    </aside>
+    <section className="nt-edit">
+      ${!note ? html`<p className="st-empty big">Start a note to begin.</p>` : html`<${Fragment} key=${note.id}>
+        <input className="nt-title" value=${note.title} onChange=${(e) => patch({ title: e.target.value })} placeholder="Give it a title" />
+        <textarea className="nt-text" value=${note.text} onChange=${(e) => patch({ text: e.target.value })} placeholder="Write anything: mnemonics, pathways, things to ask later…"></textarea>
+        <${Sketch} note=${note} onInk=${patch} /><//>`}
+    </section>
+  </div>`;
+}
+
+/* ---------- flashcards (spaced repetition) ---------- */
+function grade(c, q) {
+  let { ivl = 0, ease = 2.4, reps = 0 } = c;
+  if (q === 0) return { ...c, reps: 0, ivl: 0, ease: Math.max(1.3, ease - 0.2), due: Date.now() + 10 * 60000 };
+  if (q === 1) { ivl = Math.max(1, Math.round(ivl * 1.2)); ease = Math.max(1.3, ease - 0.15); }
+  else if (q === 2) ivl = reps === 0 ? 1 : reps === 1 ? 3 : Math.round(ivl * ease);
+  else { ivl = reps === 0 ? 3 : reps === 1 ? 6 : Math.round(ivl * ease * 1.3); ease += 0.1; }
+  return { ...c, reps: reps + 1, ivl, ease, due: Date.now() + ivl * DAY };
+}
+const hint = (c, q) => { if (q === 0) return '10m'; const g = grade(c, q); return g.ivl + 'd'; };
+function CardsTab() {
+  const cards = useStore(CardStore), ann = useStore(AnnStore);
+  const [mode, setMode] = useState('review');
+  const [flip, setFlip] = useState(false);
+  const [f, setF] = useState(''), [b, setB] = useState('');
+  const now = Date.now();
+  const due = cards.filter((c) => c.due <= now).sort((a, c) => a.due - c.due);
+  const cur = due[0];
+  const rate = useCallback((q) => { if (!cur) return; CardStore.set(CardStore.get().map((c) => (c.id === cur.id ? grade(c, q) : c))); setFlip(false); }, [cur]);
+  useEffect(() => {
+    if (mode !== 'review') return undefined;
+    const k = (e) => { if (/INPUT|TEXTAREA/.test(e.target.tagName)) return; if (e.key === ' ') { e.preventDefault(); setFlip((v) => !v); } else if (flip && '1234'.includes(e.key) && e.key) rate(+e.key - 1); };
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
+  }, [mode, flip, rate]);
+  const hlRows = Object.entries(ann).flatMap(([url, a]) => hlList(a).map((h) => ({ url, title: a.title || 'Saved page', h })))
+    .filter((r) => !cards.some((c) => c.back === r.h.t));
+  return html`<div className="cd">
+    <div className="st-stats"><div><b>${due.length}</b><span>due now</span></div><div><b>${cards.length}</b><span>cards</span></div><div><b>${cards.filter((c) => c.ivl >= 21).length}</b><span>mature</span></div></div>
+    <${Seg} value=${mode} onChange=${setMode} options=${[['review', 'Review'], ['add', 'Add'], ['hl', `From highlights${hlRows.length ? ' · ' + hlRows.length : ''}`], ['all', 'All cards']]} />
+    ${mode === 'review' && (cur ? html`<div className="cd-review">
+      <div className=${cx('cd-card', flip && 'flip')} onClick=${() => setFlip((v) => !v)} role="button" tabIndex="0" aria-label="Flip card">
+        <div className="face front"><small>${cur.src || 'Question'}</small><p>${cur.front}</p><em>Tap or press space to flip</em></div>
+        <div className="face back"><small>Answer</small><p>${cur.back}</p></div></div>
+      <div className=${cx('cd-rate', flip && 'show')}>${['Again', 'Hard', 'Good', 'Easy'].map((t, q) => html`<button key=${t} onClick=${() => rate(q)}><b>${t}</b><small>${hint(cur, q)}</small></button>`)}</div>
+    </div>` : html`<p className="st-empty big">${cards.length ? 'All caught up. Come back later, your next card is on its way.' : 'No cards yet. Add one, or turn a highlight into a card.'}</p>`)}
+    ${mode === 'add' && html`<form className="cd-add" onSubmit=${(e) => { e.preventDefault(); if (f.trim() && b.trim() && addCard(f.trim(), b.trim(), 'My card')) { setF(''); setB(''); } }}>
+      <textarea value=${f} onChange=${(e) => setF(e.target.value)} placeholder="Front: a question or a prompt"></textarea>
+      <textarea value=${b} onChange=${(e) => setB(e.target.value)} placeholder="Back: the answer"></textarea>
+      <button className="lh-btn" type="submit"><${Icon} n="fa-plus" /> Add card</button></form>`}
+    ${mode === 'hl' && html`<div className="cd-list">${hlRows.length === 0 ? html`<p className="st-empty">Highlight text in the Library reader and it will show up here, ready to become a card.</p>` : hlRows.map((r) => html`<div key=${r.url + r.h.t} className="cd-row"><div><small>${r.title}</small><p>${r.h.t}</p>${r.h.n && html`<em>${r.h.n}</em>`}</div><button onClick=${() => addCard(r.h.n || 'Recall: ' + r.title, r.h.t, r.title)}><${Icon} n="fa-clone" /> Make card</button></div>`)}</div>`}
+    ${mode === 'all' && html`<div className="cd-list">${cards.length === 0 ? html`<p className="st-empty">Nothing here yet.</p>` : cards.map((c) => html`<div key=${c.id} className="cd-row"><div><small>${c.src || 'Card'} · ${c.due <= now ? 'due now' : 'due ' + new Date(c.due).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</small><p>${c.front}</p><em>${c.back}</em></div><button onClick=${() => CardStore.set(CardStore.get().filter((x) => x.id !== c.id))} aria-label="Delete card"><${Icon} n="fa-trash-can" /></button></div>`)}</div>`}
+  </div>`;
+}
+
+/* ---------- mistake notebook ---------- */
+function MistakesTab({ go, openCase }) {
+  const attempts = useAttempts().filter((a) => !a.sample);
+  const mastered = useStore(MasteredStore);
+  const rows = CASES.map((c, i) => {
+    let miss = 0, seen = 0, lastMiss = 0, lastOk = 0;
+    attempts.forEach((a) => { if (i >= a.total) return; seen += 1; if ((a.correct || []).includes(i)) lastOk = a.timestamp; else { miss += 1; lastMiss = a.timestamp; } });
+    return { c, miss, seen, still: lastMiss > lastOk, lastMiss };
+  }).filter((r) => r.miss > 0 && !mastered.includes(r.c.id)).sort((a, b) => (b.still - a.still) || (b.miss - a.miss));
+  if (!attempts.length) return html`<p className="st-empty big">Finish a quiz and the questions you miss will collect here, with the reasoning ready to review.</p>`;
+  if (!rows.length) return html`<p className="st-empty big">No open mistakes. Nicely done.</p>`;
+  return html`<div className="mk">${rows.map(({ c, miss, seen, still }) => html`<article key=${c.id} className="mk-card">
+    <div className="mk-top"><span className=${cx('mk-tag', still && 'hot')}>${still ? 'Still tricky' : 'Got it since'}</span><span className="mk-n">Missed ${miss} of ${seen}</span></div>
+    <h4>${c.title}</h4><p>${c.objective || c.tag}</p>
+    <div className="mk-act"><button onClick=${() => { openCase(c.index); go('library'); }}><${Icon} n="fa-book-open" /> Read the case</button>
+      <button onClick=${() => addCard(`${c.title}: what is the key idea?`, c.objective || c.tag, c.code)}><${Icon} n="fa-clone" /> Make a card</button>
+      <button onClick=${() => MasteredStore.set([...MasteredStore.get(), c.id])}><${Icon} n="fa-check" /> Mastered</button></div></article>`)}</div>`;
+}
+
+/* ---------- planner ---------- */
+function PlannerTab() {
+  const plan = useStore(PlanStore), attempts = useAttempts().filter((a) => !a.sample), log = useStore(FocusLog), cards = useStore(CardStore);
+  const [t, setT] = useState('');
+  const set = (p) => PlanStore.set({ ...PlanStore.get(), ...p });
+  const days = plan.exam ? Math.ceil((new Date(plan.exam + 'T00:00:00') - new Date(new Date().toDateString())) / DAY) : null;
+  const qToday = attempts.filter((a) => dayKey(a.timestamp) === new Date().toDateString()).reduce((s, a) => s + a.total, 0);
+  const week = Array.from({ length: 7 }, (_, k) => { const d = new Date(); d.setDate(d.getDate() - (6 - k)); const key = d.toDateString(); return { d, q: attempts.filter((a) => dayKey(a.timestamp) === key).reduce((s, a) => s + a.total, 0), m: Math.round(log.filter((f) => dayKey(f.at) === key).reduce((s, f) => s + f.sec, 0) / 60) }; });
+  const maxM = Math.max(30, ...week.map((w) => w.m));
+  return html`<div className="pl">
+    <div className="pl-count"><small>Your exam</small>${days === null ? html`<p>Pick your Step 1 date to start the countdown.</p>` : days < 0 ? html`<b>Done</b><p>Your exam date has passed. Well done for getting there.</p>` : html`<b>${days}</b><p>${days === 1 ? 'day' : 'days'} to go · about ${Math.max(1, Math.round(days / 7))} week${Math.round(days / 7) === 1 ? '' : 's'}</p>`}
+      <input type="date" value=${plan.exam} onChange=${(e) => set({ exam: e.target.value })} aria-label="Exam date" /></div>
+    <div className="pl-goal"><small>Today</small>
+      <div className="pl-ring" style=${{ '--p': Math.min(1, qToday / Math.max(1, plan.goal)) }}><b>${qToday}</b><span>of ${plan.goal} questions</span></div>
+      <label>Daily goal <input type="number" min="1" max="400" value=${plan.goal} onChange=${(e) => set({ goal: Math.max(1, +e.target.value || 1) })} /></label>
+      <p>${focusToday(log)} min focused · ${cards.filter((c) => c.due <= Date.now()).length} cards due</p></div>
+    <div className="pl-week"><small>This week</small><div>${week.map((w) => html`<span key=${w.d} title=${w.m + ' min, ' + w.q + ' questions'}><i style=${{ height: Math.max(4, (w.m / maxM) * 100) + '%' }}></i><em>${w.d.toLocaleDateString(undefined, { weekday: 'narrow' })}</em></span>`)}</div></div>
+    <div className="pl-tasks"><small>Checklist</small>
+      <form onSubmit=${(e) => { e.preventDefault(); if (t.trim()) { set({ tasks: [...plan.tasks, { id: uid(), t: t.trim(), done: false }] }); setT(''); } }}><input value=${t} onChange=${(e) => setT(e.target.value)} placeholder="Add something to do…" /><button className="lh-btn" type="submit"><${Icon} n="fa-plus" /></button></form>
+      ${plan.tasks.length === 0 && html`<p className="st-empty">Break the big goal into small wins.</p>`}
+      ${plan.tasks.map((x) => html`<label key=${x.id} className=${cx('pl-task', x.done && 'done')}><input type="checkbox" checked=${x.done} onChange=${() => set({ tasks: plan.tasks.map((y) => (y.id === x.id ? { ...y, done: !y.done } : y)) })} /><span>${x.t}</span><button type="button" onClick=${() => set({ tasks: plan.tasks.filter((y) => y.id !== x.id) })} aria-label="Remove"><${Icon} n="fa-xmark" /></button></label>`)}</div>
+  </div>`;
+}
+
+/* ---------- pomodoro ---------- */
+const POMO = { focus: 25, short: 5, long: 15 };
+function beep() { try { const a = new (window.AudioContext || window.webkitAudioContext)(); [0, 0.22, 0.44].forEach((d) => { const o = a.createOscillator(), g = a.createGain(); o.frequency.value = 660 + d * 400; g.gain.value = 0.06; o.connect(g); g.connect(a.destination); o.start(a.currentTime + d); o.stop(a.currentTime + d + 0.15); }); } catch { /* no audio */ } }
+function FocusTab() {
+  const log = useStore(FocusLog);
+  const [mode, setMode] = useState('focus');
+  const [lens, setLens] = usePref('pomo', POMO);
+  const [left, setLeft] = useState(lens.focus * 60);
+  const [on, setOn] = useState(false);
+  const [round, setRound] = useState(0);
+  const end = useRef(0);
+  const total = lens[mode] * 60;
+  useEffect(() => { if (!on) setLeft(lens[mode] * 60); }, [mode, lens.focus, lens.short, lens.long]);
+  useEffect(() => {
+    if (!on) return undefined;
+    end.current = Date.now() + left * 1000;
+    const id = setInterval(() => {
+      const r = Math.max(0, Math.round((end.current - Date.now()) / 1000)); setLeft(r);
+      if (r <= 0) {
+        clearInterval(id); beep(); setOn(false);
+        if (mode === 'focus') { logFocus(lens.focus * 60); const n = round + 1; setRound(n); toast('Focus block done. Take a breather.'); setMode(n % 4 === 0 ? 'long' : 'short'); } else { toast('Break over. Ready when you are.'); setMode('focus'); }
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, [on, mode]);
+  useEffect(() => { document.title = on ? `${pad2(Math.floor(left / 60))}:${pad2(left % 60)} · Focus` : 'USMLE Quiz'; return () => { document.title = 'USMLE Quiz'; }; }, [on, left]);
+  const R = 120, C = 2 * Math.PI * R;
+  const stop = () => { if (on && mode === 'focus') logFocus(total - left); setOn(false); setLeft(total); };
+  return html`<div className="fc">
+    <${Seg} value=${mode} onChange=${(m) => { if (!on) setMode(m); }} options=${[['focus', 'Focus'], ['short', 'Short break'], ['long', 'Long break']]} />
+    <div className="fc-ring"><svg viewBox="0 0 280 280"><circle cx="140" cy="140" r=${R} className="bg" /><circle cx="140" cy="140" r=${R} className="fg" style=${{ strokeDasharray: C, strokeDashoffset: C * (1 - (total - left) / total) }} /></svg>
+      <div className="fc-time"><b>${pad2(Math.floor(left / 60))}:${pad2(left % 60)}</b><span>${mode === 'focus' ? 'Deep focus' : 'Rest your eyes'}</span></div></div>
+    <div className="fc-ctl"><button className="lh-btn" onClick=${() => setOn((v) => !v)}><${Icon} n=${on ? 'fa-pause' : 'fa-play'} /> ${on ? 'Pause' : left < total ? 'Resume' : 'Start'}</button><button className="fc-reset" onClick=${stop} aria-label="Reset"><${Icon} n="fa-rotate-left" /></button></div>
+    <div className="fc-set">${Object.entries({ focus: 'Focus', short: 'Short', long: 'Long' }).map(([k, l]) => html`<label key=${k}>${l}<input type="number" min="1" max="90" value=${lens[k]} disabled=${on} onChange=${(e) => setLens({ ...lens, [k]: Math.max(1, Math.min(90, +e.target.value || 1)) })} /><small>min</small></label>`)}</div>
+    <p className="fc-sum">Today: <b>${focusToday(log)} min</b> focused · Blocks this session: <b>${round}</b> · All time: <b>${Math.round(log.reduce((s, f) => s + f.sec, 0) / 3600 * 10) / 10} h</b></p>
+  </div>`;
+}
+
+/* ---------- the Study page ---------- */
+function Study({ go, openCase }) {
+  const [tab, setTab] = usePref('studyTab', 'notes');
+  const due = useStore(CardStore).filter((c) => c.due <= Date.now()).length;
+  return html`<section className="sec lib study" data-tone="paper" data-nav="light" style=${{ minHeight: '100dvh' }}>
+    <div className="wrap">
+      <p className="eyebrow">Your study desk</p>
+      <h1 className="st-h">Think it. <span className="hl">Draw it. Keep it.</span></h1>
+      <div className="st-tabs"><${Seg} value=${tab} onChange=${setTab} options=${[['notes', 'Notes'], ['cards', `Cards${due ? ' · ' + due : ''}`], ['mistakes', 'Mistakes'], ['plan', 'Planner'], ['focus', 'Focus']]} /></div>
+      ${tab === 'notes' && html`<${NotesTab} />`}
+      ${tab === 'cards' && html`<${CardsTab} />`}
+      ${tab === 'mistakes' && html`<${MistakesTab} go=${go} openCase=${openCase} />`}
+      ${tab === 'plan' && html`<${PlannerTab} />`}
+      ${tab === 'focus' && html`<${FocusTab} />`}
+    </div>
+  </section>`;
+}
+
+
+/* ==========================================================================
    APP
    ========================================================================== */
 function App() {
@@ -4468,6 +4819,7 @@ function App() {
       ${route === 'home' && html`<div className="site-view">
         <${Hero} go=${go} /><${Manifesto} /><${Inside} go=${go} /><${Stack} /><${Orbit} go=${go} /><${Stats} attempts=${attempts} /><${CtaBig} go=${go} /><${QuoteBlock} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'dashboard' && html`<div className="site-view"><${BarsIntro} /><${Dashboard} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
+      ${route === 'study' && html`<div className="site-view"><${Study} go=${go} openCase=${openCase} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'library' && html`<div className="site-view"><${LibHero} /><${CasesSection} pending=${pendingCase} onRead=${onRead} withExplorer=${true} /><${Footer} go=${go} openFind=${openFind} /></div>`}
     </main>
     ${quizMounted && html`<div className="quiz-host" hidden=${route !== 'quiz'}><${window.QuizApp} active=${route === 'quiz'} /></div>`}
