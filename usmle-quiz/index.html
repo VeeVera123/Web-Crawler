@@ -1162,6 +1162,32 @@
         .wk-kind { position: absolute; left: 12px; bottom: 12px; z-index: 2; padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; font: 600 10px/1 'Space Grotesk', monospace; letter-spacing: .12em; text-transform: uppercase; }
         .wk-img img { animation: fadeImg .7s var(--ease-out) both; } @keyframes fadeImg { from { opacity: 0; transform: scale(1.04); } to { opacity: 1; transform: none; } }
 
+        /* ===== 3D anatomy explorer ===== */
+        .a3 { margin: clamp(56px, 9vw, 110px) 0 0; }
+        .a3-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+        .a3-head h3 { font: 400 clamp(40px, 5.2vw, 76px)/.98 'Bebas Neue', sans-serif; letter-spacing: .01em; margin: 14px 0 0; text-transform: uppercase; }
+        .a3-head h3 .hl { font-family: 'Fraunces', serif; text-transform: none; font-style: italic; color: #fff; }
+        .a3-pick { position: relative; z-index: 20; }
+        .a3-btn { display: flex; align-items: center; gap: 14px; min-width: 280px; padding: 9px 18px 9px 9px; border-radius: 999px; border: 1px solid rgba(255,255,255,.2); background: rgba(255,255,255,.07); color: #fff; cursor: pointer; text-align: left; transition: background .3s, border-color .3s, transform .4s var(--ease); }
+        .a3-btn:hover { background: rgba(255,255,255,.13); border-color: rgba(255,255,255,.4); }
+        .a3-ico { width: 44px; height: 44px; border-radius: 50%; background: #C6F135; color: #000; display: grid; place-items: center; font-size: 18px; }
+        .a3-txt { flex: 1; display: grid; gap: 3px; } .a3-txt small { font: 600 10px/1 'Space Grotesk', monospace; letter-spacing: .16em; text-transform: uppercase; opacity: .55; } .a3-txt b { font: 600 17px/1 'Montserrat', sans-serif; }
+        .a3-chev { transition: transform .45s var(--ease); font-size: 13px; opacity: .7; } .a3-pick.open .a3-chev { transform: rotate(180deg); }
+        .a3-menu { position: absolute; right: 0; top: calc(100% + 10px); width: min(380px, 92vw); max-height: min(60vh, 520px); overflow-y: auto; margin: 0; padding: 8px; list-style: none; border-radius: 24px; background: rgba(18,18,20,.96); backdrop-filter: blur(18px); border: 1px solid rgba(255,255,255,.14); box-shadow: 0 30px 70px -20px rgba(0,0,0,.8);
+                   opacity: 0; transform: translateY(-8px) scale(.97); transform-origin: top right; pointer-events: none; visibility: hidden; transition: opacity .3s, transform .45s var(--ease-out), visibility 0s .45s; }
+        .a3-pick.open .a3-menu { opacity: 1; transform: none; pointer-events: auto; visibility: visible; transition-delay: 0s; }
+        .a3-menu button { display: flex; align-items: center; gap: 14px; width: 100%; padding: 8px 12px 8px 8px; border-radius: 16px; border: 0; background: transparent; color: #fff; cursor: pointer; text-align: left; transition: background .25s; }
+        .a3-menu button:hover { background: rgba(255,255,255,.1); } .a3-menu button.on { background: rgba(198,241,53,.14); }
+        .a3-thumb { width: 52px; height: 52px; border-radius: 14px; overflow: hidden; background: #26262b; display: grid; place-items: center; flex: none; font-size: 20px; color: #C6F135; } .a3-thumb img { width: 100%; height: 100%; object-fit: cover; }
+        .a3-li { flex: 1; display: grid; gap: 4px; } .a3-li b { font: 600 15px/1.1 'Montserrat', sans-serif; } .a3-li small { font-size: 12.5px; opacity: .55; line-height: 1.3; }
+        .a3-frame { position: relative; border-radius: 30px; overflow: hidden; background: #0b0b0d; border: 1px solid rgba(255,255,255,.16); height: min(78vh, 780px); min-height: 420px; }
+        .a3-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+        .a3-load { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 16px; color: rgba(255,255,255,.6); font-size: 14px; }
+        .a3-load span { width: 38px; height: 38px; border-radius: 50%; border: 3px solid rgba(255,255,255,.15); border-top-color: #C6F135; animation: spin .9s linear infinite; } .a3-load p { margin: 0; }
+        .a3-credit { font-size: 12.5px; opacity: .55; margin: 12px 4px 0; line-height: 1.5; } .a3-credit a { color: #fff; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @media (max-width: 760px) { .a3-btn { min-width: 0; width: 100%; } .a3-pick { width: 100%; } .a3-menu { width: 100%; } .a3-frame { height: 68vh; border-radius: 22px; } }
+
     </style>
 </head>
 <body>
@@ -3899,12 +3925,149 @@ function Explorer() {
   </div>`;
 }
 
+const SYS_RAW = [
+ {
+  "k": "bd",
+  "name": "Whole body",
+  "sub": "BioDigital · labels, layers, search",
+  "ico": "fa-person",
+  "src": "https://human.biodigital.com/viewer/?id=5HPq&ui-anatomy-descriptions=true&ui-anatomy-pronunciations=true&ui-anatomy-labels=true&ui-audio=true&ui-chapter-list=false&ui-fullscreen=true&ui-help=true&ui-info=true&ui-label-list=true&ui-layers=true&ui-loader=circle&ui-media-controls=full&ui-menu=true&ui-nav=true&ui-search=true&ui-tools=true&ui-tutorial=false&ui-undo=true&ui-whiteboard=true&initial.none=true&disable-scroll=false&dk=edac91d2443ff104ab74174b3047b00937a21960&paid=o_25ed890c",
+  "credit": "BioDigital Human"
+ },
+ {
+  "k": "sf",
+  "name": "Skeleton",
+  "sub": "Every bone, rotate and zoom",
+  "ico": "fa-bone",
+  "src": "4de7b96a351a4a35b1b6e5415277ff07",
+  "thumb": "https://media.sketchfab.com/models/4de7b96a351a4a35b1b6e5415277ff07/thumbnails/5fddaf2e9e7242b5ad944a56f4b04b50/200x200.jpeg",
+  "credit": "“Skeleton” by Diego Luján García, CC BY 4.0"
+ },
+ {
+  "k": "sf",
+  "name": "Muscles",
+  "sub": "Muscular system, male",
+  "ico": "fa-dumbbell",
+  "src": "991eb96938be4d0d8fadee241a1063d3",
+  "thumb": "https://media.sketchfab.com/models/991eb96938be4d0d8fadee241a1063d3/thumbnails/0fb3e432bec0433792ab048ecad40fbe/cb3a614029f24a5d8ba3b800015732cc.jpeg",
+  "credit": "“Male Body Muscular System” by Ruslan Gadzhiev, CC BY 4.0"
+ },
+ {
+  "k": "sf",
+  "name": "Heart",
+  "sub": "Chambers, valves and vessels",
+  "ico": "fa-heart-pulse",
+  "src": "3f8072336ce94d18b3d0d055a1ece089",
+  "thumb": "https://media.sketchfab.com/models/3f8072336ce94d18b3d0d055a1ece089/thumbnails/021a0c163a16426b8b4d2c4244e8386d/fa4b143e70bf43b0984a146ebd068f6e.jpeg",
+  "credit": "“Realistic Human Heart” by neshallads, CC BY 4.0"
+ },
+ {
+  "k": "sf",
+  "name": "Circulation",
+  "sub": "Heart and blood vessels in the body",
+  "ico": "fa-droplet",
+  "src": "6a7a537a71444f6e8201e18a685a013d",
+  "thumb": "https://media.sketchfab.com/models/6a7a537a71444f6e8201e18a685a013d/thumbnails/572778bb27ae4dcf8d444bb17aabf673/ae59434f41d441f0af8ddba9be4b3051.jpeg",
+  "credit": "“Animated Human Body with circulatory system” by AVRcontent"
+ },
+ {
+  "k": "sf",
+  "name": "Lungs",
+  "sub": "Respiratory system",
+  "ico": "fa-lungs",
+  "src": "250911151757489da1cf5501b791f363",
+  "thumb": "https://media.sketchfab.com/models/250911151757489da1cf5501b791f363/thumbnails/3febed3ef5bd46439f7dc053fd02cc1d/c884b9c1c2834f41934db13144203c4a.jpeg",
+  "credit": "“Human Respiratory system review” by Darmawan Pujisetyadi"
+ },
+ {
+  "k": "sf",
+  "name": "Digestive tract",
+  "sub": "Gastrointestinal tract",
+  "ico": "fa-utensils",
+  "src": "8c4c69035f4f4773813533d7ca56e516",
+  "thumb": "https://media.sketchfab.com/models/8c4c69035f4f4773813533d7ca56e516/thumbnails/d00e60e12688486eae3e7c766f441299/f88fa021a6fa4f29aa707e6b1f8b9a6f.jpeg",
+  "credit": "“Gastrointestinal tract” by Ebers"
+ },
+ {
+  "k": "sf",
+  "name": "Brainstem and nerves",
+  "sub": "Cranial nerves",
+  "ico": "fa-brain",
+  "src": "2792c4a8600b4984960c5caf949feb4d",
+  "thumb": "https://media.sketchfab.com/models/2792c4a8600b4984960c5caf949feb4d/thumbnails/bfcd2ec2f59944b5ad0fca2e89aad1dc/6557370b8df444d48862d72b4b2a48fd.jpeg",
+  "credit": "“Cranial nerves and brain stem” by Ebers"
+ },
+ {
+  "k": "sf",
+  "name": "Skull and neck",
+  "sub": "Head and cervical spine",
+  "ico": "fa-skull",
+  "src": "a47ef69ff3a4402783cff0f841bc5e0a",
+  "thumb": "https://media.sketchfab.com/models/a47ef69ff3a4402783cff0f841bc5e0a/thumbnails/0d6192e3499b422baf5fa0242afb7ba1/c3f7c299d6f9439f800ba96fc1026e36.jpeg",
+  "credit": "“Human skull and neck” by Lassi Kaukonen, CC BY 4.0"
+ },
+ {
+  "k": "sf",
+  "name": "Animated body",
+  "sub": "Full body with moving parts",
+  "ico": "fa-child-reaching",
+  "src": "9b0b079953b840bc9a13f524b60041e4",
+  "thumb": "https://media.sketchfab.com/models/9b0b079953b840bc9a13f524b60041e4/thumbnails/7f730db44a9e4c60a2f1f6aabb7b0e32/281858f86fb64416b0037496aa4cbfa6.jpeg",
+  "credit": "“Animated Full Human Body Anatomy” by AVRcontent"
+ }
+];
+/* BioDigital only loads on websites registered with the developer key, so it sits last. */
+const SYSTEMS_3D = [...SYS_RAW.slice(1), { ...SYS_RAW[0], name: 'BioDigital whole body', sub: 'Works on your registered website only' }];
+function Anatomy3D() {
+  const [i, setI] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [ready, setReady] = useState(false);
+  const wrap = useRef(null);
+  const [armed, setArmed] = useState(false);
+  const sys = SYSTEMS_3D[i];
+  const url = sys.k === 'bd' ? sys.src : `https://sketchfab.com/models/${sys.src}/embed?autostart=1&ui_theme=dark&ui_hint=0&ui_infos=0&ui_stop=0&dnt=1`;
+  useEffect(() => {
+    const el = wrap.current; if (!el) return undefined;
+    const io = 'IntersectionObserver' in window ? new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setArmed(true); io.disconnect(); } }, { rootMargin: '400px' }) : null;
+    if (io) io.observe(el); else setArmed(true);
+    return () => { if (io) io.disconnect(); };
+  }, []);
+  useEffect(() => {
+    if (!open) return undefined;
+    const k = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const c = (e) => { if (!e.target.closest('.a3-pick')) setOpen(false); };
+    window.addEventListener('keydown', k); document.addEventListener('mousedown', c);
+    return () => { window.removeEventListener('keydown', k); document.removeEventListener('mousedown', c); };
+  }, [open]);
+  const choose = (n) => { if (n !== i) { setReady(false); setI(n); } setOpen(false); };
+  return html`<section className="a3 reveal" ref=${wrap}>
+    <div className="a3-head">
+      <div><p className="eyebrow">Explore in 3D</p><h3>Pick a system. <span className="hl">Turn it around.</span></h3></div>
+      <div className=${cx('a3-pick', open && 'open')}>
+        <button className="a3-btn" onClick=${() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded=${open}>
+          <span className="a3-ico"><${Icon} n=${sys.ico} /></span><span className="a3-txt"><small>System</small><b>${sys.name}</b></span><${Icon} n="fa-chevron-down" cls="fas a3-chev" />
+        </button>
+        <ul className="a3-menu" role="listbox" aria-hidden=${!open}>
+          ${SYSTEMS_3D.map((s, n) => html`<li key=${n} role="option" aria-selected=${n === i}><button onClick=${() => choose(n)} className=${n === i ? 'on' : ''} tabIndex=${open ? 0 : -1}>
+            <span className="a3-thumb">${s.thumb ? html`<img src=${s.thumb} alt="" loading="lazy" onError=${hidePicture} />` : html`<${Icon} n=${s.ico} />`}</span>
+            <span className="a3-li"><b>${s.name}</b><small>${s.sub}</small></span>${n === i && html`<${Icon} n="fa-check" />`}</button></li>`)}
+        </ul>
+      </div>
+    </div>
+    <div className="a3-frame">
+      ${!ready && html`<div className="a3-load"><span></span><p>Loading the ${sys.name.toLowerCase()} model…</p></div>`}
+      ${armed && html`<iframe key=${url} src=${url} title=${sys.name + ' 3D model'} allow="autoplay; fullscreen; xr-spatial-tracking" allowFullScreen onLoad=${() => setReady(true)}></iframe>`}
+    </div>
+    <p className="a3-credit">${sys.credit}${sys.k === 'sf' ? ' · via Sketchfab' : ''}. Drag to rotate, scroll to zoom. <a href=${url} target="_blank" rel="noopener noreferrer">Open full screen ↗</a></p>
+  </section>`;
+}
+
 function CasesSection({ pending, onRead, withExplorer }) {
   return html`<section className="sec" data-tone="paper" data-nav="dark" style=${withExplorer ? { paddingTop: 120, minHeight: '100dvh' } : undefined}>
     <div className="wrap">
       <h2 className="files-h reveal" style=${{ '--d': '80ms', marginTop: 18 }}>Open a case. <span className="hl">Read the story</span> behind the answer.</h2>
       <${CaseFiles} pending=${pending} onRead=${onRead} />
-      ${withExplorer && html`<${Fragment}><section className="skel reveal"><div className="skel-head"><h3>Explore the skeleton</h3><a href="https://www.innerbody.com/image/skelfov.html" target="_blank" rel="noopener noreferrer">Open in a new tab <${Icon} n="fa-arrow-up-right-from-square" /></a></div><div className="skel-frame"><iframe src="https://www.innerbody.com/image/skelfov.html" title="Interactive skeleton, courtesy of Innerbody" loading="lazy" referrerPolicy="no-referrer"></iframe></div><p className="skel-credit">Interactive diagram by Innerbody.com, shown here with thanks.</p></section><${Explorer} /><//>`}
+      ${withExplorer && html`<${Fragment}><${Anatomy3D} /><${Explorer} /><//>`}
     </div>
   </section>`;
 }
