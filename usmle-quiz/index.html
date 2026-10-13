@@ -16,20 +16,9 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
 
     <!-- Typography: Manrope (UI), Sora (display), Space Grotesk (numerals) + Inter Tight / Instrument Serif / Outfit for the site -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-400-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-500-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-600-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-700-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-800-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/sora@latest/latin-300-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/sora@latest/latin-600-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/sora@latest/latin-700-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/space-grotesk@latest/latin-500-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/space-grotesk@latest/latin-600-normal.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/space-grotesk@latest/latin-700-normal.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=Inter+Tight:wght@400..700&family=Bebas+Neue&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400..800&family=Sora:wght@300..700&family=Space+Grotesk:wght@400..700&family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=Inter+Tight:wght@400..700&family=Montserrat:wght@400..700&family=Bebas+Neue&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script>
         tailwind.config = {
@@ -507,11 +496,12 @@
            ========================================================================== */
 
         /* ---------- 0. foundations ---------- */
-        :root { --coral: #FF9E7C; --coral-deep: #F2562B; --ease: cubic-bezier(.32,.72,0,1); --ease-out: cubic-bezier(.22,1,.36,1); }
+        :root { --paper: #F4F0E6; --paper2: #EBE5D6; --ink: #0B0A09; --umber: #3A2A20; --brown: #6B4A34; --sand: #D9C3A0; --gold: #E2B96F;
+                --coral: #D79A6E; --coral-deep: #8F5A33; --ease: cubic-bezier(.32,.72,0,1); --ease-out: cubic-bezier(.22,1,.36,1); }
         html { scroll-behavior: smooth; }
-        body { margin: 0; background: #050506; font-family: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
+        body { margin: 0; background: #0B0A09; font-family: 'Montserrat', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
         #site { min-height: 100dvh; }
-        .site-view { animation: viewIn .7s var(--ease-out) both; }
+        .site-view { animation: viewIn .7s var(--ease-out) backwards; }   /* no 'forwards': a lingering transform would hijack position:fixed children */
         @keyframes viewIn { from { opacity: 0; transform: translateY(14px); } }
         .quiz-host { position: fixed; inset: 0; z-index: 10; --nav-space: 84px; }
         .quiz-host[hidden] { display: none; }
@@ -523,9 +513,9 @@
         .reveal.in { opacity: 1; transform: none; }
         .fanfade-in { animation: riseIn 1.1s var(--ease-out) both; }
         @keyframes riseIn { from { opacity: 0; transform: translateY(26px); filter: blur(10px); } }
-        .sec { position: relative; color: var(--fg); font-family: 'Inter Tight', sans-serif; padding: clamp(72px, 10vw, 150px) clamp(18px, 5vw, 80px);
-               background: radial-gradient(70% 45% at 100% 0%, rgba(255,120,70,.11), transparent 62%), radial-gradient(60% 45% at 0% 100%, rgba(110,100,255,.13), transparent 62%), var(--bg); }
-        [data-tone] { --bg: #08080b; --fg: #f4f4f6; --mut: rgba(244,244,246,.62); --acc: var(--coral); --line: rgba(255,255,255,.1); }
+        .sec { position: relative; color: var(--fg); font-family: 'Montserrat', sans-serif; padding: clamp(72px, 10vw, 150px) clamp(18px, 5vw, 80px);
+               background: radial-gradient(70% 45% at 100% 0%, rgba(201,138,94,.13), transparent 62%), radial-gradient(60% 45% at 0% 100%, rgba(120,80,50,.14), transparent 62%), var(--bg); }
+        [data-tone] { --bg: #0B0A09; --fg: #f4f4f6; --mut: rgba(244,244,246,.62); --acc: var(--coral); --line: rgba(255,255,255,.1); }
         .wrap { max-width: 1240px; margin: 0 auto; position: relative; }
 
         /* ---------- 1. LIQUID GLASS (nav board only) ----------
@@ -548,7 +538,7 @@
 
         /* ---------- 2. buttons ---------- */
         .btn-orange, .btn-white, .btn-dark, .btn-ghost { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 52px; padding: 0 28px; border-radius: 999px; cursor: pointer;
-            border: 1px solid transparent; font: 600 15px/1 'Inter Tight', sans-serif; letter-spacing: -.01em; white-space: nowrap;
+            border: 1px solid transparent; font: 600 15px/1 'Montserrat', sans-serif; letter-spacing: -.01em; white-space: nowrap;
             transition: transform .45s var(--ease), background .25s, color .25s, border-color .25s, box-shadow .25s; }
         .btn-orange svg, .btn-white svg, .btn-dark svg, .btn-ghost svg, .btn-orange i, .btn-dark i, .btn-white i, .btn-ghost i { transition: transform .45s var(--ease); }
         .btn-orange:hover i, .btn-dark:hover i, .btn-white:hover i, .btn-ghost:hover i { transform: translateX(3px); }
@@ -560,15 +550,15 @@
         .btn-sm { height: 44px; padding: 0 20px; font-size: 14px; } .btn-lg { height: 60px; padding: 0 34px; font-size: 17px; }
 
         /* ---------- 3. nav ---------- */
-        .progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 120; transform-origin: left; transform: scaleX(var(--p, 0)); background: linear-gradient(90deg, #FF9E7C, #FF6A2B, #6a6bff); pointer-events: none; }
+        .progress { display: none; position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 120; transform-origin: left; transform: scaleX(var(--p, 0)); background: linear-gradient(90deg, #FF9E7C, #FF6A2B, #6a6bff); pointer-events: none; }
         .site-nav { position: fixed; top: 0; left: 0; right: 0; z-index: 90; display: flex; align-items: center; justify-content: space-between; padding: 14px clamp(14px, 3vw, 32px); pointer-events: none; transition: opacity .5s, transform .6s var(--ease); }
         .site-nav > * { pointer-events: auto; }
         .site-nav[data-hide="true"] { opacity: 0; transform: translateY(-20px); pointer-events: none; }
         .site-nav[data-hide="true"] > * { pointer-events: none; }
-        .nav-actions { display: flex; gap: 10px; align-items: center; }
-        .brand, .find, .tab { color: #f4f4f6; font-family: 'Inter Tight', sans-serif; cursor: pointer; }
+        .nav-actions { display: flex; gap: 10px; align-items: center; margin-left: auto; }
+        .brand, .find, .tab { color: #f4f4f6; font-family: 'Montserrat', sans-serif; cursor: pointer; }
         .brand { display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 20px 0 8px; border-radius: 999px; font-weight: 700; font-size: 14px; letter-spacing: -.01em; }
-        .brand-mark { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(145deg, #FF8356, #E4420E); box-shadow: inset 0 1px 0 rgba(255,255,255,.5), 0 3px 10px rgba(228,66,14,.5); font-size: 14px; }
+        .brand-mark { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(145deg, #D9976B, #8A5230); box-shadow: inset 0 1px 0 rgba(255,255,255,.45), 0 3px 10px rgba(110,66,34,.45); font-size: 14px; }
         .find { display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 18px; border-radius: 999px; font-weight: 600; font-size: 14px; }
         .find kbd { font: 600 10px/1 'Space Grotesk', monospace; padding: 4px 6px; border-radius: 6px; border: 1px solid rgba(255,255,255,.28); opacity: .8; }
         .tabs { position: fixed; z-index: 91; left: 50%; top: 14px; transform: translateX(-50%); display: flex; padding: 5px; border-radius: 999px; height: 54px; transition: top .7s var(--ease), transform .55s var(--ease), opacity .4s; }
@@ -583,9 +573,9 @@
         .tabs[data-t="light"] .tab[aria-current="page"] { color: #fff; }
 
         /* ---------- 4. home ---------- */
-        .home-sec { position: relative; font-family: 'Inter Tight', ui-sans-serif, system-ui, sans-serif; }
-        .home-dark { background: #09090B; color: #F4F2EC; }
-        .home-light { background: #F2EFE8; color: #121216; }
+        .home-sec { position: relative; font-family: 'Montserrat', ui-sans-serif, system-ui, sans-serif; }
+        .home-dark { background: #0B0A09; color: #F4F0E6; }
+        .home-light { background: #F2EDE0; color: #17120e; }
         .home-wrap { max-width: 1280px; margin: 0 auto; padding-inline: clamp(18px, 5vw, 72px); }
         .seam-top { border-radius: 44px 44px 0 0; margin-top: -44px; position: relative; z-index: 2; }
         .serif-i, .bs-h em, .bs-para em { font-family: 'Fraunces', Georgia, serif; font-style: italic; font-weight: 400; }
@@ -594,7 +584,7 @@
         .bs-hero { background-color: #F1EEE6; background-image: radial-gradient(55% 46% at 88% 0%, rgba(255,140,90,.34), transparent 62%), radial-gradient(48% 42% at 8% 2%, rgba(120,140,255,.28), transparent 62%), linear-gradient(180deg, #F1EEE6, #ECE8DF);
             color: #121216; overflow: hidden; min-height: 100svh; display: flex; flex-direction: column; align-items: center; text-align: center; padding: clamp(92px, 12vh, 132px) clamp(18px, 5vw, 72px) 0; }
         .bs-ghost { position: absolute; left: 50%; top: -1vw; transform: translateX(-50%); z-index: 0; pointer-events: none; user-select: none; white-space: nowrap;
-            font: 700 clamp(240px, 40vw, 600px)/.8 'Inter Tight', sans-serif; letter-spacing: -.05em; color: rgba(18,18,26,.055); }
+            font: 700 clamp(240px, 40vw, 600px)/.8 'Montserrat', sans-serif; letter-spacing: -.05em; color: rgba(18,18,26,.055); }
         .bs-hero-top { position: relative; z-index: 6; max-width: 920px; }
         .bs-h { font-weight: 500; letter-spacing: -.04em; line-height: 1; font-size: clamp(40px, 6.2vw, 90px); margin: 16px 0 0; }
         .bs-h em { letter-spacing: -.02em; }
@@ -612,7 +602,7 @@
         .name-field:hover .nf-line, .name-field:focus-within .nf-line { opacity: 1; }
         .nf-line path { fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; }
         .name-field.nf-plain { color: inherit; display: inline-grid; }
-        .name-field.nf-plain .nf-sizer, .name-field.nf-plain input { font-family: 'Inter Tight', sans-serif; font-style: normal; font-weight: 600; letter-spacing: -.01em; text-align: left; }
+        .name-field.nf-plain .nf-sizer, .name-field.nf-plain input { font-family: 'Montserrat', sans-serif; font-style: normal; font-weight: 600; letter-spacing: -.01em; text-align: left; }
 
         /* orbit: images circling a still centre (billboarded: each card counter-rotates to face you) */
         @property --spin { syntax: '<angle>'; inherits: true; initial-value: 0deg; }
@@ -659,7 +649,7 @@
         .stk-head { text-align: center; margin-bottom: clamp(40px, 7vw, 84px); }
         .stk-head h2 { font-weight: 500; letter-spacing: -.035em; line-height: 1; font-size: clamp(34px, 5vw, 70px); margin: 14px 0 0; }
         .stk-head h2 em { font-family: 'Fraunces', serif; font-style: italic; font-weight: 400; color: var(--coral); }
-        .stk { padding-bottom: 6vh; }
+        .stk { padding-bottom: 0; } .stk-card:last-child { margin-bottom: 0; }
         .stk-card { position: sticky; top: calc(96px + var(--i) * 56px); margin-bottom: clamp(26px, 5vh, 56px); }
         .stk-in { background: var(--bg); color: var(--fg); border-radius: 32px; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); min-height: min(62vh, 500px); overflow: hidden; transform-origin: 50% 0; will-change: transform, filter; box-shadow: 0 40px 80px -34px rgba(0,0,0,.7), inset 0 0 0 1px rgba(255,255,255,.07); }
         .stk-txt { padding: 18px clamp(24px, 3.6vw, 56px) clamp(24px, 3.6vw, 56px); display: flex; flex-direction: column; justify-content: space-between; gap: 28px; }
@@ -676,123 +666,124 @@
         .bs-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; text-align: center; }
         .bs-stat b { display: block; font-weight: 400; letter-spacing: -.04em; line-height: 1; font-size: clamp(54px, 8vw, 120px); }
         .bs-stat b em { font-family: 'Fraunces', serif; font-style: italic; color: var(--coral); }
-        .bs-stat span { display: block; margin: 14px auto 0; max-width: 24ch; font-size: 14.5px; line-height: 1.5; opacity: .6; }
-        .bs-cta { background-color: #FF7040; background-image: linear-gradient(135deg, #FF8356, #FF5A2B); color: #1b0d06; text-align: center; padding: clamp(90px, 14vh, 170px) clamp(18px, 5vw, 72px); }
+        .bs-stat > span { display: block; margin: 14px auto 0; max-width: 24ch; font-size: 14.5px; line-height: 1.5; opacity: .6; }
+        .bs-cta { background-color: #EFE8D8; background-image: none; color: #17120e; text-align: center; padding: clamp(90px, 14vh, 170px) clamp(18px, 5vw, 72px); }
         .bs-cta h2 { font-weight: 500; letter-spacing: -.04em; line-height: .98; font-size: clamp(44px, 8vw, 120px); margin: 0; }
         .bs-cta h2 em { font-family: 'Fraunces', serif; font-style: italic; font-weight: 400; }
-        .bs-cta p { max-width: 520px; margin: 22px auto 34px; font-size: 17px; line-height: 1.55; color: #3a1a0c; }
+        .bs-cta p { max-width: 520px; margin: 22px auto 34px; font-size: 17px; line-height: 1.6; color: #5a4c40; }
+        .bs-cta h2 em { color: #8a5a3c; }
 
         /* editorial quote (History-kit inspired): condensed caps, small body, painting inside the letters */
         .qb { padding: clamp(90px, 14vh, 170px) 0 clamp(40px, 6vw, 80px); overflow: hidden; }
         .qb-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); gap: clamp(30px, 6vw, 110px); align-items: start; }
         .qb-quote { margin: 0; }
-        .qb-quote p { font: 300 clamp(34px, 4.6vw, 70px)/1.02 'Bebas Neue', 'Inter Tight', sans-serif; letter-spacing: .01em; text-transform: uppercase; margin: 0; }
-        .qb-quote cite { display: block; margin-top: 26px; font: normal 500 13px/1 'Inter Tight', sans-serif; letter-spacing: .08em; opacity: .65; }
+        .qb-quote p { font: 300 clamp(34px, 4.6vw, 70px)/1.02 'Bebas Neue', 'Montserrat', sans-serif; letter-spacing: .01em; text-transform: uppercase; margin: 0; }
+        .qb-quote cite { display: block; margin-top: 26px; font: normal 500 13px/1 'Montserrat', sans-serif; letter-spacing: .08em; opacity: .65; }
         .qb-note p { font-size: 15px; line-height: 1.75; opacity: .78; margin: 0 0 16px; max-width: 46ch; }
         .qb-note .tiny { font-size: 11.5px; opacity: .45; line-height: 1.6; }
         .qb-giant-wrap { container-type: inline-size; margin-top: clamp(50px, 8vw, 110px); }
-        .qb-giant { font: 400 26.5cqw/.84 'Bebas Neue', 'Inter Tight', sans-serif; letter-spacing: .005em; text-align: center; user-select: none; white-space: nowrap; filter: brightness(1.45) saturate(1.25) contrast(1.06);
+        .qb-giant { font: 400 26.5cqw/.84 'Bebas Neue', 'Montserrat', sans-serif; letter-spacing: .005em; text-align: center; user-select: none; white-space: nowrap; filter: brightness(1.45) saturate(1.25) contrast(1.06);
                     background-size: cover; background-position: center; -webkit-background-clip: text; background-clip: text; color: transparent; }
 
         /* ---------- 5. dashboard ---------- */
-        .dz-page { --g0: #0b3d27; --g1: #14633f; --g2: #1f8a57; --g3: #69c496; --ink: #14201a; --mut: #8a958e; --line: #e7ece8; --panel: #f6f7f6;
-                   background: radial-gradient(60% 40% at 80% 0%, rgba(110,200,150,.18), transparent 60%), #E5E9E6; color: var(--ink); min-height: 100dvh; padding: 92px clamp(10px, 2.4vw, 32px) 56px; font-family: 'Inter Tight', sans-serif; }
-        .dz-shell { max-width: 1380px; margin: 0 auto; background: #fff; border-radius: 40px; padding: 16px; display: grid; grid-template-columns: 262px minmax(0, 1fr); gap: 16px; box-shadow: 0 40px 90px -40px rgba(20,60,40,.35); }
+        .dz-page { --g0: #2a1d14; --g1: #4a3426; --g2: #7a5a43; --g3: #c4a283; --ink: #1c1612; --mut: #8f8579; --line: #e4dccd; --panel: #ECE6D8;
+                   background: radial-gradient(60% 40% at 80% 0%, rgba(190,150,110,.2), transparent 60%), #E8E2D4; color: var(--ink); min-height: 100dvh; padding: 92px clamp(10px, 2.4vw, 32px) 56px; font-family: 'Montserrat', sans-serif; }
+        .dz-shell { max-width: 1380px; margin: 0 auto; background: #F4F0E6; border-radius: 40px; padding: 16px; display: grid; grid-template-columns: 262px minmax(0, 1fr); gap: 16px; box-shadow: 0 40px 90px -40px rgba(50,34,22,.4); }
         .dz-side { background: var(--panel); border-radius: 28px; padding: 22px 16px 16px; display: flex; flex-direction: column; gap: 20px; position: sticky; top: 92px; align-self: start; min-height: min(760px, calc(100dvh - 124px)); }
         .dz-logo { display: flex; align-items: center; gap: 10px; padding: 0 8px; font-weight: 700; font-size: 20px; letter-spacing: -.03em; }
         .dz-logo .brand-mark { width: 36px; height: 36px; border-radius: 12px; }
-        .dz-lbl { font: 600 11px/1 'Space Grotesk', monospace; letter-spacing: .16em; color: #9aa59e; padding: 0 12px; margin-bottom: 8px; }
+        .dz-lbl { font: 600 11px/1 'Space Grotesk', monospace; letter-spacing: .16em; color: #9d9285; padding: 0 12px; margin-bottom: 8px; }
         .dz-nav { display: grid; gap: 2px; }
-        .dz-nav button { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; font: 500 15px/1 'Inter Tight', sans-serif; color: #7c8780; text-align: left; background: none; border: 0; cursor: pointer; transition: color .2s, background .2s; }
+        .dz-nav button { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; font: 500 15px/1 'Montserrat', sans-serif; color: #85796c; text-align: left; background: none; border: 0; cursor: pointer; transition: color .2s, background .2s; }
         .dz-nav button i { width: 18px; text-align: center; font-size: 15px; }
-        .dz-nav button:hover { color: var(--ink); background: rgba(20,60,40,.05); }
+        .dz-nav button:hover { color: var(--ink); background: rgba(60,40,28,.06); }
         .dz-nav button.on { color: var(--ink); font-weight: 600; }
         .dz-nav button.on::before { content: ""; position: absolute; left: -16px; top: 8px; bottom: 8px; width: 5px; border-radius: 0 6px 6px 0; background: var(--g1); }
         .dz-nav button.on i { color: var(--g1); }
-        .dz-badge { margin-left: auto; font: 600 11px/1 'Inter Tight'; padding: 4px 7px; border-radius: 7px; background: var(--g0); color: #fff; }
+        .dz-badge { margin-left: auto; font: 600 11px/1 'Montserrat'; padding: 4px 7px; border-radius: 7px; background: var(--g0); color: #fff; }
         .dz-promo { margin-top: auto; border-radius: 22px; padding: 18px; color: #fff; min-height: 168px; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px;
-                    background: radial-gradient(120% 90% at 100% 0%, rgba(105,196,150,.55), transparent 55%), repeating-radial-gradient(circle at 120% 110%, rgba(255,255,255,.08) 0 2px, transparent 2px 14px), linear-gradient(160deg, #0f5a3a, #072a1b); }
+                    background: radial-gradient(120% 90% at 100% 0%, rgba(201,138,94,.5), transparent 55%), repeating-radial-gradient(circle at 120% 110%, rgba(255,255,255,.07) 0 2px, transparent 2px 14px), linear-gradient(160deg, #4a3426, #1c130c); }
         .dz-promo b { font-size: 18px; letter-spacing: -.02em; line-height: 1.15; } .dz-promo small { opacity: .75; font-size: 12.5px; line-height: 1.4; }
-        .dz-promo button { margin-top: 8px; height: 42px; border-radius: 999px; border: 0; background: linear-gradient(135deg, #1f8a57, #0f5a3a); color: #fff; font: 600 14px/1 'Inter Tight'; cursor: pointer; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
+        .dz-promo button { margin-top: 8px; height: 42px; border-radius: 999px; border: 0; background: linear-gradient(135deg, #7a5a43, #3b2a1d); color: #fff; font: 600 14px/1 'Montserrat'; cursor: pointer; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
         .dz-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
         .dz-top { background: var(--panel); border-radius: 24px; padding: 12px; display: flex; align-items: center; gap: 12px; }
-        .dz-search { flex: 1; max-width: 440px; display: flex; align-items: center; gap: 12px; height: 50px; border-radius: 999px; background: #fff; padding: 0 16px; border: 0; color: #8d9891; font: 500 15px/1 'Inter Tight', sans-serif; cursor: pointer; text-align: left; }
-        .dz-search kbd { margin-left: auto; font: 600 12px/1 'Inter Tight'; padding: 5px 8px; border-radius: 8px; background: #eceeed; color: #6b766f; border: 0; }
+        .dz-search { flex: 1; max-width: 440px; display: flex; align-items: center; gap: 12px; height: 50px; border-radius: 999px; background: #FBF9F3; padding: 0 16px; border: 0; color: #8f8579; font: 500 15px/1 'Montserrat', sans-serif; cursor: pointer; text-align: left; }
+        .dz-search kbd { margin-left: auto; font: 600 12px/1 'Montserrat'; padding: 5px 8px; border-radius: 8px; background: #e7e1d3; color: #766b5f; border: 0; }
         .dz-spacer { flex: 1; }
-        .dz-ic { width: 50px; height: 50px; border-radius: 50%; background: #fff; display: grid; place-items: center; border: 0; color: var(--ink); cursor: pointer; font-size: 16px; transition: transform .4s var(--ease); }
+        .dz-ic { width: 50px; height: 50px; border-radius: 50%; background: #FBF9F3; display: grid; place-items: center; border: 0; color: var(--ink); cursor: pointer; font-size: 16px; transition: transform .4s var(--ease); }
         .dz-ic:hover { transform: translateY(-2px); }
         .dz-user { display: flex; align-items: center; gap: 12px; padding-left: 4px; }
-        .dz-av { width: 50px; height: 50px; border-radius: 50%; display: grid; place-items: center; font: 700 18px/1 'Inter Tight'; color: #fff; background: linear-gradient(135deg, #FF9E7C, #E4502B); flex: none; }
-        .dz-user b { display: block; font-size: 15px; line-height: 1.2; } .dz-user small { color: #8a958e; font-size: 12.5px; }
+        .dz-av { width: 50px; height: 50px; border-radius: 50%; display: grid; place-items: center; font: 700 18px/1 'Montserrat'; color: #fff; background: linear-gradient(135deg, #FF9E7C, #E4502B); flex: none; }
+        .dz-user b { display: block; font-size: 15px; line-height: 1.2; } .dz-user small { color: #8f8579; font-size: 12.5px; }
         .dz-body { background: var(--panel); border-radius: 28px; padding: clamp(16px, 2vw, 28px); }
         .dz-title { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-        .dz-title h1 { font: 600 clamp(32px, 3.6vw, 46px)/1.05 'Inter Tight', sans-serif; letter-spacing: -.035em; margin: 0; }
-        .dz-title p { margin: 8px 0 0; color: #8a958e; font-size: 15px; }
+        .dz-title h1 { font: 600 clamp(32px, 3.6vw, 46px)/1.05 'Montserrat', sans-serif; letter-spacing: -.035em; margin: 0; }
+        .dz-title p { margin: 8px 0 0; color: #8f8579; font-size: 15px; }
         .dz-acts { display: flex; gap: 10px; flex-wrap: wrap; }
-        .dz-btn { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 52px; padding: 0 26px; border-radius: 999px; font: 600 15px/1 'Inter Tight'; cursor: pointer; border: 1.5px solid transparent; transition: transform .4s var(--ease), background .25s; }
+        .dz-btn { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 52px; padding: 0 26px; border-radius: 999px; font: 600 15px/1 'Montserrat'; cursor: pointer; border: 1.5px solid transparent; transition: transform .4s var(--ease), background .25s; }
         .dz-btn:active { transform: scale(.97); }
-        .dz-btn.solid { background: linear-gradient(135deg, #1c7a4f, #0e4a31); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); } .dz-btn.solid:hover { background: linear-gradient(135deg, #218f5d, #12583a); }
-        .dz-btn.out { background: transparent; color: var(--ink); border-color: #0e4a31; } .dz-btn.out:hover { background: rgba(14,74,49,.06); }
+        .dz-btn.solid { background: linear-gradient(135deg, #5b4130, #2a1d14); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); } .dz-btn.solid:hover { background: linear-gradient(135deg, #6b4c38, #36251a); }
+        .dz-btn.out { background: transparent; color: var(--ink); border-color: #3b2a1d; } .dz-btn.out:hover { background: rgba(59,42,29,.07); }
         .dz-btn.sm { height: 38px; padding: 0 16px; font-size: 13px; }
-        .dz-note { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 18px; border-radius: 18px; background: #fff; margin-bottom: 16px; font-size: 14.5px; color: #44504a; }
+        .dz-note { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 18px; border-radius: 18px; background: #FBF9F3; margin-bottom: 16px; font-size: 14.5px; color: #4a4037; }
         .dz-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
-        .dz-kpi { position: relative; background: #fff; border-radius: 22px; padding: 18px 20px; min-height: 136px; display: flex; flex-direction: column; justify-content: space-between; transition: transform .5s var(--ease); }
+        .dz-kpi { position: relative; background: #FBF9F3; border-radius: 22px; padding: 18px 20px; min-height: 136px; display: flex; flex-direction: column; justify-content: space-between; transition: transform .5s var(--ease); }
         .dz-kpi:hover { transform: translateY(-4px); }
-        .dz-kpi.feat { color: #fff; background: radial-gradient(90% 90% at 12% 108%, rgba(105,196,150,.55), transparent 60%), linear-gradient(150deg, #1b7a4e, #0c4630); }
-        .dz-kpi h4 { margin: 0; font: 500 16px/1.2 'Inter Tight'; }
-        .dz-kpi .n { font: 600 clamp(40px, 4vw, 54px)/1 'Inter Tight', sans-serif; letter-spacing: -.04em; }
-        .dz-kpi .f { font-size: 12.5px; color: var(--g2); display: flex; align-items: center; gap: 7px; } .dz-kpi.feat .f { color: #b8f0d2; }
+        .dz-kpi.feat { color: #fff; background: radial-gradient(90% 90% at 12% 108%, rgba(201,138,94,.5), transparent 60%), linear-gradient(150deg, #6b4a34, #26190f); }
+        .dz-kpi h4 { margin: 0; font: 500 16px/1.2 'Montserrat'; }
+        .dz-kpi .n { font: 600 clamp(40px, 4vw, 54px)/1 'Montserrat', sans-serif; letter-spacing: -.04em; }
+        .dz-kpi .f { font-size: 12.5px; color: var(--g2); display: flex; align-items: center; gap: 7px; } .dz-kpi.feat .f { color: #f0d5b8; }
         .dz-kpi .f i { font-size: 10px; padding: 3px 4px; border-radius: 5px; border: 1px solid currentColor; }
         .dz-arrow { position: absolute; top: 16px; right: 16px; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid #14201a; background: transparent; color: #14201a; cursor: pointer; font-size: 13px; transition: transform .4s var(--ease), background .25s; }
         .dz-arrow i { transform: rotate(45deg); transition: transform .4s var(--ease); }
         .dz-arrow:hover { background: rgba(0,0,0,.06); } .dz-arrow:hover i { transform: rotate(90deg); }
-        .dz-kpi.feat .dz-arrow { background: #fff; border-color: #fff; color: #0c4630; }
+        .dz-kpi.feat .dz-arrow { background: #fff; border-color: #fff; color: #26190f; }
         .dz-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: 250px 150px 190px; gap: 14px; }
-        .dz-card { background: #fff; border-radius: 22px; padding: 18px 20px; min-width: 0; position: relative; overflow: hidden; }
-        .dz-card h4 { margin: 0; font: 600 17px/1.2 'Inter Tight', sans-serif; letter-spacing: -.01em; }
-        .dz-card .sub { color: #9aa59e; font-size: 12.5px; margin-top: 3px; }
+        .dz-card { background: #FBF9F3; border-radius: 22px; padding: 18px 20px; min-width: 0; position: relative; overflow: hidden; }
+        .dz-card h4 { margin: 0; font: 600 17px/1.2 'Montserrat', sans-serif; letter-spacing: -.01em; }
+        .dz-card .sub { color: #9d9285; font-size: 12.5px; margin-top: 3px; }
         .dz-ch { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
         .dz-a { grid-column: 1 / span 2; grid-row: 1; } .dz-r { grid-column: 3; grid-row: 1; } .dz-p { grid-column: 4; grid-row: 1 / span 2; }
         .dz-t { grid-column: 1 / span 2; grid-row: 2 / span 2; } .dz-g { grid-column: 3; grid-row: 2 / span 2; } .dz-w { grid-column: 4; grid-row: 3; }
         .dz-bars { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; height: 168px; padding-top: 6px; }
         .dz-bc { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 8px; position: relative; cursor: pointer; }
-        .dz-bar { width: 100%; max-width: 64px; border-radius: 999px; background: repeating-linear-gradient(135deg, rgba(20,60,40,.3) 0 2px, transparent 2px 7px); border: 1px solid rgba(20,60,40,.1); transform-origin: bottom; animation: dzGrow .9s var(--ease-out) both; animation-delay: calc(var(--i) * 70ms); transition: background .3s; }
+        .dz-bar { width: 100%; max-width: 64px; border-radius: 999px; background: repeating-linear-gradient(135deg, rgba(60,40,28,.3) 0 2px, transparent 2px 7px); border: 1px solid rgba(60,40,28,.12); transform-origin: bottom; animation: dzGrow .9s var(--ease-out) both; animation-delay: calc(var(--i) * 70ms); transition: background .3s; }
         .dz-bar.has { background: var(--g2); border-color: transparent; } .dz-bar.max { background: var(--g0); } .dz-bc.on .dz-bar.has:not(.max) { background: var(--g3); }
-        .dz-bc .l { font-size: 12px; color: #9aa59e; } .dz-bc.today .l { color: var(--ink); font-weight: 700; }
-        .dz-bub { position: absolute; left: 50%; bottom: calc(var(--h) * 1% + 32px); transform: translateX(-50%); opacity: 0; transition: opacity .25s; font: 600 11px/1 'Inter Tight'; padding: 4px 7px; border-radius: 7px; background: #fff; color: var(--g1); border: 1px solid #cfe5d8; box-shadow: 0 6px 14px rgba(0,0,0,.08); pointer-events: none; }
+        .dz-bc .l { font-size: 12px; color: #9d9285; } .dz-bc.today .l { color: var(--ink); font-weight: 700; }
+        .dz-bub { position: absolute; left: 50%; bottom: calc(var(--h) * 1% + 32px); transform: translateX(-50%); opacity: 0; transition: opacity .25s; font: 600 11px/1 'Montserrat'; padding: 4px 7px; border-radius: 7px; background: #FBF9F3; color: var(--g1); border: 1px solid #e0cfba; box-shadow: 0 6px 14px rgba(0,0,0,.08); pointer-events: none; }
         .dz-bc.on .dz-bub { opacity: 1; }
         @keyframes dzGrow { from { transform: scaleY(0); } }
-        .dz-rem h5 { margin: 6px 0 0; font: 600 22px/1.12 'Inter Tight'; letter-spacing: -.025em; color: var(--g0); }
-        .dz-rem p { margin: 8px 0 0; color: #7d8a82; font-size: 13.5px; }
+        .dz-rem h5 { margin: 6px 0 0; font: 600 22px/1.12 'Montserrat'; letter-spacing: -.025em; color: var(--g0); }
+        .dz-rem p { margin: 8px 0 0; color: #80746a; font-size: 13.5px; }
         .dz-rem .dz-btn { width: 100%; margin-top: 14px; height: 54px; border-radius: 18px; }
-        .dz-step { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #6f7c74; margin-top: 8px; }
-        .dz-step button { width: 24px; height: 24px; border-radius: 50%; border: 1px solid #d6e0da; background: #fff; cursor: pointer; color: #44504a; line-height: 1; }
+        .dz-step { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #7a6e62; margin-top: 8px; }
+        .dz-step button { width: 24px; height: 24px; border-radius: 50%; border: 1px solid #ddd2c0; background: #FBF9F3; cursor: pointer; color: #4a4037; line-height: 1; }
         .dz-list { display: grid; gap: 4px; }
         .dz-li { display: flex; align-items: center; gap: 12px; padding: 7px 0; border: 0; background: none; text-align: left; width: 100%; cursor: pointer; border-radius: 10px; }
-        .dz-li:hover { background: #f4f7f5; }
+        .dz-li:hover { background: #f1ece0; }
         .dz-pi { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: #fff; font-size: 14px; flex: none; }
-        .dz-li b { display: block; font: 600 14px/1.2 'Inter Tight'; color: var(--ink); } .dz-li small { color: #9aa59e; font-size: 12px; }
+        .dz-li b { display: block; font: 600 14px/1.2 'Montserrat'; color: var(--ink); } .dz-li small { color: #9d9285; font-size: 12px; }
         .dz-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
-        .dz-row .av { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font: 700 14px/1 'Inter Tight'; color: #123; flex: none; }
-        .dz-row b { display: block; font: 600 14.5px/1.2 'Inter Tight'; } .dz-row small { color: #8a958e; font-size: 12.5px; }
-        .dz-row .pill { margin-left: auto; font: 600 11px/1 'Inter Tight'; padding: 6px 9px; border-radius: 7px; background: #e5f4ec; color: #1b7a4e; white-space: nowrap; }
+        .dz-row .av { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font: 700 14px/1 'Montserrat'; color: #123; flex: none; }
+        .dz-row b { display: block; font: 600 14.5px/1.2 'Montserrat'; } .dz-row small { color: #8f8579; font-size: 12.5px; }
+        .dz-row .pill { margin-left: auto; font: 600 11px/1 'Montserrat'; padding: 6px 9px; border-radius: 7px; background: #efe3d3; color: #6b4a34; white-space: nowrap; }
         .dz-row .pill.mid { background: #fdf3d9; color: #a4780a; } .dz-row .pill.low { background: #fde6e4; color: #c0392b; }
         .dz-gauge { position: relative; width: min(100%, 260px); margin: 4px auto 0; }
         .dz-gauge svg { width: 100%; display: block; overflow: visible; }
         .dz-gauge .arc { fill: none; stroke-width: 34; stroke-linecap: round; animation: dzArc 1.4s var(--ease-out) both; }
         @keyframes dzArc { from { stroke-dashoffset: var(--len); } }
         .dz-gauge .mid { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; }
-        .dz-gauge .mid b { display: block; font: 600 38px/1 'Inter Tight'; letter-spacing: -.04em; } .dz-gauge .mid small { color: #8a958e; font-size: 12.5px; }
-        .dz-legend { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: #6f7c74; }
+        .dz-gauge .mid b { display: block; font: 600 38px/1 'Montserrat'; letter-spacing: -.04em; } .dz-gauge .mid small { color: #8f8579; font-size: 12.5px; }
+        .dz-legend { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: #7a6e62; }
         .dz-legend span { display: inline-flex; align-items: center; gap: 6px; } .dz-legend i { width: 10px; height: 10px; border-radius: 50%; }
         .dz-track { color: #fff; border-radius: 22px; padding: 16px 20px; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden;
-                    background: radial-gradient(120% 120% at 0% 100%, rgba(60,170,110,.45), transparent 55%), repeating-radial-gradient(ellipse at 90% 130%, rgba(255,255,255,.07) 0 2px, transparent 2px 12px), linear-gradient(160deg, #0f5a3a, #06241a); }
+                    background: radial-gradient(120% 120% at 0% 100%, rgba(190,130,86,.4), transparent 55%), repeating-radial-gradient(ellipse at 90% 130%, rgba(255,255,255,.07) 0 2px, transparent 2px 12px), linear-gradient(160deg, #4a3426, #1a110a); }
         .dz-track h4 { color: #fff; font-weight: 500; font-size: 16px; }
-        .dz-clock { font: 500 38px/1 'Inter Tight'; letter-spacing: -.02em; text-align: center; font-variant-numeric: tabular-nums; }
+        .dz-clock { font: 500 38px/1 'Montserrat'; letter-spacing: -.02em; text-align: center; font-variant-numeric: tabular-nums; }
         .dz-ctl { display: flex; gap: 12px; justify-content: center; }
         .dz-ctl button { width: 46px; height: 46px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer; font-size: 15px; transition: transform .35s var(--ease); }
         .dz-ctl button:active { transform: scale(.9); }
-        .dz-ctl .go { background: #fff; color: #0c4630; } .dz-ctl .stop { background: #e5483b; color: #fff; }
+        .dz-ctl .go { background: #FBF9F3; color: #26190f; } .dz-ctl .stop { background: #e5483b; color: #fff; }
 
         /* ---------- 6. library ---------- */
         .files-h { font-family: 'Space Grotesk', sans-serif !important; font-size: clamp(38px, 6vw, 84px); font-weight: 700 !important; line-height: .94; max-width: 900px; text-transform: uppercase; letter-spacing: -.045em !important; margin: 0; }
@@ -818,18 +809,18 @@
         .file .wiki .ph { width: 96px; height: 96px; border-radius: 12px; background: repeating-linear-gradient(135deg, rgba(0,0,0,.08) 0 6px, rgba(0,0,0,.03) 6px 12px); }
         .file .obj { font-size: 13.5px; line-height: 1.6; padding-left: 14px; border-left: 3px solid rgba(35,35,26,.55); margin: 0; }
         .file .acts { display: flex; flex-wrap: wrap; gap: 10px; }
-        .file .acts button, .file .acts a { padding: 11px 18px; border-radius: 999px; font: 700 12px/1 'Inter Tight', sans-serif; letter-spacing: .02em; text-decoration: none; cursor: pointer; border: 1.5px solid #23231a; color: #23231a; background: transparent; }
+        .file .acts button, .file .acts a { padding: 11px 18px; border-radius: 999px; font: 700 12px/1 'Montserrat', sans-serif; letter-spacing: .02em; text-decoration: none; cursor: pointer; border: 1.5px solid #23231a; color: #23231a; background: transparent; }
         .file .acts .primary { background: #23231a; color: #f1ecd9; }
         .file.c2 { --c: #ddd6bd; --tabx: 38%; } .file.c3 { --c: #8790a0; --tabx: 8%; } .file.c4 { --c: #c0a27a; --tabx: 52%; color: #2a1d0c; }
 
         .reader { position: fixed; inset: 0; z-index: 140; display: grid; place-items: center; padding: clamp(10px, 3vw, 40px); background: rgba(10,10,12,.62); animation: fadeIn .35s both; }
         @keyframes fadeIn { from { opacity: 0; } }
-        .reader-card { width: min(1100px, 100%); max-height: 100%; overflow: hidden; display: grid; grid-template-rows: auto 1fr; border-radius: 30px; background: #f4f1e8; color: #23231a; animation: popIn .6s var(--ease-out) both; box-shadow: 0 40px 120px rgba(0,0,0,.5); }
+        .reader-card { width: min(1100px, 100%); max-height: calc(100dvh - clamp(20px, 6vw, 80px)); overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); border-radius: 30px; background: #f4f1e8; color: #23231a; animation: popIn .6s var(--ease-out) both; box-shadow: 0 40px 120px rgba(0,0,0,.5); }
         .reader-card.narrow { width: min(760px, 100%); }
         @keyframes popIn { from { opacity: 0; transform: translateY(30px) scale(.94); } }
         .reader-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; border-bottom: 1px solid rgba(35,35,26,.12); font: 600 11px/1 'Space Grotesk', monospace; letter-spacing: .14em; text-transform: uppercase; }
         .reader-top button { width: 40px; height: 40px; border-radius: 50%; border: 0; background: #23231a; color: #f4f1e8; cursor: pointer; }
-        .reader-body { overflow-y: auto; padding: clamp(18px, 3vw, 34px); display: grid; gap: 30px; grid-template-columns: minmax(0, 1fr); }
+        .reader-body { min-height: 0; overscroll-behavior: contain; overflow-y: auto; padding: clamp(18px, 3vw, 34px); display: grid; gap: 30px; grid-template-columns: minmax(0, 1fr); }
         @media (min-width: 900px) { .reader-body.two { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); } }
         .reader h4 { font: 700 12px/1 'Space Grotesk', monospace; letter-spacing: .16em; text-transform: uppercase; margin: 0 0 14px; color: #6a665a; }
         .reader p { font-size: 15px; line-height: 1.7; margin: 0 0 12px; }
@@ -841,11 +832,11 @@
         .reader .wk-hero { width: 100%; max-height: 300px; object-fit: cover; border-radius: 18px; margin-bottom: 16px; border: 1px solid rgba(35,35,26,.12); }
         .reader h3 { font: 400 clamp(28px, 4vw, 42px)/1.05 'Fraunces', serif; letter-spacing: -.02em; margin: 0 0 14px; }
         .reader .rd-acts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
-        .reader .rd-acts button, .reader .rd-acts a { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: 999px; font: 600 14px/1 'Inter Tight'; text-decoration: none; cursor: pointer; border: 1.5px solid #23231a; color: #23231a; background: transparent; }
+        .reader .rd-acts button, .reader .rd-acts a { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: 999px; font: 600 14px/1 'Montserrat'; text-decoration: none; cursor: pointer; border: 1.5px solid #23231a; color: #23231a; background: transparent; }
         .reader .rd-acts .primary { background: #23231a; color: #f4f1e8; }
 
         .pillseg { display: inline-flex; padding: 5px; gap: 2px; border-radius: 999px; position: relative; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12); }
-        .pillseg button { position: relative; z-index: 1; padding: 10px 18px; border-radius: 999px; font: 600 13px/1 'Inter Tight'; color: rgba(255,255,255,.65); background: none; border: 0; cursor: pointer; transition: color .3s; }
+        .pillseg button { position: relative; z-index: 1; padding: 10px 18px; border-radius: 999px; font: 600 13px/1 'Montserrat'; color: rgba(255,255,255,.65); background: none; border: 0; cursor: pointer; transition: color .3s; }
         .pillseg button.on { color: #1b0d06; }
         .pillseg .pill-thumb { position: absolute; top: 5px; bottom: 5px; left: 0; background: var(--coral); border-radius: 999px; transition: transform .5s var(--ease), width .5s var(--ease); }
 
@@ -853,12 +844,12 @@
         .ex-head h2 { font: 400 clamp(32px, 4.6vw, 60px)/1 'Fraunces', serif; letter-spacing: -.025em; margin: 14px 0 0; color: #f4f4f6; }
         .ex-head p { color: rgba(244,244,246,.6); margin: 14px 0 0; max-width: 52ch; line-height: 1.6; font-size: 16px; }
         .ex-input { display: flex; align-items: center; gap: 14px; padding: 6px 8px 6px 24px; border-radius: 999px; max-width: 680px; color: #f4f4f6; }
-        .ex-input input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; font: 500 17px/1 'Inter Tight'; color: #f4f4f6; padding: 16px 0; }
+        .ex-input input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; font: 500 17px/1 'Montserrat'; color: #f4f4f6; padding: 16px 0; }
         .ex-input input::placeholder { color: rgba(255,255,255,.4); }
         .ex-x { width: 38px; height: 38px; border-radius: 50%; border: 0; background: rgba(255,255,255,.1); color: #fff; cursor: pointer; }
         .ex-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
         .ex-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-        .ex-chips button { height: 38px; padding: 0 16px; border-radius: 999px; background: transparent; border: 1px solid rgba(255,255,255,.2); color: #f4f4f6; font: 500 13.5px/1 'Inter Tight'; cursor: pointer; transition: background .25s, border-color .25s; }
+        .ex-chips button { height: 38px; padding: 0 16px; border-radius: 999px; background: transparent; border: 1px solid rgba(255,255,255,.2); color: #f4f4f6; font: 500 13.5px/1 'Montserrat'; cursor: pointer; transition: background .25s, border-color .25s; }
         .ex-chips button:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.5); }
         .ex-tools { display: flex; gap: 10px; flex-wrap: wrap; }
         .ex-msg { color: rgba(244,244,246,.62); font-size: 15px; line-height: 1.6; padding: 28px; border: 1px dashed rgba(255,255,255,.18); border-radius: 22px; max-width: 640px; }
@@ -880,10 +871,10 @@
         .wk-body { padding: 16px 18px 6px; }
         .wk-body h4 { font: 400 22px/1.12 'Fraunces', serif; letter-spacing: -.015em; margin: 0 0 8px; }
         .wk-body p { font-size: 14px; line-height: 1.6; color: rgba(244,244,246,.66); margin: 0; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
-        .wk-note { margin: 10px 18px 0; width: calc(100% - 36px); resize: vertical; min-height: 58px; border-radius: 12px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.05); color: #f4f4f6; font: 400 13.5px/1.5 'Inter Tight'; padding: 10px 12px; outline: none; }
+        .wk-note { margin: 10px 18px 0; width: calc(100% - 36px); resize: vertical; min-height: 58px; border-radius: 12px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.05); color: #f4f4f6; font: 400 13.5px/1.5 'Montserrat'; padding: 10px 12px; outline: none; }
         .wk-note:focus { border-color: var(--coral); }
         .wk-foot { display: flex; align-items: center; gap: 8px; padding: 14px 18px 18px; flex-wrap: wrap; }
-        .wk-foot button, .wk-foot a { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 38px; padding: 0 15px; border-radius: 999px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: #f4f4f6; font: 600 13px/1 'Inter Tight'; text-decoration: none; cursor: pointer; transition: background .25s, border-color .25s; }
+        .wk-foot button, .wk-foot a { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 38px; padding: 0 15px; border-radius: 999px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: #f4f4f6; font: 600 13px/1 'Montserrat'; text-decoration: none; cursor: pointer; transition: background .25s, border-color .25s; }
         .wk-foot .read { background: #f4f4f6; color: #0b0b0d; border-color: #f4f4f6; } .wk-foot .read:hover { background: #fff; }
         .wk-foot button:hover:not(.read), .wk-foot a:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.5); }
         .wk-foot .ico { width: 38px; padding: 0; margin-left: auto; }
@@ -891,7 +882,7 @@
         @keyframes shimmer { to { background-position: -220% 0; } }
 
         /* ---------- 7. footer ---------- */
-        .site-footer { position: relative; z-index: 5; margin-top: -44px; border-radius: 44px 44px 0 0; overflow: hidden; background: #07070a; color: #f5f5f7; font-family: 'Inter Tight', sans-serif; min-height: min(112vh, 960px); display: flex; flex-direction: column; justify-content: flex-end; }
+        .site-footer { position: relative; z-index: 5; margin-top: -44px; border-radius: 44px 44px 0 0; overflow: hidden; background: #07070a; color: #f5f5f7; font-family: 'Montserrat', sans-serif; min-height: min(112vh, 960px); display: flex; flex-direction: column; justify-content: flex-end; }
         .sf-bg { position: absolute; inset: 0; background: var(--poster) center 16% / cover no-repeat; filter: saturate(1.05) contrast(1.05); }
         .sf-bg::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(7,7,10,.55) 0%, rgba(7,7,10,.08) 22%, rgba(7,7,10,.2) 42%, rgba(7,7,10,.82) 66%, #07070a 90%); }
         .sf-inner { position: relative; z-index: 1; padding: 0 clamp(18px, 5vw, 80px) 34px; }
@@ -908,11 +899,11 @@
         .pal-back { position: fixed; inset: 0; z-index: 150; background: rgba(8,8,10,.55); display: flex; justify-content: center; align-items: flex-start; padding: min(14vh, 120px) 14px 14px; animation: fadeIn .25s both; }
         .pal { width: min(680px, 100%); max-height: 72dvh; display: flex; flex-direction: column; border-radius: 26px; overflow: hidden; animation: popIn .5s var(--ease-out) both; background: rgba(24,24,30,.92); border: 1px solid rgba(255,255,255,.14); box-shadow: 0 40px 100px rgba(0,0,0,.6); color: #f5f5f7; }
         .pal-in { display: flex; align-items: center; gap: 14px; padding: 18px 20px; border-bottom: 1px solid rgba(255,255,255,.1); }
-        .pal-in input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font: 500 17px/1 'Inter Tight', sans-serif; }
+        .pal-in input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font: 500 17px/1 'Montserrat', sans-serif; }
         .pal-in input::placeholder { color: rgba(255,255,255,.4); }
         .pal-list { overflow-y: auto; padding: 8px; scrollbar-width: thin; }
         .pal-grp { padding: 12px 12px 6px; font: 600 10px/1 'Space Grotesk', monospace; letter-spacing: .16em; text-transform: uppercase; color: rgba(255,255,255,.45); }
-        .pal-item { display: grid; grid-template-columns: 38px 1fr auto; gap: 14px; align-items: center; width: 100%; padding: 10px 12px; border-radius: 14px; text-align: left; background: none; border: 0; color: #f5f5f7; cursor: pointer; font-family: 'Inter Tight', sans-serif; transition: background .15s; }
+        .pal-item { display: grid; grid-template-columns: 38px 1fr auto; gap: 14px; align-items: center; width: 100%; padding: 10px 12px; border-radius: 14px; text-align: left; background: none; border: 0; color: #f5f5f7; cursor: pointer; font-family: 'Montserrat', sans-serif; transition: background .15s; }
         .pal-item.sel { background: rgba(255,255,255,.12); }
         .pal-item .ic { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: rgba(255,255,255,.1); font-size: 14px; overflow: hidden; }
         .pal-item .ic img { width: 100%; height: 100%; object-fit: cover; }
@@ -925,7 +916,7 @@
 
         /* ---------- 9. toasts ---------- */
         .toasts { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 200; display: grid; gap: 8px; justify-items: center; pointer-events: none; }
-        .toast { padding: 12px 20px; border-radius: 999px; background: #121216; color: #fff; font: 500 14px/1.3 'Inter Tight'; box-shadow: 0 14px 40px rgba(0,0,0,.4); border: 1px solid rgba(255,255,255,.12); animation: toastIn .5s var(--ease-out) both; max-width: 86vw; text-align: center; }
+        .toast { padding: 12px 20px; border-radius: 999px; background: #121216; color: #fff; font: 500 14px/1.3 'Montserrat'; box-shadow: 0 14px 40px rgba(0,0,0,.4); border: 1px solid rgba(255,255,255,.12); animation: toastIn .5s var(--ease-out) both; max-width: 86vw; text-align: center; }
         @keyframes toastIn { from { opacity: 0; transform: translateY(14px) scale(.96); } }
 
         /* ---------- 10. responsive + motion ---------- */
@@ -944,6 +935,9 @@
             .stk-card { top: calc(84px + var(--i) * 46px); }
         }
         @media (max-width: 760px) {
+            .vg-ring { --cw: clamp(124px, 38vw, 168px); } .vg-stage { min-height: 44vh; } .vg-h { font-size: clamp(36px, 10vw, 56px); }
+            .bs-stats { grid-template-columns: 1fr; } .bs-stat { border-left: 0; border-top: 1px solid rgba(244,240,230,.14); } .bs-stat:first-child { border-top: 0; }
+            .qb-spec { display: none; }
             .tabs { left: 12px; right: 12px; transform: none; top: calc(100dvh - 74px - env(safe-area-inset-bottom)) !important; height: 62px; justify-content: space-between; }
             .tab { flex: 1; flex-direction: column; justify-content: center; gap: 4px; padding: 0 4px; font-size: 10.5px; } .tab i { font-size: 17px; }
             body[data-dock="open"] .tabs { transform: translateY(160%); }
@@ -959,14 +953,81 @@
             .file.active { min-height: 640px; } .file .tab-n { display: none; }
             .file .spine { flex-direction: row; align-items: center; padding: 0 20px; } .file .spine b { writing-mode: horizontal-tb; transform: none; font-size: 24px; }
             .ex-grid { columns: 1; } .reader-card { border-radius: 24px; }
-            .site-footer .cols { grid-template-columns: 1fr; } .site-footer { min-height: 0; }
+            .site-footer .cols { grid-template-columns: 1fr; } .site-footer { min-height: 0; padding-top: 86vw; }
+            .sf-bg { bottom: auto; height: 96vw; background-position: 50% 0; }
             .seam-top { margin-top: -28px; border-radius: 28px 28px 0 0; } .site-footer { margin-top: -28px; border-radius: 28px 28px 0 0; }
             .toasts { bottom: 100px; }
         }
         @media (prefers-reduced-motion: reduce) {
+            .vg-ring { animation: none !important; transform: translateZ(calc(var(--R) * -1)); }
             .orb, .orb-card, .orb-img, .scroll-hint { animation: none !important; } .orb-card { filter: none; }
             .reveal { opacity: 1; transform: none; transition: none; } .wk, .dz-bar, .dz-gauge .arc { animation: none !important; }
         }
+
+
+        /* ====================== NEW HERO (after your Voyager reference) ====================== */
+        .vg-hero { background: radial-gradient(60% 50% at 50% 0%, rgba(201,138,94,.16), transparent 60%), #070605; color: #F4F0E6; min-height: 100svh; overflow: hidden;
+                   display: flex; flex-direction: column; align-items: center; text-align: center; padding: clamp(96px, 13vh, 140px) clamp(18px, 5vw, 72px) 0; }
+        .vg-top { position: relative; z-index: 6; max-width: 880px; }
+        .vg-hero .kquiet { color: rgba(244,240,230,.62); opacity: 1; }
+        .vg-h { font-family: 'Fraunces', Georgia, serif; font-weight: 300; font-optical-sizing: auto; letter-spacing: -.025em; line-height: 1.02; font-size: clamp(42px, 6.4vw, 92px); margin: 16px 0 0; }
+        .vg-h em { font-style: italic; font-weight: 300; color: #EBCBA6; }
+        .vg-hero .name-field { color: #D9A06F; }
+        .vg-sub { max-width: 560px; margin: 22px auto 0; font-size: clamp(15px, 1.3vw, 17px); line-height: 1.7; color: rgba(244,240,230,.72); }
+        .vg-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px; }
+        .vg-stage { position: relative; z-index: 2; width: 100%; flex: 1; min-height: min(52vh, 500px); perspective: 1500px; perspective-origin: 50% 30%; display: grid; place-items: start center; overflow: visible; }
+        .vg-ring { --cw: clamp(150px, 18vw, 272px); --R: calc((var(--cw) + 44px) / 0.5176);   /* 12 cards, 44px between */
+                   position: relative; width: 0; height: 0; margin-top: clamp(28px, 5vh, 56px); transform-style: preserve-3d; animation: vgSpin 78s linear infinite; }
+        @keyframes vgSpin { from { transform: translateZ(calc(var(--R) * -1)) rotateY(0deg); } to { transform: translateZ(calc(var(--R) * -1)) rotateY(-360deg); } }
+        .vg-card { position: absolute; left: 0; top: 0; width: var(--cw); aspect-ratio: 3 / 4.15; margin: 0 0 0 calc(var(--cw) * -.5);
+                   transform: rotateY(var(--a)) translateZ(var(--R)); backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 22px; overflow: hidden; background: #14110e;
+                   box-shadow: 0 44px 80px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.07); }
+        .vg-card img { width: 100%; height: 100%; object-fit: cover; filter: saturate(.92) contrast(1.04); }
+        .vg-card::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.05) 38%, rgba(0,0,0,.78) 100%); }
+        .vg-card figcaption { position: absolute; left: 14px; right: 14px; bottom: 18px; z-index: 2; font: 400 clamp(17px, 1.7vw, 24px)/1.12 'Fraunces', Georgia, serif; color: #fff; text-shadow: 0 2px 14px rgba(0,0,0,.6); letter-spacing: -.01em; }
+        .vg-hero::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 22%; background: linear-gradient(180deg, transparent, #070605); z-index: 3; pointer-events: none; }
+
+        /* ====================== TYPOGRAPHY (History-poster system): Bebas Neue headlines, Montserrat body ====================== */
+        .bs-grid-head h2, .stk-head h2, .bs-cta h2, .bs-stat b, .fcell h3, .stk-txt h3, .files-h, .ex-head h2, .dz-title h1, .reader h3 {
+            font-family: 'Bebas Neue', 'Montserrat', sans-serif !important; font-weight: 400 !important; text-transform: uppercase; letter-spacing: .018em !important; line-height: .96 !important; }
+        .bs-grid-head h2 em, .stk-head h2 em, .bs-cta h2 em, .bs-stat b em, .files-h .hl, .ex-head h2 .hl { font-family: 'Fraunces', Georgia, serif !important; text-transform: none; font-style: italic; letter-spacing: -.01em !important; font-weight: 400 !important; }
+        .bs-grid-head h2 { font-size: clamp(46px, 6.4vw, 100px); } .stk-head h2 { font-size: clamp(46px, 6.4vw, 100px); } .bs-cta h2 { font-size: clamp(64px, 11vw, 168px); }
+        .fcell h3 { font-size: clamp(30px, 3.2vw, 48px); } .stk-txt h3 { font-size: clamp(36px, 4.2vw, 64px); max-width: 14ch; } .ex-head h2 { font-size: clamp(44px, 5.8vw, 84px); }
+        .files-h { font-size: clamp(52px, 7.4vw, 112px); max-width: 1000px; } .dz-title h1 { font-size: clamp(44px, 5vw, 66px); letter-spacing: .02em !important; }
+        .bs-para, .bs-word { font-family: 'Montserrat', sans-serif; font-weight: 500; } .bs-para { letter-spacing: -.03em; line-height: 1.14; font-size: clamp(28px, 4vw, 60px); }
+        .bs-stats { gap: 0; border-top: 1px solid rgba(244,240,230,.14); border-bottom: 1px solid rgba(244,240,230,.14); } 
+        .bs-stat { padding: clamp(30px, 5vw, 60px) 10px; border-left: 1px solid rgba(244,240,230,.14); } .bs-stat:first-child { border-left: 0; }
+        .bs-stat small { display: block; font: 600 11px/1 'Space Grotesk', monospace; letter-spacing: .2em; text-transform: uppercase; opacity: .55; margin-bottom: 16px; }
+        .bs-stat b { font-size: clamp(76px, 10vw, 150px); } .bs-stat b em { font-style: normal; font-family: 'Bebas Neue', sans-serif !important; text-transform: uppercase; color: var(--coral); }
+        .qb-quote p { font-weight: 400; } .qb-spec { color: #fff; }
+
+        /* painted two-line word with the type specimen laid over it (from the History poster) */
+        .qb-giant-wrap { position: relative; container-type: inline-size; margin-top: clamp(60px, 9vw, 120px); }
+        .qb-giant { display: block; font: 400 31cqw/.82 'Bebas Neue', sans-serif; text-transform: uppercase; letter-spacing: .005em; text-align: left; user-select: none; white-space: nowrap;
+                    background: var(--fill) center 30% / cover no-repeat; -webkit-background-clip: text; background-clip: text; color: transparent; filter: brightness(1.15) saturate(1.2); }
+        .qb-giant span { display: block; }
+        .qb-spec { position: absolute; z-index: 2; font-family: 'Montserrat', sans-serif; text-shadow: 0 2px 16px rgba(0,0,0,.7); }
+        .qb-spec small { display: block; font: 500 10px/1 'Montserrat'; opacity: .75; letter-spacing: .12em; }
+        .qb-spec b { display: block; font: 400 clamp(26px, 4.4cqw, 52px)/1 'Bebas Neue', sans-serif; letter-spacing: .02em; text-transform: uppercase; margin-top: 4px; }
+        .qb-spec b { font-size: 6.4cqw; } .qb-spec i { display: block; font: 500 10px/1 'Montserrat'; letter-spacing: .36em; text-transform: uppercase; font-style: normal; opacity: .8; margin: 6px 0 12px; }
+        .qb-az { display: grid; grid-template-columns: repeat(9, 1.5em); gap: 5px 8px; font: 400 10px/1 'Montserrat'; letter-spacing: .1em; opacity: .85; }
+        .qb-spec.a { left: 1cqw; top: 40%; } .qb-spec.b { right: 1cqw; top: 6%; text-align: right; } .qb-spec.b .qb-az { justify-content: end; }
+
+        /* ====================== DASHBOARD: off-white, black and brown (was green) ====================== */
+
+
+        /* ====================== LIBRARY: journals + wiki in one stack ====================== */
+        .ex-row { gap: 14px; } .ex-chips { margin-top: -4px; }
+        .wk-src { position: absolute; left: 12px; top: 12px; z-index: 2; padding: 7px 11px; border-radius: 999px; background: rgba(10,9,8,.62); border: 1px solid rgba(255,255,255,.18); color: #F4F0E6; font: 600 10px/1 'Space Grotesk', monospace; letter-spacing: .12em; text-transform: uppercase; }
+        .wk-img.paper { aspect-ratio: 16 / 7; background: linear-gradient(135deg, var(--tint, #3A2A20), #14110e); }
+        .wk-img.paper .ph { display: grid; place-content: end start; gap: 6px; padding: 18px; text-align: left; font: inherit; color: #F4F0E6; }
+        .wk-img.paper .ph span { font: italic 400 30px/1 'Fraunces', serif; opacity: .9; } .wk-img.paper .ph b { font: 500 11px/1.3 'Montserrat'; letter-spacing: .06em; opacity: .65; text-transform: uppercase; }
+        .wk-meta { font: 600 11.5px/1.45 'Montserrat'; letter-spacing: .02em; color: var(--coral); margin: -2px 0 10px; } .wk-meta span { color: rgba(244,240,230,.55); font-weight: 500; }
+        .rd-meta { font: 500 13px/1.5 'Montserrat'; color: #6a5a4c; margin: -6px 0 14px; }
+        .rd-badge { display: inline-block; font: 600 11px/1 'Space Grotesk', monospace; letter-spacing: .1em; text-transform: uppercase; color: #3d6b45; background: rgba(61,107,69,.12); padding: 8px 12px; border-radius: 999px; margin: 0 0 18px !important; }
+        .rd-badge.soft { color: #7a5a3a; background: rgba(122,90,58,.12); text-transform: none; letter-spacing: .01em; font: 500 13px/1.4 'Montserrat'; border-radius: 12px; }
+        .rd-load { color: #8a7a6a; } .rd-h { font: 400 24px/1.1 'Fraunces', serif; margin: 26px 0 8px; letter-spacing: -.01em; } .rd-h.sub { font-size: 19px; font-style: italic; color: #5a4636; }
+        .reader .wk-hero { width: 100%; max-height: 300px; object-fit: cover; border-radius: 18px; margin-bottom: 16px; }
 
     </style>
 </head>
@@ -2672,8 +2733,8 @@ const ART = {
 };
 
 const CARAV = {
-  poster: 'https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@f0bdd8c06cc683463320a0557502d7205b40b434/usmle-quiz/assets/art/caravaggio-poster.jpg',
-  fill: 'https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@f0bdd8c06cc683463320a0557502d7205b40b434/usmle-quiz/assets/art/caravaggio-fill.jpg',
+  poster: 'https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@48d9b2ea173475f0686b2f1e324974dd8f8fc0d3/usmle-quiz/assets/art/caravaggio-poster-hd.jpg',
+  fill: 'https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@48d9b2ea173475f0686b2f1e324974dd8f8fc0d3/usmle-quiz/assets/art/caravaggio-fill-hd.jpg',
 };
 
 /* ---------- content, derived from the quiz so there is one source of truth ---------- */
@@ -2797,11 +2858,9 @@ function copyText(text, okMsg) {
 const isSaved = (list, url) => list.some((p) => p.url === url);
 function toggleSaved(page) {
   const list = SavedStore.get();
-  if (isSaved(list, page.url)) { SavedStore.set(list.filter((p) => p.url !== page.url)); toast('Removed from your saved pages'); }
-  else {
-    SavedStore.set([{ title: page.title, extract: page.extract || '', thumb: page.thumb || '', url: page.url, note: '', at: Date.now() }, ...list]);
-    toast('Saved. It will be waiting for you in the Library.');
-  }
+  if (isSaved(list, page.url)) { SavedStore.set(list.filter((p) => p.url !== page.url)); toast('Removed from your saved pages'); return; }
+  SavedStore.set([{ title: page.title, extract: page.extract || '', thumb: page.thumb || '', url: page.url, source: page.source || 'Wikipedia', meta: page.meta || '', authors: page.authors || '', pmcid: page.pmcid || '', note: '', at: Date.now() }, ...list]);
+  toast('Saved. It will be waiting for you in the Library.');
 }
 const setSavedNote = (url, note) => SavedStore.set(SavedStore.get().map((p) => (p.url === url ? { ...p, note } : p)));
 
@@ -2831,9 +2890,9 @@ async function wikiSummary(title) {
   return out;
 }
 
-async function wikiSearch(q, signal) {
+async function wikiSearch(q, signal, n = 9) {
   const url = 'https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) +
-    '&gsrlimit=9&prop=pageimages%7Cextracts&exintro=1&explaintext=1&exchars=300&piprop=thumbnail&pithumbsize=480&format=json&formatversion=2&origin=*';
+    '&gsrlimit=' + n + '&prop=pageimages%7Cextracts&exintro=1&explaintext=1&exchars=300&piprop=thumbnail&pithumbsize=480&format=json&formatversion=2&origin=*';
   const r = await fetch(url, { signal });
   if (!r.ok) throw new Error('wiki ' + r.status);
   const j = await r.json();
@@ -2850,6 +2909,88 @@ async function wikiFull(title) {
   if (!r.ok) throw new Error('wiki ' + r.status);
   const p = (((await r.json()).query || {}).pages || [])[0] || {};
   return { extract: p.extract || '', thumb: p.thumbnail && p.thumbnail.source };
+}
+
+/* ---- journals: PubMed (abstracts) and Europe PMC (open-access full text) — both free, no key ---- */
+const stripTags = (t) => (t || '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+const shortAuthors = (list, more) => list.filter(Boolean).slice(0, 3).join(', ') + (more ? ', et al.' : '');
+
+async function pubmedSearch(q, signal, n = 8) {
+  const E = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/';
+  const s = await fetch(E + 'esearch.fcgi?db=pubmed&retmode=json&sort=relevance&retmax=' + n + '&term=' + encodeURIComponent(q), { signal });
+  if (!s.ok) throw new Error('pubmed ' + s.status);
+  const ids = ((await s.json()).esearchresult || {}).idlist || [];
+  if (!ids.length) return [];
+  const f = await fetch(E + 'efetch.fcgi?db=pubmed&retmode=xml&id=' + ids.join(','), { signal });
+  if (!f.ok) throw new Error('pubmed ' + f.status);
+  const doc = new DOMParser().parseFromString(await f.text(), 'text/xml');
+  const txt = (el, sel) => { const x = el.querySelector(sel); return x ? x.textContent : ''; };
+  return Array.from(doc.querySelectorAll('PubmedArticle')).map((a) => {
+    const pmid = txt(a, 'MedlineCitation > PMID');
+    const abstract = Array.from(a.querySelectorAll('Abstract > AbstractText')).map((t) => (t.getAttribute('Label') ? t.getAttribute('Label') + ': ' : '') + t.textContent).join('\n');
+    const people = Array.from(a.querySelectorAll('AuthorList > Author')).map((x) => (txt(x, 'LastName') + ' ' + txt(x, 'Initials')).trim());
+    const year = txt(a, 'JournalIssue > PubDate > Year') || txt(a, 'PubDate > MedlineDate').slice(0, 4);
+    return { title: stripTags(txt(a, 'ArticleTitle')), extract: abstract || 'This paper has no abstract on PubMed. Open it to read the original.', thumb: '', source: 'PubMed',
+             url: 'https://pubmed.ncbi.nlm.nih.gov/' + pmid + '/', meta: [txt(a, 'Journal > Title'), year].filter(Boolean).join(' · '), authors: shortAuthors(people, people.length > 3) };
+  });
+}
+
+async function epmcSearch(q, signal, n = 8) {
+  const url = 'https://www.ebi.ac.uk/europepmc/webservices/rest/search?format=json&resultType=core&sort=RELEVANCE&pageSize=' + n + '&query=' + encodeURIComponent(q + ' AND OPEN_ACCESS:y');
+  let r = await fetch(url, { signal });
+  if (r.status === 503 || r.status === 429) { await new Promise((ok) => setTimeout(ok, 800)); r = await fetch(url, { signal }); }   /* Europe PMC briefly says 503 when busy */
+  if (!r.ok) throw new Error('epmc ' + r.status);
+  const list = ((await r.json()).resultList || {}).result || [];
+  return list.map((x) => ({
+    title: stripTags(x.title), extract: stripTags(x.abstractText) || 'Open this paper to read the full text.', thumb: '', source: 'Europe PMC',
+    url: 'https://europepmc.org/article/' + x.source + '/' + x.id, pmcid: x.pmcid || '',
+    meta: [x.journalInfo && x.journalInfo.journal && x.journalInfo.journal.title, x.pubYear].filter(Boolean).join(' · '),
+    authors: stripTags(x.authorString || '').replace(/\.$/, '').split(', ').slice(0, 3).join(', ') + ((x.authorString || '').split(', ').length > 3 ? ', et al.' : ''),
+  }));
+}
+
+const SOURCES = [['all', 'Everything'], ['wiki', 'Wikipedia'], ['pubmed', 'PubMed'], ['epmc', 'Open-access papers']];
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+
+/* "Everything" shows results as each source answers, so one slow source never holds the others back. */
+async function searchSources(q, source, signal, per, onUpdate) {
+  const tag = (name, meta) => (r) => r.map((p) => ({ ...p, source: name, meta }));
+  const jobs = {
+    wiki: () => wikiSearch(q, signal, per || (source === 'all' ? 4 : 9)).then(tag('Wikipedia', 'Encyclopedia')),
+    pubmed: () => pubmedSearch(q, signal, per || (source === 'all' ? 4 : 9)),
+    epmc: () => epmcSearch(q, signal, per || (source === 'all' ? 4 : 9)),
+  };
+  if (source !== 'all') return withTimeout(jobs[source](), 12000);
+  const order = ['wiki', 'pubmed', 'epmc'];
+  const got = {}; let failed = 0;
+  const merge = () => {
+    const out = [], seen = new Set(), lists = order.map((k) => got[k] || []);
+    const most = Math.max(0, ...lists.map((l) => l.length));
+    for (let i = 0; i < most; i++) lists.forEach((l) => { const p = l[i]; if (p && !seen.has(p.url)) { seen.add(p.url); out.push(p); } });
+    return out;
+  };
+  await Promise.all(order.map((k) => withTimeout(jobs[k](), 12000).then((r) => { got[k] = r; if (onUpdate) onUpdate(merge()); }).catch(() => { failed++; })));
+  if (failed === order.length) throw new Error('all sources failed');
+  return merge();
+}
+
+/* Full text for the reader: Europe PMC open-access papers come as JATS XML. */
+async function paperFull(pmcid) {
+  const r = await fetch('https://www.ebi.ac.uk/europepmc/webservices/rest/' + pmcid + '/fullTextXML');
+  if (!r.ok) throw new Error('fulltext ' + r.status);
+  const doc = new DOMParser().parseFromString(await r.text(), 'text/xml');
+  const body = doc.querySelector('body'); const blocks = [];
+  const clean = (t) => t.replace(/\s+/g, ' ').trim();
+  const walk = (node, depth) => Array.from(node.children).forEach((el) => {
+    if (el.tagName === 'sec') {
+      const t = Array.from(el.children).find((c) => c.tagName === 'title');
+      if (t) blocks.push({ h: clean(t.textContent), d: depth });
+      walk(el, depth + 1);
+    } else if (el.tagName === 'p') { const x = clean(el.textContent); if (x) blocks.push({ p: x }); }
+    else if (el.tagName === 'list') Array.from(el.querySelectorAll('list-item')).forEach((li) => blocks.push({ p: '• ' + clean(li.textContent) }));
+  });
+  if (body) walk(body, 0);
+  return blocks.slice(0, 500);
 }
 
 function useWiki(title, enabled) {
@@ -2905,9 +3046,6 @@ const TABS = [['home', 'Home', 'fa-house'], ['quiz', 'Quiz', 'fa-pen-to-square']
 function SiteNav({ route, go, openFind }) {
   const hide = route === 'quiz';
   return html`<header className="site-nav" data-hide=${hide}>
-    <button className="brand glass" onClick=${() => go('home')} aria-label="USMLE Quiz home">
-      <span className="brand-mark"><i className="fas fa-plus"></i></span><span className="bn">USMLE Quiz</span>
-    </button>
     <div className="nav-actions">
       <button className="find glass" onClick=${openFind} aria-label="Find"><${Icon} n="fa-magnifying-glass" /><span className="lbl">Find</span><kbd>⌘K</kbd></button>
       <button className="btn-white" onClick=${() => go('quiz')}>Start a quiz</button>
@@ -2931,34 +3069,30 @@ function Tabs({ route, go }) {
 /* ==========================================================================
    HOME
    ========================================================================== */
-const ORBIT = ART.plates.filter((u) => u !== ART.center);
+const VOYAGE = [
+  [ART.lovers, 'Where care begins'], [CASES[0].q.image, 'Read the scan'], [ART.harp, 'The body, composed'], [ART.angiogram, 'Every vessel, mapped'],
+  [ART.snakeApple, 'Knowledge has a cost'], [CASES[7].q.image, 'Find what is hidden'], [ART.heartLungs, 'Heart and lungs'], [ART.viscera, 'The whole body'],
+  [ART.fingerprint, 'Look closer'], [CASES[3].q.image, 'What the hands say'], [ART.hand, 'A hand to hold'], [CASES[4].q.image, 'Trace the brainstem'],
+].filter(([src]) => !!src);
 
 function Hero({ go }) {
-  const onMove = (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    e.currentTarget.style.setProperty('--mx', ((e.clientX - r.left) / r.width - 0.5) * 2);
-    e.currentTarget.style.setProperty('--my', ((e.clientY - r.top) / r.height - 0.5) * 2);
-  };
-  const n = ORBIT.length;
-  return html`<section className="home-sec bs-hero" data-nav="light" onPointerMove=${onMove}>
-    <div className="bs-ghost" aria-hidden="true">STEP 1</div>
-    <div className="bs-hero-top fanfade-in">
+  const n = VOYAGE.length;
+  return html`<section className="home-sec vg-hero" data-nav="dark">
+    <div className="vg-top fanfade-in">
       <p className="kquiet">A free place to practise for Step 1</p>
-      <h1 className="bs-h">Dear <${NameField} />,<br /><em>you're amazing.</em></h1>
-      <p className="bs-sub">Somewhere between the late nights and the cold coffee, you decided to become a doctor. This little room is free, and it's yours. Come and practise whenever you need to.</p>
-      <div className="bs-hero-cta">
-        <button className="btn-dark" onClick=${() => go('quiz')}>Start a quiz <${Icon} n="fa-arrow-right" /></button>
+      <h1 className="vg-h">Dear <${NameField} />,<br /><em>you're amazing.</em></h1>
+      <p className="vg-sub">Somewhere between the late nights and the cold coffee, you decided to become a doctor. This little room is free, and it's yours. Come and practise whenever you need to.</p>
+      <div className="vg-cta">
+        <button className="btn-white" onClick=${() => go('quiz')}>Start a quiz <${Icon} n="fa-arrow-right" /></button>
         <button className="btn-ghost" onClick=${() => go('library')}>Take a look around</button>
       </div>
     </div>
-    <div className="orb-wrap" aria-hidden="true">
-      <div className="orb">
-        <div className="orb-center"><img src=${ART.center} alt="" onError=${hidePicture} /></div>
-        ${ORBIT.map((src, i) => html`<div key=${i} className="orb-card" style=${{ '--a': ((i * 360) / n) + 'deg', '--ap': (i / n).toFixed(4), '--i': i }}>
-          <div className="orb-img"><img src=${src} alt="" onError=${hidePicture} /></div></div>`)}
+    <div className="vg-stage" aria-hidden="true">
+      <div className="vg-ring" style=${{ '--n': n }}>
+        ${VOYAGE.map(([src, cap], i) => html`<figure key=${i} className="vg-card" style=${{ '--a': ((i * 360) / n) + 'deg' }}>
+          <img src=${src} alt="" onError=${hidePicture} /><figcaption>${cap}</figcaption></figure>`)}
       </div>
     </div>
-    <div className="scroll-hint">scroll</div>
   </section>`;
 }
 
@@ -3011,10 +3145,10 @@ function Manifesto() {
 const CELLS = [
   { k: 'Timed', title: "A clock that's on your side", body: 'Thirty quiet minutes, just like the real thing, with nobody watching.', bg: '#0E0E11', cls: 'on-dark', ico: 'fa-stopwatch', accent: true },
   { k: 'Imaging', title: 'Answers that actually teach', body: 'Every explanation shows its work, with the real images right beside it.', art: 'heartLungs', ico: 'fa-images' },
-  { k: 'Tools', title: 'Little helpers, close by', body: 'A calculator sits next to the question, never on top of it.', bg: '#123B39', cls: 'on-dark', ico: 'fa-calculator' },
-  { k: 'Focus', title: 'Music to settle into', body: 'Pick a playlist, press play, and let the room go quiet around you.', bg: '#1C1A3B', cls: 'on-dark', ico: 'fa-music' },
+  { k: 'Tools', title: 'Little helpers, close by', body: 'A calculator sits next to the question, never on top of it.', bg: '#2B1E16', cls: 'on-dark', ico: 'fa-calculator' },
+  { k: 'Focus', title: 'Music to settle into', body: 'Pick a playlist, press play, and let the room go quiet around you.', bg: '#4A3527', cls: 'on-dark', ico: 'fa-music' },
   { k: 'Progress', title: 'Your progress stays yours', body: "Your scores live on this device, so you can see how far you've come.", art: 'angiogram', ico: 'fa-chart-line' },
-  { k: 'Library', title: 'The stories behind the answers', body: 'Read a little deeper, save the pages you love, and come back to them.', bg: '#E9C65A', cls: 'on-light', ico: 'fa-bookmark' },
+  { k: 'Library', title: 'The stories behind the answers', body: 'Read a little deeper, save the pages you love, and come back to them.', bg: '#D9C3A0', cls: 'on-light', ico: 'fa-bookmark' },
 ];
 function Inside({ go }) {
   return html`<section className="home-sec home-light seam-top" data-nav="light" style=${{ padding: 'clamp(90px,13vh,170px) 0' }}>
@@ -3040,10 +3174,10 @@ function Inside({ go }) {
 
 /* Sticky stacked cards: each one slides up and settles on top of the last. */
 const STACK = [
-  { n: '01', k: 'Show up', title: 'Start small. Just begin.', body: "Open a block, start the clock, and answer the first question. That's the whole job for today. The rest follows.", bg: '#111114', fg: '#F4F2EC', img: 'angiogram' },
-  { n: '02', k: 'Learn the why', title: 'Read the reason behind every answer.', body: "Right or wrong, each question opens into an explanation with the real images beside it. That's where it really sticks.", bg: '#E7E0CF', fg: '#17150f', img: 'heartLungs' },
-  { n: '03', k: 'Notice the pattern', title: 'See what keeps tripping you up.', body: 'Your dashboard keeps quiet track, so you can spot the topics that need another look. No grades, no judgement.', bg: '#1D2B4A', fg: '#F2F4F9', img: 'fingerprint' },
-  { n: '04', k: 'Come back tomorrow', title: 'Be gentle. Be consistent.', body: 'A little each day beats a lot once. Keep your streak, save the pages you love, and let the work add up.', bg: '#F4A582', fg: '#2a140a', img: 'center' },
+  { n: '01', k: 'Show up', title: 'Start small. Just begin.', body: "Open a block, start the clock, and answer the first question. That's the whole job for today. The rest follows.", bg: '#0F0D0B', fg: '#F4F0E6', img: 'angiogram' },
+  { n: '02', k: 'Learn the why', title: 'Read the reason behind every answer.', body: "Right or wrong, each question opens into an explanation with the real images beside it. That's where it really sticks.", bg: '#EFE9DA', fg: '#17120e', img: 'heartLungs' },
+  { n: '03', k: 'Notice the pattern', title: 'See what keeps tripping you up.', body: 'Your dashboard keeps quiet track, so you can spot the topics that need another look. No grades, no judgement.', bg: '#3A2A20', fg: '#F4F0E6', img: 'fingerprint' },
+  { n: '04', k: 'Come back tomorrow', title: 'Be gentle. Be consistent.', body: 'A little each day beats a lot once. Keep your streak, save the pages you love, and let the work add up.', bg: '#C98A5E', fg: '#20130a', img: 'center' },
 ];
 function Stack() {
   const refs = useRef([]);
@@ -3090,13 +3224,13 @@ function Stack() {
 function Stats({ attempts }) {
   const s = summarize(attempts);
   const items = [
-    { n: html`<em>${CASES.length}</em>`, l: 'cases to start with, and more on the way' },
-    { n: '30:00', l: 'of quiet focus in every block' },
-    { n: s.n ? html`${s.best}<em>%</em>` : html`<em>$0</em>`, l: s.n ? "your personal best so far. Look how far you've come." : 'because you already have enough to pay for' },
+    { n: html`<${AN} value=${CASES.length} />`, k: 'Cases', l: 'to start with, and more on the way' },
+    { n: '30:00', k: 'Per block', l: 'of quiet focus, with nobody watching' },
+    { n: s.n ? html`<${AN} value=${s.best} suffix="%" />` : html`<em>Free</em>`, k: s.n ? 'Personal best' : 'Always', l: s.n ? "so far. Look how far you've come." : 'no sign-up, no cost, no catch' },
   ];
   return html`<section className="home-sec home-dark" data-nav="dark" style=${{ padding: 'clamp(70px,10vh,130px) clamp(18px,5vw,72px)', borderTop: '1px solid rgba(255,255,255,.07)' }}>
     <div className="home-wrap bs-stats">
-      ${items.map((it, i) => html`<div key=${i} className="bs-stat reveal" style=${{ '--d': i * 90 + 'ms' }}><b>${it.n}</b><span>${it.l}</span></div>`)}
+      ${items.map((it, i) => html`<div key=${i} className="bs-stat reveal" style=${{ '--d': i * 90 + 'ms' }}><small>${it.k}</small><b>${it.n}</b><span>${it.l}</span></div>`)}
     </div>
   </section>`;
 }
@@ -3113,6 +3247,7 @@ function CtaBig({ go }) {
 
 /* Editorial quote block (inspired by your "History" poster): condensed caps, a small paragraph, and
    a painting showing through giant letters. */
+const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 function QuoteBlock() {
   return html`<section className="home-sec home-dark qb" data-nav="dark">
     <div className="home-wrap">
@@ -3120,10 +3255,15 @@ function QuoteBlock() {
         <blockquote className="qb-quote reveal"><p>The good physician treats the disease; the great physician treats the patient who has the disease.</p><cite>William Osler</cite></blockquote>
         <div className="qb-note reveal" style=${{ '--d': '120ms' }}>
           <p>Step 1 asks what you know. Everything after it asks who you are. So study hard, and be kind to yourself along the way, because the world needs the kind of doctor you're becoming.</p>
-          <p className="tiny">Artwork: Caravaggio (1571–1610), Supper at Emmaus. The painting is in the public domain.</p>
+          <p>This site is free, for anyone walking the same road. No catch.</p>
+          <p className="tiny">Artwork: Caravaggio (1571–1610), Supper at Emmaus, 1601. The painting is in the public domain.</p>
         </div>
       </div>
-      <div className="qb-giant-wrap reveal" aria-hidden="true"><div className="qb-giant" style=${{ backgroundImage: `url(${CARAV.fill})` }}>MEDICINE</div></div>
+      <div className="qb-giant-wrap reveal" aria-hidden="true" style=${{ '--fill': `url(${CARAV.fill})` }}>
+        <div className="qb-giant"><span>Becoming</span><span>a doctor</span></div>
+        <div className="qb-spec a"><small>01</small><b>Bebas Neue</b><i>Headline typography</i><div className="qb-az">${ALPHA.map((c) => html`<span key=${c}>${c}</span>`)}</div></div>
+        <div className="qb-spec b"><small>02</small><b>Montserrat</b><i>Body typography</i><div className="qb-az">${ALPHA.map((c) => html`<span key=${c}>${c}</span>`)}</div></div>
+      </div>
     </div>
   </section>`;
 }
@@ -3134,8 +3274,8 @@ function QuoteBlock() {
 const HATCH_H = [58, 76, 64, 88, 82, 56, 72];
 const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const CASE_ICONS = ['fa-droplet', 'fa-pills', 'fa-user-doctor', 'fa-hand', 'fa-brain', 'fa-flask', 'fa-heart-pulse', 'fa-x-ray'];
-const CASE_TINTS = ['#2f6fed', '#1f8a57', '#e8903a', '#d8a912', '#7a4fd0', '#e5586a', '#0f9aa8', '#6b7280'];
-const AV_TINTS = ['#f6c9c3', '#cfe9c7', '#cdd3f5', '#f6e3b4', '#d4eaf0'];
+const CASE_TINTS = ['#8a5a3c', '#a8793f', '#5b6b57', '#7b4a4a', '#4f5d75', '#9a6b2f', '#6d4c41', '#556b6b'];
+const AV_TINTS = ['#ecd3c2', '#dfd6b9', '#d9c9d6', '#f1e1b5', '#cfdcd6'];
 
 function KpiCard({ title, value, suffix, foot, icon, feat, onGo, delay }) {
   return html`<article className=${cx('dz-kpi reveal', feat && 'feat')} style=${{ '--d': delay + 'ms' }}>
@@ -3151,8 +3291,8 @@ function Gauge({ parts }) {
   const R = 86, LEN = Math.PI * R, total = parts.reduce((s, p) => s + p.v, 0) || 1;
   let acc = 0;
   return html`<svg viewBox="0 0 220 124" role="img" aria-label="Case mastery">
-    <defs><pattern id="dzHatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="3" height="7" fill="rgba(20,60,40,.38)" /></pattern></defs>
-    <path d="M24,110 A86,86 0 0 1 196,110" fill="none" stroke="#eef2ef" strokeWidth="34" strokeLinecap="round" />
+    <defs><pattern id="dzHatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="3" height="7" fill="rgba(60,40,28,.4)" /></pattern></defs>
+    <path d="M24,110 A86,86 0 0 1 196,110" fill="none" stroke="#e6dfd0" strokeWidth="34" strokeLinecap="round" />
     ${parts.filter((p) => p.v > 0).map((p, i) => {
       const seg = Math.max(0, (p.v / total) * LEN - 10), off = (acc / total) * LEN; acc += p.v;
       return html`<path key=${i} className="arc" d="M24,110 A86,86 0 0 1 196,110" stroke=${p.c} strokeDasharray=${`${seg} ${LEN}`} strokeDashoffset=${-off - 5} style=${{ '--len': LEN, animationDelay: i * 160 + 'ms' }} />`;
@@ -3302,10 +3442,10 @@ function Dashboard({ go, openFind }) {
             <article className="dz-card dz-g reveal" style=${{ '--d': '240ms' }}>
               <div className="dz-ch"><div><h4>Case mastery</h4><div className="sub">From your latest attempt</div></div></div>
               <div className="dz-gauge">
-                <${Gauge} parts=${[{ v: masteredN, c: '#0b5a3a' }, { v: learningN, c: '#3aa56f' }, { v: notYetN, c: 'url(#dzHatch)' }]} />
+                <${Gauge} parts=${[{ v: masteredN, c: '#2a1d14' }, { v: learningN, c: '#b0825c' }, { v: notYetN, c: 'url(#dzHatch)' }]} />
                 <div className="mid"><b>${masteryPct}%</b><small>Mastered</small></div>
               </div>
-              <div className="dz-legend"><span><i style=${{ background: '#0b5a3a' }}></i>Mastered</span><span><i style=${{ background: '#3aa56f' }}></i>Learning</span><span><i style=${{ background: 'repeating-linear-gradient(135deg,#7d9a8a 0 2px,#fff 2px 4px)' }}></i>Not yet</span></div>
+              <div className="dz-legend"><span><i style=${{ background: '#2a1d14' }}></i>Mastered</span><span><i style=${{ background: '#b0825c' }}></i>Learning</span><span><i style=${{ background: 'repeating-linear-gradient(135deg,#8f8579 0 2px,#fff 2px 4px)' }}></i>Not yet</span></div>
             </article>
 
             <${FocusTimer} />
@@ -3365,57 +3505,77 @@ function Reader({ c, onClose }) {
 /* ==========================================================================
    LIBRARY: Wikipedia explorer with stacked cards, bookmarks, notes and a reader
    ========================================================================== */
-const SUGGEST = ['Prostate', 'Finasteride', 'Tamsulosin', 'Spermatic cord', 'Bupropion', 'Brainstem', 'Omeprazole', 'Spleen'];
+const SUGGEST = ['Finasteride', 'Benign prostatic hyperplasia', 'Testicular torsion', 'Brainstem stroke', 'Rheumatoid arthritis', 'Omeprazole', 'Parkinson disease'];
+const SRC_TINT = { Wikipedia: '#3A2A20', PubMed: '#2C3B4A', 'Europe PMC': '#3F4A33' };
 
 function WikiCard({ page, saved, onRead, i, showNote }) {
+  const paper = page.source !== 'Wikipedia';
   return html`<article className="wk" style=${{ '--i': i }}>
     <div className="wk-card">
-      <div className="wk-img">
-        ${page.thumb ? html`<img src=${page.thumb} alt="" loading="lazy" onError=${hidePicture} />` : html`<div className="ph">${page.title.charAt(0)}</div>`}
-        <button className=${cx('wk-save', saved && 'on')} onClick=${() => toggleSaved(page)} aria-pressed=${saved} aria-label=${saved ? 'Remove from saved' : 'Save this page'} title=${saved ? 'Saved' : 'Save for later'}>
-          <${Icon} n=${saved ? 'fa-bookmark' : 'fa-bookmark'} cls=${saved ? 'fas' : 'far'} /></button>
+      <div className=${cx('wk-img', paper && 'paper')} style=${paper ? { '--tint': SRC_TINT[page.source] || '#3A2A20' } : undefined}>
+        ${page.thumb ? html`<img src=${page.thumb} alt="" loading="lazy" onError=${hidePicture} />` : paper ? html`<div className="ph"><span>${page.source}</span><b>${page.meta || 'Journal article'}</b></div>` : html`<div className="ph">${page.title.charAt(0)}</div>`}
+        <span className="wk-src">${page.source}</span>
+        <button className=${cx('wk-save', saved && 'on')} onClick=${() => toggleSaved(page)} aria-pressed=${saved} aria-label=${saved ? 'Remove from saved' : 'Save this page'} title=${saved ? 'Saved' : 'Save for later'}><${Icon} n="fa-bookmark" cls=${saved ? 'fas' : 'far'} /></button>
       </div>
-      <div className="wk-body"><h4>${page.title}</h4><p>${page.extract}</p></div>
+      <div className="wk-body"><h4>${page.title}</h4>${paper && html`<div className="wk-meta">${page.meta}${page.authors ? html`<br /><span>${page.authors}</span>` : ''}</div>`}<p>${page.extract}</p></div>
       ${showNote && html`<textarea className="wk-note" placeholder="A note to your future self…" value=${page.note || ''} onChange=${(e) => setSavedNote(page.url, e.target.value)} aria-label=${`Note on ${page.title}`}></textarea>`}
       <div className="wk-foot">
         <button className="read" onClick=${() => onRead(page)}>Read here</button>
-        <a href=${page.url} target="_blank" rel="noopener noreferrer">Wikipedia <${Icon} n="fa-arrow-up-right-from-square" /></a>
+        <a href=${page.url} target="_blank" rel="noopener noreferrer">${paper ? 'Original' : 'Wikipedia'} <${Icon} n="fa-arrow-up-right-from-square" /></a>
         <button className="ico" onClick=${() => copyText(page.url, 'Link copied')} aria-label="Copy link" title="Copy link"><${Icon} n="fa-link" /></button>
       </div>
     </div>
   </article>`;
 }
 
+/* One reader for every source: Wikipedia summaries, PubMed abstracts and open-access full text. */
 function WikiReader({ page, onClose }) {
-  const [full, setFull] = useState(null);
+  const [blocks, setBlocks] = useState(null);
+  const [state, setState] = useState('loading');
+  const [hero, setHero] = useState(page.thumb || '');
   const saved = useSaved();
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', k); document.body.style.overflow = 'hidden';
     return () => { window.removeEventListener('keydown', k); document.body.style.overflow = ''; };
   }, [onClose]);
-  useEffect(() => { let live = true; wikiFull(page.title).then((d) => live && setFull(d)).catch(() => {}); return () => { live = false; }; }, [page.title]);
-  const text = (full && full.extract) || page.extract;
-  const img = (full && full.thumb) || page.thumb;
+  useEffect(() => {
+    let live = true;
+    const abstractBlocks = () => page.extract.split(/\n+/).map((p) => ({ p }));
+    if (page.pmcid) {
+      paperFull(page.pmcid).then((b) => { if (!live) return; if (b.length) { setBlocks([{ h: 'Abstract', d: 0 }, ...abstractBlocks(), ...b]); setState('full'); } else { setBlocks(abstractBlocks()); setState('abstract'); } })
+        .catch(() => { if (live) { setBlocks(abstractBlocks()); setState('abstract'); } });
+    } else if (page.source === 'Wikipedia') {
+      wikiFull(page.title).then((d) => { if (!live) return; if (d.thumb) setHero(d.thumb); setBlocks((d.extract || page.extract).split(/\n+/).map((p) => ({ p }))); setState('full'); })
+        .catch(() => { if (live) { setBlocks(abstractBlocks()); setState('full'); } });
+    } else { setBlocks(abstractBlocks()); setState('abstract'); }
+    return () => { live = false; };
+  }, [page.url]);
   const on = isSaved(saved, page.url);
-  return html`<div className="reader" onClick=${(e) => e.target === e.currentTarget && onClose()} role="dialog" aria-modal="true" aria-label=${page.title}>
-    <div className="reader-card narrow"><div className="reader-top"><span>Wikipedia · quick read</span><button onClick=${onClose} aria-label="Close"><${Icon} n="fa-xmark" /></button></div>
+  const paper = page.source !== 'Wikipedia';
+  return ReactDOM.createPortal(html`<div className="reader" onClick=${(e) => e.target === e.currentTarget && onClose()} role="dialog" aria-modal="true" aria-label=${page.title}>
+    <div className="reader-card narrow"><div className="reader-top"><span>${page.source} · reading here</span><button onClick=${onClose} aria-label="Close"><${Icon} n="fa-xmark" /></button></div>
       <div className="reader-body">
         <div>
-          ${img && html`<img className="wk-hero" src=${img} alt="" onError=${hidePicture} />`}
+          ${hero && html`<img className="wk-hero" src=${hero} alt="" onError=${hidePicture} />`}
           <h3>${page.title}</h3>
-          ${text.split(/\n+/).map((p, k) => html`<p key=${k}>${p}</p>`)}
+          ${paper && html`<p className="rd-meta">${page.meta}${page.authors ? ' — ' + page.authors : ''}</p>`}
+          ${state === 'full' && page.pmcid && html`<p className="rd-badge">Open access · full text</p>`}
+          ${state === 'abstract' && paper && html`<p className="rd-badge soft">Abstract only. The full paper may be behind a paywall, so open the original to read it all.</p>`}
+          ${!blocks && html`<p className="rd-load">Opening the article…</p>`}
+          ${blocks && blocks.map((b, k) => b.h ? html`<h4 key=${k} className=${cx('rd-h', b.d > 0 && 'sub')}>${b.h}</h4>` : html`<p key=${k}>${b.p}</p>`)}
           <div className="rd-acts">
             <button className=${on ? 'primary' : ''} onClick=${() => toggleSaved(page)}><${Icon} n="fa-bookmark" cls=${on ? 'fas' : 'far'} />${on ? 'Saved' : 'Save for later'}</button>
-            <a href=${page.url} target="_blank" rel="noopener noreferrer">Read the full article <${Icon} n="fa-arrow-up-right-from-square" /></a>
+            <a href=${page.url} target="_blank" rel="noopener noreferrer">Open the original <${Icon} n="fa-arrow-up-right-from-square" /></a>
             <button onClick=${() => copyText(page.url, 'Link copied')}><${Icon} n="fa-link" />Copy link</button>
           </div>
         </div>
-      </div></div></div>`;
+      </div></div></div>`, document.body);
 }
 
 function Explorer() {
   const [q, setQ] = useState('');
+  const [source, setSource] = useState('all');
   const [res, setRes] = useState([]);
   const [state, setState] = useState('idle');
   const [nonce, setNonce] = useState(0);
@@ -3428,30 +3588,32 @@ function Explorer() {
     const ctl = new AbortController();
     setState('loading');
     const t = setTimeout(() => {
-      wikiSearch(q, ctl.signal).then((r) => { setRes(r); setState(r.length ? 'ok' : 'none'); })
+      searchSources(q, source, ctl.signal, 0, (partial) => { if (!ctl.signal.aborted && partial.length) { setRes(partial); setState('ok'); } })
+        .then((r) => { if (ctl.signal.aborted) return; setRes(r); setState(r.length ? 'ok' : 'none'); })
         .catch((e) => { if (e.name !== 'AbortError') setState('error'); });
-    }, 350);
+    }, 380);
     return () => { clearTimeout(t); ctl.abort(); };
-  }, [q, nonce]);
+  }, [q, source, nonce]);
 
   const pick = (term) => { LibTab.set('results'); setQ(term); };
-  const exportList = () => copyText(saved.map((p) => `• ${p.title} — ${p.url}${p.note ? `\n   ${p.note}` : ''}`).join('\n'), 'Your list is copied');
+  const exportList = () => copyText(saved.map((p) => `• ${p.title} (${p.source || 'Wikipedia'}) — ${p.url}${p.note ? `\n   ${p.note}` : ''}`).join('\n'), 'Your list is copied');
   const clearAll = () => { if (confirm('Remove every saved page?')) { SavedStore.set([]); toast('Cleared'); } };
 
   return html`<div className="explorer">
-    <div className="ex-head reveal"><p className="eyebrow">Go deeper</p><h2>Curious about something? <span className="hl">Look it up.</span></h2>
-      <p>Search any drug, structure or disease. Read a quick summary here, save the pages you love, and add a note for later.</p></div>
-    <label className="ex-input frost reveal" style=${{ '--d': '80ms' }}><${Icon} n="fa-magnifying-glass" /><input value=${q} onChange=${(e) => { LibTab.set('results'); setQ(e.target.value); }} placeholder="Try “finasteride” or “brainstem”…" aria-label="Search Wikipedia" />
+    <div className="ex-head reveal"><p className="eyebrow">Go deeper</p><h2>Curious? <span className="hl">Read it here.</span></h2>
+      <p>Search Wikipedia, PubMed and open-access journals in one place. Open anything right here, save what you love, and leave yourself a note.</p></div>
+    <label className="ex-input frost reveal" style=${{ '--d': '80ms' }}><${Icon} n="fa-magnifying-glass" /><input value=${q} onChange=${(e) => { LibTab.set('results'); setQ(e.target.value); }} placeholder="Try “finasteride” or “brainstem stroke”…" aria-label="Search articles and papers" />
       ${q && html`<button className="ex-x" onClick=${() => setQ('')} aria-label="Clear"><${Icon} n="fa-xmark" /></button>`}</label>
     <div className="ex-row">
-      <div className="ex-chips">${SUGGEST.map((t) => html`<button key=${t} onClick=${() => pick(t)}>${t}</button>`)}</div>
-      <${Seg} value=${tab} onChange=${(v) => LibTab.set(v)} options=${[['results', 'Search'], ['saved', `Saved${saved.length ? ' · ' + saved.length : ''}`]]} />
+      <${Seg} value=${source} onChange=${setSource} options=${SOURCES} />
+      <${Seg} value=${tab} onChange=${(v) => LibTab.set(v)} options=${[['results', 'Results'], ['saved', `Saved${saved.length ? ' · ' + saved.length : ''}`]]} />
     </div>
+    <div className="ex-chips">${SUGGEST.map((t) => html`<button key=${t} onClick=${() => pick(t)}>${t}</button>`)}</div>
 
     ${tab === 'results' && html`<${Fragment}>
-      ${state === 'idle' && html`<p className="ex-msg">Type a topic above, or tap one of the ideas. We'll pull up the page and you can save anything worth keeping.</p>`}
-      ${state === 'none' && html`<p className="ex-msg">We couldn't find anything for “${q}”. A simpler word might help.</p>`}
-      ${state === 'error' && html`<p className="ex-msg">We couldn't reach Wikipedia just now. Check your connection, then <button className="btn-ghost btn-sm" onClick=${() => setNonce((n) => n + 1)}>try again</button></p>`}
+      ${state === 'idle' && html`<p className="ex-msg">Type a topic above, or tap one of the ideas. Journal papers show the abstract, and open-access ones can be read in full without leaving this page.</p>`}
+      ${state === 'none' && html`<p className="ex-msg">We couldn't find anything for “${q}” in ${source === 'all' ? 'these sources' : SOURCES.find((s) => s[0] === source)[1]}. A simpler word, or another source, might help.</p>`}
+      ${state === 'error' && html`<p className="ex-msg">We couldn't reach the library just now. Check your connection, then <button className="btn-ghost btn-sm" onClick=${() => setNonce((n) => n + 1)}>try again</button></p>`}
       <div className="ex-grid">
         ${state === 'loading' && [0, 1, 2, 3, 4, 5].map((k) => html`<div key=${k} className="wk sk"><div className="wk-card"></div></div>`)}
         ${state !== 'loading' && res.map((p, i) => html`<${WikiCard} key=${p.url} page=${p} i=${i} saved=${isSaved(saved, p.url)} onRead=${setReading} />`)}
@@ -3459,10 +3621,10 @@ function Explorer() {
 
     ${tab === 'saved' && html`<${Fragment}>
       ${saved.length > 0 && html`<div className="ex-tools"><button className="btn-ghost btn-sm" onClick=${exportList}><${Icon} n="fa-copy" />Copy my list</button><button className="btn-ghost btn-sm" onClick=${clearAll}><${Icon} n="fa-trash-can" />Clear all</button></div>`}
-      ${saved.length === 0 && html`<p className="ex-msg">Nothing saved yet. Tap the bookmark on any page and it will wait for you right here.</p>`}
-      <div className="ex-grid">${saved.map((p, i) => html`<${WikiCard} key=${p.url} page=${p} i=${i} saved=${true} showNote=${true} onRead=${setReading} />`)}</div><//>`}
+      ${saved.length === 0 && html`<p className="ex-msg">Nothing saved yet. Tap the bookmark on any card and it will wait for you right here.</p>`}
+      <div className="ex-grid">${saved.map((p, i) => html`<${WikiCard} key=${p.url} page=${{ source: 'Wikipedia', ...p }} i=${i} saved=${true} showNote=${true} onRead=${setReading} />`)}</div><//>`}
 
-    ${reading && html`<${WikiReader} page=${reading} onClose=${() => setReading(null)} />`}
+    ${reading && html`<${WikiReader} page=${{ source: 'Wikipedia', ...reading }} onClose=${() => setReading(null)} />`}
   </div>`;
 }
 
@@ -3546,12 +3708,12 @@ function Palette({ onClose, go, openCase }) {
     if (q.trim().length < 3) { setWiki([]); setBusy(false); return undefined; }
     const ctl = new AbortController();
     setBusy(true);
-    const t = setTimeout(() => { wikiSearch(q, ctl.signal).then(r => { setWiki(r); setBusy(false); }).catch(e => { if (e.name !== 'AbortError') setBusy(false); }); }, 380);
+    const t = setTimeout(() => { searchSources(q, 'all', ctl.signal, 2, (p) => { if (!ctl.signal.aborted) setWiki(p); }).then(r => { setWiki(r); setBusy(false); }).catch(e => { if (e.name !== 'AbortError') setBusy(false); }); }, 380);
     return () => { clearTimeout(t); ctl.abort(); };
   }, [q]);
 
-  const wikiItems = wiki.map(w => ({ id: 'w' + w.url, ic: 'fa-globe', img: w.thumb, t: w.title, s: w.extract, run: () => window.open(w.url, '_blank', 'noopener') }));
-  const groups = [['Go to', actions], ['Case files', cases], ['Your saved pages', savedHits], ['Wikipedia', wikiItems]].filter(g => g[1].length);
+  const wikiItems = wiki.map(w => ({ id: 'w' + w.url, ic: w.source === 'Wikipedia' ? 'fa-globe' : 'fa-file-lines', img: w.thumb, t: w.title, s: w.source + ' · ' + w.extract, run: () => window.open(w.url, '_blank', 'noopener') }));
+  const groups = [['Go to', actions], ['Case files', cases], ['Your saved pages', savedHits], ['Articles and papers', wikiItems]].filter(g => g[1].length);
   const flat = groups.flatMap(g => g[1]);
   useEffect(() => { setSel(0); }, [q, wiki.length]);
 
@@ -3668,7 +3830,6 @@ function App() {
   const onRead = useCallback((c) => setReader(c), []);
 
   return html`<${Fragment}>
-    <div className="progress" ref=${progressRef} aria-hidden="true"></div>
     <${SiteNav} route=${route} go=${go} openFind=${openFind} />
     <${Tabs} route=${route} go=${go} />
     <main id="site">
