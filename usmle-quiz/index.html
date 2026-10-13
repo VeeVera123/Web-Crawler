@@ -1239,6 +1239,56 @@
         .nav-actions:has(.find[data-t="light"]) .btn-white { background: #0b0b0d; color: #fff; box-shadow: none; }
         .nav-actions:has(.find[data-t="light"]) .btn-white:hover { background: #222; }
 
+        /* ===== v7: stack nav, blur links, orbit card, rising bars ===== */
+        .tabs { transition: top .7s var(--ease), transform .8s cubic-bezier(.34,1.56,.64,1), visibility 0s; transform-origin: 50% 50%; }
+        .tabs[data-c="true"] { transform: translateX(-50%) scale(.08); visibility: hidden; pointer-events: none; transition: top .7s var(--ease), transform .45s cubic-bezier(.5,0,.75,0), visibility 0s .45s; }
+        .site-nav .nav-actions { transition: transform .6s cubic-bezier(.34,1.56,.64,1), opacity .35s; }
+        body[data-navc="1"] .site-nav .nav-actions { transform: translateY(-90px) scale(.7); opacity: 0; pointer-events: none; }
+        .stack-btn { position: fixed; z-index: 92; top: 14px; left: 50%; width: 56px; height: 56px; padding: 0; border-radius: 50%; border: 0; cursor: pointer; display: grid; place-items: center;
+                     transform: translateX(-50%) scale(0); visibility: hidden; transition: transform .35s cubic-bezier(.5,0,.75,0), visibility 0s .35s; }
+        .stack-btn[data-on="true"] { visibility: visible; transform: translateX(-50%) scale(1); transition: visibility 0s; animation: stackPop .95s both; }
+        .stack-btn[data-on="true"]:hover { transform: translateX(-50%) scale(1.1) rotate(-4deg); transition: transform .5s cubic-bezier(.34,1.8,.5,1); }
+        .stack-btn:active { transform: translateX(-50%) scale(.9) !important; }
+        @keyframes stackPop { 0% { transform: translateX(-50%) scale(.15) translateY(-10px); } 38% { transform: translateX(-50%) scale(1.28) translateY(4px); } 56% { transform: translateX(-50%) scale(.86) translateY(-1px); } 72% { transform: translateX(-50%) scale(1.09); } 86% { transform: translateX(-50%) scale(.97); } 100% { transform: translateX(-50%) scale(1); } }
+        .st-i { position: relative; z-index: 2; width: 24px; height: 22px; display: block; }
+        .st-i i { position: absolute; left: 0; right: 0; height: 6px; border-radius: 4px; background: #fff; transition: transform .5s cubic-bezier(.34,1.8,.5,1); }
+        .st-i i:nth-child(1) { top: 0; transform: scaleX(.64); } .st-i i:nth-child(2) { top: 8px; transform: scaleX(.82); } .st-i i:nth-child(3) { top: 16px; }
+        .stack-btn:hover .st-i i:nth-child(1) { transform: scaleX(1) translateY(-1px); } .stack-btn:hover .st-i i:nth-child(2) { transform: scaleX(1); } .stack-btn:hover .st-i i:nth-child(3) { transform: scaleX(.64) translateY(1px); }
+        .stack-btn[data-t="light"] .st-i i { background: #17171c; }
+        @media (max-width: 760px) { .stack-btn { display: none; } }
+        /* footer: letters blur out and back in, one after the other */
+        .bl span { display: inline-block; white-space: pre; }
+        .bl:hover span, .bl:focus-visible span { animation: blu .75s ease both; animation-delay: calc(var(--i) * 48ms); }
+        @keyframes blu { 0% { filter: blur(0); opacity: 1; } 42% { filter: blur(7px); opacity: .25; } 100% { filter: blur(0); opacity: 1; } }
+        /* orbit card */
+        .ob { background: #0b0b07; background-image: radial-gradient(rgba(255,255,255,.1) 1.4px, transparent 1.6px); background-size: 34px 34px; padding: clamp(40px, 7vh, 90px) clamp(14px, 4vw, 60px); display: grid; place-items: center; }
+        .ob-card { position: relative; width: min(1380px, 100%); height: min(80vh, 760px); min-height: 520px; border-radius: clamp(30px, 4vw, 58px); background: #F3F2EC; color: #0d0d08; overflow: hidden; }
+        .ob-ring { position: absolute; left: 50%; top: 50%; width: 0; height: 0; --R: min(44vw, 640px); animation: obSpin 80s linear infinite; }
+        @keyframes obSpin { to { transform: rotate(360deg); } }
+        .ob-tile { position: absolute; left: -48px; top: -48px; width: 96px; height: 96px; border-radius: 26px; background: #fff; display: grid; place-items: center; font-size: 36px; color: #0d0d08;
+                    box-shadow: 0 20px 40px -18px rgba(0,0,0,.28); transform: rotate(var(--a)) translateY(calc(var(--R) * -1)); }
+        .ob-tile.hot { background: #FFE600; }
+        .ob-card h2 { position: absolute; left: clamp(26px, 6.5vw, 100px); top: clamp(30px, 8vh, 90px); margin: 0; z-index: 2; font: 500 clamp(40px, 5.6vw, 88px)/1.04 'Inter Tight', -apple-system, 'Helvetica Neue', Arial, sans-serif; letter-spacing: -.04em; color: #0d0d08; }
+        .ob-o { position: relative; display: inline-block; padding: 0 .06em; } .ob-o svg { position: absolute; left: -9%; top: -14%; width: 118%; height: 128%; overflow: visible; }
+        .ob-o path { fill: none; stroke: #FFE600; stroke-width: 5; stroke-linecap: round; stroke-dasharray: 520; stroke-dashoffset: 520; }
+        .ob-card.in .ob-o path { animation: scrib 1.4s .5s var(--ease-out) forwards; }
+        .ob-foot { position: absolute; z-index: 2; right: clamp(26px, 6vw, 96px); bottom: clamp(30px, 8vh, 80px); width: min(500px, 80%); }
+        .ob-foot p { font: 400 clamp(13.5px, 1.1vw, 16px)/1.65 'JetBrains Mono', ui-monospace, monospace; margin: 0 0 22px; color: #1a1a12; }
+        .ob-foot .lh-btn { margin: 0; }
+        @media (max-width: 760px) { .ob-ring { --R: 74vw; } .ob-tile { width: 70px; height: 70px; left: -35px; top: -35px; font-size: 26px; border-radius: 20px; } .ob-foot { left: 24px; right: 24px; width: auto; } }
+        /* rising bars */
+        .bx { position: relative; height: 190svh; background: #000; }
+        .bx-pin { position: sticky; top: 0; height: 100svh; overflow: hidden; background: #000; --pad: 3.2vw; --gap: 1.8vw; --bw: calc((100vw - 2 * var(--pad) - (var(--n) - 1) * var(--gap)) / var(--n)); }
+        .bx-word { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; font: 400 clamp(110px, 21vw, 360px)/1 'Bebas Neue', Impact, sans-serif; letter-spacing: .01em; color: #FFB400; white-space: nowrap; }
+        .bx-bars { position: absolute; left: var(--pad); right: var(--pad); bottom: 0; top: 0; display: flex; gap: var(--gap); align-items: flex-end; }
+        .bx-bar { position: relative; flex: 1 1 0; height: calc(var(--h) * 1svh); border-radius: 999px 999px 0 0; overflow: hidden; transform: translateY(calc(var(--s, 0px) * -1)); will-change: transform; background: #1b130a; }
+        .bx-bar img { position: absolute; width: 100vw; height: 100svh; max-width: none; object-fit: cover; object-position: 50% 40%; left: calc(var(--i) * (var(--bw) + var(--gap)) * -1 - var(--pad)); top: calc(var(--h) * 1svh - 100svh); transform: translateY(var(--s, 0px)); filter: sepia(.35) saturate(1.25) contrast(1.05); }
+        .bx-bar::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(255,160,0,.18), rgba(0,0,0,.25)); mix-blend-mode: multiply; }
+        .bx-hint { position: absolute; left: 0; right: 0; bottom: 22px; text-align: center; margin: 0; z-index: 3; color: #fff; font: 500 13px/1 'JetBrains Mono', monospace; letter-spacing: .08em; text-transform: uppercase; opacity: calc(1 - var(--p, 0) * 6); text-shadow: 0 2px 12px rgba(0,0,0,.8); }
+        @media (max-width: 760px) { .bx-pin { --gap: 2.2vw; } .bx-word { font-size: 30vw; writing-mode: horizontal-tb; } }
+        .bx-word { font-size: clamp(90px, 17.5vw, 320px); }
+        .bx-bar { box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
+
     </style>
 </head>
 <body>
@@ -3287,17 +3337,44 @@ function SiteNav({ route, go, openFind }) {
   </header>`;
 }
 
+/* The nav folds into one glass "stack" button as you scroll down, and unfolds when you scroll up or tap it. */
+function useNavCompact(route) {
+  const [compact, setCompact] = useState(false);
+  const hold = useRef(0);
+  useEffect(() => {
+    if (route === 'quiz') { setCompact(false); return undefined; }
+    let last = window.scrollY, raf = 0;
+    const step = () => {
+      raf = 0;
+      if (window.innerWidth <= 760) { setCompact(false); return; }
+      const y = window.scrollY, dy = y - last; last = y;
+      if (y < 90) setCompact(false);
+      else if (dy < -6) setCompact(false);
+      else if (dy > 6 && Date.now() > hold.current) setCompact(true);
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(step); };
+    window.addEventListener('scroll', on, { passive: true });
+    return () => { window.removeEventListener('scroll', on); cancelAnimationFrame(raf); };
+  }, [route]);
+  useEffect(() => { document.body.dataset.navc = compact ? '1' : '0'; }, [compact]);
+  const open = () => { hold.current = Date.now() + 2600; setCompact(false); };
+  return [compact, open];
+}
+
 function Tabs({ route, go }) {
+  const [compact, openNav] = useNavCompact(route);
   const refs = useRef({});
   const [th, setTh] = useState({ x: 0, w: 0 });
   const measure = useCallback(() => { const el = refs.current[route]; if (el) setTh({ x: el.offsetLeft, w: el.offsetWidth }); }, [route]);
   useLayoutEffect(measure, [measure]);
   useEffect(() => { window.addEventListener('resize', measure); if (document.fonts) document.fonts.ready.then(measure); return () => window.removeEventListener('resize', measure); }, [measure]);
-  return html`<nav className="tabs glass" data-pos=${route === 'quiz' ? 'bottom' : 'top'} aria-label="Primary">
+  return html`<${Fragment}>
+  <button className="stack-btn glass" data-on=${compact} onClick=${openNav} aria-label="Open the menu" tabIndex=${compact ? 0 : -1}><span className="st-i"><i></i><i></i><i></i></span></button>
+  <nav className="tabs glass" data-pos=${route === 'quiz' ? 'bottom' : 'top'} data-c=${compact} aria-label="Primary">
     <span className="tab-thumb" style=${{ width: th.w, transform: `translateX(${th.x}px)` }}></span>
     ${TABS.map(([r, label, icon]) => html`<button key=${r} ref=${(el) => { refs.current[r] = el; }} className="tab"
       aria-current=${route === r ? 'page' : undefined} onClick=${() => go(r)}><${Icon} n=${icon} /><span>${label}</span></button>`)}
-  </nav>`;
+  </nav><//>`;
 }
 
 /* ==========================================================================
@@ -3434,6 +3511,21 @@ function Inside({ go }) {
             <p>${c.body}</p>
           </div>
         </article>`)}
+      </div>
+    </div>
+  </section>`;
+}
+
+const ORBIT = [['fa-globe', 0], ['fa-flask', 0], ['fa-file-lines', 1], ['fa-cube', 0], ['fa-folder-open', 0], ['fa-highlighter', 1], ['fa-bookmark', 0], ['fa-bone', 0], ['fa-heart-pulse', 1], ['fa-brain', 0], ['fa-lungs', 0], ['fa-microscope', 1]];
+function Orbit({ go }) {
+  const n = ORBIT.length;
+  return html`<section className="ob" data-nav="dark">
+    <div className="ob-card reveal">
+      <div className="ob-ring" aria-hidden="true">${ORBIT.map(([ic, hot], i) => html`<span key=${i} className=${cx('ob-tile', hot && 'hot')} style=${{ '--a': (i * 360) / n + 'deg' }}><i className=${'fas ' + ic}></i></span>`)}</div>
+      <h2>Every source.<br /><span className="ob-o">One<svg viewBox="0 0 160 70" preserveAspectRatio="none" aria-hidden="true"><path d="M82,6 C30,3 4,22 7,40 C10,60 55,68 100,62 C146,56 158,32 134,15 C116,4 70,3 44,12" /></svg></span> place. Free.</h2>
+      <div className="ob-foot">
+        <p>Wikipedia, PubMed, open-access journals, 3D models and your own case files, together in one calm library. Read, highlight, save, and come back whenever you like.</p>
+        <button className="lh-btn" onClick=${() => go('library')}>Open the Library <${Icon} n="fa-arrow-right" /></button>
       </div>
     </div>
   </section>`;
@@ -3584,6 +3676,36 @@ function FocusTimer() {
       <button className="stop" onClick=${() => { setRunning(false); setSec(0); }} aria-label="Reset"><${Icon} n="fa-stop" /></button>
     </div>
   </article>`;
+}
+
+/* Pillars made of one painting; they climb out of frame as you scroll. */
+const BARS = [58, 74, 90, 100, 66, 78, 50];
+function BarsIntro() {
+  const ref = useRef(null);
+  useEffect(() => {
+    let raf = 0;
+    const paint = () => {
+      raf = 0; const el = ref.current; if (!el) return;
+      const r = el.getBoundingClientRect(), span = Math.max(1, r.height - window.innerHeight);
+      const p = Math.max(0, Math.min(1, -r.top / span));
+      el.querySelectorAll('.bx-bar').forEach((b, i) => {
+        const q = Math.max(0, Math.min(1, (p - i * 0.045) / (1 - (BARS.length - 1) * 0.045)));
+        const e = q * q * (3 - 2 * q);
+        b.style.setProperty('--s', (e * window.innerHeight * 1.12).toFixed(1) + 'px');
+      });
+      el.style.setProperty('--p', p.toFixed(3));
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(paint); };
+    window.addEventListener('scroll', on, { passive: true }); window.addEventListener('resize', on); paint();
+    return () => { window.removeEventListener('scroll', on); window.removeEventListener('resize', on); cancelAnimationFrame(raf); };
+  }, []);
+  return html`<section className="bx" ref=${ref} data-nav="dark" style=${{ '--n': BARS.length }}>
+    <div className="bx-pin">
+      <h2 className="bx-word" aria-hidden="true">YOUR PROGRESS</h2>
+      <div className="bx-bars">${BARS.map((h, i) => html`<div key=${i} className="bx-bar" style=${{ '--h': h, '--i': i }}><img src=${CARAV.fill} alt="" onError=${hidePicture} /></div>`)}</div>
+      <p className="bx-hint">Scroll to open your dashboard <${Icon} n="fa-arrow-down" /></p>
+    </div>
+  </section>`;
 }
 
 function Dashboard({ go, openFind }) {
@@ -4151,8 +4273,9 @@ function CasesSection({ pending, onRead, withExplorer }) {
 /* ==========================================================================
    FOOTER  (Caravaggio, Supper at Emmaus as the backdrop)
    ========================================================================== */
+const BL = (t) => String(t).split('').map((c, i) => html`<span key=${i} style=${{ '--i': i }} aria-hidden="true">${c}</span>`);
 function Footer({ go, openFind }) {
-  const link = (r, label) => html`<button className="flink" onClick=${() => go(r)}>${label}</button>`;
+  const link = (r, label) => html`<button className="flink bl" aria-label=${label} onClick=${() => go(r)}>${BL(label)}</button>`;
   return html`<footer className="site-footer" data-nav="dark" style=${{ '--poster': `url(${CARAV.poster})` }}>
     <div className="sf-bg" aria-hidden="true"></div>
     <div className="sf-inner">
@@ -4161,8 +4284,8 @@ function Footer({ go, openFind }) {
           <p className="blurb">A free place to practise for Step 1, made with care for everyone on the long road to a white coat. You've got this.</p>
           <button className="btn-white" onClick=${() => go('quiz')}>Start a quiz <${Icon} n="fa-arrow-right" /></button></div>
         <div><h5>Wander</h5>${link('home', 'Home')}${link('quiz', 'Quiz')}${link('dashboard', 'Dashboard')}${link('library', 'Library')}</div>
-        <div><h5>Little helpers</h5><button className="flink" onClick=${openFind}>Find anything · ⌘K</button>${link('quiz', 'Calculator')}${link('quiz', 'Study playlist')}${link('dashboard', 'Focus timer')}</div>
-        <div><h5>Read more</h5>${CASES.slice(0, 5).map((c) => html`<a key=${c.id} href=${'https://en.wikipedia.org/wiki/' + encodeURIComponent(c.wiki.replace(/ /g, '_'))} target="_blank" rel="noopener noreferrer">${c.wiki} ↗</a>`)}</div>
+        <div><h5>Little helpers</h5><button className="flink bl" aria-label="Find anything" onClick=${openFind}>${BL('Find anything · ⌘K')}</button>${link('quiz', 'Calculator')}${link('quiz', 'Study playlist')}${link('dashboard', 'Focus timer')}</div>
+        <div><h5>Read more</h5>${CASES.slice(0, 5).map((c) => html`<a key=${c.id} href=${'https://en.wikipedia.org/wiki/' + encodeURIComponent(c.wiki.replace(/ /g, '_'))} target="_blank" rel="noopener noreferrer" className="bl" aria-label=${c.wiki}>${BL(c.wiki + ' ↗')}</a>`)}</div>
       </div>
       <div className="footer-bar"><span>© ${new Date().getFullYear()} USMLE Quiz · Free, and staying that way. A practice tool, not a substitute for your curriculum.<br />Backdrop: Caravaggio, 1571–1610.</span>
         <button className="totop" onClick=${() => window.scrollTo({ top: 0, behavior: 'smooth' })} aria-label="Back to top"><${Icon} n="fa-arrow-up" /></button></div>
@@ -4255,7 +4378,7 @@ function Palette({ onClose, go, openCase }) {
 /* Is the page behind this point light or dark? (skips the nav itself) */
 function toneAt(x, y) {
   for (const el of document.elementsFromPoint(x, y)) {
-    if (el.closest('.site-nav, .tabs, .toasts, .progress')) continue;
+    if (el.closest('.site-nav, .tabs, .stack-btn, .toasts, .progress')) continue;
     if (el.tagName === 'IMG' || el.closest('.has-art, .fc-art, .qimage')) return 'dark';
     const m = getComputedStyle(el).backgroundColor.match(/rgba?\(([^)]+)\)/);
     if (!m) continue;
@@ -4294,7 +4417,7 @@ function App() {
       const max = document.documentElement.scrollHeight - window.innerHeight;
       if (progressRef.current) progressRef.current.style.setProperty('--p', max > 0 ? Math.min(1, window.scrollY / max) : 0);
       /* each nav piece looks at what is actually underneath it and picks a light or dark tint */
-      ['.brand', '.find', '.tabs'].forEach((sel) => {
+      ['.brand', '.find', '.tabs', '.stack-btn'].forEach((sel) => {
         const el = document.querySelector(sel); if (!el) return;
         const r = el.getBoundingClientRect();
         if (route === 'quiz') { el.dataset.t = 'dark'; return; }
@@ -4343,8 +4466,8 @@ function App() {
     <${Tabs} route=${route} go=${go} />
     <main id="site">
       ${route === 'home' && html`<div className="site-view">
-        <${Hero} go=${go} /><${Manifesto} /><${Inside} go=${go} /><${Stack} /><${Stats} attempts=${attempts} /><${CtaBig} go=${go} /><${QuoteBlock} /><${Footer} go=${go} openFind=${openFind} /></div>`}
-      ${route === 'dashboard' && html`<div className="site-view"><${Dashboard} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
+        <${Hero} go=${go} /><${Manifesto} /><${Inside} go=${go} /><${Stack} /><${Orbit} go=${go} /><${Stats} attempts=${attempts} /><${CtaBig} go=${go} /><${QuoteBlock} /><${Footer} go=${go} openFind=${openFind} /></div>`}
+      ${route === 'dashboard' && html`<div className="site-view"><${BarsIntro} /><${Dashboard} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'library' && html`<div className="site-view"><${LibHero} /><${CasesSection} pending=${pendingCase} onRead=${onRead} withExplorer=${true} /><${Footer} go=${go} openFind=${openFind} /></div>`}
     </main>
     ${quizMounted && html`<div className="quiz-host" hidden=${route !== 'quiz'}><${window.QuizApp} active=${route === 'quiz'} /></div>`}
