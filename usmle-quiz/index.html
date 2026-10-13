@@ -1188,6 +1188,57 @@
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 760px) { .a3-btn { min-width: 0; width: 100%; } .a3-pick { width: 100%; } .a3-menu { width: 100%; } .a3-frame { height: 68vh; border-radius: 22px; } }
 
+        /* ===== Library v6: yellow Mona Lisa opener, white page, black decks ===== */
+        .lib-hero { position: relative; min-height: 100svh; overflow: hidden; background: radial-gradient(90% 80% at 12% 100%, #E9D500 0%, transparent 60%), linear-gradient(160deg, #F2E345 0%, #F6EC72 55%, #F3E85A 100%); color: #14110a; display: flex; align-items: center; }
+        .lib-hero::after { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .5; mix-blend-mode: multiply;
+                           background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .55 0 0 0 0 .5 0 0 0 0 .1 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+        .lh-fan { position: absolute; z-index: 1; right: -9vw; top: 50%; width: min(118vh, 78vw); aspect-ratio: 1; transform: translateY(-50%); }
+        .lh-fan svg { width: 100%; height: 100%; display: block; overflow: visible; filter: contrast(1.06) saturate(1.05) drop-shadow(0 30px 40px rgba(60,45,0,.25)); }
+        .lh-copy { position: relative; z-index: 3; padding: clamp(110px, 16vh, 170px) clamp(22px, 8vw, 150px) clamp(60px, 10vh, 110px); max-width: min(1000px, 70vw); }
+        .lh-copy h1 { font: 500 clamp(46px, 6.8vw, 112px)/1.02 'Inter Tight', -apple-system, 'Helvetica Neue', Arial, sans-serif; letter-spacing: -.045em; margin: 0; color: #14110a; text-wrap: balance; }
+        .lh-u { position: relative; display: inline-block; }
+        .lh-u svg { position: absolute; left: -2%; width: 104%; bottom: -.16em; height: .22em; overflow: visible; }
+        .lh-u path { fill: none; stroke: #14110a; stroke-width: 7; stroke-linecap: round; stroke-dasharray: 260; stroke-dashoffset: 260; animation: scrib 1.1s .9s var(--ease-out) forwards; }
+        @keyframes scrib { to { stroke-dashoffset: 0; } }
+        .lh-copy p { font: 400 clamp(14px, 1.2vw, 17px)/1.65 'JetBrains Mono', ui-monospace, monospace; max-width: 46ch; margin: clamp(26px, 4vh, 40px) 0 0; color: #1c180d; }
+        .lh-btn { margin-top: 28px; display: inline-flex; align-items: center; gap: 10px; height: 54px; padding: 0 28px; border-radius: 999px; border: 0; cursor: pointer; background: #14110a; color: #F6EC72; font: 500 15px/1 'JetBrains Mono', monospace; transition: transform .4s var(--ease), box-shadow .4s; }
+        .lh-btn:hover { transform: translateY(-2px); box-shadow: 0 16px 34px -12px rgba(20,17,10,.55); } .lh-btn i { transition: transform .4s var(--ease); } .lh-btn:hover i { transform: translateY(3px); }
+        @media (max-width: 860px) {
+          .lib-hero { align-items: flex-start; } .lh-copy { max-width: none; padding-top: 112px; }
+          .lh-fan { right: -28vw; top: auto; bottom: -8vh; width: 130vw; transform: none; opacity: .96; }
+        }
+        .sec.lib { background: #fff; --fg: #0b0b0b; --mut: rgba(0,0,0,.55); color: #0b0b0b; }
+        .sec.lib .eyebrow, .sec.lib .ex-head p { color: rgba(0,0,0,.55); }
+        .sec.lib .files-h, .sec.lib .ex-head h2, .sec.lib .a3-head h3 { color: #0b0b0b; }
+        .sec.lib .files-h .hl, .sec.lib .ex-head h2 .hl, .sec.lib .a3-head h3 .hl { color: #0b0b0b; }
+        .sec.lib .file, .sec.lib .file.c2, .sec.lib .file.c3, .sec.lib .file.c4 { --c: #0b0b0b; color: #f5f5f7; }
+        .sec.lib .file::before { opacity: .12; }
+        .sec.lib .file .spine b, .sec.lib .file .body h3 { color: #fff; }
+        .sec.lib .file .tab-n { color: #f5f5f7; }
+        .sec.lib .file .wiki { background: rgba(255,255,255,.08); }
+        .sec.lib .file .obj { border-left-color: #fff; }
+        .sec.lib .file .acts .primary { background: #fff; color: #0b0b0b; }
+        .sec.lib .file .acts button:not(.primary), .sec.lib .file .acts a { color: #fff; border-color: rgba(255,255,255,.35); }
+        .sec.lib .file .wiki .ph { background: repeating-linear-gradient(135deg, rgba(255,255,255,.1) 0 6px, rgba(255,255,255,.04) 6px 12px); }
+        .sec.lib .ex-input { background: #fff; border: 1.5px solid #0b0b0b; color: #0b0b0b; box-shadow: none; }
+        .sec.lib .ex-input input { color: #0b0b0b; } .sec.lib .ex-input input::placeholder { color: rgba(0,0,0,.4); } .sec.lib .ex-x { color: #0b0b0b; }
+        .sec.lib .pillseg { background: #f1f1f1; border-color: rgba(0,0,0,.1); } .sec.lib .pillseg button { color: rgba(0,0,0,.6); } .sec.lib .pillseg button.on { color: #fff; } .sec.lib .pillseg .pill-thumb { background: #0b0b0b; }
+        .sec.lib .ex-chips button { color: #0b0b0b; border-color: rgba(0,0,0,.25); } .sec.lib .ex-chips button:hover { background: #0b0b0b; color: #fff; border-color: #0b0b0b; }
+        .sec.lib .ex-msg { color: rgba(0,0,0,.6); border-color: rgba(0,0,0,.2); }
+        .sec.lib .btn-ghost { color: #0b0b0b; border-color: rgba(0,0,0,.3); } .sec.lib .btn-ghost:hover { border-color: #0b0b0b; }
+        .sec.lib .wk-card { background: #0b0b0b; border-color: #0b0b0b; } .sec.lib .wk-meta { color: #fff; }
+        .sec.lib .wk-save.on { background: #fff; border-color: #fff; color: #0b0b0b; }
+        .sec.lib .wk.sk .wk-card { background: linear-gradient(100deg, #eee 30%, #f8f8f8 50%, #eee 70%); background-size: 220% 100%; }
+        .sec.lib .a3-btn { background: #0b0b0b; border-color: #0b0b0b; } .sec.lib .a3-ico { background: #fff; color: #0b0b0b; }
+        .sec.lib .a3-credit { color: rgba(0,0,0,.55); opacity: 1; } .sec.lib .a3-credit a { color: #0b0b0b; }
+        .sec.lib .a3-frame { border-color: #0b0b0b; }
+        .sec.lib .reveal { }
+        .lh-copy { max-width: min(900px, 50vw); } .lh-copy h1 { font-size: clamp(44px, 6vw, 104px); }
+        @media (max-width: 860px) { .lh-copy { max-width: none; } .lh-copy h1 { font-size: clamp(42px, 12vw, 70px); } }
+        .sec.lib .file .eyebrow { color: rgba(255,255,255,.55) !important; }
+        .nav-actions:has(.find[data-t="light"]) .btn-white { background: #0b0b0d; color: #fff; box-shadow: none; }
+        .nav-actions:has(.find[data-t="light"]) .btn-white:hover { background: #222; }
+
     </style>
 </head>
 <body>
@@ -4062,8 +4113,33 @@ function Anatomy3D() {
   </section>`;
 }
 
+const MONA = 'https://cdn.jsdelivr.net/gh/VeeVera123/Web-Crawler@900e7160c25e1f6ae0ddd82cf67d941d375242d7/usmle-quiz/assets/art/mona-lisa.jpg';
+/* Yellow Library opener: a slowly turning asterisk reveals and hides the Mona Lisa behind it. */
+function LibHero() {
+  const spin = !reduceMotion();
+  const bars = [[200, 0], [150, 60], [170, 120]];
+  const go = () => { const el = document.getElementById('lib-cases'); if (el) el.scrollIntoView({ behavior: 'smooth' }); };
+  return html`<section className="lib-hero" data-nav="light">
+    <div className="lh-fan" aria-hidden="true">
+      <svg viewBox="0 0 1000 1000" role="img" aria-label="The Mona Lisa, revealed by a turning fan">
+        <defs><mask id="fanm" maskUnits="userSpaceOnUse" x="-300" y="-300" width="1600" height="1600">
+          <rect x="-300" y="-300" width="1600" height="1600" fill="#000" />
+          <g fill="#fff">${bars.map(([w, a]) => html`<rect key=${a} x=${500 - w / 2} y="-100" width=${w} height="1200" transform=${'rotate(' + a + ' 500 500)'} />`)}
+            ${spin && html`<animateTransform attributeName="transform" type="rotate" from="0 500 500" to="360 500 500" dur="64s" repeatCount="indefinite" />`}</g>
+        </mask></defs>
+        <image href=${MONA} x="-100" y="-90" width="1200" height="1789" preserveAspectRatio="xMidYMid slice" mask="url(#fanm)" />
+      </svg>
+    </div>
+    <div className="lh-copy">
+      <h1>Dig into the <span className="lh-u">why<svg viewBox="0 0 220 24" preserveAspectRatio="none" aria-hidden="true"><path d="M3,15 C40,6 70,20 112,12 S180,8 217,14" /></svg></span> behind every answer</h1>
+      <p>Case files, Wikipedia, PubMed and open-access journals, together in one quiet place. Search, highlight and keep your own notes.</p>
+      <button className="lh-btn" onClick=${go}>Browse the cases <${Icon} n="fa-arrow-down" /></button>
+    </div>
+  </section>`;
+}
+
 function CasesSection({ pending, onRead, withExplorer }) {
-  return html`<section className="sec" data-tone="paper" data-nav="dark" style=${withExplorer ? { paddingTop: 120, minHeight: '100dvh' } : undefined}>
+  return html`<section className=${cx('sec', withExplorer && 'lib')} id=${withExplorer ? 'lib-cases' : undefined} data-tone="paper" data-nav="light" style=${withExplorer ? { minHeight: '100dvh' } : undefined}>
     <div className="wrap">
       <h2 className="files-h reveal" style=${{ '--d': '80ms', marginTop: 18 }}>Open a case. <span className="hl">Read the story</span> behind the answer.</h2>
       <${CaseFiles} pending=${pending} onRead=${onRead} />
@@ -4269,7 +4345,7 @@ function App() {
       ${route === 'home' && html`<div className="site-view">
         <${Hero} go=${go} /><${Manifesto} /><${Inside} go=${go} /><${Stack} /><${Stats} attempts=${attempts} /><${CtaBig} go=${go} /><${QuoteBlock} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'dashboard' && html`<div className="site-view"><${Dashboard} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
-      ${route === 'library' && html`<div className="site-view"><${CasesSection} pending=${pendingCase} onRead=${onRead} withExplorer=${true} /><${Footer} go=${go} openFind=${openFind} /></div>`}
+      ${route === 'library' && html`<div className="site-view"><${LibHero} /><${CasesSection} pending=${pendingCase} onRead=${onRead} withExplorer=${true} /><${Footer} go=${go} openFind=${openFind} /></div>`}
     </main>
     ${quizMounted && html`<div className="quiz-host" hidden=${route !== 'quiz'}><${window.QuizApp} active=${route === 'quiz'} /></div>`}
     ${reader && html`<${Reader} c=${reader} onClose=${() => setReader(null)} />`}
