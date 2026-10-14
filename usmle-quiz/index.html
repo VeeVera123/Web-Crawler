@@ -4854,7 +4854,10 @@ function startCloud() {
 const Cloud = {
   async signUp(email, password, name) { const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } }); if (error) throw error; return data; },
   async signIn(email, password) { const { error } = await sb.auth.signInWithPassword({ email, password }); if (error) throw error; },
-  async github() { const { error } = await sb.auth.signInWithOAuth({ provider: 'github', options: { redirectTo: location.href.split('#')[0] } }); if (error) throw error; },
+  async github() {
+    if (!/^https?:$/.test(location.protocol)) throw new Error('FILE_ORIGIN');
+    const { error } = await sb.auth.signInWithOAuth({ provider: 'github', options: { redirectTo: location.href.split('#')[0] } }); if (error) throw error;
+  },
   async reset(email) { const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.href.split('#')[0] }); if (error) throw error; },
   async out(wipe) { await sb.auth.signOut(); if (wipe) { Object.keys(localStorage).filter((k) => /^usmle-(site|quiz):/.test(k)).forEach((k) => localStorage.removeItem(k)); location.reload(); } },
 };
@@ -4871,7 +4874,7 @@ function AuthModal() {
     window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
   }, [c.modal]);
   if (!c.modal) return null;
-  const friendly = (m) => (/Invalid login/i.test(m) ? 'That email and password do not match.' : /already registered/i.test(m) ? 'There is already an account with that email. Try signing in.' : /provider is not enabled|Unsupported provider/i.test(m) ? 'GitHub sign-in is not switched on yet. Use email for now.' : /Password should/i.test(m) ? 'Please use a password with at least 6 characters.' : /rate limit/i.test(m) ? 'Too many tries. Please wait a minute.' : m);
+  const friendly = (m) => (m === 'FILE_ORIGIN' ? 'GitHub sign-in needs the site to be hosted at a web address. It cannot start from a file on your computer. Use email for now.' : /Invalid login/i.test(m) ? 'That email and password do not match.' : /already registered/i.test(m) ? 'There is already an account with that email. Try signing in.' : /provider is not enabled|Unsupported provider/i.test(m) ? 'GitHub sign-in is not switched on yet. Use email for now.' : /Password should/i.test(m) ? 'Please use a password with at least 6 characters.' : /rate limit/i.test(m) ? 'Too many tries. Please wait a minute.' : m);
   const submit = async (e) => {
     e.preventDefault(); setErr(''); setNote(''); setBusy(true);
     try {
