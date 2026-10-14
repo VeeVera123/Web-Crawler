@@ -1401,6 +1401,25 @@
         @media (max-width: 1240px) { .nav-actions .btn-white { display: none; } .find .lbl, .find kbd, .acct-in .lbl { display: none; } .find, .acct-in { width: 46px; padding: 0; justify-content: center; } }
         @media (max-width: 900px) and (min-width: 761px) { .tabs .tab span { display: none; } .tabs .tab { padding: 0 18px; } }
 
+        /* ===== calendar picker ===== */
+        .dp-btn { display: inline-flex; align-items: center; gap: 10px; height: 52px; padding: 0 18px; border-radius: 16px; border: 1.5px solid rgba(0,0,0,.18); background: #fff; color: #0d0d08; font: 500 15px 'Montserrat', sans-serif; cursor: pointer; text-align: left; letter-spacing: 0; text-transform: none; transition: border-color .25s, box-shadow .3s; width: 100%; }
+        .dp-btn:hover, .dp-btn.open { border-color: #0d0d08; } .dp-btn.open { box-shadow: 0 0 0 4px rgba(0,0,0,.07); } .dp-btn i { opacity: .6; } .dp-btn .ph { opacity: .45; }
+        .pl-count .dp-btn { background: rgba(255,255,255,.08); color: #fff; border-color: rgba(255,255,255,.3); width: auto; min-width: 220px; height: 46px; border-radius: 14px; } .pl-count .dp-btn:hover, .pl-count .dp-btn.open { border-color: #fff; box-shadow: none; }
+        .dp-pop { position: fixed; z-index: 700; width: 320px; padding: 16px; border-radius: 28px; background: #fbfaf6; color: #0d0d08; box-shadow: 0 30px 80px -20px rgba(0,0,0,.55), 0 0 0 1px rgba(0,0,0,.07); animation: dpIn .4s var(--ease-out); font-family: 'Montserrat', sans-serif; }
+        @keyframes dpIn { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: none; } }
+        .dp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .dp-head button { width: 38px; height: 38px; border-radius: 50%; border: 0; background: rgba(0,0,0,.06); cursor: pointer; font-size: 12px; transition: background .2s, transform .3s var(--ease); } .dp-head button:hover { background: #0d0d08; color: #fff; }
+        .dp-head .dp-title { width: auto; height: 38px; padding: 0 16px; border-radius: 999px; background: transparent; font: 600 15px 'Montserrat'; } .dp-head .dp-title:hover { background: rgba(0,0,0,.07); color: inherit; }
+        .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; } .dp-grid.big { grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 6px 0; }
+        .dp-grid em { text-align: center; font: 600 11px 'Montserrat'; opacity: .45; font-style: normal; padding: 6px 0; }
+        .dp-grid button { aspect-ratio: 1; border: 0; border-radius: 50%; background: transparent; font: 500 14px 'Montserrat'; color: inherit; cursor: pointer; transition: background .2s, color .2s, transform .25s var(--ease); }
+        .dp-grid.big button { aspect-ratio: auto; height: 52px; border-radius: 18px; font-size: 14.5px; }
+        .dp-grid button:hover { background: rgba(0,0,0,.08); transform: scale(1.06); } .dp-grid button.today { box-shadow: inset 0 0 0 1.5px #0d0d08; } .dp-grid button.sel { background: #0d0d08; color: #fff; font-weight: 700; }
+        .dp-foot { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(0,0,0,.08); } .dp-foot button { border: 0; background: none; height: 36px; padding: 0 14px; border-radius: 999px; font: 600 13px 'Montserrat'; cursor: pointer; } .dp-foot button:hover { background: rgba(0,0,0,.07); }
+        /* no scrollbars on the 3D picker */
+        .a3-menu { scrollbar-width: none; -ms-overflow-style: none; } .a3-menu::-webkit-scrollbar { display: none; }
+        .a3-frame, .a3-frame iframe { overflow: hidden; scrollbar-width: none; }
+
     </style>
 </head>
 <body>
@@ -4351,7 +4370,7 @@ function Anatomy3D() {
     </div>
     <div className="a3-frame">
       ${!ready && html`<div className="a3-load"><span></span><p>Loading the ${sys.name.toLowerCase()} model…</p></div>`}
-      ${armed && html`<iframe key=${url} src=${url} title=${sys.name + ' 3D model'} allow="autoplay; fullscreen; xr-spatial-tracking" allowFullScreen onLoad=${() => setReady(true)}></iframe>`}
+      ${armed && html`<iframe key=${url} src=${url} title=${sys.name + ' 3D model'} scrolling="no" allow="autoplay; fullscreen; xr-spatial-tracking" allowFullScreen onLoad=${() => setReady(true)}></iframe>`}
     </div>
     <p className="a3-credit">${sys.credit}${sys.k === 'sf' ? ' · via Sketchfab' : ''}. Drag to rotate, scroll to zoom. <a href=${url} target="_blank" rel="noopener noreferrer">Open full screen ↗</a></p>
   </section>`;
@@ -4716,7 +4735,7 @@ function PlannerTab() {
   const maxM = Math.max(30, ...week.map((w) => w.m));
   return html`<div className="pl">
     <div className="pl-count"><small>Your exam</small>${days === null ? html`<p>Pick your Step 1 date to start the countdown.</p>` : days < 0 ? html`<b>Done</b><p>Your exam date has passed. Well done for getting there.</p>` : html`<b>${days}</b><p>${days === 1 ? 'day' : 'days'} to go · about ${Math.max(1, Math.round(days / 7))} week${Math.round(days / 7) === 1 ? '' : 's'}</p>`}
-      <input type="date" value=${plan.exam} onChange=${(e) => set({ exam: e.target.value })} aria-label="Exam date" /></div>
+      <${DatePicker} value=${plan.exam} onChange=${(v) => set({ exam: v })} placeholder="Pick your exam date" label="Exam date" /></div>
     <div className="pl-goal"><small>Today</small>
       <div className="pl-ring" style=${{ '--p': Math.min(1, qToday / Math.max(1, plan.goal)) }}><b>${qToday}</b><span>of ${plan.goal} questions</span></div>
       <label>Daily goal <input type="number" min="1" max="400" value=${plan.goal} onChange=${(e) => set({ goal: Math.max(1, +e.target.value || 1) })} /></label>
@@ -4765,6 +4784,55 @@ function FocusTab() {
     <div className="fc-set">${Object.entries({ focus: 'Focus', short: 'Short', long: 'Long' }).map(([k, l]) => html`<label key=${k}>${l}<input type="number" min="1" max="90" value=${lens[k]} disabled=${on} onChange=${(e) => setLens({ ...lens, [k]: Math.max(1, Math.min(90, +e.target.value || 1)) })} /><small>min</small></label>`)}</div>
     <p className="fc-sum">Today: <b>${focusToday(log)} min</b> focused · Blocks this session: <b>${round}</b> · All time: <b>${Math.round(log.reduce((s, f) => s + f.sec, 0) / 3600 * 10) / 10} h</b></p>
   </div>`;
+}
+
+/* A calm, rounded calendar that replaces the browser's date box. Values are "YYYY-MM-DD" strings. */
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const isoOf = (y, m, d) => y + '-' + pad2(m + 1) + '-' + pad2(d);
+function DatePicker({ value, onChange, placeholder = 'Pick a date', label }) {
+  const today = new Date();
+  const parse = (v) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''); return m ? { y: +m[1], m: +m[2] - 1, d: +m[3] } : null; };
+  const sel = parse(value);
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState({ y: (sel || { y: today.getFullYear() }).y, m: (sel || { m: today.getMonth() }).m, mode: 'days' });
+  const [pos, setPos] = useState(null);
+  const btn = useRef(null);
+  const place = useCallback(() => {
+    if (!btn.current) return; const r = btn.current.getBoundingClientRect(), W = 320, H = 392;
+    const left = Math.min(Math.max(8, r.left), window.innerWidth - W - 8);
+    const below = r.bottom + 8 + H < window.innerHeight || r.top < H + 16;
+    setPos({ left, top: below ? r.bottom + 8 : r.top - H - 8, w: Math.max(W, 0) });
+  }, []);
+  useEffect(() => {
+    if (!open) return undefined;
+    place();
+    const k = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    const d = (e) => { if (!e.target.closest('.dp-pop') && !(btn.current && btn.current.contains(e.target))) setOpen(false); };
+    window.addEventListener('keydown', k, true); document.addEventListener('mousedown', d); window.addEventListener('resize', place); window.addEventListener('scroll', place, true);
+    return () => { window.removeEventListener('keydown', k, true); document.removeEventListener('mousedown', d); window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); };
+  }, [open, place]);
+  const toggle = () => { if (!open) { const s2 = parse(value); setView({ y: (s2 || { y: today.getFullYear() }).y, m: (s2 || { m: today.getMonth() }).m, mode: 'days' }); } setOpen((o) => !o); };
+  const pick = (y, m, d) => { onChange(isoOf(y, m, d)); setOpen(false); };
+  const shift = (n) => { if (view.mode === 'days') { const t = new Date(view.y, view.m + n, 1); setView({ ...view, y: t.getFullYear(), m: t.getMonth() }); } else if (view.mode === 'months') setView({ ...view, y: view.y + n }); else setView({ ...view, y: view.y + n * 12 }); };
+  const first = new Date(view.y, view.m, 1).getDay(), dim = new Date(view.y, view.m + 1, 0).getDate();
+  const cells = [...Array(first).fill(null), ...Array.from({ length: dim }, (_, i) => i + 1)];
+  const y0 = view.y - (view.y % 12);
+  const pretty = sel ? new Date(sel.y, sel.m, sel.d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+  const isT = (d) => d && today.getFullYear() === view.y && today.getMonth() === view.m && today.getDate() === d;
+  const isS = (d) => d && sel && sel.y === view.y && sel.m === view.m && sel.d === d;
+  return html`<${Fragment}>
+    <button type="button" ref=${btn} className=${cx('dp-btn', open && 'open')} onClick=${toggle} aria-haspopup="dialog" aria-expanded=${open} aria-label=${label || placeholder}>
+      <${Icon} n="fa-calendar-days" /><span className=${cx(!sel && 'ph')}>${pretty || placeholder}</span></button>
+    ${open && pos && ReactDOM.createPortal(html`<div className="dp-pop" style=${{ left: pos.left, top: pos.top }} role="dialog" aria-label="Choose a date">
+      <div className="dp-head"><button type="button" onClick=${() => shift(-1)} aria-label="Previous"><${Icon} n="fa-chevron-left" /></button>
+        <button type="button" className="dp-title" onClick=${() => setView({ ...view, mode: view.mode === 'days' ? 'months' : view.mode === 'months' ? 'years' : 'days' })}>${view.mode === 'days' ? MONTHS[view.m] + ' ' + view.y : view.mode === 'months' ? view.y : y0 + ' – ' + (y0 + 11)}</button>
+        <button type="button" onClick=${() => shift(1)} aria-label="Next"><${Icon} n="fa-chevron-right" /></button></div>
+      ${view.mode === 'days' && html`<div className="dp-grid"><${Fragment}>${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => html`<em key=${'w' + i}>${w}</em>`)}${cells.map((d, i) => d ? html`<button type="button" key=${i} className=${cx(isS(d) && 'sel', isT(d) && 'today')} onClick=${() => pick(view.y, view.m, d)}>${d}</button>` : html`<span key=${i}></span>`)}<//></div>`}
+      ${view.mode === 'months' && html`<div className="dp-grid big">${MONTHS.map((m, i) => html`<button type="button" key=${m} className=${cx(sel && sel.y === view.y && sel.m === i && 'sel')} onClick=${() => setView({ ...view, m: i, mode: 'days' })}>${m.slice(0, 3)}</button>`)}</div>`}
+      ${view.mode === 'years' && html`<div className="dp-grid big">${Array.from({ length: 12 }, (_, i) => y0 + i).map((y) => html`<button type="button" key=${y} className=${cx(sel && sel.y === y && 'sel')} onClick=${() => setView({ ...view, y, mode: 'months' })}>${y}</button>`)}</div>`}
+      <div className="dp-foot"><button type="button" onClick=${() => { onChange(''); setOpen(false); }}>Clear</button><button type="button" onClick=${() => pick(today.getFullYear(), today.getMonth(), today.getDate())}>Today</button></div>
+    </div>`, document.body)}
+  <//>`;
 }
 
 /* ---------- the Study page ---------- */
@@ -4988,7 +5056,7 @@ function ProfileModal() {
       <label>Username<span className="pf-at"><i>@</i><input value=${f.username} maxLength="20" onChange=${(e) => set('username', e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="yourname" autoCapitalize="none" spellCheck="false" /></span><small className=${'pf-n ' + avail}>${note}</small></label>
       <label>About you<textarea maxLength="160" value=${f.bio} onChange=${(e) => set('bio', e.target.value)} placeholder="A line about you, your goals, your why…"></textarea><small className="pf-n">${f.bio.length}/160</small></label>
       <div className="pf-row"><label>Study year<select value=${f.year} onChange=${(e) => set('year', e.target.value)}><option value="">Not set</option>${STUDY_YEARS.map((y) => html`<option key=${y} value=${y}>${y}</option>`)}</select></label>
-        <label>Step 1 date<input type="date" value=${f.exam} onChange=${(e) => set('exam', e.target.value)} /></label></div>
+        <label>Step 1 date<${DatePicker} value=${f.exam} onChange=${(v) => set('exam', v)} placeholder="Pick a date" label="Step 1 date" /></label></div>
       ${err && html`<p className="au-err" role="alert">${err}</p>`}
       <button className="au-go" type="submit" disabled=${busy || avail === 'checking'}>${busy ? 'Saving…' : 'Save profile'}</button>
     </form></div>`, document.body);

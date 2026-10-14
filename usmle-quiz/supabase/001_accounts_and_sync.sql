@@ -26,7 +26,10 @@ $$;
 
 create policy "own profile read" on public.profiles for select to authenticated using (id = (select auth.uid()));
 create policy "own profile update" on public.profiles for update to authenticated
-  using (id = (select auth.uid())) with check (id = (select auth.uid()) and is_admin = (select p.is_admin from public.profiles p where p.id = (select auth.uid())));
+  using (id = (select auth.uid())) with check (id = (select auth.uid()));
+-- people may edit only these columns; is_admin and id can never be changed from the browser
+revoke update on public.profiles from authenticated, anon;
+grant update (display_name, last_seen) on public.profiles to authenticated;
 create policy "admin reads profiles" on public.profiles for select to authenticated using (public.is_admin());
 
 create policy "own state read" on public.user_state for select to authenticated using (user_id = (select auth.uid()));

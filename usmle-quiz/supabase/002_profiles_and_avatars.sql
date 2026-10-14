@@ -30,6 +30,10 @@ insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_typ
 values ('avatars', 'avatars', true, 262144, array['image/jpeg','image/png','image/webp'])
 on conflict (id) do nothing;
 
+grant update (username, bio, study_year, exam_date, avatar_url) on public.profiles to authenticated;
+
+create policy "avatar read own folder" on storage.objects for select to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text);
 create policy "avatar insert own folder" on storage.objects for insert to authenticated
   with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text);
 create policy "avatar update own folder" on storage.objects for update to authenticated
