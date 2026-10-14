@@ -1,0 +1,43 @@
+
+        /* ============================================================
+           QUIZ ADDITIONS (dock reserve, jelly physics, seek bar, mobile)
+           ============================================================ */
+        body.quiz-locked { overflow: hidden; }
+        .quiz-root { min-height: 0; }
+        .quiz-root.blur-protect { filter: blur(30px) brightness(0.3); }
+
+        .jelly { transform-style: preserve-3d; will-change: transform; -webkit-tap-highlight-color: transparent;
+                 transition: background-color .2s, box-shadow .2s, border-color .2s, opacity .2s, color .2s !important; }
+
+        /* Content reserves room for whichever dock panel is open: cards shift away instead of being covered. */
+        .reserve-pad { padding-right: var(--reserve-x, 0px);
+                       padding-bottom: calc(var(--reserve-y, 0px) + var(--nav-space, 0px));
+                       transition: padding .6s var(--ease-apple); }
+
+        .dock-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 9998; width: auto;
+                      padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); }
+        .dock-sheet.sheet-dark { background: rgba(14,14,18,.78); border-top: 1px solid rgba(255,255,255,.14); }
+        .dock-sheet.sheet-light { background: rgba(255,255,255,.78); border-top: 1px solid rgba(0,0,0,.08); }
+        .dock-sheet.sheet-dark, .dock-sheet.sheet-light { border-radius: 26px 26px 0 0; -webkit-backdrop-filter: blur(26px) saturate(1.6); backdrop-filter: blur(26px) saturate(1.6); box-shadow: 0 -20px 60px rgba(0,0,0,.35); }
+        .dock-sheet.calc-sheet { display: flex; justify-content: center; pointer-events: none; }
+        .dock-sheet.calc-sheet > * { pointer-events: auto; }
+
+        .seek-range { -webkit-appearance: none; appearance: none; flex: 1; min-width: 0; height: 5px; border-radius: 99px; outline: none; cursor: pointer;
+                      background: linear-gradient(to right, #FF9E7C var(--p, 0%), rgba(255,255,255,.24) var(--p, 0%)); }
+        .seek-range:not(.dark) { background: linear-gradient(to right, #FF9E7C var(--p, 0%), rgba(0,0,0,.2) var(--p, 0%)); }
+        .seek-range:disabled { opacity: .4; cursor: default; }
+        .seek-range::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 0;
+                      box-shadow: 0 2px 10px rgba(0,0,0,.45); transition: transform .2s cubic-bezier(.34,1.56,.64,1); }
+        .seek-range:active::-webkit-slider-thumb { transform: scale(1.4); }
+        .seek-range::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 2px 10px rgba(0,0,0,.45); }
+
+        @media (max-width: 767px) {
+            .nexus .nexus-heading { font-size: 1.9rem; }
+            .calc-btn { width: 50px; height: 50px; }
+        }
+
+        /* Calm controls: no hover / press motion on the glass buttons */
+        .liquid-glass-music-btn:hover, .lg-toggle:hover, .lg-toggle:active, .calc-pill:hover, .calc-pill:active,
+        .liquid-glass-play-btn:hover, .lg-glass-btn:hover, .lg-glass-btn:active, .liquid-glass-playlist-card:hover,
+        .liquid-glass-music-dropdown:hover { transform: none !important; }
+        .calc-btn:hover { transform: none; }

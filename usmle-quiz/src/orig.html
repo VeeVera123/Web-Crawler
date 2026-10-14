@@ -1,0 +1,1910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="x-poe-datastore-behavior" content="local_only">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://code.jquery.com https://unpkg.com https://d3js.org https://threejs.org https://cdn.plot.ly https://stackpath.bootstrapcdn.com https://maps.googleapis.com https://cdn.tailwindcss.com https://ajax.googleapis.com https://kit.fontawesome.com https://cdn.datatables.net https://maxcdn.bootstrapcdn.com https://code.highcharts.com https://tako-static-assets-production.s3.amazonaws.com https://www.youtube.com https://fonts.googleapis.com https://fonts.gstatic.com https://pfst.cf2.poecdn.net https://puc.poecdn.net https://i.imgur.com https://wikimedia.org https://*.icons8.com https://*.giphy.com https://picsum.photos https://images.unsplash.com https://github.com https://raw.githubusercontent.com; frame-src 'self' https://www.youtube.com https://trytako.com; child-src 'self'; manifest-src 'self'; worker-src 'self'; upgrade-insecure-requests; block-all-mixed-block;">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>USMLE Quiz</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin="" src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin="" src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/framer-motion@10/dist/framer-motion.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Typography: Manrope (UI), Sora (display), Space Grotesk (numerals) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-400-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-500-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-600-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-700-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/manrope@latest/latin-800-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/sora@latest/latin-300-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/sora@latest/latin-600-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/sora@latest/latin-700-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/space-grotesk@latest/latin-500-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/space-grotesk@latest/latin-600-normal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/fontsource/css/space-grotesk@latest/latin-700-normal.css">
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Manrope', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                        mono: ['"Space Grotesk"', 'ui-monospace', 'monospace'],
+                        display: ['Sora', 'sans-serif']
+                    }
+                }
+            }
+        };
+    </script>
+    <style>
+        :root {
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --ease-apple:    cubic-bezier(0.32, 0.72, 0, 1);
+            --ease-soft:     cubic-bezier(0.4, 0, 0.2, 1);
+            --dur-fast:  220ms;
+            --dur-med:   420ms;
+            --dur-slow:  600ms;
+        }
+        * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+        *::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+        html, body { overflow: hidden; }
+        body { font-family: 'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+        .no-select { -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none; -webkit-touch-callout: none; }
+        .screenshot-protected { transition: filter 0.1s ease-out; }
+        .screenshot-protected.blur-protect { filter: blur(30px) brightness(0.3); }
+        @media print { body * { display: none !important; } body::after { content: "Fun fact: The raw ingredients of a human body would cost over £116,000."; display: block; font-size: 24px; text-align: center; padding: 50px; } }
+
+        .typing-cursor { display: inline-block; width: 2px; height: 1em; background: white; margin-left: 2px; animation: blink 1s step-end infinite; vertical-align: text-bottom; }
+        @keyframes blink { from, to { background: transparent; } 50% { background: white; } }
+
+        .glass-5-tilt { transition: transform 0.42s var(--ease-apple) !important; transform-style: preserve-3d; will-change: transform; }
+
+        .liquid-glass-music-btn,
+        .liquid-glass-music-dropdown,
+        .liquid-glass-timer,
+        .liquid-glass-calc-panel,
+        .liquid-glass-player-card,
+        .liquid-glass-playlist-card,
+        .liquid-glass-play-btn,
+        .liquid-glass-photo-frame,
+        .liquid-glass-album-cover,
+        .lg-toggle, .lg-nav, .calc-pill, .lg-glass-btn,
+        .score-card {
+            transition: transform var(--dur-med) var(--ease-apple),
+                        background-color var(--dur-fast) var(--ease-soft),
+                        box-shadow var(--dur-fast) var(--ease-soft),
+                        border-color var(--dur-fast) var(--ease-soft),
+                        opacity var(--dur-fast) var(--ease-soft);
+        }
+        .liquid-glass-music-dropdown { position: relative; border-radius: 28px; isolation: isolate; box-shadow: 0 20px 60px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.1), inset 0 1px 0 rgba(255,255,255,0.3); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); }
+        .liquid-glass-music-dropdown::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; box-shadow: inset 0 0 12px -4px #000; background: rgba(255,255,255,0.05); }
+        .liquid-glass-music-dropdown::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-music-dropdown.dark::before { background: rgba(40,40,40,0.15); }
+
+        .liquid-glass-timer { position: relative; border-radius: 20px; isolation: isolate; box-shadow: 0 8px 32px rgba(0,0,0,0.15); }
+        .liquid-glass-timer::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 20px; box-shadow: inset 0 0 10px -4px #000; background: rgba(255,255,255,0.03); }
+        .liquid-glass-timer::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: 20px; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-timer.dark::before { background: rgba(40,40,40,0.1); }
+        .liquid-glass-music-btn { position: relative; border-radius: 16px; isolation: isolate; box-shadow: 0 4px 15px rgba(0,0,0,0.1); transition: all 0.25s cubic-bezier(0.4,0,0.2,1); }
+        .liquid-glass-music-btn::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 16px; box-shadow: inset 0 0 8px -3px #000; background: rgba(255,255,255,0.03); }
+        .liquid-glass-music-btn::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: 16px; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-music-btn.dark::before { background: rgba(50,50,50,0.1); }
+        .liquid-glass-music-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+        .liquid-glass-player-card { position: relative; border-radius: 20px; isolation: isolate; box-shadow: 0 10px 40px rgba(0,0,0,0.15); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); }
+        .liquid-glass-player-card::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 20px; box-shadow: inset 0 0 12px -4px #000; background: rgba(255,255,255,0.05); }
+        .liquid-glass-player-card::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: 20px; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-player-card.dark::before { background: rgba(40,40,40,0.15); }
+        .liquid-glass-playlist-card { position: relative; border-radius: 20px; isolation: isolate; box-shadow: 0 8px 32px rgba(0,0,0,0.1); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); }
+        .liquid-glass-playlist-card::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 20px; box-shadow: inset 0 0 10px -3px #000; background: rgba(255,255,255,0.03); }
+        .liquid-glass-playlist-card::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: 20px; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-playlist-card.dark::before { background: rgba(35,35,35,0.15); }
+        .liquid-glass-playlist-card:hover { transform: translateY(-2px); }
+        .liquid-glass-play-btn { position: relative; border-radius: 50%; isolation: isolate; box-shadow: 0 8px 32px rgba(0,0,0,0.15); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); }
+        .liquid-glass-play-btn::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 50%; box-shadow: inset 0 0 10px -3px #000; background: rgba(255,255,255,0.1); }
+        .liquid-glass-play-btn::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: 50%; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-play-btn.dark::before { background: rgba(60,60,60,0.2); }
+        .liquid-glass-play-btn:hover { transform: scale(1.1); }
+
+        .liquid-glass-photo-frame { position: relative; border-radius: 50%; box-shadow: 0 8px 32px rgba(0,0,0,0.15); border: 3px solid rgba(255,255,255,0.35); overflow: hidden; }
+        .liquid-glass-photo-frame.dark { border-color: rgba(255,255,255,0.25); }
+        .liquid-glass-photo-frame:hover { border-color: rgba(255,255,255,0.45); }
+        .liquid-glass-album-cover { position: relative; border-radius: 50%; box-shadow: 0 8px 32px rgba(0,0,0,0.2); border: 2px solid rgba(255,255,255,0.3); overflow: hidden; }
+        .liquid-glass-album-cover.dark { border-color: rgba(255,255,255,0.2); }
+        .liquid-glass-album-cover:hover { border-color: rgba(255,255,255,0.4); }
+        .liquid-glass-content { position: relative; z-index: 1; }
+
+        .spin-animation { animation: spinCover 9s linear infinite; }
+        .spin-animation.paused { animation-play-state: paused; }
+        @keyframes spinCover { to { transform: rotate(360deg); } }
+
+        .sound-bar { transform-origin: bottom; animation: eqBob 0.85s ease-in-out infinite alternate; }
+        .sound-bar:nth-child(2) { animation-delay: 0.22s; }
+        .sound-bar:nth-child(3) { animation-delay: 0.44s; }
+        @keyframes eqBob { from { transform: scaleY(0.5); } to { transform: scaleY(1.3); } }
+
+        .lg-toggle { position: relative; isolation: isolate; box-shadow: 0 4px 15px rgba(0,0,0,0.1); transition: transform 0.15s cubic-bezier(0.4,0,0.2,1), box-shadow 0.15s cubic-bezier(0.4,0,0.2,1); }
+        .lg-toggle::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; box-shadow: inset 0 0 8px -3px #000; background: rgba(255,255,255,0.03); }
+        .lg-toggle::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .lg-toggle.dark::before { background: rgba(50,50,50,0.1); }
+        .lg-toggle:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+        .lg-toggle:active { transform: scale(0.93); }
+        .lg-toggle > * { position: relative; z-index: 1; }
+        .calc-pill { position: relative; height: 44px; width: 44px; border-radius: 22px; display: flex; align-items: center; justify-content: center; cursor: pointer; isolation: isolate; box-shadow: 0 4px 15px rgba(0,0,0,0.1); transition: transform 0.15s cubic-bezier(0.4,0,0.2,1), box-shadow 0.15s cubic-bezier(0.4,0,0.2,1); }
+        .calc-pill::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; box-shadow: inset 0 0 8px -3px #000; background: rgba(255,255,255,0.03); }
+        .calc-pill::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .calc-pill.dark::before { background: rgba(50,50,50,0.1); }
+        .calc-pill:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+        .calc-pill:active { transform: scale(0.93); }
+        .calc-icon { position: relative; z-index: 4; font-size: 22px; font-weight: 300; color: white; text-shadow: 0 1px 5px rgba(0,0,0,0.55); transition: transform 0.42s var(--ease-apple); user-select: none; line-height: 1; }
+        .calc-pill.open .calc-icon { transform: rotate(45deg); }
+        .liquid-glass-calc-panel { position: relative; border-radius: 24px; isolation: isolate; box-shadow: 0 20px 60px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.1), inset 0 1px 0 rgba(255,255,255,0.3); transition: all 0.3s cubic-bezier(0.4,0,0.2,1); }
+        .liquid-glass-calc-panel::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; box-shadow: inset 0 0 12px -4px #000; background: rgba(255,255,255,0.05); }
+        .liquid-glass-calc-panel::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .liquid-glass-calc-panel.dark::before { background: rgba(40,40,40,0.15); }
+        .liquid-glass-calc-panel:not(.dark) { background: rgba(0, 0, 0, 0.6); }
+        .liquid-glass-calc-panel .calc-display, .liquid-glass-calc-panel .calc-grid { position: relative; z-index: 2; }
+        .calc-display { padding: 16px 16px 6px; text-align: right; font-size: 38px; font-weight: 300; color: white; text-shadow: 0 2px 8px rgba(0,0,0,0.4); letter-spacing: -1.5px; word-break: break-all; min-height: 60px; font-family: 'Space Grotesk', monospace; }
+        .calc-display.small { font-size: 22px; padding-top: 22px; }
+        .calc-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; padding: 6px 12px 14px; }
+        .calc-btn { border: none; border-radius: 50%; width: 52px; height: 52px; font-size: 18px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; color: white; transition: transform 0.15s cubic-bezier(0.34,1.56,0.64,1), filter 0.1s ease; -webkit-user-select: none; user-select: none; font-family: 'Space Grotesk', monospace; }
+        .calc-btn:hover { transform: scale(1.14); filter: brightness(1.18); }
+        .calc-btn:active { transform: scale(0.88); }
+        .calc-btn-zero { border-radius: 26px; width: auto; grid-column: span 2; justify-content: flex-start; padding-left: 20px; }
+        .calc-btn-fn { background: rgba(180,180,192,0.38); box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), inset 0 -1px 0 rgba(0,0,0,0.18); }
+        .calc-btn-num { background: rgba(255,255,255,0.14); box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 -1px 0 rgba(0,0,0,0.14); }
+        .calc-btn-op { background: rgba(255,159,10,0.90); box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), inset 0 -1px 0 rgba(0,0,0,0.22); }
+        .calc-btn-op.active-op { background: rgba(255,255,255,0.95); color: #ff9f0a; }
+
+        .score-card { position: relative; border-radius: 16px; padding: 20px; isolation: isolate; background: rgba(0, 0, 0, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2); }
+        .score-card::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; box-shadow: inset 0 0 8px -3px #000; background: rgba(0,0,0,0.1); }
+        .score-card.dark { background: rgba(0,0,0,0.7); border-color: rgba(255,255,255,0.12); }
+        .score-card:hover { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1); }
+        .score-card > * { position: relative; z-index: 2; }
+
+        .lg-glass-btn { position: relative; cursor: pointer; isolation: isolate; box-shadow: 0 8px 32px rgba(0,0,0,0.15); border-radius: 18px; color: white; }
+        .lg-glass-btn::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit; box-shadow: inset 0 0 10px -4px #000; background: rgba(255,255,255,0.03); }
+        .lg-glass-btn::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        .lg-glass-btn.dark::before { background: rgba(40,40,40,0.1); }
+        .lg-glass-btn:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,0.18); }
+        .lg-glass-btn:active { transform: translateY(0) scale(0.97); }
+        .lg-glass-btn:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
+
+        .opt-btn {
+            width: 100%;
+            padding: 12px 16px 12px 48px;
+            margin-bottom: 8px;
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.2);
+            background: transparent;
+            color: white;
+            text-align: left;
+            font-family: 'Manrope', sans-serif;
+            font-weight: 500;
+            transition: background-color var(--dur-fast) var(--ease-soft),
+                        border-color var(--dur-fast) var(--ease-soft),
+                        transform 0.18s var(--ease-soft),
+                        opacity var(--dur-fast) var(--ease-soft),
+                        box-shadow var(--dur-fast) var(--ease-soft);
+            position: relative;
+            will-change: transform, background-color;
+        }
+        .opt-btn::before {
+            content: attr(data-letter);
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 24px;
+            height: 24px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: 'Space Grotesk', monospace;
+            color: rgba(255,255,255,0.7);
+            letter-spacing: 0;
+            transition: all var(--dur-fast) var(--ease-soft);
+        }
+        .opt-btn:hover:not(.locked) { background: rgba(255,255,255,0.1); transform: translateX(2px); }
+        .opt-btn:hover:not(.locked)::before { border-color: rgba(255,255,255,0.55); color: rgba(255,255,255,0.95); }
+        .opt-btn:focus-visible { outline: 2px solid #FF9E7C; outline-offset: 2px; }
+        .opt-btn.locked { cursor: default; }
+        .opt-btn.opt-selected {
+            background: rgba(255,255,255,0.18);
+            border-color: rgba(255,255,255,0.45);
+        }
+        .opt-btn.opt-dim { opacity: 0.32; }
+
+        .floating-bg-container {
+            contain: layout paint style;
+            will-change: contents;
+        }
+        .floating-bg-container img {
+            transform: translateZ(0);
+            backface-visibility: hidden;
+        }
+
+        .progress-rail {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 18px;
+            height: 3px;
+        }
+        .progress-seg {
+            flex: 1;
+            height: 100%;
+            background: rgba(255,255,255,0.12);
+            border-radius: 999px;
+            overflow: hidden;
+            position: relative;
+        }
+        .progress-seg-fill {
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, #FF9E7C, #FFB899);
+            transform-origin: left center;
+            transform: scaleX(0);
+            transition: transform 0.5s var(--ease-apple);
+        }
+        .progress-seg.done .progress-seg-fill { transform: scaleX(1); }
+        .progress-seg.current .progress-seg-fill {
+            transform: scaleX(0.5);
+            animation: currentPulse 1.8s var(--ease-soft) infinite;
+        }
+        @keyframes currentPulse {
+            0%, 100% { transform: scaleX(0.35); opacity: 0.7; }
+            50%      { transform: scaleX(0.7); opacity: 1; }
+        }
+
+        /* ============================================================
+           WAVE TEXT — canvas edition.
+           The wave is now painted on a single <canvas>. There are NO
+           per-letter DOM nodes anymore, so the browser never has to
+           style/layout hundreds of spans on mount or on dark-mode
+           toggle. Visually identical: same stagger, same 7px bob,
+           same 1s ease-in-out per letter.
+           ============================================================ */
+        .question-text-container {
+            position: relative;
+            min-height: 3em;
+            contain: layout style;
+        }
+        .question-text-container canvas { display: block; max-width: 100%; }
+        .question-card-layer { will-change: transform, opacity; transform: translateZ(0); }
+
+        /* ============================================================
+           RESULTS SCREEN — mature dashboard cards
+           ============================================================ */
+        .nexus {
+            font-family: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+            letter-spacing: -0.005em;
+            color: #FFFFFF;
+        }
+        .nexus .mono, .font-grotesk {
+            font-family: 'Space Grotesk', ui-monospace, 'SF Mono', monospace;
+            font-feature-settings: "tnum" 1, "ss01" 1;
+        }
+        .nexus-muted { color: #8b8b8b; }
+        .nexus-heading {
+            font-family: 'Sora', 'Manrope', sans-serif;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            line-height: 1.12;
+        }
+        .nexus-subtitle {
+            font-family: 'Manrope', sans-serif;
+            font-weight: 500;
+            letter-spacing: -0.01em;
+            color: #8b8b8b;
+        }
+
+        .qcard {
+            position: relative;
+            border-radius: 18px;
+            border: 1px solid rgba(255,255,255,0.07);
+            background:
+                linear-gradient(165deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.015) 34%, rgba(255,255,255,0) 100%),
+                rgba(13, 10, 8, 0.92);
+            box-shadow: 0 10px 30px -18px rgba(0,0,0,0.9);
+            transition: border-color 0.4s var(--ease-apple), box-shadow 0.4s var(--ease-apple);
+            overflow: hidden;
+        }
+        .qcard::before {
+            content: "";
+            position: absolute;
+            left: 12%; right: 12%; top: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,158,124,0.55), transparent);
+            opacity: 0;
+            transition: opacity 0.4s var(--ease-apple);
+        }
+        .qcard:hover {
+            border-color: rgba(255,158,124,0.32);
+            box-shadow: 0 22px 55px -20px rgba(0,0,0,0.85), 0 0 45px -18px rgba(255,158,124,0.4);
+        }
+        .qcard:hover::before { opacity: 1; }
+        .qcard > * { position: relative; z-index: 1; }
+        .qcard::after { pointer-events: none; }
+        .qcard-featured {
+            background:
+                radial-gradient(130% 130% at 88% -12%, rgba(255,158,124,0.16) 0%, rgba(255,158,124,0.04) 38%, transparent 62%),
+                linear-gradient(165deg, rgba(255,255,255,0.05), rgba(255,255,255,0) 60%),
+                rgba(13, 10, 8, 0.92);
+        }
+        .qcard-shine::after {
+            content: "";
+            position: absolute;
+            top: -30%; bottom: -30%; width: 38%; left: -70%;
+            transform: skewX(-18deg);
+            background: linear-gradient(105deg, transparent, rgba(255,255,255,0.055), transparent);
+            animation: qshine 5s var(--ease-soft) infinite 1.6s;
+            z-index: 0;
+        }
+        @keyframes qshine { 0% { left: -70%; } 45%, 100% { left: 140%; } }
+
+        .qcard-label {
+            font-size: 10.5px;
+            font-weight: 800;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: #8b8b8b;
+            font-family: 'Manrope', sans-serif;
+        }
+        .qchip {
+            width: 34px; height: 34px; border-radius: 11px;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: #a3a3a3; font-size: 13px; flex-shrink: 0;
+            transition: transform 0.45s var(--ease-apple), color 0.3s var(--ease-soft),
+                        border-color 0.3s var(--ease-soft), background 0.3s var(--ease-soft);
+        }
+        .qcard:hover .qchip {
+            transform: translateY(-2px) rotate(-6deg);
+            color: #FFB899;
+            border-color: rgba(255,158,124,0.35);
+            background: rgba(255,158,124,0.08);
+        }
+
+        .nexus-btn {
+            font-family: 'Manrope', sans-serif;
+            font-size: 12.5px;
+            font-weight: 600;
+            padding: 9px 16px;
+            border-radius: 11px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.03);
+            color: #e8e8e8;
+            transition: all 0.3s var(--ease-apple);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+        }
+        .nexus-btn:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.22); transform: translateY(-1px); }
+        .nexus-btn:active { transform: translateY(0) scale(0.97); }
+        .nexus-btn i { transition: transform 0.5s var(--ease-apple); }
+        .nexus-btn-primary { background: #FFFFFF; color: #0A0A0A; border-color: #FFFFFF; }
+        .nexus-btn-primary:hover { background: #FFE9DF; border-color: #FFE9DF; box-shadow: 0 8px 24px -10px rgba(255,158,124,0.5); }
+        .btn-redo:hover i { transform: rotate(180deg); }
+
+        .nexus-tab {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 5px 11px;
+            border-radius: 8px;
+            color: #8b8b8b;
+            transition: all 0.2s var(--ease-apple);
+            background: transparent;
+            border: 1px solid transparent;
+            cursor: pointer;
+            font-family: 'Manrope', sans-serif;
+        }
+        .nexus-tab:hover { color: #fff; background: rgba(255,255,255,0.05); }
+        .nexus-tab.active { background: rgba(255,158,124,0.12); color: #FFB899; border-color: rgba(255,158,124,0.28); }
+
+        .nexus-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-size: 10.5px;
+            font-weight: 600;
+            font-family: 'Space Grotesk', monospace;
+            white-space: nowrap;
+        }
+        .nexus-pill-up { color: #4ade80; background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74,222,128,0.18); }
+        .nexus-pill-down { color: #f87171; background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248,113,113,0.18); }
+
+        .nexus-icon-chip {
+            width: 32px;
+            height: 32px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #8b8b8b;
+            font-size: 12px;
+            flex-shrink: 0;
+            transition: transform 0.4s var(--ease-apple);
+        }
+        .nexus-row:hover .nexus-icon-chip { transform: scale(1.08) rotate(-5deg); }
+
+        .nexus-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 11px 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.055);
+            border-radius: 10px;
+            transition: background 0.25s var(--ease-soft);
+        }
+        .nexus-row:hover { background: rgba(255,255,255,0.04); }
+        .nexus-row:last-of-type { border-bottom: none; }
+    </style>
+</head>
+<body class="bg-white dark:bg-black">
+
+    <svg style="display: none"><filter id="lg-dist"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="70" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none"><defs><filter id="glass-distortion" x="0%" y="0%" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="77" xChannelSelector="R" yChannelSelector="G"/></filter></defs></svg>
+
+    <script>
+        (function() {
+            const h = { contextmenu: e => e.preventDefault(), selectstart: e => e.preventDefault(), dragstart: e => e.preventDefault(), copy: e => e.preventDefault(), cut: e => e.preventDefault() };
+            for (const ev in h) document.addEventListener(ev, h[ev], { passive: false });
+            document.addEventListener('keydown', function(e) { const k = e.key.toLowerCase(); if ((e.ctrlKey || e.metaKey) && ['c','x','u','s','a','p'].includes(k)) e.preventDefault(); if ((e.ctrlKey || e.metaKey) && e.shiftKey && ['i','c','j'].includes(k)) e.preventDefault(); if (e.key === 'F12' || e.key === 'PrintScreen') e.preventDefault(); }, { passive: false });
+            document.addEventListener('touchstart', function(e) { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
+        })();
+    </script>
+    <div id="root" class="screenshot-protected"></div>
+    <script>
+        const { useState, useEffect, useRef, createElement: h, useMemo, useImperativeHandle } = React;
+        const { motion, AnimatePresence } = window.Motion;
+
+        const EASE = {
+            apple:    [0.32, 0.72, 0, 1],
+            outExpo:  [0.16, 1, 0.3, 1],
+            soft:     [0.4, 0, 0.2, 1],
+            glide:    [0.45, 0.05, 0.25, 1],
+        };
+        const DUR = {
+            fast: 0.22,
+            med:  0.42,
+            slow: 0.6,
+            glide: 0.62,
+        };
+        const FEEDBACK_MS = 420;
+
+        /* ============================================================
+           Canvas wave-text engine.
+           measureLines: pure-CPU line breaking (unchanged).
+           buildLayout:  per-char x positions, measured once.
+           paintFrame:   draws the text; with a time value it applies
+                         the same 0 → -7px → 0 bob each letter had in
+                         the old CSS keyframes.
+           ============================================================ */
+        let _measureCanvas = null;
+        function measureLines(text, maxWidth, cssFont) {
+            if (!_measureCanvas) _measureCanvas = document.createElement('canvas');
+            const ctx = _measureCanvas.getContext('2d');
+            ctx.font = cssFont;
+            const tokens = text.split(/(\s+)/);
+            const lines = [];
+            let cur = '', curW = 0;
+            for (const tok of tokens) {
+                if (tok === '') continue;
+                const tw = ctx.measureText(tok).width;
+                if (cur && curW + tw > maxWidth) {
+                    lines.push(cur);
+                    if (/^\s+$/.test(tok)) { cur = ''; curW = 0; }
+                    else { cur = tok; curW = tw; }
+                } else { cur += tok; curW += tw; }
+            }
+            if (cur) lines.push(cur);
+            return lines;
+        }
+
+        const WAVE_CHAR_STAGGER = 0.022;
+        const WAVE_LINE_STAGGER = 0.07;
+        const WAVE_DURATION = 1.0;
+        const WAVE_AMP = 7;
+        const easeInOutQuad = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+        function buildLayout(text, maxWidth, cssFont) {
+            if (!_measureCanvas) _measureCanvas = document.createElement('canvas');
+            const ctx = _measureCanvas.getContext('2d');
+            const lines = measureLines(text, maxWidth, cssFont);
+            ctx.font = cssFont;
+            return lines.map((line) => {
+                const xs = [];
+                for (let i = 0; i < line.length; i++) xs.push(ctx.measureText(line.slice(0, i)).width);
+                return { text: line, xs };
+            });
+        }
+
+        function _WaveQuestionCard({ q, i, isActive, opaqueMode, currentQuestion, handleOption,
+                                    musicDropdownOpen, calcDropdownOpen, isMobile,
+                                    selected, locked, quizStarted }) {
+            const containerRef = useRef(null);
+            const canvasRef = useRef(null);
+            const layoutRef = useRef(null);
+            const fontRef = useRef({ cssFont: '16px sans-serif', fontSize: 16, lineHeight: 26, width: 0 });
+            const rafRef = useRef(0);
+            const [layoutVersion, setLayoutVersion] = useState(0);
+
+            /* Paint one frame. t === null → static (full strings, perfect
+               kerning). t === seconds → per-char wave offsets. */
+            const paintFrame = (t) => {
+                const canvas = canvasRef.current;
+                const L = layoutRef.current;
+                if (!canvas || !L || !L.length) return;
+                const { cssFont, fontSize, lineHeight, width } = fontRef.current;
+                const height = L.length * lineHeight + 2;
+                const dpr = Math.min(2.5, window.devicePixelRatio || 1);
+                const pw = Math.round(width * dpr), ph = Math.round(height * dpr);
+                if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
+                canvas.style.width = width + 'px';
+                canvas.style.height = height + 'px';
+                const ctx = canvas.getContext('2d');
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                ctx.clearRect(0, 0, width, height);
+                ctx.font = cssFont;
+                ctx.fillStyle = '#FFFFFF';
+                ctx.textBaseline = 'alphabetic';
+                for (let li = 0; li < L.length; li++) {
+                    const line = L[li];
+                    const baseY = li * lineHeight + fontSize * 0.92;
+                    if (t === null) {
+                        ctx.fillText(line.text.replace(/\s+$/, ''), 0, baseY);
+                    } else {
+                        for (let ci = 0; ci < line.text.length; ci++) {
+                            const ch = line.text[ci];
+                            if (ch === ' ') continue;
+                            const delay = ci * WAVE_CHAR_STAGGER + li * WAVE_LINE_STAGGER;
+                            const local = t - delay;
+                            let off = 0;
+                            if (local > 0 && local < WAVE_DURATION) {
+                                const half = WAVE_DURATION / 2;
+                                off = local < half
+                                    ? -WAVE_AMP * easeInOutQuad(local / half)
+                                    : -WAVE_AMP * (1 - easeInOutQuad((local - half) / half));
+                            }
+                            ctx.fillText(ch, line.xs[ci], baseY + off);
+                        }
+                    }
+                }
+            };
+
+            const computeAndSet = () => {
+                const el = containerRef.current;
+                if (!el) return;
+                const cs = getComputedStyle(el);
+                const cssFont = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+                const fontSize = parseFloat(cs.fontSize) || 16;
+                const lineHeight = fontSize * 1.625; /* leading-relaxed */
+                const maxW = el.clientWidth;
+                if (maxW <= 0) return;
+                fontRef.current = { cssFont, fontSize, lineHeight, width: maxW };
+                layoutRef.current = buildLayout(q.question, maxW, cssFont);
+                setLayoutVersion(v => v + 1);
+            };
+
+            useEffect(() => { computeAndSet(); }, [q.question]);
+
+            useEffect(() => {
+                let raf;
+                const onResize = () => {
+                    cancelAnimationFrame(raf);
+                    raf = requestAnimationFrame(() => { cancelAnimationFrame(rafRef.current); computeAndSet(); });
+                };
+                window.addEventListener('resize', onResize);
+                return () => { window.removeEventListener('resize', onResize); cancelAnimationFrame(raf); };
+            }, [q.question]);
+
+            /* Static frame whenever layout changes */
+            useEffect(() => { paintFrame(null); }, [layoutVersion]);
+
+            /* Webfonts resolve after first paint — re-measure once ready */
+            useEffect(() => {
+                let alive = true;
+                if (document.fonts && document.fonts.ready) {
+                    document.fonts.ready.then(() => { if (alive) computeAndSet(); });
+                }
+                return () => { alive = false; };
+            }, []);
+
+            /* Trigger the wave ~550ms after the card becomes active */
+            useEffect(() => {
+                if (!isActive || !quizStarted) return;
+                const timer = setTimeout(() => {
+                    cancelAnimationFrame(rafRef.current);
+                    const L = layoutRef.current;
+                    if (!L || !L.length) return;
+                    let maxDelay = 0;
+                    L.forEach((line, li) => { maxDelay = Math.max(maxDelay, line.text.length * WAVE_CHAR_STAGGER + li * WAVE_LINE_STAGGER); });
+                    const total = maxDelay + WAVE_DURATION + 0.08;
+                    const start = performance.now();
+                    const step = (now) => {
+                        const tt = (now - start) / 1000;
+                        if (tt >= total) { paintFrame(null); return; }
+                        paintFrame(Math.max(0, tt));
+                        rafRef.current = requestAnimationFrame(step);
+                    };
+                    rafRef.current = requestAnimationFrame(step);
+                }, 550);
+                return () => { clearTimeout(timer); cancelAnimationFrame(rafRef.current); };
+            }, [isActive, quizStarted, layoutVersion]);
+
+            useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+
+            const hasImage = !!q.image;
+            const isCur  = i === currentQuestion;
+            const dropdownOpen = musicDropdownOpen || calcDropdownOpen;
+
+            let targetX = '0%', targetScale = 1, targetOpacity = 0, zIndex = 0;
+            if (isCur) {
+                if (hasImage) {
+                    targetX = dropdownOpen ? '-25%' : '0%';
+                } else {
+                    targetX = dropdownOpen ? '-50%' : '0%';
+                }
+                targetScale = hasImage ? (dropdownOpen ? 0.9 : 1.05) : (dropdownOpen ? 1 : 1.05);
+                targetOpacity = 1;
+                zIndex = 20;
+            } else if (i === currentQuestion - 1) {
+                targetX = '-80%';
+                targetScale = 0.95;
+                targetOpacity = 0.4;
+                zIndex = 10;
+            } else if (i === currentQuestion + 1) {
+                targetX = dropdownOpen ? '200%' : '80%';
+                targetScale = 0.95;
+                targetOpacity = dropdownOpen ? 0 : 0.4;
+                zIndex = 10;
+            } else if (i < currentQuestion) {
+                targetX = '-120%';
+                targetScale = 0.9;
+                targetOpacity = 0;
+                zIndex = 5;
+            } else {
+                targetX = '120%';
+                targetScale = 0.9;
+                targetOpacity = 0;
+                zIndex = 5;
+            }
+
+            const cardWidth = hasImage
+                ? (isMobile ? '95vw' : 'min(90vw, 980px)')
+                : 'min(90vw, 560px)';
+
+            const questionTextNode = h('div', {
+                ref: containerRef,
+                className: 'mb-6 leading-relaxed question-text-container',
+            }, h('canvas', {
+                ref: canvasRef,
+                role: 'img',
+                'aria-label': q.question
+            }));
+
+            const optionClass = (idx) => {
+                if (!isCur || !locked || selected === null) return 'opt-btn';
+                if (idx === selected) return 'opt-btn locked opt-selected';
+                return 'opt-btn locked opt-dim';
+            };
+
+            const LETTERS = ['A','B','C','D','E','F','G','H'];
+            const renderOptions = () => h('div', { className: 'space-y-2' },
+                q.options.map((opt, idx) => h('button', {
+                    key: idx,
+                    onClick: () => isCur && !locked && handleOption(idx),
+                    className: optionClass(idx),
+                    disabled: locked,
+                    'data-letter': LETTERS[idx] || (idx + 1),
+                    'aria-label': `Option ${LETTERS[idx] || (idx+1)}: ${opt}`
+                }, opt))
+            );
+
+            const totalQuestions = questions.length;
+            const progressRail = h('div', { className: 'progress-rail' },
+                Array.from({length: totalQuestions}, (_, segIdx) => h('div', {
+                    key: segIdx,
+                    className: `progress-seg${segIdx < i ? ' done' : segIdx === i ? ' current' : ''}`
+                }, h('div', { className: 'progress-seg-fill' })))
+            );
+            const questionHeader = h('h2', { className: 'text-xl text-[#FF9E7C] font-semibold tracking-tight mb-4', style: { fontFamily: "'Sora', sans-serif" } },
+                `Question ${i + 1}`
+            );
+
+            const cardInner = hasImage
+                ? h('div', { className: 'flex flex-col md:flex-row gap-4 md:gap-6 items-stretch' },
+                    h('div', {
+                        className: `flex-shrink-0 border border-white/10 p-4 rounded-3xl ${opaqueMode ? 'bg-black/95' : 'bg-black/90'} flex items-center justify-center`,
+                        style: { width: isMobile ? '100%' : '40%', minHeight: isMobile ? '200px' : '400px', maxHeight: isMobile ? '35vh' : '75vh' }
+                    },
+                        h('img', { src: q.image, alt: 'Question illustration', className: 'max-w-full max-h-full object-contain rounded-2xl' })
+                    ),
+                    h('div', {
+                        className: `flex-1 border border-white/10 p-6 rounded-3xl overflow-y-auto ${opaqueMode ? 'bg-black/95' : 'bg-black/90'}`,
+                        style: { maxHeight: isMobile ? '40vh' : '75vh' }
+                    },
+                        progressRail,
+                        questionHeader,
+                        questionTextNode,
+                        renderOptions()
+                    )
+                )
+                : h('div', {
+                    className: `border border-white/10 p-6 rounded-3xl overflow-y-auto max-h-[80vh] ${opaqueMode ? 'bg-black/95' : 'bg-black/90'}`
+                },
+                    progressRail,
+                    questionHeader,
+                    questionTextNode,
+                    renderOptions()
+                );
+
+            return h(motion.div, {
+                className: 'absolute question-card-layer',
+                animate: { x: targetX, scale: targetScale, opacity: targetOpacity },
+                transition: { duration: DUR.glide, ease: EASE.glide },
+                style: { width: cardWidth, zIndex },
+                initial: false
+            }, cardInner);
+        }
+        const WaveQuestionCard = React.memo(_WaveQuestionCard);
+
+        function Calculator({ isDarkMode, isOpen, isAnimating, onToggle }) {
+            const [disp, setDisp] = useState('0');
+            const [prev, setPrev] = useState(null);
+            const [op, setOp] = useState(null);
+            const [fresh, setFresh] = useState(true);
+            const [activeOp, setActiveOp] = useState(null);
+            const wrapRef = useRef(null);
+            const btnRef = useRef(null);
+            const panelRef = useRef(null);
+
+            useEffect(() => {
+                const fn = (e) => { if (isOpen && wrapRef.current && !wrapRef.current.contains(e.target)) onToggle(false); };
+                document.addEventListener('mousedown', fn);
+                return () => document.removeEventListener('mousedown', fn);
+            }, [isOpen, onToggle]);
+
+            const toggleOpen = () => onToggle(!isOpen);
+
+            const onTiltMove = (e, ref) => {
+                if (!ref.current) return;
+                const rect = ref.current.getBoundingClientRect();
+                const x = e.clientX - rect.left, y = e.clientY - rect.top;
+                const cx = rect.width/2, cy = rect.height/2;
+                const rx = ((y-cy)/cy)*-6, ry = ((x-cx)/cx)*6;
+                ref.current.style.transform = `perspective(800px) rotateX(${rx}deg) rotateY(${ry}deg) scale3d(1.03,1.03,1.03)`;
+            };
+            const onTiltLeave = (ref) => {
+                if (!ref.current) return;
+                ref.current.style.transform = 'perspective(800px) rotateX(0deg) rotateY(0deg) scale3d(1,1,1)';
+            };
+
+            const fmt = (n) => { const s = String(n); return s.length > 10 ? parseFloat(n.toPrecision(7)).toString() : s; };
+            const compute = (a, b, o) => { if (o === '+') return a + b; if (o === '-') return a - b; if (o === '*') return a * b; if (o === '/') return b !== 0 ? a / b : 0; return b; };
+            const pressNum = (n) => { if (fresh) { setDisp(String(n)); setFresh(false); } else setDisp(d => d === '0' ? String(n) : (d.length < 10 ? d + n : d)); };
+            const pressDot = () => { if (fresh) { setDisp('0.'); setFresh(false); return; } if (!disp.includes('.')) setDisp(d => d + '.'); };
+            const pressOp = (o) => { const cur = parseFloat(disp); if (prev !== null && !fresh) { const res = compute(prev, cur, op); setDisp(fmt(res)); setPrev(res); } else setPrev(cur); setOp(o); setActiveOp(o); setFresh(true); };
+            const pressEq = () => { if (op === null || prev === null) return; const res = compute(prev, parseFloat(disp), op); setDisp(fmt(res)); setPrev(null); setOp(null); setActiveOp(null); setFresh(true); };
+            const pressClear = () => { setDisp('0'); setPrev(null); setOp(null); setActiveOp(null); setFresh(true); };
+            const pressPM = () => setDisp(d => d.startsWith('-') ? d.slice(1) : (d !== '0' ? '-' + d : '0'));
+            const pressPct = () => { setDisp(d => fmt(parseFloat(d)/100)); setFresh(true); };
+            const Btn = ({ label, type, wide, fn, isAct }) => h('button', { className: `calc-btn calc-btn-${type}${wide?' calc-btn-zero':''}${isAct?' active-op':''}`, onClick: fn, style: wide ? { justifySelf: 'stretch' } : {} }, label);
+            const rows = [
+                [['C','fn',pressClear],['±','fn',pressPM],['%','fn',pressPct],['÷','op',()=>pressOp('/')]],
+                [['7','num',()=>pressNum('7')],['8','num',()=>pressNum('8')],['9','num',()=>pressNum('9')],['×','op',()=>pressOp('*')]],
+                [['4','num',()=>pressNum('4')],['5','num',()=>pressNum('5')],['6','num',()=>pressNum('6')],['−','op',()=>pressOp('-')]],
+                [['1','num',()=>pressNum('1')],['2','num',()=>pressNum('2')],['3','num',()=>pressNum('3')],['+','op',()=>pressOp('+')]],
+                [['0','num',()=>pressNum('0'),true],['.','num',pressDot],['=','op',pressEq]]
+            ];
+            return h('div',{ref:wrapRef,style:{position:'relative',zIndex:9999}},
+                h('div',{ref:btnRef,className:`calc-pill glass-5-tilt ${isOpen?' open':''}${isDarkMode?' dark':''}`,onClick:toggleOpen,onMouseMove:(e)=>onTiltMove(e,btnRef),onMouseLeave:()=>onTiltLeave(btnRef),title:"Calculator"}, h('span',{className:'calc-icon'},'+')),
+                (isOpen || isAnimating) && h('div',{className:`absolute top-full right-0 mt-2 overflow-visible transition-all duration-150 ${isOpen?'opacity-100 scale-100':'opacity-0 scale-95 pointer-events-none'}`,style:{width:'268px',transformOrigin:'top right',zIndex:9999}},
+                    h('div',{ref:panelRef,className:`liquid-glass-calc-panel glass-5-tilt ${isDarkMode?'dark':''}`,style:{width:'260px',padding:'4px 0'},onMouseMove:(e)=>onTiltMove(e,panelRef),onMouseLeave:()=>onTiltLeave(panelRef)},
+                        h('div',{className:`calc-display${disp.length>9?' small':''}`},disp),
+                        h('div',{className:'calc-grid'},
+                            rows.map((row,ri)=>row.map(([label,type,fn,wide],ci)=>
+                                h(Btn,{key:`${ri}-${ci}`,label,type,wide:!!wide,fn,isAct:(label==='÷'&&activeOp==='/')||(label==='×'&&activeOp==='*')||(label==='−'&&activeOp==='-')||(label==='+'&&activeOp==='+')})
+                            ))
+                        )
+                    )
+                )
+            );
+        }
+
+        const questions = [
+            { question: "A 63-year-old man comes to the office due to poor urine flow for several months. The patient says that it takes about 10 seconds to initiate a urinary stream. He also needs to strain when urinating or the stream just stops before his bladder is empty. He has tried behavioral modifications, but the symptoms continue to be bothersome. The patient takes lisinopril for hypertension. He has smoked a pack of cigarettes a day for 30 years. His father had urothelial cancer of the bladder. He reports significant improvement several months after starting finasteride. A therapeutic effect on which of the following structures is most likely responsible for this patient's symptomatic improvement?", options: ["Structure A","Structure B","Structure C","Structure D","Structure E","Structure F"], answer: 2, image: "https://github.com/Bluegates77/Question-Images/blob/main/Question%201.png?raw=true" },
+            { question: "A 54-year-old man comes to the office due to difficulty maintaining an erection for the last several weeks. He says, \"One night I was having sex with my wife and could not maintain an erection. Since then, it has continued to be a problem.\" The patient still has morning erections. His medical history is significant for hypertension, coronary artery disease, and depression. He has been married for 20 years but reports that he and his wife have been arguing since he began spending more time at work following a promotion 2 months ago. His current medications include amlodipine, lisinopril, and bupropion. Physical examination is unremarkable. Which of the following is the most likely cause of this patient's erectile dysfunction?", options: ["Advancing age","Antidepressant-induced sexual dysfunction","Antihypertensive-induced adverse effect","Psychological distress","Vascular insufficiency"], answer: 3 },
+            { question: "A 21-year-old previously healthy man comes to the emergency department with acute onset of severe left scrotal pain and nausea. The pain started after he returned home from the gym following an intense workout. He denies any trauma, fever, or dysuria. Examination shows a swollen and tender left testis that lies higher than the right testis. Doppler ultrasound shows decreased arterial blood flow in the left spermatic cord entering the testis. Which of the following is the likely origin of the artery involved in this patient's condition?", options: ["Abdominal aorta","External iliac artery","Internal iliac artery","Internal pudendal artery","Obturator artery","Renal artery"], answer: 0 }
+        ];
+
+        const explanations = [
+            { text: `This patient has signs of bladder outlet obstruction (eg, urinary hesitancy, need to strain) most likely due to benign prostatic hyperplasia (BPH), a condition that is present in >90% of men age >80. The diagnosis is based on history of urinary symptoms and digital rectal examination showing a smooth, homogenously enlarged prostate. The prostate is located just anterior to the anal canal (Choice D) and posterior to the symphysis pubis (the above CT image is just superior to the joining of the left and right pubic bones).\n\nBPH may cause static urinary obstruction (androgen-mediated enlargement of the prostate) or dynamic obstruction (prostate smooth muscle contraction via α-adrenoceptors). 5-α reductase inhibitors (eg, finasteride) inhibit the action of androgens on the prostate gland, preventing the conversion of testosterone to dihydrotestosterone and thereby limiting further prostate enlargement. α-adrenergic blockers (eg, tamsulosin) relax the smooth muscle in the bladder neck and prostate gland and are also used to control symptoms of BPH.\n\n(Choice B) The distal end of the anterior bladder wall may or may not be visible at this level depending on patient positioning and bladder filling.\n\nEducational objective:\nThe prostate is located between the pubic symphysis and the anal canal and is visible on inferior sections of the pelvis on CT scan. Benign prostatic hyperplasia is a common, age-related condition that causes urinary symptoms (eg, hesitancy, straining, incomplete voiding). It can be medically treated with α-adrenergic blockers and 5-α reductase inhibitors.`, images: ["https://github.com/Bluegates77/Question-Images/blob/main/Answer%201.jpeg?raw=true","https://github.com/Bluegates77/Question-Images/blob/main/Benign%20prostatic%20hyperplasia%20%28BPH%29.jpeg?raw=true","https://github.com/Bluegates77/Question-Images/blob/main/Benign%20prostatic%20hyperplasia.jpeg?raw=true"] },
+            `The temporal association between this patient's arguments with his wife and subsequent onset of erectile dysfunction (ED) makes psychogenic factors the most likely cause of his ED. The presence of spontaneous nocturnal erections is another important diagnostic clue as this demonstrates the integrity of neurologic reflexes and corpus cavernosa blood flow. Loss of normal nocturnal erections occurs in men with organic ED but is not seen with psychogenic etiologies.\n\nED can be caused by organic factors, psychogenic factors, or a combination of both. Psychogenic causes include performance anxiety, depression, sexual trauma, and/or relationship problems and are typically associated with an abrupt onset triggered by stress, as in this patient. In contrast, men suffering from organic causes of ED (eg, vascular insufficiency) tend to have a slower progression of symptoms, with intermittent ED later becoming more persistent in nature (Choice E).\n\n(Choice A) There tends to be an increase in the incidence of ED with advancing age. However, the sudden onset of this patient's dysfunction during a time of relationship and work stress makes a psychogenic cause more likely.\n\n(Choices B and C) Antidepressants, particularly selective serotonin reuptake inhibitors, have been associated with sexual dysfunction. However, the norepinephrine-dopamine reuptake inhibitor bupropion has not been associated with sexual dysfunction. Of the antihypertensive agents, thiazide diuretics and sympathetic blockers (eg, clonidine, methyldopa) have the greatest risk for ED. Angiotensin-converting enzyme inhibitors (eg, lisinopril) and calcium channel blockers (eg, amlodipine) have the least risk.\n\nEducational objective:\nPsychogenic causes of erectile dysfunction include performance anxiety, depression, sexual trauma, relationship problems, and stress. Important clues include sudden-onset and normal nocturnal erections.`,
+            `The gonadal arteries arise from the abdominal aorta slightly below the renal arteries. Each gonadal artery courses obliquely downward and laterally within the retroperitoneal space near the psoas major muscle. After crossing anteriorly over the ureter, the gonadal arteries run parallel to the external iliac vessels and eventually traverse the inguinal canal to supply the testes via the spermatic cord in males.\n\nThis patient most likely has testicular torsion, which is usually due to inadequate fixation of the lower pole of the testis to the tunica vaginalis. Testicular torsion is caused by twisting of the spermatic cord, resulting in compression of the pampiniform plexus of the testicular vein and reduced venous outflow. Arterial blood flow in the testicular arteries is initially preserved or slightly decreased, leading to engorgement and eventual hemorrhagic infarction. Torsion is characterized by acute, severe pain with nausea/vomiting, an asymmetrically high-riding testis, and absent cremasteric reflex (elevation of testis while pinching the skin in upper thigh).\n\n(Choices B and C) The external and internal iliac arteries arise from the common iliac artery. The external iliac artery travels underneath the inguinal ligament and becomes the femoral artery, which supplies the lower extremity. The internal iliac artery provides blood supply to the pelvic wall/viscera, buttock, female reproductive organs, bladder, and medial thigh.\n\n(Choice D) The internal pudendal artery is a branch of the internal iliac artery and provides blood supply to the anal canal, scrotum, and penis. However, it does not provide blood supply to the testis.\n\n(Choice E) The obturator artery arises from the internal iliac artery and provides blood supply to the pelvis, bladder, and parts of the femoral head and medial thigh muscles.\n\n(Choice F) The renal artery provides blood supply to the kidney. Branches of the renal artery supply the ureter but do not travel to the testis. Unlike the gonadal arteries, the gonadal veins arise from different structures. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.\n\nEducational objective:\nTesticular torsion is due to twisting of the testis around the spermatic cord (containing the gonadal artery), which can eventually lead to ischemia. The gonadal arteries arise from the abdominal aorta. The right gonadal vein drains directly into the inferior vena cava while the left gonadal vein drains into the left renal vein.`
+        ];
+
+        const firstRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images@main/Download%202.jpg","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Black%20Car.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Brunch.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/Mirror.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@main/book.jfif"];
+        const secondRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Asthetic%20Polo.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/2000s%20fashion.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Aesthetic%20Cafe%20Vibe.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Studio%20setup%20_%20Oakywood%20Classic%20Desk.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@2nd-row/Coffe.jfif"];
+        const thirdRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/KayandTay.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/%40__nigrum.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/Black%20friends%20(2).jpg","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/Chicken%20.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Third-row/fdoc!.jfif"];
+        const fourthRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/Model.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/IMG_6225.JPG","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/%40sophiacuerquis.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/Khaki_Brown_Blue.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/rich%20life.jfif"];
+        const fifthRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Call%20me%20daddy%20lol.jpg","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Blob.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Fucking%20Aura.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Thongs.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@5th-row/Legs%20in%20the%20air%20.jpg"];
+        const sixthRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Black%20and%20fucking%20beautiful.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Crossed%20legs%20(2).jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Guitar.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Plus-size%20Butter%20lemon%20Yellow%20Oversize%20Outfit%20Men%20Women%20Casual%20CompfyFall%20Ideas.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@6th-row/Dread.jfif"];
+        const seventhRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Jeans%20and%20cups.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Multicolored%20car.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Sunflowers%20.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Sunset.jfif","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Spiddey.jfif"];
+        const eighthRowImages = ["https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Hands.JPG","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Girls.JPG","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Go%20girl.JPG","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Green%20car.JPG","https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@8th-row/Haha.JPG"];
+
+        const PLAYLISTS = [
+            { id:"im-not-okay", name:"I'm <not> Okay", cover:"https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@Fourth-row/IMG_6225.JPG", songs:[{title:"Butterflies - Tom Odell",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/I'm-%3CNot%3E-Okay/Butterflies%20-%20Tom%20Odell.mp4"},{title:"Friends - Aubory",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/I'm-%3CNot%3E-Okay/Friends%20-Aubory.mp3"},{title:"Supermarket Flowers - Ed Sheeran",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/I'm-%3CNot%3E-Okay/Supermarket%20Flowers%20-%20Ed%20Sheeran%20.mp4"},{title:"Still Mine - Ashley Sighn",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/I'm-%3CNot%3E-Okay/Still%20Mine%20-%20Ashley%20Sighn.mp4"},{title:"Uncalled For - Emily James",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/I'm-%3CNot%3E-Okay/Uncalled%20For%20-%20Emily%20James%20.mp4"}] },
+            { id:"night-drive", name:"Night Drive", cover:"https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Sunflowers%20.jfif", songs:[{title:"All Girls Are The Same - Juice",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Night-Drive/All%20Girls%20Are%20The%20Same%20-%20Juice%20.mp3"},{title:"Dear God - Dax",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Night-Drive/Dear%20God%20-%20Dax.mp3"},{title:"Fast - Juice Wrld",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Night-Drive/Fast%20-%20Juice%20Wrld.mp3"},{title:"Let You Down - NF",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Night-Drive/Let%20You%20Down%20-%20NF.mp3"},{title:"Lie - NF",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Night-Drive/Lie%20-%20NF.mp3"}] },
+            { id:"trybe", name:"Trybe", cover:"https://cdn.jsdelivr.net/gh/Bluegates77/Quiz-Images-II@7th-row/Spiddey.jfif", songs:[{title:"Die Hard - Kendrick Lamar",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Trybe/Die%20Hard%20-%20Kendrick%20Lamar%20.mp3"},{title:"Hotline Bling - Drake",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Trybe/Hotline%20Bling%20-%20Drake.mp3"},{title:"Passionfruit - Drake",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Trybe/Passionfruit%20-%20%20Drake.mp3"},{title:"Pretty Little Fears - 6LACK ft J Cole",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Trybe/Pretty%20Little%20Fears%20-%206LACK%20ft%20J%20Cole.mp3"},{title:"Tranquility - Jack Harlow",url:"https://github.com/Bluegates77/Songs/raw/refs/heads/Trybe/Tranquility%20-%20Jack%20Harlow.mp3"}] }
+        ];
+        const DEFAULT_SONG_URL = PLAYLISTS[0]?.songs[0]?.url || "";
+
+        const _FloatingBg = function FloatingBackground() {
+            const ANIMATION_DURATION = 50;
+            const ROW_DELAY = ANIMATION_DURATION / 8;
+            const IMAGE_STAGGER = 0.05;
+            const isMobile = window.innerWidth < 768;
+            const imageWidth  = isMobile ? '17vw'   : '16vw';
+            const imageHeight = isMobile ? '400px'  : '460px';
+            const imageGap    = isMobile ? '1.5vw'  : '2vw';
+            const rows = [
+                {images:firstRowImages,rowIndex:0},{images:secondRowImages,rowIndex:1},
+                {images:thirdRowImages,rowIndex:2},{images:fourthRowImages,rowIndex:3},
+                {images:fifthRowImages,rowIndex:4},{images:sixthRowImages,rowIndex:5},
+                {images:seventhRowImages,rowIndex:6},{images:eighthRowImages,rowIndex:7}
+            ];
+            return h('div', { className: "absolute inset-0 z-0 overflow-hidden floating-bg-container" },
+                rows.map(row => {
+                    const images = row.images;
+                    const num = images.length;
+                    const totalRowWidth = num * parseFloat(imageWidth) + (num - 1) * parseFloat(imageGap);
+                    const offset = (100 - totalRowWidth) / 2;
+                    return images.map((url, i) => {
+                        const delay = row.rowIndex * ROW_DELAY + i * IMAGE_STAGGER;
+                        const left = offset + i * (parseFloat(imageWidth) + parseFloat(imageGap));
+                        return h(motion.img, {
+                            key: `${row.rowIndex}-${i}`,
+                            src: url,
+                            className: "absolute object-cover rounded-3xl shadow-xl",
+                            style: { width: imageWidth, height: imageHeight, left: `${left}vw`, willChange: 'transform' },
+                            initial:  { y: "-620px" },
+                            animate:  { y: "calc(100vh + 2900px)" },
+                            transition: { duration: ANIMATION_DURATION, ease: "linear", delay, repeat: Infinity }
+                        });
+                    });
+                })
+            );
+        };
+        const FloatingBackground = React.memo(_FloatingBg, () => true);
+
+        const Timer = React.forwardRef(function Timer({ isDarkMode, running, duration, onExpire }, ref) {
+            const [display, setDisplay] = useState(duration);
+            const remainingRef = useRef(duration);
+            const onExpireRef = useRef(onExpire);
+            onExpireRef.current = onExpire;
+
+            useImperativeHandle(ref, () => ({
+                getTimeLeft: () => remainingRef.current,
+                reset: () => { remainingRef.current = duration; setDisplay(duration); }
+            }), [duration]);
+
+            useEffect(() => {
+                if (!running) return;
+                const interval = setInterval(() => {
+                    remainingRef.current = Math.max(0, remainingRef.current - 1);
+                    setDisplay(remainingRef.current);
+                    if (remainingRef.current <= 0) {
+                        clearInterval(interval);
+                        onExpireRef.current && onExpireRef.current();
+                    }
+                }, 1000);
+                return () => clearInterval(interval);
+            }, [running]);
+
+            const formatTime = s => `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
+
+            return h('div', { className: `liquid-glass-timer ${isDarkMode?'dark':''} absolute z-30 px-6 py-3 rounded-2xl font-mono font-bold text-lg`, style: { top: '1rem', left: '6vw' } },
+                h('span', { className: `liquid-glass-content ${isDarkMode?'text-white/90':'text-gray-800'}` }, formatTime(display))
+            );
+        });
+
+        function AnimatedNumber({ value, suffix = '', duration = 900 }) {
+            const [display, setDisplay] = useState(0);
+            useEffect(() => {
+                const start = performance.now();
+                let raf;
+                const target = Number(value) || 0;
+                const tick = (now) => {
+                    const t = Math.min(1, (now - start) / duration);
+                    const eased = 1 - Math.pow(1 - t, 4);
+                    setDisplay(Math.round(target * eased));
+                    if (t < 1) raf = requestAnimationFrame(tick);
+                };
+                raf = requestAnimationFrame(tick);
+                return () => cancelAnimationFrame(raf);
+            }, [value, duration]);
+            return h(React.Fragment, null, display, suffix);
+        }
+
+        const formatMS = (secs) => {
+            const s = Math.max(0, Math.round(secs || 0));
+            return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+        };
+
+        function AnimatedTime({ seconds, duration = 1100 }) {
+            const [v, setV] = useState(0);
+            const target = Math.max(0, Math.round(Number(seconds) || 0));
+            useEffect(() => {
+                if (target === 0) { setV(0); return; }
+                const start = performance.now();
+                let raf;
+                const tick = (now) => {
+                    const t = Math.min(1, (now - start) / duration);
+                    const eased = 1 - Math.pow(1 - t, 4);
+                    setV(Math.round(target * eased));
+                    if (t < 1) raf = requestAnimationFrame(tick);
+                };
+                raf = requestAnimationFrame(tick);
+                return () => cancelAnimationFrame(raf);
+            }, [target, duration]);
+            return h(React.Fragment, null, formatMS(v));
+        }
+
+        /* Pop-in delta pill (spring) */
+        function PopPill({ text, tone = 'up', delay = 1 }) {
+            return h(motion.span, {
+                className: `nexus-pill ${tone === 'up' ? 'nexus-pill-up' : 'nexus-pill-down'}`,
+                initial: { scale: 0.4, opacity: 0 },
+                animate: { scale: 1, opacity: 1 },
+                transition: { type: 'spring', stiffness: 520, damping: 26, delay }
+            }, text);
+        }
+
+        /* Animated SVG progress ring for the score card */
+        function ScoreRing({ percent, delay = 0.45, size = 118 }) {
+            const stroke = 9;
+            const R = (size - stroke) / 2 - 2;
+            const C = 2 * Math.PI * R;
+            const c = size / 2;
+            const clamped = Math.min(100, Math.max(0, percent));
+            return h('div', { className: 'relative flex-shrink-0', style: { width: size, height: size } },
+                h('svg', { width: size, height: size, viewBox: `0 0 ${size} ${size}`, style: { transform: 'rotate(-90deg)', overflow: 'visible' } },
+                    h('defs', null,
+                        h('linearGradient', { id: 'scoreRingGrad', x1: '0%', y1: '0%', x2: '100%', y2: '100%' },
+                            h('stop', { offset: '0%', stopColor: '#FF9E7C' }),
+                            h('stop', { offset: '100%', stopColor: '#FFD3B8' })
+                        )
+                    ),
+                    h('circle', { cx: c, cy: c, r: R, fill: 'none', stroke: 'rgba(255,255,255,0.07)', strokeWidth: stroke }),
+                    h(motion.circle, {
+                        cx: c, cy: c, r: R, fill: 'none',
+                        stroke: 'url(#scoreRingGrad)',
+                        strokeWidth: stroke, strokeLinecap: 'round',
+                        strokeDasharray: C,
+                        initial: { strokeDashoffset: C },
+                        animate: { strokeDashoffset: C * (1 - clamped / 100) },
+                        transition: { duration: 1.5, delay, ease: [0.16, 1, 0.3, 1] }
+                    })
+                ),
+                h('div', { className: 'absolute inset-0 flex flex-col items-center justify-center' },
+                    h('span', { className: 'font-grotesk text-white font-bold leading-none', style: { fontSize: size * 0.24, letterSpacing: '-0.02em' } },
+                        h(AnimatedNumber, { value: percent, suffix: '%' })),
+                    h('span', { className: 'qcard-label mt-1', style: { fontSize: 9 } }, 'Score')
+                )
+            );
+        }
+
+        /* Card shell: staggered entrance + spring hover lift */
+        function ResultCard({ delay = 0, className = '', style, children }) {
+            return h(motion.div, {
+                className: `qcard ${className}`,
+                style,
+                initial: 'hidden',
+                animate: 'show',
+                whileHover: 'hover',
+                variants: {
+                    hidden: { opacity: 0, y: 30 },
+                    show: { opacity: 1, y: 0, transition: { duration: 0.75, delay, ease: EASE.outExpo } },
+                    hover: { y: -5, transition: { type: 'spring', stiffness: 400, damping: 24 } }
+                }
+            }, children);
+        }
+
+        /* Mini bar sparkline of recent attempts */
+        function AttemptBars({ history, delay = 0.7 }) {
+            const items = history.slice(-6);
+            if (!items.length) return null;
+            return h('div', { className: 'flex items-end gap-1.5', style: { height: 34 } },
+                items.map((a, idx) => {
+                    const pct = Math.round((a.score / a.total) * 100);
+                    const isLast = idx === items.length - 1;
+                    return h(motion.div, {
+                        key: a.timestamp + '-' + idx,
+                        title: `${pct}%`,
+                        className: 'rounded-full',
+                        style: {
+                            width: 7,
+                            height: `${Math.max(22, pct)}%`,
+                            background: isLast ? 'linear-gradient(180deg,#FFB899,#FF9E7C)' : 'rgba(255,255,255,0.14)',
+                            transformOrigin: 'bottom'
+                        },
+                        initial: { scaleY: 0 },
+                        animate: { scaleY: 1 },
+                        transition: { duration: 0.7, delay: delay + idx * 0.07, ease: EASE.outExpo }
+                    });
+                })
+            );
+        }
+
+        function ResultsChart({ scores }) {
+            const canvasRef = useRef(null);
+            const chartRef  = useRef(null);
+            useEffect(() => {
+                if (!canvasRef.current || typeof Chart === 'undefined') return;
+                const ctx = canvasRef.current.getContext('2d');
+                const grad = ctx.createLinearGradient(0, 0, 0, 320);
+                grad.addColorStop(0, 'rgba(255,158,124,0.22)');
+                grad.addColorStop(1, 'rgba(255,158,124,0)');
+                const labels = scores.map((_, i) => `#${i+1}`);
+                chartRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels,
+                        datasets: [{
+                            data: scores,
+                            borderColor: '#FF9E7C',
+                            borderWidth: 2,
+                            backgroundColor: grad,
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: scores.length > 1 ? 3 : 0,
+                            pointBackgroundColor: '#FF9E7C',
+                            pointBorderColor: 'rgba(0,0,0,0.4)',
+                            pointHoverRadius: 6,
+                            pointHoverBackgroundColor: '#FFF',
+                            pointHoverBorderColor: '#FF9E7C',
+                            pointHoverBorderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: { duration: 800, easing: 'easeOutQuart' },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: '#151110',
+                                titleColor: '#8b8b8b',
+                                bodyColor: '#FFF',
+                                titleFont: { size: 12, family: 'Manrope' },
+                                bodyFont:  { size: 14, family: 'Space Grotesk', weight: '600' },
+                                padding: 12,
+                                borderColor: 'rgba(255,158,124,0.25)',
+                                borderWidth: 1,
+                                displayColors: false,
+                                callbacks: { label: (c) => `${c.raw}%` }
+                            }
+                        },
+                        scales: {
+                            x: { grid: { display: false }, border: { display: false },
+                                 ticks: { color: '#8b8b8b', font: { family: 'Manrope', size: 11 } } },
+                            y: { grid: { color: 'rgba(255,255,255,0.05)', drawBorder: false },
+                                 border: { display: false },
+                                 ticks: { callback: (v) => `${v}%`, color: '#8b8b8b',
+                                          font: { family: 'Manrope', size: 11 } },
+                                 min: 0, max: 100 }
+                        },
+                        interaction: { intersect: false, mode: 'index' }
+                    }
+                });
+                return () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; } };
+            }, [JSON.stringify(scores)]);
+            return h('canvas', { ref: canvasRef, style: { width: '100%', height: '100%' } });
+        }
+
+        /* Performance History panel — the All / Last 5 tabs now actually filter */
+        function HistoryPanel({ scores, delay = 0.4 }) {
+            const [range, setRange] = useState('all');
+            const data = range === 'all' ? scores : scores.slice(-5);
+            return h(ResultCard, { delay, className: 'lg:col-span-2 p-6 flex flex-col', style: { height: 400 } },
+                h('div', { className: 'flex justify-between items-center mb-6' },
+                    h('div', null,
+                        h('div', { className: 'qcard-label mb-1' }, 'Analytics'),
+                        h('span', { className: 'text-sm font-semibold text-white' }, 'Performance History')
+                    ),
+                    h('div', { className: 'flex gap-1.5' },
+                        [['all', 'All'], ['last', 'Last 5']].map(([val, label]) =>
+                            h('button', {
+                                key: val,
+                                onClick: () => setRange(val),
+                                className: `nexus-tab ${range === val ? 'active' : ''}`
+                            }, label)
+                        )
+                    )
+                ),
+                h('div', { className: 'flex-1 relative w-full', style: { minHeight: 0 } },
+                    h(ResultsChart, { scores: data })
+                )
+            );
+        }
+
+        function PhysiologyQuiz() {
+            const [quizStarted, setQuizStarted] = useState(false);
+            const [currentQuestion, setCurrentQuestion] = useState(0);
+            const [selected, setSelected] = useState(null);
+            const [locked, setLocked] = useState(false);
+            const [score, setScore] = useState(0);
+            const [completed, setCompleted] = useState(false);
+            const [timeIsUp, setTimeIsUp] = useState(false);
+            const timerRef = useRef(null);
+            const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
+            const [isDarkMode, setIsDarkMode] = useState(() => {
+                if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) { document.documentElement.classList.add('dark'); return true; } return false;
+            });
+            const [opaqueMode, setOpaqueMode] = useState(false);
+            const [reviewIndex, setReviewIndex] = useState(0);
+            const [showReview, setShowReview] = useState(false);
+            const [lightboxOpen, setLightboxOpen] = useState(false);
+            const [lightboxImageIndex, setLightboxImageIndex] = useState(0);
+            const [correctQuestions, setCorrectQuestions] = useState([]);
+            const [quizHistory, setQuizHistory] = useState([]);
+            const [totalTimeUsed, setTotalTimeUsed] = useState(0);
+            const [typingText, setTypingText] = useState('');
+            const [musicDropdownOpen, setMusicDropdownOpen] = useState(false);
+            const [calcDropdownOpen, setCalcDropdownOpen] = useState(false);
+            const [dropdownAnimating, setDropdownAnimating] = useState(false);
+            const [calcDropdownAnimating, setCalcDropdownAnimating] = useState(false);
+            const [currentPlaylist, setCurrentPlaylist] = useState(PLAYLISTS[0]);
+            const [currentSongIndex, setCurrentSongIndex] = useState(0);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [audioStarted, setAudioStarted] = useState(false);
+            const audioRef = useRef(null);
+            const dropdownRef = useRef(null);
+            const carouselRef = useRef(null);
+            const musicBtnRef = useRef(null);
+            const timeoutRef = useRef(null);
+
+            useEffect(() => {
+                const explanationImgs = [];
+                explanations.forEach(e => {
+                    if (e && typeof e === 'object' && Array.isArray(e.images)) e.images.forEach(u => explanationImgs.push(u));
+                });
+                const allUrls = [
+                    ...questions.map(q2 => q2.image).filter(Boolean),
+                    ...explanationImgs,
+                    ...firstRowImages, ...secondRowImages, ...thirdRowImages, ...fourthRowImages,
+                    ...fifthRowImages, ...sixthRowImages, ...seventhRowImages, ...eighthRowImages,
+                    ...PLAYLISTS.map(p => p.cover)
+                ];
+                allUrls.forEach(url => {
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    img.src = url;
+                    if (img.decode) img.decode().catch(() => {});
+                    if (typeof fetch !== 'undefined') {
+                        fetch(url, { mode: 'no-cors', cache: 'force-cache' }).catch(() => {});
+                    }
+                });
+            }, []);
+
+            useEffect(() => {
+                if (quizStarted) return;
+                const sequence = [
+                    { type: 'type', text: 'Hi', speed: 150 },
+                    { type: 'pause', duration: 700 },
+                    { type: 'delete', speed: 80 },
+                    { type: 'pause', duration: 400 },
+                    { type: 'type', text: 'Fuck this', speed: 120 },
+                    { type: 'pause', duration: 1000 },
+                    { type: 'delete', speed: 70 },
+                    { type: 'pause', duration: 400 },
+                    { type: 'type', text: 'Hello world...', speed: 130 },
+                    { type: 'pause', duration: 1200 },
+                    { type: 'start' }
+                ];
+                let index = 0, currentText = '', charIndex = 0, cancelled = false;
+                const run = () => {
+                    if (cancelled || index >= sequence.length) return;
+                    const step = sequence[index];
+                    if (step.type === 'type') {
+                        if (charIndex < step.text.length) {
+                            currentText = step.text.substring(0, charIndex + 1);
+                            setTypingText(currentText); charIndex++;
+                            timeoutRef.current = setTimeout(run, step.speed);
+                        } else { charIndex = 0; index++; timeoutRef.current = setTimeout(run, 200); }
+                    } else if (step.type === 'delete') {
+                        if (currentText.length > 0) { currentText = currentText.slice(0, -1); setTypingText(currentText); timeoutRef.current = setTimeout(run, step.speed); }
+                        else { index++; timeoutRef.current = setTimeout(run, 200); }
+                    } else if (step.type === 'pause') { index++; timeoutRef.current = setTimeout(run, step.duration); }
+                    else if (step.type === 'start') { setQuizStarted(true); }
+                };
+                timeoutRef.current = setTimeout(run, 300);
+                return () => { cancelled = true; clearTimeout(timeoutRef.current); };
+            }, [quizStarted]);
+
+            const onTiltMove = (e, ref) => {
+                if (!ref.current) return;
+                const rect = ref.current.getBoundingClientRect();
+                const x = e.clientX - rect.left, y = e.clientY - rect.top;
+                const cx = rect.width/2, cy = rect.height/2;
+                const rx = ((y-cy)/cy)*-5, ry = ((x-cx)/cx)*5;
+                ref.current.style.transform = `perspective(800px) rotateX(${rx}deg) rotateY(${ry}deg) scale3d(1.02,1.02,1.02)`;
+            };
+            const onTiltLeave = (ref) => {
+                if (!ref.current) return;
+                ref.current.style.transform = 'perspective(800px) rotateX(0deg) rotateY(0deg) scale3d(1,1,1)';
+            };
+
+            useEffect(() => {
+                if (DEFAULT_SONG_URL) {
+                    audioRef.current = new Audio(DEFAULT_SONG_URL);
+                    audioRef.current.loop = false;
+                    audioRef.current.volume = 0.3;
+                    audioRef.current.addEventListener('ended', handleSongEnd);
+                }
+                return () => {
+                    if (audioRef.current) {
+                        audioRef.current.removeEventListener('ended', handleSongEnd);
+                        audioRef.current.pause(); audioRef.current = null;
+                    }
+                };
+            }, []);
+
+            const handleSongEnd = () => {
+                setCurrentSongIndex(prev => {
+                    const ni = (prev + 1) % currentPlaylist.songs.length;
+                    const ns = currentPlaylist.songs[ni];
+                    if (audioRef.current && ns) { audioRef.current.src = ns.url; audioRef.current.play().catch(()=>{}); }
+                    return ni;
+                });
+            };
+
+            useEffect(() => {
+                if (audioRef.current && currentPlaylist?.songs[currentSongIndex]) {
+                    const wp = isPlaying;
+                    audioRef.current.src = currentPlaylist.songs[currentSongIndex].url;
+                    if (wp) audioRef.current.play().catch(()=>{});
+                }
+            }, [currentPlaylist, currentSongIndex]);
+
+            useEffect(() => {
+                if (!DEFAULT_SONG_URL) return;
+                const startAudio = () => {
+                    if (audioRef.current && !audioStarted) {
+                        audioRef.current.play().then(() => { setAudioStarted(true); setIsPlaying(true); }).catch(()=>{});
+                    }
+                };
+                document.addEventListener('click', startAudio);
+                document.addEventListener('keydown', startAudio);
+                return () => {
+                    document.removeEventListener('click', startAudio);
+                    document.removeEventListener('keydown', startAudio);
+                };
+            }, [audioStarted]);
+
+            const playSong = (playlist, songIndex) => {
+                setCurrentPlaylist(playlist); setCurrentSongIndex(songIndex);
+                if (audioRef.current) {
+                    audioRef.current.src = playlist.songs[songIndex].url;
+                    audioRef.current.play().then(() => { setIsPlaying(true); setAudioStarted(true); }).catch(()=>{});
+                }
+            };
+            const togglePlayPause = (e) => {
+                if (e) e.stopPropagation();
+                if (audioRef.current) {
+                    if (isPlaying) { audioRef.current.pause(); setIsPlaying(false); }
+                    else { audioRef.current.play().then(() => setIsPlaying(true)).catch(()=>{}); }
+                }
+            };
+
+            const toggleMusicDropdown = () => {
+                if (dropdownAnimating || calcDropdownAnimating) return;
+                setDropdownAnimating(true);
+                if (musicDropdownOpen) { setTimeout(() => { setMusicDropdownOpen(false); setDropdownAnimating(false); }, 150); }
+                else {
+                    if (calcDropdownOpen) { setCalcDropdownOpen(false); setCalcDropdownAnimating(false); }
+                    setMusicDropdownOpen(true);
+                    setTimeout(() => setDropdownAnimating(false), 50);
+                }
+            };
+
+            const handleCalcToggle = (nextState) => {
+                if (dropdownAnimating || calcDropdownAnimating) return;
+                setCalcDropdownAnimating(true);
+                if (nextState) {
+                    if (musicDropdownOpen) { setMusicDropdownOpen(false); setDropdownAnimating(false); }
+                    setCalcDropdownOpen(true);
+                    setTimeout(() => setCalcDropdownAnimating(false), 50);
+                } else {
+                    setTimeout(() => { setCalcDropdownOpen(false); setCalcDropdownAnimating(false); }, 150);
+                }
+            };
+
+            useEffect(() => {
+                const mq = window.matchMedia('(prefers-color-scheme: dark)');
+                const hc = (e) => { setIsDarkMode(e.matches); if (e.matches) document.documentElement.classList.add('dark'); else document.documentElement.classList.remove('dark'); };
+                mq.addEventListener('change', hc);
+                return () => mq.removeEventListener('change', hc);
+            }, []);
+
+            const toggleDarkMode = () => setIsDarkMode(prev => {
+                const nv = !prev;
+                requestAnimationFrame(() => {
+                    if (nv) document.documentElement.classList.add('dark');
+                    else document.documentElement.classList.remove('dark');
+                });
+                return nv;
+            });
+            const toggleOpaqueMode = () => setOpaqueMode(prev => !prev);
+
+            useEffect(() => {
+                let frame;
+                const onResize = () => {
+                    cancelAnimationFrame(frame);
+                    frame = requestAnimationFrame(() => setIsMobile(window.innerWidth < 768));
+                };
+                window.addEventListener('resize', onResize);
+                return () => { window.removeEventListener('resize', onResize); cancelAnimationFrame(frame); };
+            }, []);
+
+            const handleTimeExpire = () => {
+                setTotalTimeUsed(1800);
+                setTimeIsUp(true);
+                setCompleted(true);
+            };
+
+            const handleOptionRef = useRef();
+            handleOptionRef.current = (i) => {
+                if (locked || selected !== null) return;
+                setSelected(i);
+                setLocked(true);
+                if (i === questions[currentQuestion].answer) {
+                    setScore(s => s + 1);
+                    setCorrectQuestions(prev => [...prev, currentQuestion]);
+                }
+                setTimeout(() => {
+                    if (currentQuestion + 1 < questions.length) {
+                        setCurrentQuestion(q => q + 1);
+                        setSelected(null);
+                        setLocked(false);
+                    } else {
+                        setTotalTimeUsed(1800 - (timerRef.current ? timerRef.current.getTimeLeft() : 0));
+                        setCompleted(true);
+                    }
+                }, FEEDBACK_MS);
+            };
+            const handleOption = useRef((i) => handleOptionRef.current(i)).current;
+
+            useEffect(() => {
+                const onKey = (e) => {
+                    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+                    if (musicDropdownOpen || calcDropdownOpen || lightboxOpen) return;
+                    if (!quizStarted) {
+                        if (e.key === ' ' || e.key === 'Enter') {
+                            e.preventDefault();
+                            clearTimeout(timeoutRef.current);
+                            setQuizStarted(true);
+                        }
+                        return;
+                    }
+                    if (completed) {
+                        if (e.key === 'r' || e.key === 'R') { e.preventDefault(); handleRewriteQuiz(); }
+                        return;
+                    }
+                    const numMatch = e.key.match(/^[1-9]$/);
+                    if (numMatch) {
+                        const idx = parseInt(e.key, 10) - 1;
+                        const opts = questions[currentQuestion]?.options || [];
+                        if (idx >= 0 && idx < opts.length && !locked) {
+                            e.preventDefault();
+                            handleOption(idx);
+                        }
+                    }
+                };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            }, [quizStarted, completed, currentQuestion, locked, musicDropdownOpen, calcDropdownOpen, lightboxOpen]);
+
+            const getExplanationData = (exp) => { if (exp === null || exp === undefined) return null; if (typeof exp === 'string') return { text: exp, images: [] }; return { text: exp.text, images: exp.images || [] }; };
+            const questionsWithExplanations = questions.map((q, i) => { const ed = getExplanationData(explanations[i]); if (!ed) return null; return { ...q, index: i, explanationText: ed.text, explanationImages: ed.images }; }).filter(Boolean);
+
+            const handlePreviousReview = () => { if (reviewIndex > 0) setReviewIndex(reviewIndex - 1); };
+            const handleNextReview = () => { if (reviewIndex < questionsWithExplanations.length - 1) setReviewIndex(reviewIndex + 1); };
+            const handleStartReview = () => { setShowReview(true); setReviewIndex(0); };
+            const handleBackToResults = () => setShowReview(false);
+
+            useEffect(() => {
+                if (completed && !showReview) {
+                    const timeUsed = totalTimeUsed;
+                    const attempt = { score, total: questions.length, timeUsed, timestamp: Date.now() };
+                    setQuizHistory(prev => {
+                        const exists = prev.some(p => p.timestamp === attempt.timestamp);
+                        if (!exists) return [...prev, attempt];
+                        return prev;
+                    });
+                }
+            }, [completed]);
+
+            useEffect(() => {
+                const el = carouselRef.current; if (!el || !lightboxOpen) return;
+                let startX = 0, isDragging = false;
+                const onTouchStart = (e) => { startX = e.touches[0].clientX; };
+                const onTouchEnd = (e) => {
+                    const dx = e.changedTouches[0].clientX - startX;
+                    if (Math.abs(dx) > 40) {
+                        if (dx < 0) setLightboxImageIndex(prev => Math.min((questionsWithExplanations[reviewIndex]?.explanationImages?.length || 1) - 1, prev + 1));
+                        else setLightboxImageIndex(prev => Math.max(0, prev - 1));
+                    }
+                };
+                const onMouseDown = (e) => { startX = e.clientX; isDragging = true; };
+                const onMouseUp = (e) => {
+                    if (!isDragging) return; isDragging = false;
+                    const dx = e.clientX - startX;
+                    if (Math.abs(dx) > 40) {
+                        if (dx < 0) setLightboxImageIndex(prev => Math.min((questionsWithExplanations[reviewIndex]?.explanationImages?.length || 1) - 1, prev + 1));
+                        else setLightboxImageIndex(prev => Math.max(0, prev - 1));
+                    }
+                };
+                const onMouseLeave = () => { isDragging = false; };
+                el.addEventListener('touchstart', onTouchStart, {passive:true});
+                el.addEventListener('touchend', onTouchEnd, {passive:true});
+                el.addEventListener('mousedown', onMouseDown);
+                el.addEventListener('mouseup', onMouseUp);
+                el.addEventListener('mouseleave', onMouseLeave);
+                return () => {
+                    el.removeEventListener('touchstart', onTouchStart);
+                    el.removeEventListener('touchend', onTouchEnd);
+                    el.removeEventListener('mousedown', onMouseDown);
+                    el.removeEventListener('mouseup', onMouseUp);
+                    el.removeEventListener('mouseleave', onMouseLeave);
+                };
+            }, [lightboxOpen, reviewIndex]);
+
+            useEffect(() => {
+                if (!lightboxOpen) return;
+                const hk = (e) => {
+                    if (e.key === 'Escape') setLightboxOpen(false);
+                    if (e.key === 'ArrowRight') setLightboxImageIndex(prev => Math.min(questionsWithExplanations[reviewIndex]?.explanationImages?.length - 1 || 0, prev + 1));
+                    if (e.key === 'ArrowLeft') setLightboxImageIndex(prev => Math.max(0, prev - 1));
+                };
+                window.addEventListener('keydown', hk);
+                return () => window.removeEventListener('keydown', hk);
+            }, [lightboxOpen, reviewIndex]);
+
+            const handleRewriteQuiz = () => {
+                setCurrentQuestion(0); setSelected(null); setLocked(false);
+                setScore(0); setCompleted(false); setTimeIsUp(false);
+                if (timerRef.current) timerRef.current.reset();
+                setShowReview(false);
+                setTotalTimeUsed(0); setCorrectQuestions([]); setQuizStarted(true);
+            };
+
+            const renderMusicDropdown = () => h('div', { className: "relative z-40" },
+                h('button', {
+                    ref: musicBtnRef,
+                    onClick: toggleMusicDropdown,
+                    onMouseMove: (e) => onTiltMove(e, musicBtnRef),
+                    onMouseLeave: () => onTiltLeave(musicBtnRef),
+                    className: `liquid-glass-music-btn glass-5-tilt ${isDarkMode?'dark':''} px-5 py-3 rounded-2xl flex items-center gap-3 text-sm font-medium transition-all ${isDarkMode?'text-white/90':'text-gray-800'} ${musicDropdownOpen?'ring-1 ring-white/30':''}`,
+                    style: { minWidth: isMobile?'140px':'200px', position:'relative', zIndex:2 }
+                },
+                    h('span', { className:"liquid-glass-content flex items-center gap-3" },
+                        isPlaying ? h('div', { className:"flex items-end gap-0.5 h-4" }, h('div',{className:"w-1 bg-green-400 rounded-full sound-bar",style:{height:'8px'}}), h('div',{className:"w-1 bg-green-400 rounded-full sound-bar",style:{height:'12px'}}), h('div',{className:"w-1 bg-green-400 rounded-full sound-bar",style:{height:'6px'}})) : h('i',{className:"fas fa-music text-sm"}),
+                        h('span', { className:"truncate" }, isMobile ? "Music" : "Songs my cat thinks are cool"),
+                        h('i', { className:`fas fa-chevron-down text-xs transition-transform duration-300 ${musicDropdownOpen?'rotate-180':''}` })
+                    )
+                ),
+                (musicDropdownOpen || dropdownAnimating) && h('div', {
+                    ref: dropdownRef,
+                    className: `absolute top-full right-0 mt-2 overflow-visible transition-all duration-150 ${musicDropdownOpen?'opacity-100 scale-100':'opacity-0 scale-95 pointer-events-none'}`,
+                    style: { width: isMobile?'90vw':'420px', maxWidth:'90vw', transformOrigin:'top right' }
+                },
+                    h('div', { className:`liquid-glass-player-card ${isDarkMode?'dark':''} p-5 mb-4` },
+                        h('div', { className:"liquid-glass-content flex items-center gap-4" },
+                            h('div', { className:`liquid-glass-photo-frame ${isDarkMode?'dark':''} w-16 h-16 flex-shrink-0 cursor-pointer ${isPlaying?'spin-animation':'spin-animation paused'}`, onClick:()=>playSong(currentPlaylist,0) }, h('img',{src:currentPlaylist.cover,alt:currentPlaylist.name,className:"w-full h-full object-cover"})),
+                            h('div', { className:"flex-1 min-w-0" }, h('p',{className:`text-xs ${isDarkMode?'text-gray-400':'text-gray-600'} mb-1`},"Now playing"), h('p',{className:`text-sm font-medium truncate ${isDarkMode?'text-white':'text-gray-900'}`},currentPlaylist.songs[currentSongIndex]?.title||"Select a song"), h('p',{className:`text-xs ${isDarkMode?'text-gray-500':'text-gray-700'}`},currentPlaylist.name)),
+                            h('button', { onClick:togglePlayPause, className:`liquid-glass-play-btn ${isDarkMode?'dark':''} w-12 h-12 flex items-center justify-center flex-shrink-0` },
+                                h('span', { className:"liquid-glass-content" }, isPlaying ? h('i',{className:`fas fa-pause ${isDarkMode?'text-white':'text-gray-900'}`}) : h('i',{className:`fas fa-play ${isDarkMode?'text-white':'text-gray-900'}`}))
+                            )
+                        )
+                    ),
+                    h('div', { className:"space-y-4 overflow-y-auto", style:{maxHeight:'55vh',paddingBottom:'80px'} },
+                        PLAYLISTS.map(playlist => h('div', { key:playlist.id, className:`liquid-glass-playlist-card ${isDarkMode?'dark':''} p-5` },
+                            h('div', { className:"liquid-glass-content" },
+                                h('div', { className:"flex items-center gap-3 mb-4" },
+                                    h('div', { className:`liquid-glass-album-cover ${isDarkMode?'dark':''} w-14 h-14 cursor-pointer flex-shrink-0 ${currentPlaylist?.id===playlist.id&&isPlaying?'spin-animation':'spin-animation paused'}`, onClick:()=>playSong(playlist,0) }, h('img',{src:playlist.cover,alt:playlist.name,className:"w-full h-full object-cover"})),
+                                    h('h4', { className:`text-base font-semibold ${isDarkMode?'text-white':'text-gray-900'}` }, playlist.name)
+                                ),
+                                h('div', { className:"space-y-2" },
+                                    playlist.songs.map((song, si) => h('button', {
+                                        key:si, onClick:()=>playSong(playlist,si),
+                                        className:`w-full px-3.5 py-3 rounded-2xl transition-all ${currentPlaylist?.id===playlist.id&&currentSongIndex===si?(isDarkMode?'bg-white/20 border border-white/30':'bg-black/20 border border-black/20'):(isDarkMode?'bg-black/30 hover:bg-black/40':'bg-black/10 hover:bg-black/20')}`
+                                    },
+                                        h('div', { className:"flex items-center gap-3" },
+                                            currentPlaylist?.id===playlist.id&&currentSongIndex===si&&isPlaying ? h('div',{className:"flex items-end gap-0.5 w-6 h-5 justify-center"},h('div',{className:`w-1 ${isDarkMode?'bg-gray-300':'bg-gray-600'} rounded-full sound-bar`,style:{height:'8px'}}),h('div',{className:`w-1 ${isDarkMode?'bg-gray-300':'bg-gray-600'} rounded-full sound-bar`,style:{height:'12px'}}),h('div',{className:`w-1 ${isDarkMode?'bg-gray-300':'bg-gray-600'} rounded-full sound-bar`,style:{height:'6px'}})) : h('span',{className:`text-sm w-6 text-center font-medium font-grotesk ${isDarkMode?'text-gray-500':'text-gray-400'}`},si+1),
+                                            h('i', { className:`fas fa-music text-sm ${isDarkMode?'text-gray-500':'text-gray-400'} mr-1.5` }),
+                                            h('span', { className:`text-sm truncate ${currentPlaylist?.id===playlist.id&&currentSongIndex===si?(isDarkMode?'text-white font-bold':'text-gray-900 font-bold'):isDarkMode?'text-gray-300':'text-gray-700'}` }, song.title)
+                                        )
+                                    ))
+                                )
+                            )
+                        ))
+                    )
+                )
+            );
+
+            const renderReviewMode = () => {
+                const q = questionsWithExplanations[reviewIndex];
+                const cardShiftTransition = { x: { duration: DUR.med, ease: EASE.apple }, opacity: { duration: DUR.fast, ease: EASE.soft } };
+                return h('div', { className:"z-10 w-full px-4 flex flex-col", style:{maxWidth:'96vw'} },
+                    lightboxOpen && q.explanationImages && q.explanationImages.length > 0 && h('div', {
+                        className:"fixed inset-0 z-50",
+                        style:{ background:'transparent' },
+                        onClick:(e)=>{ if(e.target===e.currentTarget){ e.stopPropagation(); setLightboxOpen(false); } }
+                    },
+                        h('div', { className:"absolute inset-0 z-10", style:{ backgroundColor: 'rgba(0,0,0,0.7)' } }),
+                        h('div', { className:"absolute top-4 right-4 flex items-center gap-2", style:{zIndex:100,overflow:'visible'} },
+                            renderMusicDropdown(),
+                            h(Calculator, {isDarkMode, isOpen: calcDropdownOpen, isAnimating: calcDropdownAnimating, onToggle: handleCalcToggle}),
+                            h('button', { onClick:toggleOpaqueMode, className:`lg-toggle ${isDarkMode?'dark':''} w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl` },
+                                opaqueMode ? h('i',{className:`fas fa-layer-group text-lg ${isDarkMode?'text-gray-300':'text-gray-500'}`}) : h('i',{className:`fas fa-layer-group text-lg ${isDarkMode?'text-white':'text-gray-900'}`})),
+                            h('button', { onClick:toggleDarkMode, className:`lg-toggle ${isDarkMode?'dark':''} w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl` },
+                                isDarkMode ? h('i',{className:"fas fa-sun text-yellow-300 text-lg"}) : h('i',{className:"fas fa-moon text-gray-700 text-lg"}))
+                        ),
+                        h('div', { className:"absolute inset-0 flex items-center justify-center", style:{ zIndex:51 } },
+                            h('div', { className:"flex gap-6 items-stretch", style:{ width:'92vw', height:'88vh' } },
+                                h(motion.div, {
+                                    className:"flex flex-col overflow-hidden flex-shrink-0",
+                                    style:{width:'28vw',maxWidth:'520px'},
+                                    animate: { x: musicDropdownOpen ? '-120%' : (calcDropdownOpen ? '-30%' : '0%'),
+                                               opacity: musicDropdownOpen ? 0 : (calcDropdownOpen ? 0.7 : 1) },
+                                    transition: cardShiftTransition
+                                },
+                                    h('div', { className:`${opaqueMode ? 'bg-black/60' : 'bg-black/30'} border border-white/10 p-6 rounded-3xl overflow-y-auto h-full` },
+                                        h('div',{className:"flex items-center gap-2 mb-4"},h('div',{className:"w-8 h-8 rounded-full bg-[#FF9E7C] flex items-center justify-center text-black font-bold text-sm font-grotesk"},q.index+1),h('h2',{className:"text-xl text-[#FF9E7C] font-semibold",style:{fontFamily:"'Sora', sans-serif"}},"Question")),
+                                        q.image && h('div',{className:"mb-4"},h('img',{src:q.image,alt:"Question image",className:"w-full object-contain rounded-2xl"})),
+                                        h('p',{className:"mb-6 text-white whitespace-pre-wrap no-select text-sm leading-relaxed",onContextMenu:e=>e.preventDefault(),onCopy:e=>e.preventDefault()},q.question),
+                                        h('div',{className:"space-y-2"},q.options.map((opt,idx)=>h('div',{key:idx,className:`w-full p-3 rounded-xl border text-sm ${idx===q.answer?'border-green-500 bg-green-500/20 text-green-300':'border-white/20 text-white/70'}`},h('span',{className:"flex items-center gap-2"},idx===q.answer&&h('i',{className:"fas fa-check text-green-400"}),opt))))
+                                    )
+                                ),
+                                h(motion.div, {
+                                    className:"flex flex-col items-center justify-center relative border border-white/10 rounded-3xl h-full flex-shrink-0",
+                                    style:{width:'32vw',maxWidth:'600px',overflow:'hidden',cursor:'grab',minWidth:'200px', backgroundColor: opaqueMode ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.3)'},
+                                    animate: { x: musicDropdownOpen ? '-25vw' : (calcDropdownOpen ? '-12vw' : '0vw') },
+                                    transition: cardShiftTransition,
+                                    ref:carouselRef
+                                },
+                                    h('div',{className:"absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-white/10 border border-white/15"},h('span',{className:"text-white/70 text-xs font-medium font-grotesk"},`${lightboxImageIndex+1} / ${q.explanationImages.length}`)),
+                                    h('button',{onClick:()=>setLightboxOpen(false),className:"absolute top-3 right-3 z-20 w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 flex items-center justify-center"},h('i',{className:"fas fa-times text-white text-sm"})),
+                                    h('div',{className:"relative w-full h-full flex items-center justify-center"},
+                                        q.explanationImages.map((imgUrl,imgIdx)=>{
+                                            const off=imgIdx-lightboxImageIndex;
+                                            if(off<-1||off>1)return null;
+                                            return h(motion.div,{
+                                                key:imgIdx,
+                                                className:"absolute flex items-center justify-center",
+                                                animate: {
+                                                    x: off===0?'0%':off===-1?'-62%':'62%',
+                                                    scale: off===0?1:0.82,
+                                                    opacity: off===0?1:0.25
+                                                },
+                                                transition: { duration: DUR.med, ease: EASE.apple },
+                                                style:{width:'94%',height:'94%',pointerEvents:off===0?'auto':'none',zIndex:off===0?10:5}
+                                            },
+                                                h('img',{src:imgUrl,alt:`Image ${imgIdx+1}`,className:"w-full h-full object-contain rounded-2xl shadow-2xl border border-white/10"})
+                                            );
+                                        })
+                                    ),
+                                    h('div',{className:"absolute bottom-3 flex gap-2 items-center z-20"},
+                                        q.explanationImages.map((_,di)=>h('button',{
+                                            key:di,
+                                            onClick:()=>setLightboxImageIndex(di),
+                                            className:`rounded-full ${di===lightboxImageIndex?'w-6 h-2 bg-white':'w-2 h-2 bg-white/30 hover:bg-white/50'}`,
+                                            style: { transition: 'all 0.3s var(--ease-apple)' }
+                                        }))
+                                    )
+                                ),
+                                h(motion.div,{
+                                    className:"flex flex-col overflow-hidden flex-shrink-0",
+                                    style:{width:'28vw',maxWidth:'520px'},
+                                    animate: { x: musicDropdownOpen ? '-25vw' : (calcDropdownOpen ? '-12vw' : '0vw') },
+                                    transition: cardShiftTransition
+                                },
+                                    h('div',{className:`${opaqueMode ? 'bg-black/60' : 'bg-black/30'} border border-white/10 p-6 rounded-3xl overflow-y-auto h-full`},
+                                        h('div',{className:"flex items-center gap-2 mb-4"},h('div',{className:"w-8 h-8 rounded-full bg-[#7CE0FF] flex items-center justify-center"},h('i',{className:"fas fa-info text-black"})),h('h2',{className:"text-xl text-[#7CE0FF] font-semibold",style:{fontFamily:"'Sora', sans-serif"}},"Explanation")),
+                                        h('p',{className:"text-white whitespace-pre-wrap leading-relaxed no-select text-sm",onContextMenu:e=>e.preventDefault(),onCopy:e=>e.preventDefault()},q.explanationText)
+                                    )
+                                )
+                            )
+                        )
+                    ),
+                    !lightboxOpen && h('div',{className:"flex items-center justify-between mb-6 px-2"},
+                        h('button',{onClick:handleBackToResults,className:`lg-glass-btn ${isDarkMode?'dark':''}`,style:{padding:'10px 22px',display:'flex',alignItems:'center',gap:'8px',fontWeight:500,fontSize:'14px'}},h('i',{className:'fas fa-arrow-left'}),'Back to Results'),
+                        h('span',{className:`text-lg font-semibold ${isDarkMode?'text-white':'text-gray-900'}`,style:{fontFamily:"'Sora', sans-serif"}},`Question ${q.index+1} of ${questions.length}`),
+                        h('div',{className:"w-32"})
+                    ),
+                    !lightboxOpen && h(motion.div,{
+                        className:"flex flex-col lg:flex-row gap-3 items-stretch justify-center",
+                        animate: { width: musicDropdownOpen ? 'calc(96vw - 525px)' : '96vw' },
+                        transition: { duration: DUR.med, ease: EASE.apple }
+                    },
+                        h('div',{className:"flex-1 max-w-xl"},
+                            h('div',{className:`${opaqueMode?'bg-black/90':'bg-black/80'} border border-white/10 p-6 rounded-3xl h-full overflow-y-auto max-h-[65vh]`},
+                                h('div',{className:"flex items-center gap-2 mb-4"},h('div',{className:"w-8 h-8 rounded-full bg-[#FF9E7C] flex items-center justify-center text-black font-bold text-sm font-grotesk"},q.index+1),h('h2',{className:"text-xl text-[#FF9E7C] font-semibold",style:{fontFamily:"'Sora', sans-serif"}},"Question")),
+                                q.image && h('div',{className:"mb-4"},h('img',{src:q.image,alt:"Question illustration",className:"w-full object-contain rounded-2xl"})),
+                                h('p',{className:"mb-6 text-white whitespace-pre-wrap no-select",onContextMenu:e=>e.preventDefault(),onCopy:e=>e.preventDefault()},q.question),
+                                h('div',{className:"space-y-2"},q.options.map((opt,idx)=>h('div',{key:idx,className:`w-full p-3 mb-2 rounded-xl border text-left ${idx===q.answer?'border-green-500 bg-green-500/20 text-green-300':'border-white/20 text-white/70'}`},h('span',{className:"flex items-center gap-2"},idx===q.answer&&h('i',{className:"fas fa-check text-green-400"}),opt))))
+                            )
+                        ),
+                        h('div',{className:"flex-1 max-w-lg"},
+                            h('div',{className:`${opaqueMode?'bg-black/90':'bg-black/80'} border border-white/10 p-6 rounded-3xl h-full overflow-y-auto max-h-[65vh]`},
+                                h('div',{className:"flex items-center gap-2 mb-4"},h('div',{className:"w-8 h-8 rounded-full bg-[#7CE0FF] flex items-center justify-center"},h('i',{className:"fas fa-info text-black"})),h('h2',{className:"text-xl text-[#7CE0FF] font-semibold",style:{fontFamily:"'Sora', sans-serif"}},"Explanation")),
+                                q.explanationImages && q.explanationImages.length > 0 && h('div',{className:"mb-4"},
+                                    h('div',{className:"flex overflow-x-auto pb-3 gap-3 snap-x snap-mandatory",style:{scrollbarWidth:'thin'}},
+                                        q.explanationImages.map((imgUrl,imgIdx)=>h('div',{
+                                            key:imgIdx,
+                                            className:"flex-shrink-0 snap-center cursor-pointer",
+                                            style:{width:'85%',maxWidth:'500px'},
+                                            onClick:()=>{setLightboxOpen(true);setLightboxImageIndex(imgIdx);}
+                                        }, h('img',{src:imgUrl,alt:`Explanation image ${imgIdx+1}`,className:"w-full h-auto object-contain rounded-2xl"})))
+                                    )
+                                ),
+                                h('p',{className:"text-white whitespace-pre-wrap leading-relaxed no-select",onContextMenu:e=>e.preventDefault(),onCopy:e=>e.preventDefault()},q.explanationText)
+                            )
+                        )
+                    ),
+                    !lightboxOpen && h('div',{className:"flex items-center justify-center gap-4 mt-6"},
+                        h('button',{onClick:handlePreviousReview,disabled:reviewIndex===0,className:`lg-glass-btn ${isDarkMode?'dark':''}`,style:{padding:'10px 22px',display:'flex',alignItems:'center',gap:'8px',fontWeight:500,fontSize:'14px',opacity:reviewIndex===0?0.38:1}},h('i',{className:'fas fa-chevron-left'}),'Previous'),
+                        h('div',{className:"flex items-center gap-2 px-4"},questionsWithExplanations.map((_,idx)=>h('div',{key:idx,className:`rounded-full ${idx===reviewIndex?'bg-[#FF9E7C] w-6 h-2':isDarkMode?'bg-white/30 w-2 h-2':'bg-gray-400 w-2 h-2'}`,style:{transition:'all 0.32s var(--ease-apple)'}}))),
+                        h('button',{onClick:handleNextReview,disabled:reviewIndex===questionsWithExplanations.length-1,className:`lg-glass-btn ${isDarkMode?'dark':''}`,style:{padding:'10px 22px',display:'flex',alignItems:'center',gap:'8px',fontWeight:500,fontSize:'14px',opacity:reviewIndex===questionsWithExplanations.length-1?0.38:1}},'Next',h('i',{className:'fas fa-chevron-right'}))
+                    )
+                );
+            };
+
+            const renderResultsScreen = () => {
+                const la = quizHistory.length > 0 ? quizHistory[quizHistory.length - 1] : null;
+                const pa = quizHistory.length > 1 ? quizHistory[quizHistory.length - 2] : null;
+                const scorePercent = la ? Math.round((la.score / la.total) * 100) : Math.round((score / questions.length) * 100);
+                const bestScore = quizHistory.length > 0 ? Math.max(...quizHistory.map(a => Math.round((a.score / a.total) * 100))) : scorePercent;
+                const scoreDelta = pa ? Math.round(((la.score / la.total) - (pa.score / pa.total)) * 100) : null;
+                const timeDelta = pa ? pa.timeUsed - la.timeUsed : null;
+                const lastTime = la ? la.timeUsed : totalTimeUsed;
+                const timePercent = Math.min(100, Math.round((lastTime / 1800) * 100));
+                const chartScores = quizHistory.length > 0 ? quizHistory.map(a => Math.round((a.score / a.total) * 100)) : [scorePercent];
+                const correctCount = correctQuestions.length;
+                const avgPercent = quizHistory.length > 0 ? Math.round(quizHistory.reduce((a, b) => a + (b.score / b.total) * 100, 0) / quizHistory.length) : scorePercent;
+                const totalTime = quizHistory.reduce((a, b) => a + b.timeUsed, 0) || totalTimeUsed;
+                const shiftX = musicDropdownOpen ? -160 : (calcDropdownOpen ? -280 : 0);
+
+                return h(motion.div, {
+                    className: 'nexus z-10 w-full px-6 py-8 flex flex-col',
+                    style: { maxWidth: 1200, maxHeight: '100vh', overflowY: 'auto' },
+                    animate: { x: shiftX },
+                    transition: { duration: DUR.med, ease: EASE.apple }
+                },
+                    /* ---------- Header ---------- */
+                    h(motion.div, {
+                        className: 'w-full flex items-end justify-between mb-7',
+                        initial: { opacity: 0, y: 22 },
+                        animate: { opacity: 1, y: 0 },
+                        transition: { duration: 0.7, ease: EASE.outExpo }
+                    },
+                        h('div', null,
+                            h('div', { className: 'qcard-label mb-2', style: { color: '#FF9E7C' } }, 'Session Report'),
+                            h('h2', { className: 'nexus-heading text-3xl md:text-4xl text-white' }, timeIsUp ? "Time's Up" : 'Quiz Complete'),
+                            h('p', { className: 'nexus-subtitle text-sm mt-2' },
+                                `${questions.length} questions · Attempt #${quizHistory.length || 1} · ${new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`)
+                        ),
+                        h('div', { className: 'flex gap-2.5' },
+                            questionsWithExplanations.length > 0 && h('button', { onClick: handleStartReview, className: 'nexus-btn' },
+                                h('i', { className: 'fas fa-file-alt text-xs' }), 'Review'),
+                            h('button', { onClick: handleRewriteQuiz, className: 'nexus-btn nexus-btn-primary btn-redo' },
+                                h('i', { className: 'fas fa-redo text-xs' }), 'Retry')
+                        )
+                    ),
+
+                    /* ---------- Metric cards ---------- */
+                    h('div', { className: 'w-full grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4' },
+
+                        /* Score — featured card with animated ring */
+                        h(ResultCard, { delay: 0.08, className: 'qcard-featured p-5', style: { minHeight: 168 } },
+                            h('div', { className: 'flex items-center gap-5 h-full' },
+                                h(ScoreRing, { percent: scorePercent, delay: 0.5 }),
+                                h('div', { className: 'flex-1 min-w-0 flex flex-col justify-center gap-1.5' },
+                                    h('span', { className: 'qcard-label' }, 'Overall Score'),
+                                    h('span', { className: 'text-xs nexus-muted leading-snug' }, `${la ? la.score : correctCount} of ${questions.length} correct`),
+                                    scoreDelta !== null && h(PopPill, { text: `${scoreDelta >= 0 ? '▲' : '▼'} ${Math.abs(scoreDelta)}% vs prev`, tone: scoreDelta >= 0 ? 'up' : 'down', delay: 1.15 })
+                                )
+                            )
+                        ),
+
+                        /* Time used — animated budget bar */
+                        h(ResultCard, { delay: 0.16, className: 'p-5', style: { minHeight: 168 } },
+                            h('div', { className: 'flex flex-col justify-between h-full gap-3' },
+                                h('div', { className: 'flex items-center justify-between' },
+                                    h('span', { className: 'qcard-label' }, 'Time Used'),
+                                    h('div', { className: 'qchip' }, h('i', { className: 'fas fa-stopwatch' }))
+                                ),
+                                h('div', null,
+                                    h('span', { className: 'font-grotesk text-white font-bold leading-none', style: { fontSize: 34, letterSpacing: '-0.02em' } },
+                                        h(AnimatedTime, { seconds: lastTime, duration: 1100 })),
+                                    h('div', { className: 'mt-3 h-1 rounded-full', style: { background: 'rgba(255,255,255,0.08)', overflow: 'hidden' } },
+                                        h(motion.div, {
+                                            className: 'h-full rounded-full',
+                                            style: { background: 'linear-gradient(90deg,#FF9E7C,#FFD3B8)' },
+                                            initial: { width: '0%' },
+                                            animate: { width: `${timePercent}%` },
+                                            transition: { duration: 1.2, delay: 0.6, ease: EASE.outExpo }
+                                        })
+                                    ),
+                                    h('div', { className: 'flex items-center justify-between mt-2 gap-2' },
+                                        h('span', { className: 'text-[10px] nexus-muted' }, `${timePercent}% of 30:00 budget`),
+                                        timeDelta !== null && h(PopPill, { text: `${Math.abs(timeDelta)}s ${timeDelta >= 0 ? 'faster' : 'slower'}`, tone: timeDelta >= 0 ? 'up' : 'down', delay: 1.2 })
+                                    )
+                                )
+                            )
+                        ),
+
+                        /* Best score — shine sweep */
+                        h(ResultCard, { delay: 0.24, className: 'qcard-shine p-5', style: { minHeight: 168 } },
+                            h('div', { className: 'flex flex-col justify-between h-full gap-3' },
+                                h('div', { className: 'flex items-center justify-between' },
+                                    h('span', { className: 'qcard-label' }, 'Best Score'),
+                                    h('div', { className: 'qchip' }, h('i', { className: 'fas fa-trophy' }))
+                                ),
+                                h('div', null,
+                                    h('div', { className: 'flex items-end gap-2 flex-wrap' },
+                                        h('span', { className: 'font-grotesk text-white font-bold leading-none', style: { fontSize: 34, letterSpacing: '-0.02em' } },
+                                            h(AnimatedNumber, { value: bestScore, suffix: '%', duration: 1100 })),
+                                        bestScore >= scorePercent && quizHistory.length > 1 && h(PopPill, { text: '★ Personal best', tone: 'up', delay: 1.25 })
+                                    ),
+                                    h('span', { className: 'text-xs nexus-muted mt-2 block' }, `across ${quizHistory.length || 1} attempt${quizHistory.length === 1 ? '' : 's'}`)
+                                )
+                            )
+                        ),
+
+                        /* Attempts — with sparkline bars */
+                        h(ResultCard, { delay: 0.32, className: 'p-5', style: { minHeight: 168 } },
+                            h('div', { className: 'flex flex-col justify-between h-full gap-3' },
+                                h('div', { className: 'flex items-center justify-between' },
+                                    h('span', { className: 'qcard-label' }, 'Attempts'),
+                                    h('div', { className: 'qchip' }, h('i', { className: 'fas fa-layer-group' }))
+                                ),
+                                h('div', { className: 'flex items-end justify-between gap-3' },
+                                    h('span', { className: 'font-grotesk text-white font-bold leading-none', style: { fontSize: 34 } },
+                                        h(AnimatedNumber, { value: quizHistory.length || 1 })),
+                                    h(AttemptBars, { history: quizHistory.length ? quizHistory : [{ score, total: questions.length, timestamp: 0 }], delay: 0.75 })
+                                )
+                            )
+                        )
+                    ),
+
+                    /* ---------- Chart + breakdown ---------- */
+                    h('div', { className: 'w-full grid grid-cols-1 lg:grid-cols-3 gap-4' },
+                        h(HistoryPanel, { scores: chartScores, delay: 0.4 }),
+
+                        h(ResultCard, { delay: 0.48, className: 'p-6 flex flex-col', style: { minHeight: 400 } },
+                            h('div', { className: 'flex items-center justify-between mb-5' },
+                                h('div', null,
+                                    h('div', { className: 'qcard-label mb-1' }, 'Breakdown'),
+                                    h('span', { className: 'text-sm font-semibold text-white' }, 'Question Results')
+                                ),
+                                h('span', { className: 'font-grotesk text-xs px-2.5 py-1 rounded-md', style: { color: '#FFB899', background: 'rgba(255,158,124,0.1)', border: '1px solid rgba(255,158,124,0.2)' } },
+                                    `${correctCount}/${questions.length}`)
+                            ),
+                            h('div', { className: 'flex-1 flex flex-col' },
+                                questions.map((_, qi) => {
+                                    const isRight = correctQuestions.includes(qi);
+                                    return h(motion.div, {
+                                        key: qi,
+                                        className: 'nexus-row',
+                                        initial: { opacity: 0, x: -16 },
+                                        animate: { opacity: 1, x: 0 },
+                                        transition: { duration: 0.5, delay: 0.6 + qi * 0.09, ease: EASE.outExpo }
+                                    },
+                                        h('div', { className: 'flex items-center gap-3' },
+                                            h('div', { className: 'nexus-icon-chip' },
+                                                h('i', { className: `fas ${isRight ? 'fa-check' : 'fa-times'}`, style: { color: isRight ? '#4ade80' : '#f87171' } })),
+                                            h('div', null,
+                                                h('p', { className: 'text-sm font-semibold text-white leading-tight' }, `Question ${qi + 1}`),
+                                                h('p', { className: 'text-xs nexus-muted mt-0.5' }, isRight ? 'Correct' : 'Incorrect'))
+                                        ),
+                                        h('span', { className: `nexus-pill ${isRight ? 'nexus-pill-up' : 'nexus-pill-down'}` }, isRight ? '✓' : '✕')
+                                    );
+                                })
+                            ),
+                            questionsWithExplanations.length > 0 && h('button', { onClick: handleStartReview, className: 'w-full nexus-btn justify-center mt-4' },
+                                h('i', { className: 'fas fa-arrow-right text-xs' }), 'View Full Review')
+                        )
+                    ),
+
+                    /* ---------- Bottom stats ---------- */
+                    h('div', { className: 'w-full grid grid-cols-1 md:grid-cols-3 gap-4 mt-4' },
+                        [
+                            { label: 'Correct Answers', value: `${correctCount}/${questions.length}`, icon: 'fa-check', tint: '#4ade80', delay: 0.56 },
+                            { label: 'Average Score', value: `${avgPercent}%`, icon: 'fa-chart-line', tint: '#FFB899', delay: 0.62 },
+                            { label: 'Total Study Time', value: formatMS(totalTime), icon: 'fa-clock', tint: '#7CE0FF', delay: 0.68 }
+                        ].map((s) => h(ResultCard, { key: s.label, delay: s.delay, className: 'px-5 py-4' },
+                            h('div', { className: 'flex items-center justify-between' },
+                                h('div', null,
+                                    h('div', { className: 'qcard-label mb-1.5' }, s.label),
+                                    h('div', { className: 'font-grotesk text-xl font-bold text-white' }, s.value)),
+                                h('div', { className: 'qchip', style: { color: s.tint } }, h('i', { className: `fas ${s.icon}` }))
+                            )
+                        ))
+                    )
+                );
+            };
+
+            const renderQuestionCard = (q, i) => h(WaveQuestionCard, {
+                key: i, q, i,
+                isActive: i === currentQuestion,
+                opaqueMode, currentQuestion, handleOption,
+                musicDropdownOpen, calcDropdownOpen, isMobile,
+                selected, locked, quizStarted
+            });
+
+            return h('div', { className:`min-h-screen flex items-center justify-center relative screenshot-protected ${isDarkMode?'bg-[#0D0D0D] text-white':'bg-[#F5F0EB] text-gray-900'}` },
+                h(AnimatePresence, null,
+                    !quizStarted && h(motion.div, {
+                        key: 'intro-overlay',
+                        className: "absolute inset-0 z-50 flex items-center justify-center",
+                        style: { background:'rgba(0,0,0,0.92)', willChange: 'opacity, transform' },
+                        initial: { opacity: 1 },
+                        animate: { opacity: 1 },
+                        exit:    { opacity: 0, scale: 1.04, transition: { duration: 0.55, ease: EASE.apple } }
+                    },
+                        h('div', { className:"text-center" },
+                            h('span', { className:"text-4xl md:text-6xl font-light text-white tracking-tight", style:{ fontFamily: "'Sora', sans-serif" } }, typingText),
+                            h('span', { className:"typing-cursor" })
+                        )
+                    )
+                ),
+                musicDropdownOpen && !lightboxOpen && h('div',{className:"fixed inset-0 z-30",onClick:toggleMusicDropdown}),
+
+                !showReview && h(Timer, { ref: timerRef, isDarkMode, running: quizStarted && !completed, duration: 1800, onExpire: handleTimeExpire }),
+
+                h('div',{className:"absolute z-40 flex items-center gap-2", style:{ top:'1rem', right:'6vw' }},
+                    !lightboxOpen && h('button',{onClick:toggleOpaqueMode,className:`lg-toggle ${isDarkMode?'dark':''} w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl`,'aria-label':opaqueMode?'Low opacity mode':'High opacity mode'},opaqueMode?h('i',{className:`fas fa-layer-group text-lg ${isDarkMode?'text-gray-300':'text-gray-500'}`}):h('i',{className:`fas fa-layer-group text-lg ${isDarkMode?'text-white':'text-gray-900'}`})),
+                    !lightboxOpen && h('button',{onClick:toggleDarkMode,className:`lg-toggle ${isDarkMode?'dark':''} w-12 h-12 rounded-2xl flex items-center justify-center shadow-xl`,'aria-label':'Toggle dark mode'},isDarkMode?h('i',{className:"fas fa-sun text-yellow-300 text-lg"}):h('i',{className:"fas fa-moon text-gray-700 text-lg"})),
+                    !lightboxOpen && h(Calculator, {isDarkMode, isOpen: calcDropdownOpen, isAnimating: calcDropdownAnimating, onToggle: handleCalcToggle}),
+                    !lightboxOpen && renderMusicDropdown(),
+                ),
+
+                h(FloatingBackground),
+
+                !completed && h('div',{
+                    className:"relative w-full h-[500px] z-10 flex items-center justify-center",
+                    style:{ willChange:'transform' }
+                }, questions.map((q,i)=>renderQuestionCard(q,i))),
+
+                quizStarted && completed && (showReview ? renderReviewMode() : renderResultsScreen())
+            );
+        }
+
+        window.addEventListener('load',()=>{ ReactDOM.createRoot(document.getElementById('root')).render(h(PhysiologyQuiz)); });
+        (function(){
+            const root=document.getElementById('root');
+            document.addEventListener('visibilitychange',()=>{if(document.hidden){root?.classList.add('blur-protect');}else{setTimeout(()=>root?.classList.remove('blur-protect'),100);}});
+            window.addEventListener('blur',()=>{root?.classList.add('blur-protect');});
+            window.addEventListener('focus',()=>{setTimeout(()=>root?.classList.remove('blur-protect'),100);});
+            document.addEventListener('keyup',(e)=>{if(e.key==='PrintScreen'){root?.classList.add('blur-protect');navigator.clipboard.writeText('').catch(()=>{});setTimeout(()=>root?.classList.remove('blur-protect'),1000);}});
+            document.addEventListener('keydown',(e)=>{if((e.metaKey||e.ctrlKey)&&e.shiftKey&&['3','4','5','s','S'].includes(e.key)){root?.classList.add('blur-protect');setTimeout(()=>root?.classList.remove('blur-protect'),500);}});
+            root?.classList.add('screenshot-protected');
+        })();
+    </script>
+</body>
+</html>
