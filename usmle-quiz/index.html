@@ -1872,6 +1872,21 @@
         .fv-h4 { margin: 56px 0 14px; font: 700 20px -apple-system, 'SF Pro Display', Inter, Arial, sans-serif; }
         .fv-cta { margin-top: 44px; height: 56px; padding: 0 30px; border-radius: 999px; border: 0; background: #fff; color: #000; font: 600 15.5px -apple-system, Inter, Arial, sans-serif; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; }
         .fv-ci { width: 60px; height: 60px; }
+        /* ===== v18: the drip is made of the real nav glass ===== */
+        .acct-wrap .acct-menu .am-neck, .acct-wrap .acct-menu .am-drop { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0; pointer-events: none; z-index: 1; box-shadow: 0 8px 32px rgba(0,0,0,.18); }
+        .am-neck::before, .am-drop::before { background: rgba(16,16,20,.5); }
+        .am-neck::after, .am-drop::after { display: block !important; }
+        .acct-wrap .acct-menu .am-body { z-index: 3; }
+        /* ===== v18: friend page = photo + frosted dark sheet (the jacket layout) that rises, while the photo blurs ===== */
+        .fv-flow { max-width: none; padding: 62dvh 0 0; margin-top: -100dvh; }
+        .fv-sheet2 { width: min(1040px, calc(100% - 32px)); margin: 0 auto; min-height: 100dvh; padding: 10px clamp(22px, 3.4vw, 40px) 18dvh; border-radius: 30px 30px 0 0; background: rgba(34,32,46,.62); -webkit-backdrop-filter: blur(26px) saturate(1.35); backdrop-filter: blur(26px) saturate(1.35); box-shadow: 0 -24px 60px -24px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.16); }
+        @media (max-width: 700px) { .fv-sheet2 { width: 100%; border-radius: 26px 26px 0 0; } }
+        .fv-grab2 { display: block; width: 44px; height: 5px; margin: 8px auto 26px; border-radius: 3px; background: rgba(255,255,255,.55); }
+        .fv-r2 { margin-bottom: 22px; } .fv-r2 b { display: block; font: 700 17px -apple-system, 'SF Pro Text', Inter, Arial, sans-serif; } .fv-r2 p { margin: 7px 0 0; font: 400 16px/1.5 -apple-system, 'SF Pro Text', Inter, Arial, sans-serif; color: rgba(255,255,255,.9); }
+        .fv-sheet2 .fv-text { font: 400 16px/1.55 -apple-system, 'SF Pro Text', Inter, Arial, sans-serif; letter-spacing: 0; color: #fff; margin-top: 7px; }
+        .fv-sheet2 .fv-facts { margin: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 28px; } @media (max-width: 700px) { .fv-sheet2 .fv-facts { grid-template-columns: 1fr 1fr; } }
+        .fv-sheet2 .fv-cta { margin-top: 12px; }
+        .fv-shade::after { opacity: calc(var(--p) * .6); }
 
     </style>
 </head>
@@ -5988,12 +6003,13 @@ function FriendDetail({ p, others, onBack, onMessage }) {
       <div className="fv-hint" aria-hidden="true"><i></i>Scroll</div>
     </div>
     <div className="fv-flow">
-      <small className="fv-lab">ABOUT</small>
-      <h2 className="fv-h2">${(p.display_name || '').split(' ')[0]}</h2>
-      <p className="fv-text" ref=${txt}>${words.map((w, i) => html`<span key=${i}>${w} </span>`)}</p>
-      <div className="fv-facts" ref=${facts}>${rows.map(([k, v]) => html`<div key=${k}><b>${k}</b><span>${v}</span></div>`)}</div>
-      ${others.length > 0 && html`<h4 className="fv-h4">Study circle</h4><div className="fv-cast">${others.slice(0, 10).map((x) => html`<div key=${x.conn_id || x.user_id} className="fv-c"><${Av} p=${x} cls="fv-ci" /><span>${(x.display_name || '').split(' ')[0]}</span></div>`)}</div>`}
-      <button className="fv-cta" onClick=${onMessage}><${CIcon} n="chat" size=${18} sw=${2.1} />Message ${(p.display_name || '').split(' ')[0]}</button>
+      <section className="fv-sheet2">
+        <span className="fv-grab2" aria-hidden="true"></span>
+        <div className="fv-r2"><b>About</b><p className="fv-text" ref=${txt}>${words.map((w, i) => html`<span key=${i}>${w} </span>`)}</p></div>
+        <div className="fv-facts" ref=${facts}>${rows.map(([k, v]) => html`<div key=${k} className="fv-r2"><b>${k}</b><p>${v}</p></div>`)}</div>
+        ${others.length > 0 && html`<div className="fv-r2"><b>Study circle</b><div className="fv-cast">${others.slice(0, 10).map((x) => html`<div key=${x.conn_id || x.user_id} className="fv-c"><${Av} p=${x} cls="fv-ci" /><span>${(x.display_name || '').split(' ')[0]}</span></div>`)}</div></div>`}
+        <button className="fv-cta" onClick=${onMessage}><${CIcon} n="chat" size=${18} sw=${2.1} />Message ${(p.display_name || '').split(' ')[0]}</button>
+      </section>
     </div></div>`;
 }
 
@@ -6365,78 +6381,32 @@ function AccountButton() {
   const c = useCloud(), name = useUserName();
   const [stage, setStage] = useState('closed');   /* closed | open | closing */
   const closeMenu = useCallback(() => { setStage('closing'); setTimeout(() => setStage('closed'), 420); }, []);
-  const lqR = useRef(null), rimR = useRef(null), bodyR = useRef(null), rectR = useRef(null);
-  /* A real drip, and glass from the first frame to the last. The liquid is an outline computed every frame (a smooth union of
-     the photo bead, a tapering thread of beads and the falling drop, traced with marching squares). That outline clips a
-     single liquid-glass layer, the same recipe as the nav bar and the quiz timer, so the drop is glass the whole way.
-     Physics: the drop grows (more weight), surface tension through the neck holds it and weakens as the neck thins, so it
-     sags then runs away; the thread snaps and springs back; the drop rings, lands, and splashes into the panel on springs. */
+  const dropR = useRef(null), neckR = useRef(null), bodyR = useRef(null), rectR = useRef(null);
+  /* A real drip, in the real nav glass. The drop and the thread are ordinary .glass elements (the same layers as the nav bar and
+     the quiz timer: a tint, plus a backdrop displaced by the glass filter), moved by a small physics sim:
+     the drop grows (more weight), the thread through the neck holds it and thins as it stretches, so it sags then runs away;
+     the thread snaps and springs back; the drop rings, lands, and splashes into the panel on springs. Closing runs it backwards. */
   useLayoutEffect(() => {
-    const lq = lqR.current, bd = bodyR.current, rim = rimR.current;
-    if (stage === 'closed' || !lq || !bd) return undefined;
-    const OX = 34, OY = 96, W = 280, H = bd.offsetHeight, R = OX + W, AV = 46, GAP = 48, cx0 = R - AV / 2, cy0 = OY - GAP - AV / 2;
-    const L0 = 34, Lp = 60, GRAV = 3400, KH = 150, DAMP = 6, RD = 26, DT = 1 / 480, K = 8, S = 4;
-    const GW = W + 68, GH = OY + H + 34;
-    rim.ownerSVGElement.setAttribute('width', GW); rim.ownerSVGElement.setAttribute('height', GH);
+    const drop = dropR.current, neck = neckR.current, bd = bodyR.current;
+    if (stage === 'closed' || !drop || !neck || !bd) return undefined;
+    const W = 280, H = bd.offsetHeight, R = W, AV = 46, GAP = 48, cx0 = W - AV / 2, cy0 = -GAP - AV / 2, OX = 0, OY = 0;
+    const L0 = 34, Lp = 60, GRAV = 3400, KH = 150, DAMP = 6, RD = 26, DT = 1 / 480;
     const opening = stage === 'open', clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const px = (n) => n + 'px';
     const sneck = (L) => clamp(1 - (L - L0) / (Lp - L0), 0, 1);
     const spring = (e, tg, w, z) => { const a = -w * w * (e.x - tg) - 2 * z * w * e.v; e.v += a * DT; e.x += e.v * DT; };
-    /* ---- the outline ---- */
-    let shapes = [];
-    const circ = (x, y, r) => shapes.push([0, x, y, r, 0]), ell = (x, y, rx, ry) => shapes.push([1, x, y, rx, ry]), box = (l, t, r, b) => { shapes.push([2, (l + r) / 2, (t + b) / 2, (r - l) / 2, (b - t) / 2]); rectR.current = { l, t, r, b }; };
-    const sd = (sh, x, y) => {
-      if (sh[0] === 0) return Math.hypot(x - sh[1], y - sh[2]) - sh[3];
-      if (sh[0] === 1) return (Math.hypot((x - sh[1]) / sh[3], (y - sh[2]) / sh[4]) - 1) * Math.min(sh[3], sh[4]);
-      const hw = sh[3], hh = sh[4], rr = Math.min(30, hw, hh), qx = Math.abs(x - sh[1]) - hw + rr, qy = Math.abs(y - sh[2]) - hh + rr;
-      return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rr;
-    };
-    const field = (x, y) => { let sum = 0; for (let i = 0; i < shapes.length; i++) sum += Math.exp(-sd(shapes[i], x, y) / K); return -K * Math.log(sum + 1e-30); };
-    const outline = () => {
-      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-      shapes.forEach((sh) => { const w = sh[0] === 0 ? sh[3] : sh[3], h = sh[0] === 0 ? sh[3] : sh[4]; x0 = Math.min(x0, sh[1] - w); x1 = Math.max(x1, sh[1] + w); y0 = Math.min(y0, sh[2] - h); y1 = Math.max(y1, sh[2] + h); });
-      const m = 16; x0 = Math.max(0, Math.floor((x0 - m) / S) * S); y0 = Math.max(0, Math.floor((y0 - m) / S) * S); x1 = Math.min(GW, Math.ceil((x1 + m) / S) * S); y1 = Math.min(GH, Math.ceil((y1 + m) / S) * S);
-      const nx = Math.round((x1 - x0) / S), ny = Math.round((y1 - y0) / S), vals = new Float32Array((nx + 1) * (ny + 1));
-      for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) vals[j * (nx + 1) + i] = field(x0 + i * S, y0 + j * S);
-      const adj = new Map(), pt = new Map(), add = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
-      const eid = (i, j, v) => 2 * (j * (nx + 1) + i) + v;
-      const ept = (id) => { let p = pt.get(id); if (p) return p; const v = id & 1, k = id >> 1, i = k % (nx + 1), j = (k - i) / (nx + 1), a = vals[k], b = v ? vals[k + nx + 1] : vals[k + 1], t = a / (a - b); p = v ? [x0 + i * S, y0 + (j + t) * S] : [x0 + (i + t) * S, y0 + j * S]; pt.set(id, p); return p; };
-      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-        const k = j * (nx + 1) + i, tl = vals[k] < 0 ? 1 : 0, tr = vals[k + 1] < 0 ? 1 : 0, bl = vals[k + nx + 1] < 0 ? 1 : 0, br = vals[k + nx + 2] < 0 ? 1 : 0, c = tl * 8 + tr * 4 + br * 2 + bl;
-        if (c === 0 || c === 15) continue;
-        const T = eid(i, j, 0), B = eid(i, j + 1, 0), Lf = eid(i, j, 1), Rt = eid(i + 1, j, 1);
-        switch (c) {
-          case 1: case 14: add(Lf, B); break; case 2: case 13: add(B, Rt); break; case 3: case 12: add(Lf, Rt); break;
-          case 4: case 11: add(T, Rt); break; case 6: case 9: add(T, B); break; case 7: case 8: add(T, Lf); break;
-          case 5: { const ce = (vals[k] + vals[k + 1] + vals[k + nx + 1] + vals[k + nx + 2]) / 4 < 0; if (ce) { add(T, Lf); add(Rt, B); } else { add(T, Rt); add(Lf, B); } break; }
-          case 10: { const ce = (vals[k] + vals[k + 1] + vals[k + nx + 1] + vals[k + nx + 2]) / 4 < 0; if (ce) { add(T, Rt); add(Lf, B); } else { add(T, Lf); add(Rt, B); } break; }
-          default: break;
-        }
-      }
-      const seen = new Set(); let d = '';
-      adj.forEach((_, start) => {
-        if (seen.has(start)) return; let prev = -1, cur = start, first = true;
-        for (let guard = 0; guard < 8000; guard++) {
-          seen.add(cur); const p = ept(cur); d += (first ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1); first = false;
-          const nb = adj.get(cur), nxt = nb[0] !== prev ? nb[0] : nb[1];
-          if (nxt === undefined || nxt === start || seen.has(nxt)) break; prev = cur; cur = nxt;
-        }
-        d += 'Z';
-      });
-      return d;
-    };
-    const roundRect = (l, t, r, b, rr) => 'M' + (l + rr) + ',' + t + 'H' + (r - rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + r + ',' + (t + rr) + 'V' + (b - rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + (r - rr) + ',' + b + 'H' + (l + rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + l + ',' + (b - rr) + 'V' + (t + rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + (l + rr) + ',' + t + 'Z';
-    const flush = (exact) => { const d = exact || outline(); lq.style.clipPath = 'path("' + d + '")'; rim.setAttribute('d', d); shapes = []; };
-    const drawChain = (y, s, shrink) => { const N = 6; for (let i = 0; i < N; i++) { const f = (i + 1) / (N + 1), r = shrink != null ? shrink * (0.5 + 0.5 * f) : 15 * Math.pow(s, 0.8) * (0.45 + 0.55 * f); if (r >= 1.2) circ(cx0, cy0 + f * (y - cy0), r); } };
+    const boxEl = (l, t, r, b, rad) => { const st = drop.style, w = Math.max(2, r - l), h = Math.max(2, b - t); st.left = px(l); st.top = px(t); st.width = px(w); st.height = px(h); st.borderRadius = rad == null ? px(Math.min(30, w / 2, h / 2)) : rad; st.opacity = 1; rectR.current = { l, t, r, b }; };
+    const hideNeck = () => { neck.style.opacity = 0; };
+    const showNeck = (cy, top, width) => { if (width < 2) { hideNeck(); return; } const st = neck.style; st.left = px(cx0 - width / 2); st.top = px(cy); st.width = px(width); st.height = px(Math.max(2, top - cy)); st.borderRadius = px(width / 2); st.opacity = 1; };
     const content = (l0) => {
       const rc = rectR.current, p = clamp((l0 - rc.l) / (l0 - OX), 0, 1);
       bd.style.opacity = clamp((p - 0.6) / 0.3, 0, 1);
       bd.style.clipPath = 'inset(' + px(Math.max(0, rc.t - OY)) + ' ' + px(Math.max(0, R - rc.r)) + ' ' + px(Math.max(0, OY + H - rc.b)) + ' ' + px(Math.max(0, rc.l - OX)) + ')';
     };
-    const settle = () => { box(OX, OY, R, OY + H); shapes = []; flush(roundRect(OX, OY, R, OY + H, 30)); bd.style.opacity = 1; bd.style.clipPath = 'none'; };
+    const settle = () => { boxEl(OX, OY, R, OY + H, '30px'); hideNeck(); bd.style.opacity = 1; bd.style.clipPath = 'none'; };
     let raf = 0, t0 = 0, simT = 0, ph, E, y, v, rd, tbreak;
-    if (opening) { ph = 'hang'; y = cy0 + 27; v = 0; rd = 10; tbreak = null; bd.style.opacity = 0; rectR.current = { l: cx0 - 10, t: y - 10, r: cx0 + 10, b: y + 10 }; }
-    else { const rc = rectR.current || { l: OX, t: OY, r: R, b: OY + H }; ph = 'collapse'; E = { l: { x: rc.l, v: 0 }, t: { x: rc.t, v: 0 }, r: { x: rc.r, v: 0 }, b: { x: rc.b, v: 0 } }; }
+    if (opening) { ph = 'hang'; y = cy0 + 27; v = 0; rd = 10; tbreak = null; bd.style.opacity = 0; drop.style.opacity = 0; hideNeck(); rectR.current = { l: cx0 - 10, t: y - 10, r: cx0 + 10, b: y + 10 }; }
+    else { const rc = rectR.current || { l: OX, t: OY, r: R, b: OY + H }; ph = 'collapse'; E = { l: { x: rc.l, v: 0 }, t: { x: rc.t, v: 0 }, r: { x: rc.r, v: 0 }, b: { x: rc.b, v: 0 } }; hideNeck(); }
     const L_START = { v: cx0 - RD };
     const step = () => {
       if (ph === 'hang') {
@@ -6459,12 +6429,12 @@ function AccountButton() {
       if (ph === 'hang') {
         const L = y - cy0, s = tbreak == null ? sneck(L) : 0, tbr = tbreak == null ? 0 : simT - tbreak;
         const sy = tbreak == null ? 1 + 0.3 * (1 - s) * clamp((L - 30) / 8, 0, 1) : 1 + 0.2 * Math.exp(-14 * tbr) * Math.cos(46 * tbr), sx = 1 / Math.sqrt(sy);
-        circ(cx0, cy0, AV / 2); ell(cx0, y, rd * sx, rd * sy); rectR.current = { l: cx0 - rd, t: y - rd, r: cx0 + rd, b: y + rd }; bd.style.opacity = 0;
-        if (tbreak == null) drawChain(y, s); else { const k = Math.exp(-20 * tbr); drawChain(cy0 + (y - cy0) * 0.25 * k + 12 * (1 - k), 0, 9 * k); }
-      } else if (ph === 'land') { box(E.l.x, E.t.x, E.r.x, E.b.x); content(L_START.v); }
-      else if (ph === 'collapse') { circ(cx0, cy0, AV / 2); box(E.l.x, E.t.x, E.r.x, E.b.x); bd.style.opacity = clamp(parseFloat(bd.style.opacity || 1) - 0.12, 0, 1); bd.style.clipPath = 'inset(' + px(Math.max(0, E.t.x - OY)) + ' ' + px(Math.max(0, R - E.r.x)) + ' ' + px(Math.max(0, OY + H - E.b.x)) + ' ' + px(Math.max(0, E.l.x - OX)) + ')'; }
-      else if (ph === 'rise') { const L = y - cy0, s = sneck(L), ry = rd * (1 + 0.28 * (1 - s)); circ(cx0, cy0, AV / 2); ell(cx0, y, rd, ry); drawChain(y, s); bd.style.opacity = 0; }
-      if (shapes.length) flush();
+        const rx = rd * sx, ry = rd * sy; boxEl(cx0 - rx, y - ry, cx0 + rx, y + ry, '50%'); rectR.current = { l: cx0 - rd, t: y - rd, r: cx0 + rd, b: y + rd }; bd.style.opacity = 0;
+        const top = cy0 + AV / 2 - 8;
+        if (tbreak == null) showNeck(top, y - ry + 12, 24 * Math.pow(s, 0.9)); else showNeck(top, top + 16 * Math.exp(-20 * tbr) + 2, 10 * Math.exp(-22 * tbr));
+      } else if (ph === 'land') { boxEl(E.l.x, E.t.x, E.r.x, E.b.x); hideNeck(); content(L_START.v); }
+      else if (ph === 'collapse') { boxEl(E.l.x, E.t.x, E.r.x, E.b.x); bd.style.opacity = clamp(parseFloat(bd.style.opacity || 1) - 0.12, 0, 1); bd.style.clipPath = 'inset(' + px(Math.max(0, E.t.x - OY)) + ' ' + px(Math.max(0, R - E.r.x)) + ' ' + px(Math.max(0, OY + H - E.b.x)) + ' ' + px(Math.max(0, E.l.x - OX)) + ')'; }
+      else if (ph === 'rise') { const L = y - cy0, s = sneck(L), ry = rd * (1 + 0.28 * (1 - s)); boxEl(cx0 - rd, y - ry, cx0 + rd, y + ry, '50%'); showNeck(cy0 + AV / 2 - 8, y - ry + 12, 24 * Math.pow(s, 0.9)); bd.style.opacity = 0; }
     };
     const tick = (now) => {
       if (!t0) t0 = now; const target = (now - t0) / 1000;
@@ -6473,7 +6443,7 @@ function AccountButton() {
         if (ph === 'land' && Math.abs(E.l.x - OX) < 0.3 && Math.abs(E.b.x - OY - H) < 0.3 && Math.abs(E.t.x - OY) < 0.3 && Math.abs(E.r.x - R) < 0.3 && Math.abs(E.l.v) < 4 && Math.abs(E.b.v) < 4 && Math.abs(E.t.v) < 4) { settle(); ph = 'rest'; break; }
       }
       if (ph === 'rest') return;
-      if (ph === 'done') { lq.style.clipPath = 'polygon(0 0,0 0,0 0)'; rim.setAttribute('d', ''); bd.style.opacity = 0; return; }
+      if (ph === 'done') { drop.style.opacity = 0; hideNeck(); bd.style.opacity = 0; return; }
       paint(); raf = requestAnimationFrame(tick);
     };
     paint(); raf = requestAnimationFrame(tick);
@@ -6491,7 +6461,7 @@ function AccountButton() {
   const go = (fn) => () => { closeMenu(); fn(); };
   return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => (stage === 'open' ? closeMenu() : stage === 'closed' && setStage('open'))} aria-label="Account" aria-expanded=${stage === 'open'}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<span className="sb-corner"><${SyncBadge} status=${c.status} size=${19} /></span></button>
     ${stage !== 'closed' && html`<div className=${cx('acct-menu', stage)}>
-      <div className="am-lq" ref=${lqR} aria-hidden="true"></div><svg className="am-rim" aria-hidden="true"><path ref=${rimR} fill="none" /></svg>
+      <div className="am-neck glass" data-t="mixed" ref=${neckR} aria-hidden="true"></div><div className="am-drop glass" data-t="mixed" ref=${dropR} aria-hidden="true"></div>
       <div className="am-body" ref=${bodyR}><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
         <p className=${'am-st ' + c.status}><${SyncBadge} status=${c.status} size=${16} />${label}</p>
         <button onClick=${go(() => { location.hash = '#/account'; })}><${Icon} n="fa-id-badge" /> Your account</button>
