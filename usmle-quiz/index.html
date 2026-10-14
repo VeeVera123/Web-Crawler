@@ -1420,6 +1420,35 @@
         .a3-menu { scrollbar-width: none; -ms-overflow-style: none; } .a3-menu::-webkit-scrollbar { display: none; }
         .a3-frame, .a3-frame iframe { overflow: hidden; scrollbar-width: none; }
 
+        /* ===== select box, account page ===== */
+        .sb-btn { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; height: 52px; padding: 0 18px; border-radius: 16px; border: 1.5px solid rgba(0,0,0,.18); background: #fff; color: #0d0d08; font: 500 15px 'Montserrat', sans-serif; cursor: pointer; text-align: left; letter-spacing: 0; text-transform: none; transition: border-color .25s, box-shadow .3s; }
+        .sb-btn:hover, .sb-btn.open { border-color: #0d0d08; } .sb-btn.open { box-shadow: 0 0 0 4px rgba(0,0,0,.07); } .sb-btn .ph { opacity: .45; } .sb-chev { font-size: 12px; opacity: .6; transition: transform .4s var(--ease); } .sb-btn.open .sb-chev { transform: rotate(180deg); }
+        .sb-pop { position: fixed; z-index: 700; margin: 0; padding: 8px; list-style: none; max-height: 420px; overflow-y: auto; scrollbar-width: none; border-radius: 22px; background: #fbfaf6; box-shadow: 0 30px 70px -20px rgba(0,0,0,.5), 0 0 0 1px rgba(0,0,0,.07); animation: dpIn .35s var(--ease-out); font-family: 'Montserrat', sans-serif; } .sb-pop::-webkit-scrollbar { display: none; }
+        .sb-pop button { width: 100%; height: 44px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border: 0; border-radius: 14px; background: transparent; color: #0d0d08; font: 500 14.5px 'Montserrat'; cursor: pointer; transition: background .15s; } .sb-pop button.hi { background: rgba(0,0,0,.07); } .sb-pop button.on { font-weight: 700; } .sb-pop button i { font-size: 12px; }
+        .ac-hero { display: flex; gap: 26px; align-items: center; padding: 28px; border-radius: 32px; background: #0b0b0b; color: #fff; margin-bottom: 14px; flex-wrap: wrap; }
+        .ac-av { width: 120px; height: 120px; border-radius: 50%; background: #FFE600; color: #0b0b0b; display: grid; place-items: center; overflow: hidden; flex: none; } .ac-av b { font: 400 64px 'Bebas Neue'; } .ac-av img { width: 100%; height: 100%; object-fit: cover; }
+        .ac-hero h2 { margin: 0; font: 400 clamp(44px, 5vw, 68px)/1 'Bebas Neue'; text-transform: uppercase; } .ac-hero small { opacity: .6; font-size: 13px; } .ac-hero p { margin: 10px 0 14px; max-width: 54ch; line-height: 1.55; opacity: .85; font-size: 15px; }
+        .ac-hero .lh-btn { margin: 0; background: #fff; color: #0b0b0b; } .ac-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; } .ac-chips span { padding: 7px 14px; border-radius: 999px; background: rgba(255,255,255,.12); font: 600 12px 'Montserrat'; }
+        .ac-soon { display: flex; align-items: center; gap: 18px; padding: 22px 26px; border-radius: 28px; border: 1.5px dashed rgba(0,0,0,.25); margin-top: 6px; } .ac-soon > i { font-size: 26px; } .ac-soon b { font-size: 16px; } .ac-soon p { margin: 4px 0 0; font-size: 13.5px; opacity: .65; line-height: 1.5; max-width: 62ch; } .ac-soon > span { margin-left: auto; padding: 7px 14px; border-radius: 999px; background: #FFE600; font: 700 11px 'Montserrat'; letter-spacing: .08em; text-transform: uppercase; flex: none; }
+        .ac-list { display: grid; gap: 12px; max-width: 820px; }
+        .ac-row, .ac-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 24px; border-radius: 26px; background: #f3f3f1; } .ac-row b, .ac-card b { display: block; font-size: 15.5px; } .ac-row small, .ac-card small { display: block; margin-top: 5px; font-size: 13px; opacity: .6; line-height: 1.5; max-width: 52ch; }
+        .ac-card .lh-btn { margin: 0; flex: none; } .lh-btn.ghost { background: transparent; color: #0b0b0b; border: 1.5px solid #0b0b0b; } .lh-btn.danger { background: #c62828; color: #fff; } .lh-btn:disabled { opacity: .5; cursor: not-allowed; }
+        .ac-card.col { flex-direction: column; align-items: stretch; } .ac-card.danger { background: #fff1ef; border: 1.5px solid #f0b8b0; flex-wrap: wrap; } .ac-confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; } .ac-confirm input { height: 48px; border-radius: 14px; border: 1.5px solid rgba(0,0,0,.25); padding: 0 16px; font: 500 14px 'Montserrat'; outline: none; background: #fff; }
+        .ac-use { display: grid; gap: 10px; } .ac-use div { display: grid; grid-template-columns: 150px 1fr 70px; gap: 12px; align-items: center; font-size: 13px; } .ac-use i { height: 10px; border-radius: 6px; background: rgba(0,0,0,.08); overflow: hidden; } .ac-use u { display: block; height: 100%; background: #0b0b0b; border-radius: 6px; } .ac-use em { font-style: normal; opacity: .6; text-align: right; }
+        .ac-sw { width: 54px; height: 32px; border-radius: 999px; border: 0; background: rgba(0,0,0,.2); position: relative; cursor: pointer; flex: none; transition: background .3s; } .ac-sw i { position: absolute; left: 3px; top: 3px; width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.3); transition: transform .45s cubic-bezier(.34,1.56,.64,1); } .ac-sw.on { background: #0b0b0b; } .ac-sw.on i { transform: translateX(22px); }
+        .ac-sel { width: 200px; flex: none; }
+        .ac-embed { margin: 0 calc(-1 * clamp(18px, 5vw, 80px)); } .ac-embed .dz { min-height: 0; }
+        .gl { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 1000px; } .gl-card { padding: 24px; border-radius: 28px; background: #f3f3f1; display: grid; gap: 14px; align-content: start; } .gl-card.wide { grid-column: span 2; } .gl-card > small { font: 600 11px 'Space Grotesk', monospace; letter-spacing: .14em; text-transform: uppercase; opacity: .55; }
+        .gl-card textarea { min-height: 120px; border-radius: 18px; border: 1.5px solid rgba(0,0,0,.14); padding: 14px 16px; font: 400 15px/1.55 'Montserrat'; background: #fff; outline: none; resize: vertical; } .gl-card textarea:focus, .gl-card input:focus { border-color: #0b0b0b; }
+        .gl-card label { display: flex; justify-content: space-between; align-items: center; font-size: 14px; } .gl-card label input[type=number] { width: 80px; height: 44px; border-radius: 12px; border: 1.5px solid rgba(0,0,0,.2); text-align: center; font: 600 15px 'Montserrat'; background: #fff; outline: none; margin-right: 6px; }
+        .gl-bar > div { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 7px; } .gl-bar span { opacity: .6; } .gl-bar i { display: block; height: 12px; border-radius: 8px; background: rgba(0,0,0,.09); overflow: hidden; } .gl-bar u { display: block; height: 100%; background: #0b0b0b; border-radius: 8px; transition: width .8s var(--ease-out); }
+        .gl-card form { display: flex; gap: 8px; } .gl-card form input { flex: 1; height: 50px; border-radius: 999px; border: 1.5px solid rgba(0,0,0,.2); padding: 0 20px; font: 500 15px 'Montserrat'; outline: none; background: #fff; } .gl-card form .lh-btn { margin: 0; width: 50px; padding: 0; justify-content: center; }
+        .gl-ms { display: grid; grid-template-columns: 1fr 190px 30px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid rgba(0,0,0,.08); } .gl-ms label { justify-content: flex-start; gap: 12px; } .gl-ms input[type=checkbox] { width: 20px; height: 20px; accent-color: #0b0b0b; } .gl-ms.done label span { text-decoration: line-through; opacity: .45; } .gl-ms button.dp-btn { height: 42px; border-radius: 12px; font-size: 13px; } .gl-ms > button:last-child { border: 0; background: none; cursor: pointer; opacity: .4; } .gl-ms > button:last-child:hover { opacity: 1; }
+        @media (max-width: 760px) { .gl { grid-template-columns: 1fr; } .gl-card.wide { grid-column: span 1; } .gl-ms { grid-template-columns: 1fr 30px; } .gl-ms .dp-btn { grid-column: 1 / -1; grid-row: 2; } .ac-row, .ac-card { flex-wrap: wrap; } .ac-use div { grid-template-columns: 110px 1fr 56px; } .ac-sel { width: 100%; } }
+        body.rm *, body.rm *::before, body.rm *::after { animation-duration: .001s !important; animation-iteration-count: 1 !important; transition-duration: .001s !important; scroll-behavior: auto !important; }
+        .tab-thumb[style*="width: 0px"] { opacity: 0; }
+        .tabs .tab[aria-current="page"] { opacity: 1; }
+
     </style>
 </head>
 <body>
@@ -3107,7 +3136,7 @@ const { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, useS
 const html = htm.bind(React.createElement);
 const cx = (...a) => a.filter(Boolean).join(' ');
 const PROTECT_QUIZ = true;                       /* original copy / screenshot guards, scoped to the Quiz tab */
-const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches || (typeof PrefsStore !== 'undefined' && PrefsStore.get().reduceMotion);
 const hidePicture = (e) => { e.currentTarget.style.visibility = 'hidden'; };
 const GALLERY_COLUMNS = (window.__quizData.gallery || []);
 // Dark-academia medical / anatomical plates for the home gallery (center = the reaching-hand photo).
@@ -3192,9 +3221,9 @@ const SAMPLE = (() => {
 /* ---------- hooks ---------- */
 const useAttempts = () => useSyncExternalStore(window.AttemptStore.subscribe, window.AttemptStore.get);
 
-const ROUTES = ['home', 'quiz', 'dashboard', 'study', 'library'];
+const ROUTES = ['home', 'quiz', 'dashboard', 'study', 'library', 'account'];
 function useRoute() {
-  const read = () => { const r = location.hash.replace(/^#\/?/, '').split('?')[0]; return ROUTES.includes(r) ? r : 'home'; };
+  const read = () => { const r = location.hash.replace(/^#\/?/, '').split('?')[0]; return ROUTES.includes(r) ? r : (r === '' && typeof PrefsStore !== 'undefined' && ROUTES.includes(PrefsStore.get().landing) ? PrefsStore.get().landing : 'home'); };
   const [route, setRoute] = useState(read);
   useEffect(() => {
     const on = () => setRoute(read());
@@ -3483,7 +3512,7 @@ function useNavCompact(route) {
     let last = window.scrollY, raf = 0;
     const step = () => {
       raf = 0;
-      if (window.innerWidth <= 760) { setCompact(false); return; }
+      if (window.innerWidth <= 760 || !PrefsStore.get().collapseNav) { setCompact(false); return; }
       const y = window.scrollY, dy = y - last; last = y;
       if (y < 90) setCompact(false);
       else if (dy < -6) setCompact(false);
@@ -3502,7 +3531,7 @@ function Tabs({ route, go }) {
   const [compact, openNav] = useNavCompact(route);
   const refs = useRef({});
   const [th, setTh] = useState({ x: 0, w: 0 });
-  const measure = useCallback(() => { const el = refs.current[route]; if (el) setTh({ x: el.offsetLeft, w: el.offsetWidth }); }, [route]);
+  const measure = useCallback(() => { const el = refs.current[route]; setTh(el ? { x: el.offsetLeft, w: el.offsetWidth } : { x: 0, w: 0 }); }, [route]);
   useLayoutEffect(measure, [measure]);
   useEffect(() => { window.addEventListener('resize', measure); if (document.fonts) document.fonts.ready.then(measure); return () => window.removeEventListener('resize', measure); }, [measure]);
   return html`<${Fragment}>
@@ -4539,6 +4568,8 @@ const CardStore = makeStore('usmle-site:cards', []);
 const PlanStore = makeStore('usmle-site:plan', { exam: '', goal: 20, tasks: [] });
 const FocusLog = makeStore('usmle-site:focus', []);                 /* [{ at, sec }] finished focus blocks */
 const MasteredStore = makeStore('usmle-site:mastered', []);
+const GoalsStore = makeStore('usmle-site:goals', { accuracy: 75, weeklyHours: 20, why: '', milestones: [] });
+const PrefsStore = makeStore('usmle-site:prefs', { sound: true, collapseNav: true, reduceMotion: false, landing: 'home' });
 const useStore = (st) => useSyncExternalStore(st.subscribe, st.get);
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 const DAY = 864e5;
@@ -4560,7 +4591,8 @@ function Sketch({ note, onInk }) {
   const [tool, setTool] = useState('pen'), [color, setColor] = useState(SK_COLORS[0]), [size, setSize] = useState(4);
   const undo = useRef([]);
   const bgData = useRef(note.bg || '');
-  const [hasBg, setHasBg] = useState(!!note.bg);
+  const bgRefVal = useRef(note.bgRef || '');
+  const [hasBg, setHasBg] = useState(!!(note.bg || note.bgRef));
   const loadImg = (src, cross) => new Promise((ok, no) => { const im = new Image(); if (cross) im.crossOrigin = 'anonymous'; im.onload = () => ok(im); im.onerror = no; im.src = src; });
   const paintBg = (im) => {
     const c = bgRef.current.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, SK_W, SK_H);
@@ -4568,14 +4600,16 @@ function Sketch({ note, onInk }) {
   };
   useEffect(() => {
     paintBg(null);
-    if (note.bg) loadImg(note.bg).then(paintBg).catch(() => {});
+    if (note.bgRef) loadImg(note.bgRef, true).then(paintBg).catch(() => {});
+    else if (note.bg) loadImg(note.bg).then(paintBg).catch(() => {});
     if (note.ink) loadImg(note.ink).then((im) => inkRef.current.getContext('2d').drawImage(im, 0, 0)).catch(() => {});
   }, []);
-  const save = () => onInk({ ink: inkRef.current.toDataURL('image/png'), bg: bgData.current });
+  const save = () => onInk({ ink: inkRef.current.toDataURL('image/webp', 0.8), bg: bgData.current, bgRef: bgRefVal.current });
   const setBackground = async (src, cross) => {
     try {
       const im = await loadImg(src, cross); paintBg(im);
-      bgData.current = bgRef.current.toDataURL('image/jpeg', 0.82); setHasBg(true); save();
+      if (cross) { bgData.current = ''; bgRefVal.current = src; } else { bgData.current = bgRef.current.toDataURL('image/jpeg', 0.65); bgRefVal.current = ''; }   /* picture presets are saved as a link, not a copy */
+      setHasBg(true); save();
     } catch { toast('That image could not be loaded'); }
   };
   const pos = (e) => { const r = inkRef.current.getBoundingClientRect(); return [(e.clientX - r.left) * SK_W / r.width, (e.clientY - r.top) * SK_H / r.height]; };
@@ -4609,7 +4643,7 @@ function Sketch({ note, onInk }) {
   const move = (e) => { if (stroke.current) draw(e, false); };
   const up = () => { if (!stroke.current) return; stroke.current = null; save(); };
   const undoOne = () => { const snap = undo.current.pop(); if (!snap) return; inkRef.current.getContext('2d').putImageData(snap, 0, 0); save(); };
-  const clearAll = () => { if (!confirm('Clear the drawing and the background?')) return; undo.current = []; inkRef.current.getContext('2d').clearRect(0, 0, SK_W, SK_H); paintBg(null); bgData.current = ''; setHasBg(false); save(); };
+  const clearAll = () => { if (!confirm('Clear the drawing and the background?')) return; undo.current = []; inkRef.current.getContext('2d').clearRect(0, 0, SK_W, SK_H); paintBg(null); bgData.current = ''; bgRefVal.current = ''; setHasBg(false); save(); };
   const exportPng = () => {
     const c = document.createElement('canvas'); c.width = SK_W; c.height = SK_H; const x = c.getContext('2d');
     x.drawImage(bgRef.current, 0, 0); x.drawImage(inkRef.current, 0, 0);
@@ -4750,7 +4784,7 @@ function PlannerTab() {
 
 /* ---------- pomodoro ---------- */
 const POMO = { focus: 25, short: 5, long: 15 };
-function beep() { try { const a = new (window.AudioContext || window.webkitAudioContext)(); [0, 0.22, 0.44].forEach((d) => { const o = a.createOscillator(), g = a.createGain(); o.frequency.value = 660 + d * 400; g.gain.value = 0.06; o.connect(g); g.connect(a.destination); o.start(a.currentTime + d); o.stop(a.currentTime + d + 0.15); }); } catch { /* no audio */ } }
+function beep() { if (!PrefsStore.get().sound) return; try { const a = new (window.AudioContext || window.webkitAudioContext)(); [0, 0.22, 0.44].forEach((d) => { const o = a.createOscillator(), g = a.createGain(); o.frequency.value = 660 + d * 400; g.gain.value = 0.06; o.connect(g); g.connect(a.destination); o.start(a.currentTime + d); o.stop(a.currentTime + d + 0.15); }); } catch { /* no audio */ } }
 function FocusTab() {
   const log = useStore(FocusLog);
   const [mode, setMode] = useState('focus');
@@ -4835,6 +4869,151 @@ function DatePicker({ value, onChange, placeholder = 'Pick a date', label }) {
   <//>`;
 }
 
+/* ==========================================================================
+   ACCOUNT: your profile home, progress, goals, settings and your data
+   ========================================================================== */
+function SelectBox({ value, options, onChange, placeholder = 'Choose', label }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
+  const [hi, setHi] = useState(-1);
+  const btn = useRef(null);
+  const place = useCallback(() => {
+    if (!btn.current) return; const r = btn.current.getBoundingClientRect(), H = Math.min(options.length * 46 + 16, 420);
+    const below = r.bottom + 8 + H < window.innerHeight || r.top < H + 16;
+    setPos({ left: r.left, width: r.width, top: below ? r.bottom + 8 : r.top - H - 8 });
+  }, [options.length]);
+  useEffect(() => {
+    if (!open) return undefined;
+    place(); setHi(Math.max(0, options.findIndex((o) => o[0] === value)));
+    const k = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); btn.current && btn.current.focus(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => Math.min(options.length - 1, h + 1)); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => Math.max(0, h - 1)); }
+      else if (e.key === 'Enter') { e.preventDefault(); setHi((h) => { if (options[h]) { onChange(options[h][0]); setOpen(false); } return h; }); }
+    };
+    const d = (e) => { if (!e.target.closest('.sb-pop') && !(btn.current && btn.current.contains(e.target))) setOpen(false); };
+    window.addEventListener('keydown', k, true); document.addEventListener('mousedown', d); window.addEventListener('resize', place); window.addEventListener('scroll', place, true);
+    return () => { window.removeEventListener('keydown', k, true); document.removeEventListener('mousedown', d); window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); };
+  }, [open, place]);
+  const cur = options.find((o) => o[0] === value);
+  return html`<${Fragment}>
+    <button type="button" ref=${btn} className=${cx('sb-btn', open && 'open')} onClick=${() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded=${open} aria-label=${label || placeholder}>
+      <span className=${cx(!cur && 'ph')}>${cur ? cur[1] : placeholder}</span><${Icon} n="fa-chevron-down" cls="fas sb-chev" /></button>
+    ${open && pos && ReactDOM.createPortal(html`<ul className="sb-pop" role="listbox" style=${{ left: pos.left, top: pos.top, width: pos.width }}>
+      ${options.map(([k, l], i) => html`<li key=${k} role="option" aria-selected=${k === value}><button type="button" className=${cx(k === value && 'on', i === hi && 'hi')} onMouseEnter=${() => setHi(i)} onClick=${() => { onChange(k); setOpen(false); }}><span>${l}</span>${k === value && html`<${Icon} n="fa-check" />`}</button></li>`)}</ul>`, document.body)}
+  <//>`;
+}
+
+const fmtKB = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB');
+const sizeOf = (v) => { try { return new Blob([JSON.stringify(v)]).size; } catch { return 0; } };
+const SYNC_LABELS = { attempts: 'Quiz scores', saved: 'Saved pages', annotations: 'Highlights', notes: 'Notes and sketches', cards: 'Flashcards', focus: 'Focus log', mastered: 'Mastered', goals: 'Goals', prefs: 'Settings', plan: 'Planner', name: 'Name' };
+const DAYS7 = () => Array.from({ length: 7 }, (_, k) => { const d = new Date(); d.setDate(d.getDate() - (6 - k)); return d; });
+
+function exportMine() {
+  const out = { exported: new Date().toISOString(), note: 'Your Step 1 study data. It is yours to keep.', profile: (CloudStore.get().profile || null) };
+  Object.entries(SYNC).forEach(([k, def]) => { out[k] = def.st.get(); });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }));
+  a.download = 'step1-my-data-' + new Date().toISOString().slice(0, 10) + '.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+function ProfileCard({ go }) {
+  const c = useCloud(), name = useUserName(), attempts = useAttempts().filter((a) => !a.sample), cards = useStore(CardStore), log = useStore(FocusLog), plan = useStore(PlanStore);
+  const p = c.profile || {};
+  const st = summarize(attempts);
+  const days = plan.exam ? Math.ceil((new Date(plan.exam + 'T00:00:00') - new Date(new Date().toDateString())) / DAY) : null;
+  if (!c.user) return html`<div className="ac-hero"><div className="ac-av"><b>${(name || '?').charAt(0).toUpperCase()}</b></div><div><h2>${name}</h2><p>Sign in to add a photo and username, and to keep your notes, cards and scores on every device.</p><button className="lh-btn" onClick=${() => patchCloud({ modal: true })}><${Icon} n="fa-user" /> Sign in or create an account</button></div></div>`;
+  return html`<${Fragment}>
+    <div className="ac-hero"><div className="ac-av">${p.avatar_url ? html`<img src=${p.avatar_url} alt="" />` : html`<b>${(name || '?').charAt(0).toUpperCase()}</b>`}</div>
+      <div><h2>${name}</h2><small>${p.username ? '@' + p.username : 'No username yet'} · ${c.user.email}</small>
+        <p>${p.bio || 'Add a line about you and your goals.'}</p>
+        <div className="ac-chips">${p.study_year && html`<span>${p.study_year}</span>`}${days !== null && days >= 0 && html`<span>${days} days to Step 1</span>`}<span>Joined ${new Date(c.user.created_at || Date.now()).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}</span></div>
+        <button className="lh-btn" onClick=${() => patchCloud({ profileOpen: true })}><${Icon} n="fa-user-pen" /> Edit profile</button></div></div>
+    <div className="st-stats"><div><b>${st.n}</b><span>quizzes</span></div><div><b>${st.n ? st.best + '%' : '–'}</b><span>best score</span></div><div><b>${st.streak}</b><span>day streak</span></div><div><b>${cards.filter((x) => x.due <= Date.now()).length}</b><span>cards due</span></div><div><b>${focusToday(log)}</b><span>min focused today</span></div></div>
+    <div className="ac-soon"><i className="fas fa-user-group"></i><div><b>Study buddies and the community map</b><p>Soon you will be able to find other students, and see roughly which regions people are studying from. Only regions, never addresses, and only if you choose to show up.</p></div><span>Coming soon</span></div>
+  <//>`;
+}
+
+function GoalsTab() {
+  const g = useStore(GoalsStore), plan = useStore(PlanStore), attempts = useAttempts().filter((a) => !a.sample), log = useStore(FocusLog);
+  const [m, setM] = useState('');
+  const set = (p) => GoalsStore.set({ ...GoalsStore.get(), ...p });
+  const avg = attempts.length ? Math.round(attempts.slice(-10).reduce((s, a) => s + pctOf(a), 0) / Math.min(10, attempts.length)) : 0;
+  const weekMin = Math.round(log.filter((f) => Date.now() - f.at < 7 * DAY).reduce((s, f) => s + f.sec, 0) / 60);
+  const qToday = attempts.filter((a) => dayKey(a.timestamp) === new Date().toDateString()).reduce((s, a) => s + a.total, 0);
+  const Bar = ({ v, max, label, now }) => html`<div className="gl-bar"><div><b>${label}</b><span>${now}</span></div><i><u style=${{ width: Math.min(100, (v / Math.max(1, max)) * 100) + '%' }}></u></i></div>`;
+  return html`<div className="gl">
+    <div className="gl-card"><small>Your why</small><textarea value=${g.why} maxLength="240" onChange=${(e) => set({ why: e.target.value })} placeholder="Why are you doing this? On the hard days, this is what you will want to read."></textarea></div>
+    <div className="gl-card"><small>Targets</small>
+      <label>Practice accuracy<span><input type="number" min="30" max="100" value=${g.accuracy} onChange=${(e) => set({ accuracy: Math.max(30, Math.min(100, +e.target.value || 30)) })} /> %</span></label>
+      <label>Questions a day<span><input type="number" min="1" max="400" value=${plan.goal} onChange=${(e) => PlanStore.set({ ...PlanStore.get(), goal: Math.max(1, +e.target.value || 1) })} /></span></label>
+      <label>Focus hours a week<span><input type="number" min="1" max="100" value=${g.weeklyHours} onChange=${(e) => set({ weeklyHours: Math.max(1, +e.target.value || 1) })} /></span></label></div>
+    <div className="gl-card wide"><small>How you are doing</small>
+      <${Bar} v=${avg} max=${g.accuracy} label="Accuracy, last 10 quizzes" now=${avg + '% of ' + g.accuracy + '%'} />
+      <${Bar} v=${qToday} max=${plan.goal} label="Questions today" now=${qToday + ' of ' + plan.goal} />
+      <${Bar} v=${weekMin} max=${g.weeklyHours * 60} label="Focus this week" now=${Math.round(weekMin / 6) / 10 + ' of ' + g.weeklyHours + ' h'} /></div>
+    <div className="gl-card wide"><small>Milestones</small>
+      <form onSubmit=${(e) => { e.preventDefault(); if (m.trim()) { set({ milestones: [...g.milestones, { id: uid(), t: m.trim(), done: false, due: '' }] }); setM(''); } }}><input value=${m} onChange=${(e) => setM(e.target.value)} placeholder="Finish cardiology, 1000 questions, first 80%…" /><button className="lh-btn" type="submit"><${Icon} n="fa-plus" /></button></form>
+      ${g.milestones.length === 0 && html`<p className="st-empty">Small, dated wins keep the big goal close.</p>`}
+      ${g.milestones.map((x) => html`<div key=${x.id} className=${cx('gl-ms', x.done && 'done')}><label><input type="checkbox" checked=${x.done} onChange=${() => set({ milestones: g.milestones.map((y) => (y.id === x.id ? { ...y, done: !y.done } : y)) })} /><span>${x.t}</span></label>
+        <${DatePicker} value=${x.due} onChange=${(v) => set({ milestones: g.milestones.map((y) => (y.id === x.id ? { ...y, due: v } : y)) })} placeholder="Add date" label="Milestone date" />
+        <button onClick=${() => set({ milestones: g.milestones.filter((y) => y.id !== x.id) })} aria-label="Remove"><${Icon} n="fa-xmark" /></button></div>`)}</div>
+  </div>`;
+}
+
+function SettingsTab() {
+  const pr = useStore(PrefsStore);
+  const set = (p) => PrefsStore.set({ ...PrefsStore.get(), ...p });
+  const Row = ({ k, title, sub }) => html`<label className="ac-row"><div><b>${title}</b><small>${sub}</small></div><button type="button" role="switch" aria-checked=${!!pr[k]} className=${cx('ac-sw', pr[k] && 'on')} onClick=${() => set({ [k]: !pr[k] })}><i></i></button></label>`;
+  useEffect(() => { document.body.classList.toggle('rm', !!pr.reduceMotion); }, [pr.reduceMotion]);
+  return html`<div className="ac-list">
+    <${Row} k="sound" title="Timer sounds" sub="A soft chime when a focus block or break ends." />
+    <${Row} k="collapseNav" title="Fold the menu as you scroll" sub="The navigation shrinks into the stack button while you read." />
+    <${Row} k="reduceMotion" title="Calmer motion" sub="Turns off most animation across the site." />
+    <div className="ac-row"><div><b>Open the site on</b><small>The page you land on when you arrive.</small></div><div className="ac-sel"><${SelectBox} value=${pr.landing} onChange=${(v) => set({ landing: v })} label="Landing page" options=${[['home', 'Home'], ['quiz', 'Quiz'], ['dashboard', 'Dashboard'], ['study', 'Study'], ['library', 'Library']]} /></div></div>
+  </div>`;
+}
+
+function DataTab() {
+  const c = useCloud(), all = {};
+  Object.entries(SYNC).forEach(([k, def]) => { all[k] = sizeOf(def.st.get()); });
+  const total = Object.values(all).reduce((s, n) => s + n, 0);
+  const top = Object.entries(all).filter(([, n]) => n > 2).sort((a, b) => b[1] - a[1]);
+  const [del, setDel] = useState(false), [typed, setTyped] = useState(''), [busy, setBusy] = useState(false), [err, setErr] = useState('');
+  const doDelete = async () => {
+    setBusy(true); setErr('');
+    try {
+      const uid = c.user.id;
+      await sb.storage.from('avatars').remove([uid + '/avatar.jpg']).catch(() => {});
+      const { error } = await sb.rpc('delete_my_account');
+      if (error) throw error;
+      await sb.auth.signOut().catch(() => {});
+      Object.keys(localStorage).filter((k) => /^usmle-(site|quiz):/.test(k)).forEach((k) => localStorage.removeItem(k));
+      location.hash = '#/home'; location.reload();
+    } catch (x) { setErr(/delete_my_account|function/i.test(String(x.message || x)) ? 'Account deletion has not been switched on for this project yet.' : String(x.message || x)); setBusy(false); }
+  };
+  return html`<div className="ac-list">
+    <div className="ac-card"><div><b>Export my data</b><small>Everything in one file you can keep: scores, notes, sketches, cards, highlights, goals and settings.</small></div><button className="lh-btn" onClick=${exportMine}><${Icon} n="fa-download" /> Download</button></div>
+    <div className="ac-card col"><div><b>How much space your data uses</b><small>${fmtKB(total)} in total. Notes with sketches are the heaviest. Saved pages keep only a short preview, and the highlight keeps just the marked sentence, never the whole article.</small></div>
+      <div className="ac-use">${top.map(([k, n]) => html`<div key=${k}><span>${SYNC_LABELS[k] || k}</span><i><u style=${{ width: Math.max(3, (n / Math.max(1, top[0][1])) * 100) + '%' }}></u></i><em>${fmtKB(n)}</em></div>`)}</div></div>
+    <div className="ac-card"><div><b>Clear this device</b><small>Removes the copy of your data stored in this browser. If you are signed in, your account keeps its copy.</small></div><button className="lh-btn ghost" onClick=${() => { if (confirm('Remove all study data stored in this browser?')) { Object.keys(localStorage).filter((k) => /^usmle-(site|quiz):/.test(k)).forEach((k) => localStorage.removeItem(k)); location.reload(); } }}><${Icon} n="fa-eraser" /> Clear</button></div>
+    ${c.user && html`<div className="ac-card danger"><div><b>Delete my account</b><small>Permanently removes your account, profile, photo and everything synced. This cannot be undone. Download your data first.</small></div>
+      ${!del ? html`<button className="lh-btn danger" onClick=${() => setDel(true)}><${Icon} n="fa-trash-can" /> Delete account</button>` : html`<div className="ac-confirm"><input value=${typed} onChange=${(e) => setTyped(e.target.value)} placeholder="Type DELETE to confirm" /><button className="lh-btn danger" disabled=${typed !== 'DELETE' || busy} onClick=${doDelete}>${busy ? 'Deleting…' : 'Delete forever'}</button><button className="lh-btn ghost" onClick=${() => { setDel(false); setTyped(''); }}>Cancel</button>${err && html`<p className="au-err">${err}</p>`}</div>`}</div>`}
+  </div>`;
+}
+
+function AccountPage({ go, openFind }) {
+  const [tab, setTab] = usePref('acctTab', 'profile');
+  return html`<section className="sec lib study acct" data-tone="paper" data-nav="light" style=${{ minHeight: '100dvh' }}>
+    <div className="wrap"><p className="eyebrow">Your account</p><h1 className="st-h">Your <span className="hl">space.</span></h1>
+      <div className="st-tabs"><${Seg} value=${tab} onChange=${setTab} options=${[['profile', 'Profile'], ['progress', 'Progress'], ['goals', 'Goals'], ['settings', 'Settings'], ['data', 'Data and privacy']]} /></div>
+      ${tab === 'profile' && html`<${ProfileCard} go=${go} />`}
+      ${tab === 'progress' && html`<div className="ac-embed"><${Dashboard} go=${go} openFind=${openFind} /></div>`}
+      ${tab === 'goals' && html`<${GoalsTab} />`}
+      ${tab === 'settings' && html`<${SettingsTab} />`}
+      ${tab === 'data' && html`<${DataTab} />`}
+    </div></section>`;
+}
+
 /* ---------- the Study page ---------- */
 function Study({ go, openCase }) {
   const [tab, setTab] = usePref('studyTab', 'notes');
@@ -4869,7 +5048,7 @@ const useCloud = () => useSyncExternalStore(CloudStore.subscribe, CloudStore.get
 const unionBy = (idf, prefer) => (a, b) => { const m = new Map(); [...a, ...b].forEach((x) => { const k = idf(x), o = m.get(k); m.set(k, o ? (prefer ? prefer(o, x) : o) : x); }); return [...m.values()]; };
 const SYNC = {
   attempts: { st: window.AttemptStore, merge: (l, r) => unionBy((a) => a.timestamp)(l, r).sort((a, b) => a.timestamp - b.timestamp).slice(-200) },
-  saved: { st: SavedStore, merge: unionBy((x) => x.url) },
+  saved: { st: SavedStore, merge: unionBy((x) => x.url), pack: (l) => l.map((p) => ({ ...p, extract: (p.extract || '').slice(0, 200) })) },   /* the full text is fetched again when you open the page */
   annotations: { st: AnnStore, merge: (l, r) => {
     const out = { ...r };
     Object.entries(l).forEach(([u, a]) => { const b = out[u]; out[u] = !b ? a : { ...b, ...a, hl: unionBy((h) => (typeof h === 'string' ? h : h.t))(hlList(a), hlList(b)), note: a.note || b.note }; });
@@ -4878,6 +5057,8 @@ const SYNC = {
   cards: { st: CardStore, merge: unionBy((c) => c.id, (o, x) => (x.reps > o.reps ? x : o)) },
   focus: { st: FocusLog, merge: (l, r) => unionBy((f) => f.at)(l, r).sort((a, b) => a.at - b.at).slice(-500) },
   mastered: { st: MasteredStore, merge: (l, r) => [...new Set([...l, ...r])] },
+  goals: { st: GoalsStore, lww: true },
+  prefs: { st: PrefsStore, lww: true },
   plan: { st: PlanStore, lww: true },
   name: { st: UserStore, lww: true },
 };
@@ -4902,8 +5083,9 @@ async function pullAndMerge(userId) {
       else if (def.lww) next = (tsAll()[k] || 0) > Date.parse(r.updated_at) ? loc : r.value;
       else next = def.merge(loc, r.value);
       if (JSON.stringify(next) !== JSON.stringify(loc)) def.st.set(next);
-      const same = r && JSON.stringify(next) === JSON.stringify(r.value);
-      if (!same && !isBlank(next) && (!def.lww || touched || r)) rows.push({ user_id: userId, key: k, value: next, updated_at: new Date().toISOString() });
+      const out = def.pack ? def.pack(next) : next;
+      const same = r && JSON.stringify(out) === JSON.stringify(r.value);
+      if (!same && !isBlank(out) && (!def.lww || touched || r)) rows.push({ user_id: userId, key: k, value: out, updated_at: new Date().toISOString() });
     }
   } finally { applying = false; }
   if (rows.length) { const { error: e2 } = await sb.from('user_state').upsert(rows); if (e2) throw e2; }
@@ -4912,7 +5094,7 @@ async function pullAndMerge(userId) {
 async function pushKey(k) {
   const u = CloudStore.get().user; if (!u || !sb) return;
   patchCloud({ status: 'syncing' });
-  const { error } = await sb.from('user_state').upsert({ user_id: u.id, key: k, value: SYNC[k].st.get(), updated_at: new Date().toISOString() });
+  const { error } = await sb.from('user_state').upsert({ user_id: u.id, key: k, value: SYNC[k].pack ? SYNC[k].pack(SYNC[k].st.get()) : SYNC[k].st.get(), updated_at: new Date().toISOString() });
   if (error) { patchCloud({ status: 'error', error: error.message }); if (!warned) { warned = true; toast('Could not sync just now. Your data is safe on this device.'); } } else patchCloud({ status: 'synced' });
 }
 function startCloud() {
@@ -5055,7 +5237,7 @@ function ProfileModal() {
       <label>Display name<input value=${f.name} maxLength="24" onChange=${(e) => set('name', e.target.value)} /></label>
       <label>Username<span className="pf-at"><i>@</i><input value=${f.username} maxLength="20" onChange=${(e) => set('username', e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="yourname" autoCapitalize="none" spellCheck="false" /></span><small className=${'pf-n ' + avail}>${note}</small></label>
       <label>About you<textarea maxLength="160" value=${f.bio} onChange=${(e) => set('bio', e.target.value)} placeholder="A line about you, your goals, your why…"></textarea><small className="pf-n">${f.bio.length}/160</small></label>
-      <div className="pf-row"><label>Study year<select value=${f.year} onChange=${(e) => set('year', e.target.value)}><option value="">Not set</option>${STUDY_YEARS.map((y) => html`<option key=${y} value=${y}>${y}</option>`)}</select></label>
+      <div className="pf-row"><label>Study year<${SelectBox} value=${f.year} onChange=${(v) => set('year', v)} placeholder="Not set" label="Study year" options=${[['', 'Not set'], ...STUDY_YEARS.map((y) => [y, y])]} /></label>
         <label>Step 1 date<${DatePicker} value=${f.exam} onChange=${(v) => set('exam', v)} placeholder="Pick a date" label="Step 1 date" /></label></div>
       ${err && html`<p className="au-err" role="alert">${err}</p>`}
       <button className="au-go" type="submit" disabled=${busy || avail === 'checking'}>${busy ? 'Saving…' : 'Save profile'}</button>
@@ -5076,7 +5258,8 @@ function AccountButton() {
   return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => setOpen((o) => !o)} aria-label="Account" aria-expanded=${open}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<i className=${'sd ' + c.status}></i></button>
     ${open && html`<div className="acct-menu"><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
       <p className=${'am-st ' + c.status}><i className=${'sd ' + c.status}></i>${label}</p>
-      <button onClick=${() => { setOpen(false); patchCloud({ profileOpen: true }); }}><${Icon} n="fa-user-pen" /> ${c.profile && c.profile.username ? 'Your profile' : 'Set up your profile'}</button>
+      <button onClick=${() => { setOpen(false); location.hash = '#/account'; }}><${Icon} n="fa-id-badge" /> Your account</button>
+      <button onClick=${() => { setOpen(false); patchCloud({ profileOpen: true }); }}><${Icon} n="fa-user-pen" /> ${c.profile && c.profile.username ? 'Edit profile' : 'Set up your profile'}</button>
       <button onClick=${() => { pullAndMerge(c.user.id).catch(() => {}); }}><${Icon} n="fa-arrows-rotate" /> Sync now</button>
       <button onClick=${() => { setOpen(false); Cloud.out(false); }}><${Icon} n="fa-arrow-right-from-bracket" /> Sign out</button>
       <button onClick=${() => { if (confirm('Sign out and remove this device’s copy of your data? It stays safe in your account.')) Cloud.out(true); }}><${Icon} n="fa-eraser" /> Sign out and clear this device</button></div>`}</div>`;
@@ -5164,6 +5347,7 @@ function App() {
       ${route === 'home' && html`<div className="site-view">
         <${Hero} go=${go} /><${Manifesto} /><${Inside} go=${go} /><${Stack} /><${Orbit} go=${go} /><${Stats} attempts=${attempts} /><${CtaBig} go=${go} /><${QuoteBlock} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'dashboard' && html`<div className="site-view"><${BarsIntro} /><${Dashboard} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
+      ${route === 'account' && html`<div className="site-view"><${AccountPage} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'study' && html`<div className="site-view"><${Study} go=${go} openCase=${openCase} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'library' && html`<div className="site-view"><${LibHero} /><${CasesSection} pending=${pendingCase} onRead=${onRead} withExplorer=${true} /><${Footer} go=${go} openFind=${openFind} /></div>`}
     </main>
