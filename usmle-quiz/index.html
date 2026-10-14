@@ -1579,11 +1579,53 @@
         .cn-msgs { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 6px 2px 14px; scrollbar-width: none; } .cn-msg { align-self: flex-start; max-width: 78%; padding: 12px 16px; border-radius: 20px 20px 20px 6px; background: #1d1d21; font-size: 14.5px; line-height: 1.5; word-wrap: break-word; } .cn-msg.me { align-self: flex-end; background: #FF5A1F; border-radius: 20px 20px 6px 20px; } .cn-msg i { display: block; margin-top: 4px; font-size: 10px; font-style: normal; opacity: .55; }
         .cn-send { display: flex; gap: 8px; padding-bottom: 90px; } .cn-send input { flex: 1; height: 54px; border-radius: 999px; border: 0; background: #17171a; color: #fff; padding: 0 22px; font: 500 15px 'Montserrat'; outline: none; } .cn-send button { width: 54px; height: 54px; border-radius: 50%; border: 0; background: #FF5A1F; color: #fff; cursor: pointer; }
 
+        /* ===== v11: seal badge, liquid menu, quiz gate, swipe deck, faster ripple ===== */
+        .sb-corner { position: absolute; right: -4px; bottom: -4px; z-index: 4; filter: drop-shadow(0 2px 4px rgba(0,0,0,.35)); line-height: 0; }
+        .sbadge .sb-tick { stroke-dasharray: 20; stroke-dashoffset: 0; animation: sbDraw .55s .1s cubic-bezier(.6,0,.3,1) both; } @keyframes sbDraw { from { stroke-dashoffset: 20; } to { stroke-dashoffset: 0; } }
+        .sbadge.synced { animation: sbPop .6s cubic-bezier(.34,1.8,.5,1); } @keyframes sbPop { from { transform: scale(.4); } to { transform: none; } }
+        .sbadge .sb-spin { transform-origin: 12px 12px; animation: spin .9s linear infinite; }
+        .acct-av { z-index: 3; overflow: visible; } .acct-av img { z-index: 1; }
+        .acct-wrap .acct-menu { background: none !important; box-shadow: none !important; padding: 0 !important; width: 280px; top: calc(100% + 12px); animation: none !important; z-index: 2; }
+        .am-goo { position: absolute; inset: -70px -34px -34px -34px; filter: url(#goo-menu) drop-shadow(0 26px 30px rgba(0,0,0,.35)); pointer-events: none; }
+        .am-shape { position: absolute; left: 34px; right: 34px; top: 70px; bottom: 34px; background: #131316; border-radius: 30px; transform-origin: 100% 0; animation: amDrop .66s cubic-bezier(.3,1.2,.5,1) both; }
+        .am-blob { position: absolute; right: 34px; top: 12px; width: 46px; height: 46px; border-radius: 50%; background: #131316; animation: amBlob .9s both; }
+        @keyframes amDrop { 0% { transform: translateY(-58px) scale(.17); border-radius: 50%; } 40% { transform: translateY(-14px) scale(.5, .8); border-radius: 40%; } 70% { transform: translateY(8px) scale(1.04, 1.04); border-radius: 30px; } 100% { transform: none; } }
+        @keyframes amBlob { 0%, 55% { opacity: 1; transform: none; } 100% { opacity: 0; transform: scale(.7); } }
+        .acct-menu.closing .am-shape { animation: amUndrop .5s cubic-bezier(.55,0,.4,1) both; } .acct-menu.closing .am-blob { animation: none; opacity: 1; }
+        @keyframes amUndrop { 0% { transform: none; border-radius: 30px; } 100% { transform: translateY(-58px) scale(.17); border-radius: 50%; } }
+        .am-body { position: relative; z-index: 2; padding: 10px; animation: amIn .3s .3s both; } .acct-menu.closing .am-body { animation: amOut .18s both; } @keyframes amIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } } @keyframes amOut { to { opacity: 0; } }
+        .qg { min-height: 100dvh; background: #000; color: #f5f5f7; display: grid; place-items: center; padding: 120px 24px; }
+        .qg-in { max-width: 640px; } .qg-in .eyebrow { color: rgba(255,255,255,.55); } .qg-in h1 { font: 400 clamp(60px, 10vw, 140px)/.92 'Bebas Neue'; text-transform: uppercase; margin: 14px 0 20px; } .qg-in h1 .hl { font-family: 'Fraunces', serif; text-transform: none; font-style: italic; color: #fff; } .qg-in p { font-size: 17px; line-height: 1.65; opacity: .7; max-width: 52ch; margin: 0 0 28px; }
+        .qg-btns { display: flex; gap: 12px; flex-wrap: wrap; } .qg-btns .lh-btn { margin: 0; background: #fff; color: #000; } .qg-btns .lh-btn.ghost { background: transparent; color: #fff; border: 1.5px solid rgba(255,255,255,.5); }
+        /* swipe deck */
+        .cn-ring { transition-duration: .55s; } .cn-ring.r2 { transition-delay: .05s; } .cn-ring.r3 { transition-delay: .12s; } .cn-ui { animation-delay: .38s; animation-duration: .5s; } .cn-root.closing .cn-ring.r1 { transition-delay: .12s; }
+        .cn-root::before { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; background: radial-gradient(60% 45% at 50% 0%, rgba(255,90,31,.28), transparent 70%), radial-gradient(50% 40% at 50% 100%, rgba(255,90,31,.16), transparent 70%); opacity: 0; transition: opacity .6s .4s; } .cn-root.open::before { opacity: 1; }
+        .cn-ui { z-index: 1; }
+        .mc-deck { display: grid; justify-items: center; gap: 18px; padding-top: 6px; }
+        .mc-stage { position: relative; width: 100%; height: min(540px, 66vh); display: grid; place-items: center; perspective: 1200px; }
+        .mc { position: absolute; width: min(330px, 74vw); height: 100%; border-radius: 36px; overflow: hidden; background: #17171a; box-shadow: 0 40px 70px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.08); touch-action: pan-y; user-select: none; cursor: grab; transition: transform .5s cubic-bezier(.22,1,.36,1), filter .5s, opacity .5s; }
+        .mc.p-c { z-index: 3; } .mc.p-c.drag { transition: none; cursor: grabbing; } .mc.p-c.fly { transition: transform .42s cubic-bezier(.5,0,.8,.4), opacity .42s; opacity: 0; }
+        .mc.p-r { z-index: 2; transform: translateX(62%) scale(.86); filter: blur(6px) brightness(.7); opacity: .85; pointer-events: none; }
+        .mc.p-l { z-index: 1; transform: translateX(-62%) scale(.8); filter: blur(8px) brightness(.55); opacity: .7; pointer-events: none; }
+        .mc-ph { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; font-size: 150px; pointer-events: none; } .mc-shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.25) 0%, transparent 30%, rgba(0,0,0,.85) 100%); pointer-events: none; }
+        .mc-tags { position: absolute; left: 16px; top: 16px; display: flex; gap: 6px; flex-wrap: wrap; } .mc-tags span { padding: 7px 12px; border-radius: 999px; background: rgba(15,15,18,.7); backdrop-filter: blur(8px); font: 700 11.5px 'Montserrat'; } .mc-tags span:first-child { background: #FF5A1F; }
+        .mc-pct { position: absolute; right: 16px; top: 16px; padding: 7px 12px; border-radius: 999px; background: #fff; color: #0c0c0e; font: 800 12.5px 'Unbounded'; }
+        .mc-info { position: absolute; left: 20px; right: 20px; bottom: 20px; display: grid; gap: 5px; pointer-events: none; } .mc-info b { font: 800 26px/1.05 'Unbounded'; letter-spacing: -.02em; } .mc-info small { color: rgba(255,255,255,.6); font-size: 13px; }
+        .mc-where { display: flex; align-items: center; gap: 8px; margin-top: 4px; font: 600 13px 'Montserrat'; color: #FF9A6B; } .mc-info p { margin: 8px 0 0; font-size: 13.5px; line-height: 1.5; color: rgba(255,255,255,.85); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+        .mc-stamp { position: absolute; top: 50%; left: 50%; width: 96px; height: 96px; margin: -48px 0 0 -48px; border-radius: 50%; display: grid; place-items: center; font-size: 38px; pointer-events: none; z-index: 4; transition: opacity .1s; } .mc-stamp.link { background: #fff; color: #0c0c0e; box-shadow: 0 20px 40px -10px rgba(255,90,31,.8); } .mc-stamp.skip { background: #0c0c0e; color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.4); opacity: 0; }
+        .mc-btns { display: flex; gap: 18px; } .mc-b { width: 68px; height: 68px; border-radius: 50%; border: 0; cursor: pointer; font-size: 24px; display: grid; place-items: center; transition: transform .35s cubic-bezier(.34,1.8,.5,1); } .mc-b:hover { transform: scale(1.12); } .mc-b:active { transform: scale(.92); } .mc-b.skip { background: #1d1d21; color: #fff; box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.2); } .mc-b.link { background: #FF5A1F; color: #fff; box-shadow: 0 16px 30px -8px rgba(255,90,31,.7); }
+        .mc-hint { margin: 0; font-size: 12.5px; color: rgba(255,255,255,.45); }
+        .cn-h { margin-bottom: 14px; } .mc-stage { height: min(450px, 52vh); } .mc-b { width: 60px; height: 60px; } .mc-deck { gap: 12px; }
+        @keyframes amDrop { 0% { transform: translateY(-46px) scale(.17); border-radius: 50%; } 40% { transform: translateY(-10px) scale(.5, .8); border-radius: 40%; } 70% { transform: translateY(8px) scale(1.04, 1.04); border-radius: 30px; } 100% { transform: none; } }
+        @keyframes amUndrop { 0% { transform: none; border-radius: 30px; } 100% { transform: translateY(-46px) scale(.17); border-radius: 50%; } }
+        .am-goo { filter: url(#goo-menu) drop-shadow(0 26px 30px rgba(0,0,0,.35)); }
+
     </style>
 </head>
 <body>
     <svg style="display: none"><filter id="lg-dist"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="70" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none"><defs><filter id="glass-distortion" x="0%" y="0%" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="77" xChannelSelector="R" yChannelSelector="G"/></filter></defs></svg>
+<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0" aria-hidden="true"><defs><filter id="goo-menu" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="9" result="b"/><feColorMatrix in="b" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"/></filter></defs></svg>
 
 <div id="root"></div>
 <script>
@@ -3631,8 +3673,8 @@ const NAVI = {
   community: () => SVG(html`<circle cx="12" cy="12" r="8.8"/><path d="M3.2 12h17.6"/><path d="M12 3.2c2.6 2.4 3.9 5.4 3.9 8.8s-1.3 6.4-3.9 8.8c-2.6-2.4-3.9-5.4-3.9-8.8S9.4 5.6 12 3.2z"/>`),
 };
 
-function SiteNav({ route, go, openFind }) {
-  const hide = route === 'quiz';
+function SiteNav({ route, gate, go, openFind }) {
+  const hide = route === 'quiz' && !gate;
   return html`<header className="site-nav" data-hide=${hide}>
     <div className="nav-actions">
       <${AccountButton} />
@@ -3666,8 +3708,8 @@ function useNavCompact(route) {
   return [compact, open];
 }
 
-function Tabs({ route, go }) {
-  const [compact, openNav] = useNavCompact(route);
+function Tabs({ route, gate, go }) {
+  const [compact, openNav] = useNavCompact(route === 'quiz' && gate ? 'gate' : route);
   const refs = useRef({});
   const [th, setTh] = useState({ x: 0, w: 0 });
   const measure = useCallback(() => { const el = refs.current[route]; setTh(el ? { x: el.offsetLeft, w: el.offsetWidth } : { x: 0, w: 0 }); }, [route]);
@@ -3675,7 +3717,7 @@ function Tabs({ route, go }) {
   useEffect(() => { window.addEventListener('resize', measure); if (document.fonts) document.fonts.ready.then(measure); return () => window.removeEventListener('resize', measure); }, [measure]);
   return html`<${Fragment}>
   <button className="stack-btn glass" data-on=${compact} onClick=${openNav} aria-label="Open the menu" tabIndex=${compact ? 0 : -1}><span className="st-i"><i></i><i></i><i></i></span></button>
-  <nav className="tabs glass" data-pos=${route === 'quiz' ? 'bottom' : 'top'} data-c=${compact} aria-label="Primary">
+  <nav className="tabs glass" data-pos=${route === 'quiz' && !gate ? 'bottom' : 'top'} data-c=${compact} aria-label="Primary">
     <span className="tab-thumb" style=${{ width: th.w, transform: `translateX(${th.x}px)` }}></span>
     ${TABS.map(([r, label]) => html`<button key=${r} ref=${(el) => { refs.current[r] = el; }} className="tab" aria-label=${label} data-tip=${label}
       aria-current=${route === r ? 'page' : undefined} onClick=${() => go(r)}>${NAVI[r]()}</button>`)}
@@ -5373,9 +5415,10 @@ function Community({ go }) {
   const place = (r) => (r.lat != null && r.lng != null ? [r.lat, r.lng] : ll(r.country_id || r.id));
   const real = rows.map((r) => { const p = place(r); return { id: r.country_id, n: Number(r.n), name: (r.region ? r.region + ', ' : '') + r.country_name, lat: p[0], lng: p[1] }; });
   const fake = sample && world ? SAMPLE_PEOPLE.map(([id, n]) => { const p = ll(id); return { id, n, name: world.names[id] || id, lat: p[0], lng: p[1] }; }) : [];
-  const marks = [...real, ...fake.filter((f) => !real.some((r) => r.id === f.id))];
+  const onGlobe = !!(c.user && mine);
+  const marks = onGlobe ? [...real, ...fake.filter((f) => !real.some((r) => r.id === f.id))] : [];
   const total = marks.reduce((s, m) => s + m.n, 0);
-  const myLL = mine ? place(mine) : null;
+  const myLL = onGlobe ? place(mine) : null;
   const match = () => {
     if (!mine) { toast('Join the globe first, and the match will fly from your place.'); return; }
     const p = SAMPLE_PARTNERS[Math.floor(Math.random() * SAMPLE_PARTNERS.length)];
@@ -5385,10 +5428,10 @@ function Community({ go }) {
   const dm = /^#\/u\/([A-Za-z0-9_]{3,20})/.exec(location.hash);
   return html`<section className="cm" data-nav="dark"><${ConnectLayer} deepUser=${dm ? dm[1] : null} />
     <div className="cm-head"><p className="eyebrow">Community</p><h1>Students, <span className="hl">everywhere.</span></h1>
-      <p>A quiet look at where people are studying from. Only a country and state are ever counted, never an address, and you can leave whenever you like.</p></div>
+      <p>A quiet look at where people are studying from. It works both ways: you see others only while you are on the globe too. Only a country and state are counted, never an address, and you can leave whenever you like.</p></div>
     <div className="cm-grid">
       <div className="cm-globe">${gl ? html`<${GlobeGL} marks=${marks} me=${myLL} flight=${flight} onFlightEnd=${() => { setFlight(null); setPartner(null); }} onFail=${() => setGl(false)} />` : world ? html`<${Globe2D} world=${world} marks=${marks} me=${mine && mine.country_id} flight=${flight} onFlightEnd=${() => { setFlight(null); setPartner(null); }} />` : html`<div className="cm-load">${err ? 'The map could not load. Check your connection and refresh.' : html`<span></span>Loading the globe…`}</div>`}
-        <div className="cm-legend"><i></i> ${total ? total + ' student' + (total === 1 ? '' : 's') + ' in ' + marks.length + ' place' + (marks.length === 1 ? '' : 's') : 'No one on the map yet'}${sample && fake.length ? ' · includes sample data' : ''}</div></div>
+        <div className="cm-legend"><i></i> ${!onGlobe ? 'Turn on the globe to see where students are' : total ? total + ' student' + (total === 1 ? '' : 's') + ' in ' + marks.length + ' place' + (marks.length === 1 ? '' : 's') : 'No one on the map yet'}${onGlobe && sample && fake.length ? ' · includes sample data' : ''}</div></div>
       <div className="cm-side">
         <div className="cm-card"><small>Your place on the globe</small>
           ${!c.user ? html`<p>Sign in to be counted automatically, and to see real counts. You choose at sign-up and can change it any time.</p><button className="lh-btn" onClick=${() => patchCloud({ modal: true })}><${Icon} n="fa-user" /> Sign in</button>` : html`<${Fragment}>
@@ -5400,7 +5443,7 @@ function Community({ go }) {
           <p>Soon, you will be matched with someone who shares your goals and keeps the same steady streak. Here is a preview with sample students.</p>
           <button className="lh-btn" onClick=${match} disabled=${!world}><${Icon} n="fa-wand-magic-sparkles" /> Preview a match</button>
           ${partner && html`<div className="cm-match"><b>${partner.name}</b><span>${world.names[partner.id]}</span><p>${partner.goal}</p><div><em>${partner.streak} day streak</em><em>${partner.hours} h a week</em></div><small>Sample student. Real matching is coming.</small></div>`}</div>
-        <label className="cm-check"><input type="checkbox" checked=${sample} onChange=${(e) => setSample(e.target.checked)} /><span>Show sample students until the community grows</span></label>
+        ${onGlobe && html`<label className="cm-check"><input type="checkbox" checked=${sample} onChange=${(e) => setSample(e.target.checked)} /><span>Show sample students until the community grows</span></label>`}
       </div>
     </div>
   </section>`;
@@ -5445,12 +5488,12 @@ function whyChips(p, me) {
   return out.slice(0, 3);
 }
 const SAMPLE_MATCHES = [
-  { sample: true, user_id: 's1', display_name: 'Amara', username: 'amara_n', study_year: 'MS2', country_name: 'Nigeria', score: 94, weekly_minutes: 1080, accuracy: 78, streak: 21, goal_accuracy: 80, bio: 'Cardiology block, flashcards every morning.' },
-  { sample: true, user_id: 's2', display_name: 'Lucas', username: 'lucas_md', study_year: 'MS2', country_name: 'Brazil', score: 91, weekly_minutes: 900, accuracy: 74, streak: 12, goal_accuracy: 78, bio: 'Forty questions a day and a long walk after.' },
-  { sample: true, user_id: 's3', display_name: 'Priya', username: 'priya_k', study_year: 'MS3', country_name: 'India', score: 88, weekly_minutes: 1440, accuracy: 81, streak: 33, goal_accuracy: 85, bio: 'Reviewing every missed question, weekly.' },
-  { sample: true, user_id: 's4', display_name: 'Noah', username: 'noah_s', study_year: 'Gap year', country_name: 'Canada', score: 85, weekly_minutes: 720, accuracy: 70, streak: 9, goal_accuracy: 75, bio: 'Rebuilding fundamentals, one system at a time.' },
-  { sample: true, user_id: 's5', display_name: 'Mia', username: 'mia_r', study_year: 'MS2', country_name: 'Australia', score: 82, weekly_minutes: 960, accuracy: 76, streak: 17, goal_accuracy: 80, bio: 'Quiet mornings, loud study playlists.' },
-  { sample: true, user_id: 's6', display_name: 'Kofi', username: 'kofi_a', study_year: 'MS1', country_name: 'Ghana', score: 79, weekly_minutes: 600, accuracy: 68, streak: 6, goal_accuracy: 72, bio: 'Starting early so the end is calm.' },
+  { sample: true, user_id: 's1', step: 'Step 1', display_name: 'Amara', username: 'amara_n', study_year: 'MS2', country_name: 'Nigeria', score: 94, weekly_minutes: 1080, accuracy: 78, streak: 21, goal_accuracy: 80, bio: 'Cardiology block, flashcards every morning.' },
+  { sample: true, user_id: 's2', step: 'Step 1', display_name: 'Lucas', username: 'lucas_md', study_year: 'MS2', country_name: 'Brazil', score: 91, weekly_minutes: 900, accuracy: 74, streak: 12, goal_accuracy: 78, bio: 'Forty questions a day and a long walk after.' },
+  { sample: true, user_id: 's3', step: 'Step 2 CK', display_name: 'Priya', username: 'priya_k', study_year: 'MS3', country_name: 'India', score: 88, weekly_minutes: 1440, accuracy: 81, streak: 33, goal_accuracy: 85, bio: 'Reviewing every missed question, weekly.' },
+  { sample: true, user_id: 's4', step: 'Step 1', display_name: 'Noah', username: 'noah_s', study_year: 'Gap year', country_name: 'Canada', score: 85, weekly_minutes: 720, accuracy: 70, streak: 9, goal_accuracy: 75, bio: 'Rebuilding fundamentals, one system at a time.' },
+  { sample: true, user_id: 's5', step: 'Step 1', display_name: 'Mia', username: 'mia_r', study_year: 'MS2', country_name: 'Australia', score: 82, weekly_minutes: 960, accuracy: 76, streak: 17, goal_accuracy: 80, bio: 'Quiet mornings, loud study playlists.' },
+  { sample: true, user_id: 's6', step: 'Step 1', display_name: 'Kofi', username: 'kofi_a', study_year: 'MS1', country_name: 'Ghana', score: 79, weekly_minutes: 600, accuracy: 68, streak: 6, goal_accuracy: 72, bio: 'Starting early so the end is calm.' },
 ];
 
 /* ---------- QR code for sharing your profile ---------- */
@@ -5504,11 +5547,38 @@ function PeekSheet({ p, state, onBack, onConnect }) {
   const why = whyChips(p);
   return html`<div className="cn-sheet"><div className="cn-hero-card"><${Av} p=${p} cls="cn-hero-av" /><button className="cn-back" onClick=${onBack} aria-label="Back"><${Icon} n="fa-arrow-left" /></button>
       ${p.score != null && html`<span className="cn-score-pill">${p.score}% match</span>`}</div>
-    <div className="cn-sheet-body"><small className="cn-lab">${p.sample ? 'SAMPLE STUDENT' : 'STUDENT'}</small><h2>${p.display_name}</h2><p className="cn-meta">@${p.username}${p.study_year ? ' · ' + p.study_year : ''}${p.country_name ? ' · ' + p.country_name : ''}</p>
+    <div className="cn-sheet-body"><small className="cn-lab">${p.sample ? 'SAMPLE STUDENT' : 'STUDENT'}</small><h2>${p.display_name}</h2><p className="cn-meta">@${p.username}${p.step ? ' · ' + p.step : ''}${p.study_year ? ' · ' + p.study_year : ''}${p.country_name ? ' · ' + p.country_name : ''}</p>
       ${why.length > 0 && html`<div className="cn-chips">${why.map((w) => html`<span key=${w}>${w}</span>`)}</div>`}
       <div className="cn-stats">${[['Hours a week', hrs != null ? hrs : '–'], ['Accuracy', p.accuracy != null ? p.accuracy + '%' : '–'], ['Streak', p.streak != null ? p.streak + 'd' : '–'], ['Exam', p.exam_date ? new Date(p.exam_date).toLocaleDateString(undefined, { month: 'short', year: '2-digit' }) : '–']].map(([k, v]) => html`<div key=${k}><b>${v}</b><span>${k}</span></div>`)}</div>
       ${p.bio && html`<div className="cn-about"><small>ABOUT</small><p>${p.bio}</p></div>`}
       <button className="cn-cta" disabled=${state === 'sent' || state === 'connected'} onClick=${() => onConnect(p)}>${state === 'sent' ? 'Request sent' : state === 'connected' ? 'Connected' : 'Connect'} <${Icon} n="fa-arrow-right" /></button></div></div>`;
+}
+
+function MatchDeck({ items, onLink, onOpen }) {
+  const [i, setI] = useState(0), [dx, setDx] = useState(0), [fly, setFly] = useState(''), [dragging, setDragging] = useState(false);
+  const drag = useRef(null);
+  useEffect(() => { setI(0); setDx(0); setFly(''); }, [items.length && items[0] && items[0].user_id]);
+  const act = useCallback((kind) => { if (fly || !items[i]) return; setFly(kind); if (kind === 'link') onLink(items[i]); setTimeout(() => { setFly(''); setDx(0); setI((n) => n + 1); }, 420); }, [fly, i, items, onLink]);
+  useEffect(() => { const k = (e) => { if (/INPUT|TEXTAREA/.test(e.target.tagName)) return; if (e.key === 'ArrowRight') act('link'); else if (e.key === 'ArrowLeft') act('skip'); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [act]);
+  const down = (e) => { if (fly) return; drag.current = { x: e.clientX, moved: false }; setDragging(true); e.currentTarget.setPointerCapture(e.pointerId); };
+  const move = (e) => { if (!drag.current) return; const d = e.clientX - drag.current.x; if (Math.abs(d) > 6) drag.current.moved = true; setDx(d); };
+  const up = () => { if (!drag.current) return; const { moved } = drag.current; drag.current = null; setDragging(false); if (dx > 110) act('link'); else if (dx < -110) act('skip'); else { setDx(0); if (!moved && items[i]) onOpen(items[i]); } };
+  if (i >= items.length) return html`<div className="cn-gate"><b>That is everyone for now</b><p>You have been through all your matches. Check back as more students join, or search a username.</p></div>`;
+  const shown = [items[i], items[i + 1], items[i + 2]].filter(Boolean);
+  const pos = (k) => (k === 0 ? 'c' : k === 1 ? 'r' : 'l');
+  const cur = fly === 'link' ? 640 : fly === 'skip' ? -640 : dx;
+  return html`<div className="mc-deck"><div className="mc-stage">
+      ${shown.map((p, k) => { const c0 = k === 0; return html`<div key=${p.user_id} className=${cx('mc', 'p-' + pos(k), c0 && dragging && 'drag', c0 && fly && 'fly')} style=${c0 ? { transform: 'translateX(' + cur + 'px) rotate(' + cur * 0.045 + 'deg)' } : undefined}
+        onPointerDown=${c0 ? down : undefined} onPointerMove=${c0 ? move : undefined} onPointerUp=${c0 ? up : undefined} onPointerCancel=${c0 ? up : undefined}>
+        <${Av} p=${p} cls="mc-ph" /><span className="mc-shade"></span>
+        <div className="mc-tags"><span>${p.step || 'Step 1'}</span>${p.study_year && html`<span>${p.study_year}</span>`}</div>
+        ${p.score != null && html`<span className="mc-pct">${p.score}%</span>`}
+        ${c0 && html`<span className="mc-stamp link" style=${{ opacity: Math.max(0, Math.min(1, dx / 110)) || (fly === 'link' ? 1 : 0) }}><${Icon} n="fa-link" /></span><span className="mc-stamp skip" style=${{ opacity: Math.max(0, Math.min(1, -dx / 110)) || (fly === 'skip' ? 1 : 0) }}><${Icon} n="fa-xmark" /></span>`}
+        <div className="mc-info"><b>${p.display_name}</b><small>@${p.username}</small>
+          <div className="mc-where"><${Icon} n="fa-location-dot" />${p.country_name || 'Somewhere on Earth'}</div>
+          <p>${p.bio || 'No note yet.'}</p></div></div>`; })}</div>
+    <div className="mc-btns"><button className="mc-b skip" onClick=${() => act('skip')} aria-label="Skip"><${Icon} n="fa-xmark" /></button><button className="mc-b link" onClick=${() => act('link')} aria-label="Send a connect request"><${Icon} n="fa-link" /></button></div>
+    <p className="mc-hint">Swipe right to link up, left to skip</p></div>`;
 }
 
 /* ---------- the connect layer ---------- */
@@ -5518,13 +5588,13 @@ function ConnectUI({ close, deepUser }) {
   const [matches, setMatches] = useState(null), [people, setPeople] = useState([]), [results, setResults] = useState([]), [q, setQ] = useState('');
   const [sheet, setSheet] = useState(null), [chat, setChat] = useState(null), [sent, setSent] = useState({});
   const on = !!(c.profile && c.profile.discoverable), hasName = !!(c.profile && c.profile.username);
-  const loadMatches = useCallback(async () => { if (!sb || !CloudStore.get().user) return; await publishStats(); const { data, error } = await sb.rpc('find_matches', { max_rows: 18 }); setMatches(error ? [] : data || []); }, []);
+  const loadMatches = useCallback(async () => { if (!sb || !CloudStore.get().user) return; await publishStats(); const { data, error } = await sb.rpc('find_matches_v2', { max_rows: 18 }); setMatches(error ? [] : data || []); }, []);
   const loadPeople = useCallback(async () => { if (!sb || !CloudStore.get().user) return; const { data } = await sb.rpc('my_connections'); setPeople(data || []); }, []);
   useEffect(() => { if (c.user && on) { loadMatches(); } else setMatches([]); loadPeople(); }, [c.user && c.user.id, on]);
-  useEffect(() => { if (!deepUser || !c.user) return; sb.rpc('public_profile', { u: deepUser }).then(({ data }) => { if (data && data[0]) setSheet(data[0]); else toast('That student is not available.'); }); }, [deepUser, c.user && c.user.id]);
+  useEffect(() => { if (!deepUser || !c.user) return; sb.rpc('public_profile_v2', { u: deepUser }).then(({ data }) => { if (data && data[0]) setSheet(data[0]); else toast('That student is not available.'); }); }, [deepUser, c.user && c.user.id]);
   useEffect(() => {
     if (tab !== 'find' || q.trim().length < 2 || !c.user) { setResults([]); return undefined; }
-    let live = true; const t = setTimeout(async () => { const { data } = await sb.rpc('search_users', { q: q.trim().replace(/^@/, '') }); if (live) setResults(data || []); }, 300);
+    let live = true; const t = setTimeout(async () => { const { data } = await sb.rpc('search_users_v2', { q: q.trim().replace(/^@/, '') }); if (live) setResults(data || []); }, 300);
     return () => { live = false; clearTimeout(t); };
   }, [q, tab, c.user && c.user.id]);
   const incoming = people.filter((x) => x.status === 'pending' && !x.i_requested), connected = people.filter((x) => x.status === 'accepted');
@@ -5538,7 +5608,7 @@ function ConnectUI({ close, deepUser }) {
   const decline = async (x) => { await sb.from('connections').delete().eq('id', x.conn_id); loadPeople(); };
   const turnOn = async () => { if (!hasName) { patchCloud({ profileOpen: true }); toast('Choose a username first, then switch matching on.'); return; } await setDiscoverable(true); };
   const real = matches && matches.length ? matches : null;
-  const list = real || (on || !c.user ? SAMPLE_MATCHES : []);
+  const list = real || (on ? SAMPLE_MATCHES : []);
   const titles = { matches: 'Matches', find: 'Find', people: 'People', code: 'My code' };
   const Row = ({ p }) => html`<button className="cn-row" onClick=${() => setSheet(p)}><${Av} p=${p} cls="cn-av" /><div className="cn-row-t"><b>${p.display_name}</b><small>@${p.username}${p.study_year ? ' · ' + p.study_year : ''}${p.country_name ? ' · ' + p.country_name : ''}</small>${p.score != null && html`<div className="cn-chips">${whyChips(p).map((w) => html`<span key=${w}>${w}</span>`)}</div>`}</div>${p.score != null ? html`<span className="cn-pct">${p.score}%</span>` : ''}</button>`;
   return html`<div className="cn-ui"><div className="cn-wrap">
@@ -5546,12 +5616,10 @@ function ConnectUI({ close, deepUser }) {
       <div className="cn-top"><button className="cn-back" onClick=${close} aria-label="Close"><${Icon} n="fa-arrow-left" /></button><small className="cn-lab">${tab === 'matches' ? 'TODAY' : 'CONNECT'}</small></div>
       <h1 className="cn-h">${titles[tab]}</h1>
       ${tab === 'matches' && html`<${Fragment}>
-        ${!c.user && html`<div className="cn-gate"><b>Meet students like you</b><p>Sign in to be matched by study time, scores, goals and exam date. Here is a preview with sample students.</p><button className="cn-btn" onClick=${() => { patchCloud({ modal: true }); }}>Sign in</button></div>`}
-        ${c.user && !on && html`<div className="cn-gate"><b>Turn on matching</b><p>This shares a small summary with students you could match with: your username, photo, bio, weekly study time, score range, streak, exam month and goals. Never your notes or answers. You can switch it off any time.</p><button className="cn-btn" onClick=${turnOn}>${hasName ? 'Turn on matching' : 'Choose a username first'}</button></div>`}
-        ${list.length > 0 && html`<${Fragment}>
-          <div className="cn-grid">${list.slice(0, 6).map((p) => html`<button key=${p.user_id} className="cn-tile" onClick=${() => setSheet(p)}><${Av} p=${p} cls="cn-tile-av" /><span className="cn-tile-n">${p.display_name}</span><span className="cn-tile-s">${p.score}%</span></button>`)}</div>
-          <small className="cn-lab">${real ? 'BEST FITS' : 'SAMPLE STUDENTS · PREVIEW'}</small><div className="cn-list">${list.map((p) => html`<${Row} key=${p.user_id} p=${p} />`)}</div><//>`}
-        ${c.user && on && !real && matches && html`<p className="cn-hint">No real matches yet. As more students switch matching on, the best fits show up here. The students below are samples.</p>`}<//>`}
+        ${!c.user && html`<div className="cn-gate"><b>Matching works both ways</b><p>Sign in and switch matching on, and you will see students who study like you. Without it, you only see the empty planet.</p><button className="cn-btn" onClick=${() => { patchCloud({ modal: true }); }}>Sign in</button></div>`}
+        ${c.user && !on && html`<div className="cn-gate"><b>Turn on matching to see others</b><p>It is a two-way street: matching shows you other students only while you are visible to them too. That shares your username, photo, bio, exam step, weekly study time, score range, streak, exam month and goals. Never your notes or answers. Switch it off any time.</p><button className="cn-btn" onClick=${turnOn}>${hasName ? 'Turn on matching' : 'Choose a username first'}</button></div>`}
+        ${c.user && on && matches === null && html`<p className="cn-hint">Finding your matches…</p>`}
+        ${c.user && on && matches !== null && html`<${Fragment}>${!real && html`<p className="cn-hint">No real matches yet. As more students switch matching on, your best fits appear here. These cards are samples.</p>`}<${MatchDeck} items=${list} onLink=${connect} onOpen=${setSheet} /><//>`}<//>`}
       ${tab === 'find' && html`<${Fragment}><label className="cn-search"><${Icon} n="fa-magnifying-glass" /><input value=${q} onChange=${(e) => setQ(e.target.value)} placeholder="Search a username" aria-label="Search a username" autoCapitalize="none" /></label>
         ${!c.user && html`<p className="cn-hint">Sign in to search students by username.</p>`}
         ${q.trim().length >= 2 && results.length === 0 && c.user && html`<p className="cn-hint">No student with that username is available.</p>`}
@@ -5568,7 +5636,7 @@ function ConnectUI({ close, deepUser }) {
 function ConnectLayer({ deepUser }) {
   const [stage, setStage] = useState('closed'), [o, setO] = useState({ x: 56, y: 40 }), btn = useRef(null);
   const open = (from) => { const r = from && btn.current ? btn.current.getBoundingClientRect() : null; setO(r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : { x: 56, y: 40 }); setStage('opening'); requestAnimationFrame(() => requestAnimationFrame(() => setStage('open'))); };
-  const close = () => { setStage('closing'); setTimeout(() => setStage('closed'), 1000); };
+  const close = () => { setStage('closing'); setTimeout(() => setStage('closed'), 620); };
   useEffect(() => { if (deepUser && stage === 'closed') open(false); }, [deepUser]);
   useEffect(() => { if (stage === 'closed') return undefined; document.body.style.overflow = 'hidden'; const k = (e) => { if (e.key === 'Escape') close(); }; window.addEventListener('keydown', k); return () => { document.body.style.overflow = ''; window.removeEventListener('keydown', k); }; }, [stage]);
   return html`<${Fragment}>
@@ -5604,7 +5672,7 @@ const SB_URL = 'https://womakbkesvwzwfviwlgs.supabase.co';
 const SB_KEY = 'sb_publishable_lAY6AW3Ho6ZlWy83ox3FgQ_Znh_mj-G';     /* publishable key: safe in the browser, row-level security protects the data */
 const sb = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true, experimental: { passkey: true } } }) : null;
 const memStore = (init) => { let v = init; const subs = new Set(); return { get: () => v, set(n) { v = n; subs.forEach((f) => f()); }, subscribe(fn) { subs.add(fn); return () => subs.delete(fn); } }; };
-const CloudStore = memStore({ user: null, profile: null, status: 'out', modal: false, profileOpen: false, error: '' });
+const CloudStore = memStore({ user: null, profile: null, status: 'out', modal: false, mode: 'in', ready: !sb, profileOpen: false, error: '' });
 const patchCloud = (p) => CloudStore.set({ ...CloudStore.get(), ...p });
 const useCloud = () => useSyncExternalStore(CloudStore.subscribe, CloudStore.get);
 
@@ -5665,11 +5733,11 @@ function startCloud() {
   Object.entries(SYNC).forEach(([k, def]) => def.st.subscribe(() => { if (applying) return; tsMark(k); if (CloudStore.get().user) { clearTimeout(timers[k]); timers[k] = setTimeout(() => pushKey(k), 1500); } }));
   if (!sb) return;
   const hydrate = async (session) => {
-    const user = session && session.user; patchCloud({ user: user || null });
+    const user = session && session.user; patchCloud({ user: user || null, ready: true });
     if (!user) { patchCloud({ profile: null, status: 'out' }); return; }
     try {
       await pullAndMerge(user.id);
-      const { data: prof } = await sb.from('profiles').select('display_name,is_admin,username,bio,study_year,exam_date,avatar_url,discoverable').eq('id', user.id).maybeSingle();
+      const { data: prof } = await sb.from('profiles').select('display_name,is_admin,username,bio,study_year,exam_date,avatar_url,discoverable,step').eq('id', user.id).maybeSingle();
       patchCloud({ profile: prof || null });
       if (prof && prof.display_name && !tsAll().name && UserStore.get() === 'Charles') { applying = true; UserStore.set(prof.display_name); applying = false; }
       sb.from('profiles').update({ last_seen: new Date().toISOString() }).eq('id', user.id).then(() => {});
@@ -5735,6 +5803,7 @@ function AuthModal() {
   const [busy, setBusy] = useState(false), [err, setErr] = useState(''), [note, setNote] = useState('');
   const [geoOk, setGeoOk] = useState(PrefsStore.get().globe !== false);
   useEffect(() => { if (c.user && c.modal) patchCloud({ modal: false }); }, [c.user, c.modal]);
+  useEffect(() => { if (c.modal) { setMode(c.mode || 'in'); setErr(''); setNote(''); } }, [c.modal]);
   useEffect(() => {
     if (!c.modal) return undefined;
     const k = (e) => { if (e.key === 'Escape') patchCloud({ modal: false }); };
@@ -5785,7 +5854,7 @@ function ProfileModal() {
   const [avail, setAvail] = useState('');            /* '', 'checking', 'ok', 'taken', 'bad' */
   const [busy, setBusy] = useState(false), [err, setErr] = useState('');
   const fileRef = useRef(null);
-  useEffect(() => { if (c.profileOpen) { setF({ name: name || p.display_name || '', username: p.username || '', bio: p.bio || '', year: p.study_year || '', exam: p.exam_date || '' }); setErr(''); setAvail(''); } }, [c.profileOpen]);
+  useEffect(() => { if (c.profileOpen) { setF({ name: name || p.display_name || '', username: p.username || '', bio: p.bio || '', year: p.study_year || '', step: p.step || '', exam: p.exam_date || '' }); setErr(''); setAvail(''); } }, [c.profileOpen]);
   useEffect(() => {
     if (!f || !c.profileOpen) return undefined;
     const u = f.username.trim().toLowerCase();
@@ -5824,7 +5893,7 @@ function ProfileModal() {
     setBusy(true);
     try {
       const nm = f.name.trim().slice(0, 24) || 'friend';
-      await savePatch({ display_name: nm, username: u || null, bio: f.bio.trim().slice(0, 160), study_year: f.year || null, exam_date: f.exam || null });
+      await savePatch({ display_name: nm, username: u || null, bio: f.bio.trim().slice(0, 160), study_year: f.year || null, step: f.step || null, exam_date: f.exam || null });
       UserStore.set(nm); if (f.exam) PlanStore.set({ ...PlanStore.get(), exam: f.exam });
       toast('Profile saved'); patchCloud({ profileOpen: false });
     } catch (x) { setErr(/duplicate|unique|23505/i.test(String(x.message || x)) ? 'That username is taken. Try another.' : /violates check/i.test(String(x.message || x)) ? 'That username is not allowed. Try another.' : String(x.message || x)); } finally { setBusy(false); }
@@ -5842,56 +5911,93 @@ function ProfileModal() {
       <label>Display name<input value=${f.name} maxLength="24" onChange=${(e) => set('name', e.target.value)} /></label>
       <label>Username<span className="pf-at"><i>@</i><input value=${f.username} maxLength="20" onChange=${(e) => set('username', e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="yourname" autoCapitalize="none" spellCheck="false" /></span><small className=${'pf-n ' + avail}>${note}</small></label>
       <label>About you<textarea maxLength="160" value=${f.bio} onChange=${(e) => set('bio', e.target.value)} placeholder="A line about you, your goals, your why…"></textarea><small className="pf-n">${f.bio.length}/160</small></label>
-      <div className="pf-row"><label>Study year<${SelectBox} value=${f.year} onChange=${(v) => set('year', v)} placeholder="Not set" label="Study year" options=${[['', 'Not set'], ...STUDY_YEARS.map((y) => [y, y])]} /></label>
+      <label>Exam step<${SelectBox} value=${f.step} onChange=${(v) => set('step', v)} placeholder="Not set" label="Exam step" options=${[['', 'Not set'], ['Step 1', 'Step 1'], ['Step 2 CK', 'Step 2 CK'], ['Step 2 CS', 'Step 2 CS'], ['Step 3', 'Step 3']]} /></label>
+      <div className="pf-row"><label>Level<${SelectBox} value=${f.year} onChange=${(v) => set('year', v)} placeholder="Not set" label="Study year" options=${[['', 'Not set'], ...STUDY_YEARS.map((y) => [y, y])]} /></label>
         <label>Step 1 date<${DatePicker} value=${f.exam} onChange=${(v) => set('exam', v)} placeholder="Pick a date" label="Step 1 date" /></label></div>
       ${err && html`<p className="au-err" role="alert">${err}</p>`}
       <button className="au-go" type="submit" disabled=${busy || avail === 'checking'}>${busy ? 'Saving…' : 'Save profile'}</button>
     </form></div>`, document.body);
 }
 
+/* A seal-shaped check, drawn once as a path. Green when everything is saved. */
+const BADGE_D = (() => {
+  const n = 10, pts = []; for (let i = 0; i < n * 2; i++) { const a = (Math.PI * i) / n - Math.PI / 2, r = i % 2 ? 9.1 : 10.7; pts.push([12 + r * Math.cos(a), 12 + r * Math.sin(a)]); }
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], f = (v) => v.toFixed(2); let d = '';
+  for (let i = 0; i < pts.length; i++) { const p0 = pts[i], p1 = pts[(i + 1) % pts.length], m = mid(p0, p1); if (!i) { const s0 = mid(pts[pts.length - 1], p0); d += 'M' + f(s0[0]) + ',' + f(s0[1]); } d += ' Q' + f(p0[0]) + ',' + f(p0[1]) + ' ' + f(m[0]) + ',' + f(m[1]); }
+  return d + 'Z';
+})();
+function SyncBadge({ status, size = 18 }) {
+  const ok = status === 'synced', bad = status === 'error', busy = status === 'syncing';
+  const fill = bad ? 'url(#sbRed)' : busy ? 'url(#sbGrey)' : ok ? 'url(#sbGreen)' : 'url(#sbGrey)';
+  return html`<svg className=${'sbadge ' + (status || 'out')} viewBox="0 0 24 24" width=${size} height=${size} role="img" aria-label=${ok ? 'Everything is saved' : bad ? 'Could not sync' : busy ? 'Saving' : 'Not signed in'}>
+    <defs><linearGradient id="sbGreen" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3ee58a" /><stop offset="1" stop-color="#0c9d4c" /></linearGradient><linearGradient id="sbRed" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff7a6e" /><stop offset="1" stop-color="#d1382b" /></linearGradient><linearGradient id="sbGrey" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b9b9c0" /><stop offset="1" stop-color="#76767e" /></linearGradient></defs>
+    <path d=${BADGE_D} fill=${fill} stroke="#fff" stroke-width="1.1" stroke-linejoin="round" />
+    ${ok && html`<path className="sb-tick" d="M7.4 12.4l3.1 3.1 6-6.5" fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" />`}
+    ${bad && html`<path d="M12 7.2v6M12 16.4v.3" fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round" />`}
+    ${busy && html`<circle className="sb-spin" cx="12" cy="12" r="4.4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-dasharray="14 14" />`}
+  </svg>`;
+}
+
 function AccountButton() {
   const c = useCloud(), name = useUserName();
-  const [open, setOpen] = useState(false);
+  const [stage, setStage] = useState('closed');   /* closed | open | closing */
+  const closeMenu = useCallback(() => { setStage('closing'); setTimeout(() => setStage('closed'), 520); }, []);
   useEffect(() => {
-    if (!open) return undefined;
-    const d = (e) => { if (!e.target.closest('.acct-wrap')) setOpen(false); };
-    document.addEventListener('mousedown', d); return () => document.removeEventListener('mousedown', d);
-  }, [open]);
+    if (stage !== 'open') return undefined;
+    const d = (e) => { if (!e.target.closest('.acct-wrap')) closeMenu(); }, k = (e) => { if (e.key === 'Escape') closeMenu(); };
+    document.addEventListener('mousedown', d); window.addEventListener('keydown', k);
+    return () => { document.removeEventListener('mousedown', d); window.removeEventListener('keydown', k); };
+  }, [stage, closeMenu]);
   if (!sb) return null;
   if (!c.user) return html`<button className="acct-in glass" onClick=${() => patchCloud({ modal: true })}><${Icon} n="fa-user" /><span className="lbl">Sign in</span></button>`;
   const label = { synced: 'All saved to your account', syncing: 'Saving…', error: 'Could not sync. Data is safe on this device.', out: '' }[c.status];
-  return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => setOpen((o) => !o)} aria-label="Account" aria-expanded=${open}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<i className=${'sd ' + c.status}></i></button>
-    ${open && html`<div className="acct-menu"><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
-      <p className=${'am-st ' + c.status}><i className=${'sd ' + c.status}></i>${label}</p>
-      <button onClick=${() => { setOpen(false); location.hash = '#/account'; }}><${Icon} n="fa-id-badge" /> Your account</button>
-      <button onClick=${() => { setOpen(false); location.hash = '#/community'; }}><${Icon} n="fa-earth-europe" /> Community globe</button>
-      <button onClick=${() => { setOpen(false); patchCloud({ profileOpen: true }); }}><${Icon} n="fa-user-pen" /> ${c.profile && c.profile.username ? 'Edit profile' : 'Set up your profile'}</button>
-      <button onClick=${() => { pullAndMerge(c.user.id).catch(() => {}); }}><${Icon} n="fa-arrows-rotate" /> Sync now</button>
-      <button onClick=${() => { setOpen(false); Cloud.out(false); }}><${Icon} n="fa-arrow-right-from-bracket" /> Sign out</button>
-      <button onClick=${() => { if (confirm('Sign out and remove this device’s copy of your data? It stays safe in your account.')) Cloud.out(true); }}><${Icon} n="fa-eraser" /> Sign out and clear this device</button></div>`}</div>`;
+  const go = (fn) => () => { closeMenu(); fn(); };
+  return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => (stage === 'open' ? closeMenu() : stage === 'closed' && setStage('open'))} aria-label="Account" aria-expanded=${stage === 'open'}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<span className="sb-corner"><${SyncBadge} status=${c.status} size=${19} /></span></button>
+    ${stage !== 'closed' && html`<div className=${cx('acct-menu', stage)}>
+      <div className="am-goo" aria-hidden="true"><i className="am-blob"></i><i className="am-shape"></i></div>
+      <div className="am-body"><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
+        <p className=${'am-st ' + c.status}><${SyncBadge} status=${c.status} size=${16} />${label}</p>
+        <button onClick=${go(() => { location.hash = '#/account'; })}><${Icon} n="fa-id-badge" /> Your account</button>
+        <button onClick=${go(() => { location.hash = '#/community'; })}><${Icon} n="fa-earth-europe" /> Community globe</button>
+        <button onClick=${go(() => patchCloud({ profileOpen: true }))}><${Icon} n="fa-user-pen" /> ${c.profile && c.profile.username ? 'Edit profile' : 'Set up your profile'}</button>
+        <button onClick=${() => { pullAndMerge(c.user.id).catch(() => {}); }}><${Icon} n="fa-arrows-rotate" /> Sync now</button>
+        <button onClick=${go(() => Cloud.out(false))}><${Icon} n="fa-arrow-right-from-bracket" /> Sign out</button>
+        <button onClick=${go(() => { if (confirm('Sign out and remove this device’s copy of your data? It stays safe in your account.')) Cloud.out(true); })}><${Icon} n="fa-eraser" /> Sign out and clear this device</button></div></div>`}</div>`;
 }
 
 
 /* ==========================================================================
    APP
    ========================================================================== */
+function QuizGate({ ready }) {
+  return html`<section className="qg" data-nav="dark"><div className="qg-in">
+    <p className="eyebrow">The quiz</p>
+    <h1>Sign in to <span className="hl">begin.</span></h1>
+    ${ready ? html`<p>The quiz keeps your scores, your streak and your mistakes, so you need an account to take it. It is free, and it takes less than a minute.</p>
+      <div className="qg-btns"><button className="lh-btn" onClick=${() => patchCloud({ modal: true, mode: 'in' })}><${Icon} n="fa-user" /> Sign in</button><button className="lh-btn ghost" onClick=${() => patchCloud({ modal: true, mode: 'up' })}>Create an account</button></div>`
+      : html`<p>One moment…</p>`}</div></section>`;
+}
+
 function App() {
   const [route, go] = useRoute();
   useEffect(() => { startCloud(); }, []);
   const attempts = useAttempts();
-  const [quizMounted, setQuizMounted] = useState(route === 'quiz');
+  const cloud = useCloud();
+  const quizOk = !sb || !!cloud.user;
+  const [quizMounted, setQuizMounted] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [pendingCase, setPendingCase] = useState(null);
   const [reader, setReader] = useState(null);
   const progressRef = useRef(null);
 
   useEffect(() => {
-    if (route === 'quiz') setQuizMounted(true);
-    document.body.classList.toggle('quiz-locked', route === 'quiz');
+    if (route === 'quiz' && quizOk) setQuizMounted(true);
+    document.body.classList.toggle('quiz-locked', route === 'quiz' && quizOk);
     document.body.dataset.route = route;
-    window.__quizProtect = PROTECT_QUIZ && route === 'quiz';
-    window.scrollTo(0, 0);
-  }, [route]);
+    window.__quizProtect = PROTECT_QUIZ && route === 'quiz' && quizOk;
+  }, [route, quizOk]);
+  useEffect(() => { window.scrollTo(0, 0); }, [route]);
+  useEffect(() => { if (!quizOk) setQuizMounted(false); }, [quizOk]);
 
   /* scroll progress bar */
   useEffect(() => {
@@ -5946,10 +6052,11 @@ function App() {
   const onRead = useCallback((c) => setReader(c), []);
 
   return html`<${Fragment}>
-    <${SiteNav} route=${route} go=${go} openFind=${openFind} />
+    <${SiteNav} route=${route} gate=${route === 'quiz' && !quizOk} go=${go} openFind=${openFind} />
     <${AuthModal} /><${ProfileModal} />
-    <${Tabs} route=${route} go=${go} />
+    <${Tabs} route=${route} gate=${route === 'quiz' && !quizOk} go=${go} />
     <main id="site">
+      ${route === 'quiz' && !quizOk && html`<div className="site-view"><${QuizGate} ready=${cloud.ready} /></div>`}
       ${route === 'home' && html`<div className="site-view">
         <${Hero} go=${go} /><${Manifesto} /><${Inside} go=${go} /><${Stack} /><${Orbit} go=${go} /><${Stats} attempts=${attempts} /><${CtaBig} go=${go} /><${QuoteBlock} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'dashboard' && html`<div className="site-view"><${BarsIntro} /><${Dashboard} go=${go} openFind=${openFind} /><${Footer} go=${go} openFind=${openFind} /></div>`}
@@ -5958,7 +6065,7 @@ function App() {
       ${route === 'study' && html`<div className="site-view"><${Study} go=${go} openCase=${openCase} /><${Footer} go=${go} openFind=${openFind} /></div>`}
       ${route === 'library' && html`<div className="site-view"><${LibHero} /><${CasesSection} pending=${pendingCase} onRead=${onRead} withExplorer=${true} /><${Footer} go=${go} openFind=${openFind} /></div>`}
     </main>
-    ${quizMounted && html`<div className="quiz-host" hidden=${route !== 'quiz'}><${window.QuizApp} active=${route === 'quiz'} /></div>`}
+    ${quizOk && quizMounted && html`<div className="quiz-host" hidden=${route !== 'quiz'}><${window.QuizApp} active=${route === 'quiz'} /></div>`}
     ${reader && html`<${Reader} c=${reader} onClose=${() => setReader(null)} />`}
     <${ToastHost} />
     ${findOpen && html`<${Palette} onClose=${() => setFindOpen(false)} go=${go} openCase=${openCase} />`}
