@@ -1887,6 +1887,17 @@
         .fv-sheet2 .fv-facts { margin: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 28px; } @media (max-width: 700px) { .fv-sheet2 .fv-facts { grid-template-columns: 1fr 1fr; } }
         .fv-sheet2 .fv-cta { margin-top: 12px; }
         .fv-shade::after { opacity: calc(var(--p) * .6); }
+        /* ===== v19: the drip is the nav's glass, copied exactly (clear tint + the glossy knob rim) ===== */
+        .acct-wrap .acct-menu .am-neck, .acct-wrap .acct-menu .am-drop { box-shadow: inset 0 1px 0 rgba(255,255,255,.85), inset 0 -7px 14px rgba(255,255,255,.14), 0 10px 22px -6px rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.55); background: linear-gradient(180deg, rgba(255,255,255,.34), rgba(255,255,255,.1)); }
+        .am-neck::before, .am-drop::before { background: rgba(40,40,40,.1); box-shadow: inset 0 0 10px -4px #000; }
+        .am-neck::after, .am-drop::after { backdrop-filter: blur(0px); -webkit-backdrop-filter: blur(0px); filter: url(#glass-distortion); }
+        /* study circle: big photos, one wave when you reach them */
+        .fv-sheet2 .fv-cast { gap: 18px; padding: 44px 4px 14px; margin: -30px -4px 0; } .fv-sheet2 .fv-ci { width: 112px; height: 112px; } .fv-sheet2 .fv-c { gap: 10px; font-size: 14px; }
+        .fv-cast.wave .fv-c { animation: fvWave 1s cubic-bezier(.45,0,.3,1) both; animation-delay: calc(var(--i) * .13s); }
+        @keyframes fvWave { 0% { transform: translateY(0); } 32% { transform: translateY(-34px) scale(1.07); } 68% { transform: translateY(12px) scale(.98); } 100% { transform: translateY(0); } }
+        @media (max-width: 700px) { .fv-sheet2 .fv-ci { width: 92px; height: 92px; } }
+        .fv-flow { pointer-events: none; } .fv-sheet2 { pointer-events: auto; }
+        .fv-stage .fv-top { position: fixed; z-index: 6; }
 
     </style>
 </head>
@@ -5975,7 +5986,7 @@ function PeopleHome({ list, incoming, waiting, accept, decline, onOpen, onChat, 
     </div></div>`;
 }
 function FriendDetail({ p, others, onBack, onMessage }) {
-  const sc = useRef(null), txt = useRef(null), facts = useRef(null);
+  const sc = useRef(null), txt = useRef(null), facts = useRef(null), cast = useRef(null), waved = useRef(false);
   const text = p.about || p.bio || 'No note yet.', words = text.split(/\s+/).filter(Boolean);
   const rows = [['Exam step', p.step || 'Not set'], ['Level', p.study_year || 'Not set'], ['Country', p.country_name || 'Somewhere on Earth'], ['Study streak', p.streak ? p.streak + ' days' : 'Just getting started']];
   useEffect(() => { const k = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onBack(); } }; window.addEventListener('keydown', k, true); return () => window.removeEventListener('keydown', k, true); }, [onBack]);
@@ -5986,6 +5997,7 @@ function FriendDetail({ p, others, onBack, onMessage }) {
       el.style.setProperty('--p', cl(y / (vh * 0.85), 0, 1).toFixed(3));
       const t = txt.current;
       if (t) { const top = t.offsetTop - y, r = cl((vh * 0.9 - top) / (vh * 0.55), 0, 1), n = t.children.length; for (let i = 0; i < n; i++) t.children[i].style.opacity = (0.12 + 0.88 * cl(r * (n + 5) - i, 0, 1)).toFixed(2); }
+      const cs = cast.current; if (cs && !waved.current && cs.getBoundingClientRect().top < vh * 0.82) { waved.current = true; cs.classList.add('wave'); }
       const f = facts.current; if (f) { const r = cl((vh * 0.95 - (f.offsetTop - y)) / (vh * 0.3), 0, 1); f.style.opacity = r.toFixed(2); f.style.transform = 'translateY(' + ((1 - r) * 24).toFixed(1) + 'px)'; }
     };
     const on = () => { if (!raf) raf = requestAnimationFrame(upd); };
@@ -6007,7 +6019,7 @@ function FriendDetail({ p, others, onBack, onMessage }) {
         <span className="fv-grab2" aria-hidden="true"></span>
         <div className="fv-r2"><b>About</b><p className="fv-text" ref=${txt}>${words.map((w, i) => html`<span key=${i}>${w} </span>`)}</p></div>
         <div className="fv-facts" ref=${facts}>${rows.map(([k, v]) => html`<div key=${k} className="fv-r2"><b>${k}</b><p>${v}</p></div>`)}</div>
-        ${others.length > 0 && html`<div className="fv-r2"><b>Study circle</b><div className="fv-cast">${others.slice(0, 10).map((x) => html`<div key=${x.conn_id || x.user_id} className="fv-c"><${Av} p=${x} cls="fv-ci" /><span>${(x.display_name || '').split(' ')[0]}</span></div>`)}</div></div>`}
+        ${others.length > 0 && html`<div className="fv-r2"><b>Study circle</b><div className="fv-cast" ref=${cast}>${others.slice(0, 10).map((x, i) => html`<div key=${x.conn_id || x.user_id} className="fv-c" style=${{ '--i': i }}><${Av} p=${x} cls="fv-ci" /><span>${(x.display_name || '').split(' ')[0]}</span></div>`)}</div></div>`}
         <button className="fv-cta" onClick=${onMessage}><${CIcon} n="chat" size=${18} sw=${2.1} />Message ${(p.display_name || '').split(' ')[0]}</button>
       </section>
     </div></div>`;
@@ -6461,7 +6473,7 @@ function AccountButton() {
   const go = (fn) => () => { closeMenu(); fn(); };
   return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => (stage === 'open' ? closeMenu() : stage === 'closed' && setStage('open'))} aria-label="Account" aria-expanded=${stage === 'open'}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<span className="sb-corner"><${SyncBadge} status=${c.status} size=${19} /></span></button>
     ${stage !== 'closed' && html`<div className=${cx('acct-menu', stage)}>
-      <div className="am-neck glass" data-t="mixed" ref=${neckR} aria-hidden="true"></div><div className="am-drop glass" data-t="mixed" ref=${dropR} aria-hidden="true"></div>
+      <div className="am-neck glass" ref=${neckR} aria-hidden="true"></div><div className="am-drop glass" ref=${dropR} aria-hidden="true"></div>
       <div className="am-body" ref=${bodyR}><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
         <p className=${'am-st ' + c.status}><${SyncBadge} status=${c.status} size=${16} />${label}</p>
         <button onClick=${go(() => { location.hash = '#/account'; })}><${Icon} n="fa-id-badge" /> Your account</button>
