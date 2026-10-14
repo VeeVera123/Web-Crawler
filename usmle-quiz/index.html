@@ -1387,6 +1387,20 @@
         .au-sw { display: grid; gap: 4px; justify-items: center; } .au-sw button { border: 0; background: none; cursor: pointer; font: 500 13.5px 'Montserrat'; text-decoration: underline; text-underline-offset: 3px; opacity: .75; } .au-sw button:hover { opacity: 1; }
         @media (max-width: 760px) { .acct-in .lbl { display: none; } .acct-in { width: 46px; padding: 0; justify-content: center; } .nav-actions { gap: 8px; } }
 
+        /* ===== profile dialog + nav fit ===== */
+        .acct-av img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; z-index: 1; }
+        .pf-card textarea, .pf-card select { border-radius: 16px; border: 1.5px solid rgba(0,0,0,.18); padding: 12px 16px; font: 500 15px 'Montserrat'; background: #fff; outline: none; color: #0d0d08; letter-spacing: 0; text-transform: none; } .pf-card textarea { min-height: 76px; resize: none; line-height: 1.5; } .pf-card textarea:focus, .pf-card select:focus { border-color: #0d0d08; } .pf-card select { height: 52px; }
+        .pf-photo { display: flex; align-items: center; gap: 16px; } .pf-photo > div { display: grid; gap: 4px; justify-items: start; } .pf-photo small { font-size: 12px; opacity: .55; text-transform: none; letter-spacing: 0; font-weight: 500; }
+        .pf-av { position: relative; width: 84px; height: 84px; border-radius: 50%; border: 0; background: #0d0d08; color: #fff; cursor: pointer; overflow: hidden; display: grid; place-items: center; flex: none; } .pf-av b { font: 400 40px 'Bebas Neue'; } .pf-av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+        .pf-av span { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.5); color: #fff; opacity: 0; transition: opacity .25s; } .pf-av:hover span { opacity: 1; }
+        .pf-link { border: 0; background: none; padding: 0; font: 600 13.5px 'Montserrat'; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; color: #0d0d08; text-transform: none; letter-spacing: 0; }
+        .pf-at { display: flex; align-items: center; height: 52px; border-radius: 16px; border: 1.5px solid rgba(0,0,0,.18); background: #fff; padding-left: 16px; } .pf-at:focus-within { border-color: #0d0d08; } .pf-at i { font: 600 16px 'Montserrat'; opacity: .45; font-style: normal; } .pf-at input { border: 0; height: 100%; flex: 1; padding-left: 4px; }
+        .pf-n { min-height: 14px; text-transform: none; letter-spacing: 0; font-weight: 500; opacity: .55; font-size: 12px; } .pf-n.ok { color: #138a43; opacity: 1; } .pf-n.taken, .pf-n.bad { color: #b3261e; opacity: 1; }
+        .pf-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        /* keep the corner buttons clear of the tab bar on narrower windows */
+        @media (max-width: 1240px) { .nav-actions .btn-white { display: none; } .find .lbl, .find kbd, .acct-in .lbl { display: none; } .find, .acct-in { width: 46px; padding: 0; justify-content: center; } }
+        @media (max-width: 900px) and (min-width: 761px) { .tabs .tab span { display: none; } .tabs .tab { padding: 0 18px; } }
+
     </style>
 </head>
 <body>
@@ -4780,7 +4794,7 @@ const SB_URL = 'https://womakbkesvwzwfviwlgs.supabase.co';
 const SB_KEY = 'sb_publishable_lAY6AW3Ho6ZlWy83ox3FgQ_Znh_mj-G';     /* publishable key: safe in the browser, row-level security protects the data */
 const sb = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true } }) : null;
 const memStore = (init) => { let v = init; const subs = new Set(); return { get: () => v, set(n) { v = n; subs.forEach((f) => f()); }, subscribe(fn) { subs.add(fn); return () => subs.delete(fn); } }; };
-const CloudStore = memStore({ user: null, profile: null, status: 'out', modal: false, error: '' });
+const CloudStore = memStore({ user: null, profile: null, status: 'out', modal: false, profileOpen: false, error: '' });
 const patchCloud = (p) => CloudStore.set({ ...CloudStore.get(), ...p });
 const useCloud = () => useSyncExternalStore(CloudStore.subscribe, CloudStore.get);
 
@@ -4842,7 +4856,7 @@ function startCloud() {
     if (!user) { patchCloud({ profile: null, status: 'out' }); return; }
     try {
       await pullAndMerge(user.id);
-      const { data: prof } = await sb.from('profiles').select('display_name,is_admin').eq('id', user.id).maybeSingle();
+      const { data: prof } = await sb.from('profiles').select('display_name,is_admin,username,bio,study_year,exam_date,avatar_url').eq('id', user.id).maybeSingle();
       patchCloud({ profile: prof || null });
       if (prof && prof.display_name && !tsAll().name && UserStore.get() === 'Charles') { applying = true; UserStore.set(prof.display_name); applying = false; }
       sb.from('profiles').update({ last_seen: new Date().toISOString() }).eq('id', user.id).then(() => {});
@@ -4898,6 +4912,88 @@ function AuthModal() {
     </form></div>`, document.body);
 }
 
+const STUDY_YEARS = ['MS1', 'MS2', 'MS3', 'MS4', 'Gap year', 'Graduate', 'Other'];
+const squareJpeg = (file, px) => new Promise((ok, no) => {
+  const url = URL.createObjectURL(file), im = new Image();
+  im.onload = () => {
+    const k = Math.min(im.width, im.height), c = document.createElement('canvas'); c.width = c.height = px;
+    c.getContext('2d').drawImage(im, (im.width - k) / 2, (im.height - k) / 2, k, k, 0, 0, px, px);
+    URL.revokeObjectURL(url); c.toBlob((b) => (b ? ok(b) : no(new Error('Could not read that image'))), 'image/jpeg', 0.85);
+  };
+  im.onerror = () => { URL.revokeObjectURL(url); no(new Error('That file is not an image we can read')); };
+  im.src = url;
+});
+function ProfileModal() {
+  const c = useCloud(), name = useUserName();
+  const p = c.profile || {};
+  const [f, setF] = useState(null);
+  const [avail, setAvail] = useState('');            /* '', 'checking', 'ok', 'taken', 'bad' */
+  const [busy, setBusy] = useState(false), [err, setErr] = useState('');
+  const fileRef = useRef(null);
+  useEffect(() => { if (c.profileOpen) { setF({ name: name || p.display_name || '', username: p.username || '', bio: p.bio || '', year: p.study_year || '', exam: p.exam_date || '' }); setErr(''); setAvail(''); } }, [c.profileOpen]);
+  useEffect(() => {
+    if (!f || !c.profileOpen) return undefined;
+    const u = f.username.trim().toLowerCase();
+    if (!u || u === (p.username || '')) { setAvail(''); return undefined; }
+    if (!/^[a-z0-9_]{3,20}$/.test(u)) { setAvail('bad'); return undefined; }
+    setAvail('checking'); let live = true;
+    const t = setTimeout(async () => { const { data, error } = await sb.rpc('username_available', { u }); if (live) setAvail(error ? '' : data ? 'ok' : 'taken'); }, 400);
+    return () => { live = false; clearTimeout(t); };
+  }, [f && f.username, c.profileOpen]);
+  useEffect(() => {
+    if (!c.profileOpen) return undefined;
+    const k = (e) => { if (e.key === 'Escape') patchCloud({ profileOpen: false }); };
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
+  }, [c.profileOpen]);
+  if (!c.profileOpen || !f || !c.user) return null;
+  const set = (k, v) => setF({ ...f, [k]: v });
+  const uid = c.user.id;
+  const savePatch = async (patch) => { const { error } = await sb.from('profiles').update(patch).eq('id', uid); if (error) throw error; patchCloud({ profile: { ...CloudStore.get().profile, ...patch } }); };
+  const onPhoto = async (e) => {
+    const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file) return;
+    setErr(''); setBusy(true);
+    try {
+      const blob = await squareJpeg(file, 256);
+      const { error } = await sb.storage.from('avatars').upload(uid + '/avatar.jpg', blob, { upsert: true, contentType: 'image/jpeg', cacheControl: '3600' });
+      if (error) throw error;
+      await savePatch({ avatar_url: SB_URL + '/storage/v1/object/public/avatars/' + uid + '/avatar.jpg?v=' + Date.now() });
+      toast('Photo updated');
+    } catch (x) { setErr(String(x.message || x)); } finally { setBusy(false); }
+  };
+  const dropPhoto = async () => { setBusy(true); try { await sb.storage.from('avatars').remove([uid + '/avatar.jpg']); await savePatch({ avatar_url: null }); } catch (x) { setErr(String(x.message || x)); } finally { setBusy(false); } };
+  const save = async (e) => {
+    e.preventDefault(); setErr('');
+    const u = f.username.trim().toLowerCase();
+    if (u && !/^[a-z0-9_]{3,20}$/.test(u)) { setErr('Usernames use 3 to 20 letters, numbers or underscores.'); return; }
+    if (avail === 'taken') { setErr('That username is taken. Try another.'); return; }
+    setBusy(true);
+    try {
+      const nm = f.name.trim().slice(0, 24) || 'friend';
+      await savePatch({ display_name: nm, username: u || null, bio: f.bio.trim().slice(0, 160), study_year: f.year || null, exam_date: f.exam || null });
+      UserStore.set(nm); if (f.exam) PlanStore.set({ ...PlanStore.get(), exam: f.exam });
+      toast('Profile saved'); patchCloud({ profileOpen: false });
+    } catch (x) { setErr(/duplicate|unique|23505/i.test(String(x.message || x)) ? 'That username is taken. Try another.' : /violates check/i.test(String(x.message || x)) ? 'That username is not allowed. Try another.' : String(x.message || x)); } finally { setBusy(false); }
+  };
+  const note = { checking: 'Checking…', ok: 'Available', taken: 'Already taken', bad: '3 to 20 letters, numbers or _' }[avail] || '';
+  return ReactDOM.createPortal(html`<div className="au-back" onMouseDown=${(e) => { if (e.target === e.currentTarget) patchCloud({ profileOpen: false }); }}>
+    <form className="au-card pf-card" onSubmit=${save} role="dialog" aria-modal="true" aria-label="Your profile">
+      <button type="button" className="au-x" onClick=${() => patchCloud({ profileOpen: false })} aria-label="Close"><${Icon} n="fa-xmark" /></button>
+      <h3>Your profile</h3>
+      <div className="pf-photo">
+        <button type="button" className="pf-av" onClick=${() => fileRef.current.click()} disabled=${busy} aria-label="Change photo">${p.avatar_url ? html`<img src=${p.avatar_url} alt="" />` : html`<b>${(f.name || '?').charAt(0).toUpperCase()}</b>`}<span><${Icon} n="fa-camera" /></span></button>
+        <div><button type="button" className="pf-link" onClick=${() => fileRef.current.click()} disabled=${busy}>${p.avatar_url ? 'Change photo' : 'Add a photo'}</button>${p.avatar_url && html`<button type="button" className="pf-link" onClick=${dropPhoto} disabled=${busy}>Remove</button>`}<small>Shrunk to a small square on your device</small></div>
+        <input ref=${fileRef} type="file" accept="image/*" hidden onChange=${onPhoto} />
+      </div>
+      <label>Display name<input value=${f.name} maxLength="24" onChange=${(e) => set('name', e.target.value)} /></label>
+      <label>Username<span className="pf-at"><i>@</i><input value=${f.username} maxLength="20" onChange=${(e) => set('username', e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="yourname" autoCapitalize="none" spellCheck="false" /></span><small className=${'pf-n ' + avail}>${note}</small></label>
+      <label>About you<textarea maxLength="160" value=${f.bio} onChange=${(e) => set('bio', e.target.value)} placeholder="A line about you, your goals, your why…"></textarea><small className="pf-n">${f.bio.length}/160</small></label>
+      <div className="pf-row"><label>Study year<select value=${f.year} onChange=${(e) => set('year', e.target.value)}><option value="">Not set</option>${STUDY_YEARS.map((y) => html`<option key=${y} value=${y}>${y}</option>`)}</select></label>
+        <label>Step 1 date<input type="date" value=${f.exam} onChange=${(e) => set('exam', e.target.value)} /></label></div>
+      ${err && html`<p className="au-err" role="alert">${err}</p>`}
+      <button className="au-go" type="submit" disabled=${busy || avail === 'checking'}>${busy ? 'Saving…' : 'Save profile'}</button>
+    </form></div>`, document.body);
+}
+
 function AccountButton() {
   const c = useCloud(), name = useUserName();
   const [open, setOpen] = useState(false);
@@ -4909,9 +5005,10 @@ function AccountButton() {
   if (!sb) return null;
   if (!c.user) return html`<button className="acct-in glass" onClick=${() => patchCloud({ modal: true })}><${Icon} n="fa-user" /><span className="lbl">Sign in</span></button>`;
   const label = { synced: 'All saved to your account', syncing: 'Saving…', error: 'Could not sync. Data is safe on this device.', out: '' }[c.status];
-  return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => setOpen((o) => !o)} aria-label="Account" aria-expanded=${open}><b>${(name || '?').trim().charAt(0).toUpperCase()}</b><i className=${'sd ' + c.status}></i></button>
-    ${open && html`<div className="acct-menu"><div className="am-top"><b>${name}</b><small>${c.user.email}</small></div>
+  return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => setOpen((o) => !o)} aria-label="Account" aria-expanded=${open}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<i className=${'sd ' + c.status}></i></button>
+    ${open && html`<div className="acct-menu"><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
       <p className=${'am-st ' + c.status}><i className=${'sd ' + c.status}></i>${label}</p>
+      <button onClick=${() => { setOpen(false); patchCloud({ profileOpen: true }); }}><${Icon} n="fa-user-pen" /> ${c.profile && c.profile.username ? 'Your profile' : 'Set up your profile'}</button>
       <button onClick=${() => { pullAndMerge(c.user.id).catch(() => {}); }}><${Icon} n="fa-arrows-rotate" /> Sync now</button>
       <button onClick=${() => { setOpen(false); Cloud.out(false); }}><${Icon} n="fa-arrow-right-from-bracket" /> Sign out</button>
       <button onClick=${() => { if (confirm('Sign out and remove this device’s copy of your data? It stays safe in your account.')) Cloud.out(true); }}><${Icon} n="fa-eraser" /> Sign out and clear this device</button></div>`}</div>`;
@@ -4993,7 +5090,7 @@ function App() {
 
   return html`<${Fragment}>
     <${SiteNav} route=${route} go=${go} openFind=${openFind} />
-    <${AuthModal} />
+    <${AuthModal} /><${ProfileModal} />
     <${Tabs} route=${route} go=${go} />
     <main id="site">
       ${route === 'home' && html`<div className="site-view">
