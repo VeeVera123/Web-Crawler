@@ -1697,13 +1697,50 @@
         .cn-send { align-items: center; gap: 6px; } .cn-send input { height: 50px; }
         .ct-tool { width: 44px; height: 44px; border-radius: 50%; border: 0; background: rgba(255,255,255,.07); color: #fff; cursor: pointer; display: grid; place-items: center; flex: none; transition: background .2s, color .2s; } .ct-tool:hover, .ct-tool.on { background: #FF5A1F; color: #fff; }
         .cn-send button[type="submit"], .cn-send button[aria-label="Voice note"] { width: 50px; height: 50px; }
+        /* ===== v14: true drip ===== */
+        .acct-wrap .acct-menu { top: calc(100% + 48px) !important; }
+        .am-goo { inset: -96px -34px -34px -34px !important; }
+        .am-ch { position: absolute; border-radius: 50%; background: #131316; width: 0; height: 0; left: 0; top: 0; }
+        .am-shape { left: 0; top: 0; width: 0; height: 0; }
+        /* ===== v14: chat list + thread in the "Let's Stay Connected" style ===== */
+        .ch, .cn-chat { font-family: -apple-system, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', 'Inter', Arial, sans-serif; }
+        .ch-hero { margin: 0 -22px; padding: 18px 22px 22px; border-radius: 0 0 34px 34px; background: linear-gradient(160deg, #7aa89b 0%, #8c9fc4 48%, #a08fcc 100%); position: relative; }
+        @media (min-width: 1000px) { .ch-hero { margin: 0; border-radius: 34px; padding: 22px 30px 26px; } }
+        .ch-search { display: flex; align-items: center; gap: 10px; height: 42px; padding: 0 8px 0 16px; width: min(260px, 70%); border-radius: 999px; background: rgba(70,70,92,.5); backdrop-filter: blur(12px); color: rgba(255,255,255,.85); }
+        .ch-search { width: 100%; max-width: none; } .ch-search input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font: 400 15px/1 -apple-system, 'SF Pro Text', 'Helvetica Neue', Inter, Arial, sans-serif; } .ch-search input::placeholder { color: rgba(255,255,255,.7); }
+        .ch-chev { width: 32px; height: 32px; border-radius: 50%; border: 0; background: transparent; color: #fff; cursor: pointer; display: grid; place-items: center; transition: transform .3s, background .2s; } .ch-chev.on { background: rgba(255,255,255,.25); transform: rotate(180deg); }
+        .ch-hero h2 { margin: 26px 0 20px; color: #fff; font: 700 clamp(42px, 9vw, 56px)/.96 -apple-system, 'SF Pro Display', 'Helvetica Neue', Inter, Arial, sans-serif; letter-spacing: -.045em; }
+        .ch-stories { display: flex; gap: 14px; overflow-x: auto; scrollbar-width: none; margin: 0 -22px; padding: 0 22px 2px; } .ch-stories::-webkit-scrollbar { display: none; }
+        .ch-st { flex: none; width: 66px; border: 0; background: none; padding: 0; cursor: pointer; display: grid; justify-items: center; gap: 7px; color: rgba(255,255,255,.92); }
+        .ch-st span { width: 62px; height: 62px; border-radius: 50%; display: grid; place-items: center; padding: 2.5px; background: rgba(255,255,255,.55); box-shadow: 0 6px 14px -6px rgba(40,30,80,.5); transition: transform .3s cubic-bezier(.34,1.8,.5,1); } .ch-st:hover span { transform: scale(1.06); } .ch-st:active span { transform: scale(.94); }
+        .ch-st.add span { background: transparent; border: 2px solid rgba(255,255,255,.55); box-shadow: none; padding: 0; color: #fff; background: rgba(255,255,255,.12); }
+        .ch-sa { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; font-size: 22px; }
+        .ch-st small { font: 400 11.5px -apple-system, 'Helvetica Neue', Inter, Arial, sans-serif; max-width: 66px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ch-list { display: grid; padding-top: 10px; -webkit-mask-image: linear-gradient(#000 82%, transparent); mask-image: linear-gradient(#000 82%, transparent); padding-bottom: 20px; }
+        @media (min-width: 1000px) { .ch-list { grid-template-columns: 1fr 1fr; column-gap: 28px; } }
+        .ch-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; padding: 12px 2px; border: 0; background: none; color: #fff; text-align: left; cursor: pointer; width: 100%; border-radius: 16px; transition: background .2s; } .ch-row:hover { background: rgba(255,255,255,.05); }
+        .ch-ava { position: relative; display: block; } .ch-av { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; display: block; font-size: 20px; }
+        .ch-dot { position: absolute; right: 0; bottom: 1px; width: 12px; height: 12px; border-radius: 50%; background: #34c759; border: 2px solid #000; }
+        .ch-txt { min-width: 0; } .ch-txt b { display: block; font: 600 17px/1.15 -apple-system, 'SF Pro Display', 'Helvetica Neue', Inter, Arial, sans-serif; letter-spacing: -.015em; }
+        .ch-txt small { display: block; margin-top: 4px; font: 400 13px -apple-system, 'Helvetica Neue', Inter, Arial, sans-serif; color: rgba(255,255,255,.62); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ch-txt small.typing { color: #9ad3b0; }
+        .ch-meta { display: grid; justify-items: end; gap: 6px; align-self: start; padding-top: 4px; } .ch-meta time { font: 400 11px -apple-system, 'Helvetica Neue', Inter, Arial, sans-serif; color: rgba(255,255,255,.5); white-space: nowrap; }
+        .ch-badge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: linear-gradient(135deg, #7aa89b, #a08fcc); color: #fff; font: 700 11.5px/20px -apple-system, Inter, Arial, sans-serif; font-style: normal; text-align: center; }
+        .ch-note { margin: 4px 2px 0; font: italic 400 12.5px -apple-system, Inter, Arial, sans-serif; color: rgba(255,255,255,.4); }
+        /* thread */
+        .cn-chat-top { padding: 4px 0 16px; } .ct-nm b { font: 600 17px -apple-system, 'SF Pro Display', 'Helvetica Neue', Inter, Arial, sans-serif; letter-spacing: -.015em; } .ct-nm small { color: #34c759; font-family: -apple-system, 'Helvetica Neue', Inter, Arial, sans-serif; }
+        .cn-back { background: rgba(255,255,255,.1) !important; box-shadow: none !important; } .ct-ic { background: rgba(255,255,255,.1); } .ct-ic:hover { background: linear-gradient(135deg, #7aa89b, #a08fcc); }
+        .cn-msg { background: #1c1c1e; font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', Inter, Arial, sans-serif; font-size: 15px; } .cn-msg.me { background: linear-gradient(150deg, #7aa89b 0%, #8c9fc4 50%, #a08fcc 100%); color: #fff; }
+        .cn-send input { background: #1c1c1e; font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', Inter, Arial, sans-serif; } .cn-send button[type="submit"], .cn-send button[aria-label="Voice note"] { background: linear-gradient(135deg, #7aa89b, #a08fcc); } .ct-tool:hover, .ct-tool.on { background: linear-gradient(135deg, #7aa89b, #a08fcc); }
+        .ct-day span { font-family: -apple-system, 'Helvetica Neue', Inter, Arial, sans-serif; }
+        .cn-send button { display: grid; place-items: center; padding: 0; }
+        .cn-send .ct-tool { background: rgba(255,255,255,.1) !important; } .cn-send .ct-tool:hover, .cn-send .ct-tool.on { background: linear-gradient(135deg, #7aa89b, #a08fcc) !important; }
 
     </style>
 </head>
 <body>
     <svg style="display: none"><filter id="lg-dist"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="70" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none"><defs><filter id="glass-distortion" x="0%" y="0%" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="92" result="noise"/><feGaussianBlur in="noise" stdDeviation="2" result="blurred"/><feDisplacementMap in="SourceGraphic" in2="blurred" scale="77" xChannelSelector="R" yChannelSelector="G"/></filter></defs></svg>
-<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0" aria-hidden="true"><defs><filter id="goo-menu" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="9" result="b"/><feColorMatrix in="b" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"/></filter></defs></svg>
+<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0" aria-hidden="true"><defs><filter id="goo-menu" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="7" result="b"/><feColorMatrix in="b" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 24 -11"/></filter></defs></svg>
 
 <div id="root"></div>
 <script>
@@ -3726,6 +3763,7 @@ function AN({ value, prefix = '', suffix = '', ms = 1300 }) {
   return html`<span ref=${ref}>${prefix}${v}${suffix}</span>`;
 }
 const timeAgo = (t) => { const d = Math.max(0, Date.now() - t); if (d < 60000) return 'now'; if (d < 3600000) return Math.floor(d / 60000) + 'm'; if (d < 86400000) return Math.floor(d / 3600000) + 'h'; if (d < 2592000000) return Math.floor(d / 86400000) + 'd'; return Math.floor(d / 2592000000) + 'mo'; };
+const chatTime = (t) => { if (!t) return ''; const d = new Date(t), n = new Date(), diff = n - d; if (diff < 120000) return 'Just Now'; if (d.toDateString() === n.toDateString()) return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }).toLowerCase(); const y = new Date(n); y.setDate(y.getDate() - 1); if (d.toDateString() === y.toDateString()) return 'Yesterday'; return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
 const Icon = ({ n, cls }) => html`<i className=${cx('fas', n, cls)} aria-hidden="true"></i>`;
 
 function Seg({ options, value, onChange }) {
@@ -5588,7 +5626,7 @@ const SAMPLE_FRIENDS = [
   { name: 'Diego', un: 'diego_s', st: 'Step 1', yr: 'MS2', c: 'Brazil', bio: 'Walks and audio decks.', ph: 4, last: 'Thanks, I needed that reminder.', unread: 0, online: false },
   { name: 'Chidi', un: 'chidi_h', st: 'Step 2 CK', yr: 'MS4', c: 'Nigeria', bio: 'Rings, rhythm, rounds.', ph: 5, last: 'Lol same here', unread: 1, online: true },
   { name: 'Marcus', un: 'marcus_t', st: 'Step 1', yr: 'MS2', c: 'United States', bio: 'Gym at 6, questions at 7.', ph: 6, last: 'You up?', unread: 0, online: false },
-].map((x, i) => ({ sample: true, conn_id: 'f' + i, other_id: 'f' + i, user_id: 'f' + i, status: 'accepted', display_name: x.name, username: x.un, step: x.st, study_year: x.yr, country_name: x.c, bio: x.bio, avatar_url: FRIEND_PHOTOS[x.ph], last_body: x.last, last_at: Date.now() - (i + 1) * 3600000, unread: x.unread, online: x.online, typing: x.typing }));
+].map((x, i) => ({ sample: true, conn_id: 'f' + i, other_id: 'f' + i, user_id: 'f' + i, status: 'accepted', display_name: x.name, username: x.un, step: x.st, study_year: x.yr, country_name: x.c, bio: x.bio, avatar_url: FRIEND_PHOTOS[x.ph], last_body: x.last, last_at: Date.now() - [30e3, 2 * 3600e3, 26 * 3600e3, 30 * 3600e3, 5 * 86400e3, 20 * 86400e3, 40 * 86400e3][i], unread: x.unread, online: x.online, typing: x.typing }));
 
 
 /* inline icons for the connect layer (no font dependency) */
@@ -5601,6 +5639,7 @@ const CI = {
   x: 'M6 6l12 12M18 6L6 18',
   pin: 'M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.800 12 21 12 21zM12 12a2.500 2.500 0 1 0 0-5 2.500 2.500 0 0 0 0 5z',
   back: 'M19 12H5M11 6l-6 6 6 6',
+  chev: 'M6 9l6 6 6-6',
   chat: 'M4 12a7 7 0 0 1 7-7h2a7 7 0 0 1 7 7v0a7 7 0 0 1-7 7H8l-4 3v-5a7 7 0 0 1 0-5z',
   send: 'M4 12l16-8-6 18-3-7-7-3z',
   mic: 'M12 3a3 3 0 0 1 3 3v6a3 3 0 1 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3',
@@ -5730,7 +5769,7 @@ function MatchDeck({ items, onLink, onOpen }) {
 /* ---------- the connect layer ---------- */
 function ConnectUI({ close, deepUser }) {
   const c = useCloud(), name = useUserName();
-  const [tab, setTab] = useState('matches');
+  const [tab, setTab] = useState('matches'), [pq, setPq] = useState(''), [unreadOnly, setUnreadOnly] = useState(false);
   const [matches, setMatches] = useState(null), [people, setPeople] = useState([]), [results, setResults] = useState([]), [q, setQ] = useState('');
   const [sheet, setSheet] = useState(null), [chat, setChat] = useState(null), [sent, setSent] = useState({});
   const on = !!(c.profile && c.profile.discoverable), hasName = !!(c.profile && c.profile.username);
@@ -5760,7 +5799,7 @@ function ConnectUI({ close, deepUser }) {
   return html`<div className="cn-ui"><div className="cn-wrap">
     ${chat ? html`<${Chat} conn=${chat} onBack=${() => setChat(null)} />` : sheet ? html`<${PeekSheet} p=${sheet} state=${stateOf(sheet)} onBack=${() => setSheet(null)} onConnect=${connect} />` : html`<${Fragment}>
       <div className="cn-top"><button className="cn-back" onClick=${close} aria-label="Close"><${CIcon} n="back" size=${22} /></button><small className="cn-lab">${tab === 'matches' ? 'TODAY' : 'CONNECT'}</small></div>
-      <h1 className="cn-h">${titles[tab]}</h1>
+      ${tab !== 'people' && html`<h1 className="cn-h">${titles[tab]}</h1>`}
       ${tab === 'matches' && html`<${Fragment}>
         ${!c.user && html`<div className="cn-gate"><b>Matching works both ways</b><p>Sign in and switch matching on, and you will see students who study like you. Without it, you only see the empty planet.</p><button className="cn-btn" onClick=${() => { patchCloud({ modal: true }); }}>Sign in</button></div>`}
         ${c.user && !on && html`<div className="cn-gate"><b>Turn on matching to see others</b><p>It is a two-way street: matching shows you other students only while you are visible to them too. That shares your username, photo, bio, exam step, weekly study time, score range, streak, exam month and goals. Never your notes or answers. Switch it off any time.</p><button className="cn-btn" onClick=${turnOn}>${hasName ? 'Turn on matching' : 'Choose a username first'}</button></div>`}
@@ -5772,16 +5811,27 @@ function ConnectUI({ close, deepUser }) {
         <div className="cn-list">${results.map((p) => html`<${Row} key=${p.user_id} p=${p} />`)}</div><//>`}
       ${tab === 'people' && html`<${Fragment}>
         ${!c.user && html`<div className="cn-gate"><b>Your people live here</b><p>Sign in to see your connections, chat, and keep up with how your friends are studying.</p><button className="cn-btn" onClick=${() => patchCloud({ modal: true })}>Sign in</button></div>`}
+        ${c.user && (() => {
+          const list = connected.length ? connected : SAMPLE_FRIENDS, ql = pq.trim().toLowerCase();
+          const shownList = list.filter((x) => (!unreadOnly || x.unread) && (!ql || (x.display_name + ' ' + x.username + ' ' + (x.last_body || '')).toLowerCase().includes(ql)));
+          return html`<div className="ch">
+            <div className="ch-hero">
+              <label className="ch-search"><${CIcon} n="search" size=${17} sw=${2} /><input value=${pq} onChange=${(e) => setPq(e.target.value)} placeholder="Search..." aria-label="Search chats" /><button type="button" className=${cx('ch-chev', unreadOnly && 'on')} onClick=${() => setUnreadOnly((v) => !v)} aria-label="Show unread only" title="Unread only"><${CIcon} n="chev" size=${20} sw=${2.2} /></button></label>
+              <h2>Let’s Stay<br/>Connected</h2>
+              <div className="ch-stories">
+                <button className="ch-st add" onClick=${() => setTab('find')}><span><${CIcon} n="plus" size=${22} sw=${1.6} /></span><small>Add</small></button>
+                ${list.slice(0, 12).map((x) => html`<button key=${x.conn_id} className="ch-st" onClick=${() => setChat(x)}><span><${Av} p=${x} cls="ch-sa" /></span><small>${(x.display_name || '').split(' ')[0]}</small></button>`)}
+              </div>
+            </div>
+            <div className="ch-list">${shownList.length === 0 ? html`<p className="cn-hint">Nothing here yet.</p>` : shownList.map((x) => html`<button key=${x.conn_id} className="ch-row" onClick=${() => setChat(x)}>
+              <span className="ch-ava"><${Av} p=${x} cls="ch-av" />${x.online && html`<i className="ch-dot"></i>`}</span>
+              <div className="ch-txt"><b>${x.display_name}</b><small className=${cx(x.typing && 'typing')}>${x.typing ? 'typing…' : (x.last_body || 'Say hello')}</small></div>
+              <span className="ch-meta"><time>${chatTime(x.last_at)}</time>${x.unread > 0 && html`<i className="ch-badge">${x.unread}</i>`}</span>
+            </button>`)}</div>
+            ${!connected.length && html`<p className="ch-note">These chats are samples. Real chats appear once you connect with students.</p>`}
+          </div>`;
+        })()}
         ${c.user && incoming.length > 0 && html`<${Fragment}><small className="cn-lab">REQUESTS</small><div className="pp-list">${incoming.map((x) => html`<div key=${x.conn_id} className="pp-row static"><${Av} p=${x} cls="pp-av" /><div className="pp-txt"><b>${x.display_name}</b><small>@${x.username} wants to connect</small></div><button className="cn-mini" onClick=${() => accept(x)}>Accept</button><button className="cn-mini ghost" onClick=${() => decline(x)}>Not now</button></div>`)}</div><//>`}
-        ${c.user && html`<${Fragment}>
-          <div className="pp-head"><small className="cn-lab">CHATS</small>${(() => { const all = connected.length ? connected : SAMPLE_FRIENDS; const total = all.reduce((s, x) => s + (x.unread || 0), 0); return total ? html`<span className="pp-pill">${total} unread</span>` : null; })()}</div>
-          ${(() => { const list = connected.length ? connected : SAMPLE_FRIENDS; return list.length === 0 ? html`<p className="cn-hint">No connections yet. Send a request from your matches.</p>` : html`<div className="pp-list">${list.map((x) => html`<button key=${x.conn_id} className=${cx('pp-row', x.unread && 'un')} onClick=${() => setChat(x)}>
-            <span className="pp-ava"><${Av} p=${x} cls="pp-av" />${x.online && html`<i className="pp-dot"></i>`}</span>
-            <div className="pp-txt"><div className="pp-top"><b>${x.display_name}</b>${x.last_at && html`<time>${timeAgo(x.last_at)}</time>`}</div><small className=${cx(x.typing && 'typing')}>${x.typing ? html`<i className="pp-wave"><em></em><em></em><em></em></i> typing` : (x.last_body || 'Say hello')}</small></div>
-            ${x.unread > 0 ? html`<i className="pp-badge">${x.unread}</i>` : html`<span className="pp-ic"><${CIcon} n="chat" size=${20} sw=${2.1} /></span>`}
-          </button>`)}</div>`; })()}
-          ${!connected.length && c.user && html`<p className="cn-hint" style=${{ marginTop: '14px', fontStyle: 'italic', opacity: .55 }}>These chats are samples. Real chats appear once you connect with students.</p>`}
-        <//>`}
         ${c.user && people.some((x) => x.status === 'pending' && x.i_requested) && html`<${Fragment}><small className="cn-lab">WAITING</small><div className="pp-list">${people.filter((x) => x.status === 'pending' && x.i_requested).map((x) => html`<div key=${x.conn_id} className="pp-row static"><${Av} p=${x} cls="pp-av" /><div className="pp-txt"><b>${x.display_name}</b><small>Request sent</small></div><button className="cn-mini ghost" onClick=${() => decline(x)}>Cancel</button></div>`)}</div><//>`}<//>`}
       ${tab === 'code' && html`<${QrCard} username=${c.profile && c.profile.username} />`}
       <nav className="cn-tabs" aria-label="Connect">${[['matches', 'compass'], ['find', 'search'], ['people', 'people'], ['code', 'qr']].map(([k, ic]) => html`<button key=${k} className=${cx(tab === k && 'on')} onClick=${() => setTab(k)} aria-label=${titles[k]} title=${titles[k]}><${CIcon} n=${ic} size=${24} />${k === 'people' && incoming.length > 0 && html`<i>${incoming.length}</i>`}</button>`)}</nav><//>`}
@@ -6095,56 +6145,83 @@ function SyncBadge({ status, size = 18 }) {
 function AccountButton() {
   const c = useCloud(), name = useUserName();
   const [stage, setStage] = useState('closed');   /* closed | open | closing */
-  const closeMenu = useCallback(() => { setStage('closing'); setTimeout(() => setStage('closed'), 360); }, []);
-  const gooR = useRef(null), blobR = useRef(null), shapeR = useRef(null), neckR = useRef(null), bodyR = useRef(null);
-  /* Liquid drop physics. The bead sits at the photo. A second shape falls under gravity, with a tapering neck
-     between the two. Surface tension thins the neck as the drop pulls away, and the neck snaps once it is thin
-     enough. The drop then rebounds like landed water: oversize, undersize, settle. */
+  const closeMenu = useCallback(() => { setStage('closing'); setTimeout(() => setStage('closed'), 420); }, []);
+  const gooR = useRef(null), blobR = useRef(null), shapeR = useRef(null), bodyR = useRef(null), rectR = useRef(null);
+  /* A real drip. Everything lives under one goo filter, so shapes that touch merge and shapes that part pinch off by themselves.
+     1. A drop grows at the photo (more liquid, more weight). Surface tension through the neck holds it, and that hold
+        weakens as the neck thins, so the drop sags, then runs away (gravity vs a failing spring).
+     2. A chain of shrinking beads fills the neck, thickest at the drop and thinnest at the photo, so it tapers like a
+        real thread; when it reaches nothing the thread snaps, springs back into the photo and the drop rings like a bell.
+     3. The free drop lands on the surface, carrying its speed into the bottom edge, and splashes outwards into the panel
+        on underdamped springs (it overshoots and settles). Closing runs it backwards: the panel gathers into a drop
+        that is pulled back up, the thread reforms and the photo drinks it. */
   useLayoutEffect(() => {
-    const sh = shapeR.current, bd = bodyR.current, goo = gooR.current, blob = blobR.current, nk = neckR.current;
-    if (stage === 'closed' || !sh || !bd || !nk) return undefined;
-    const OX = 34, OY_BEAD = 10, W = 280, H = bd.offsetHeight, DIAM = 42;    /* bead is a 42px circle at the photo */
-    const beadCx = OX + 234 + 23, beadCy = OY_BEAD + 21;
-    const dropFinalCy = 80 + H / 2;    /* resting middle of the panel */
-    const opening = stage === 'open';
-    let raf = 0, t0 = 0;
-    const paintBead = (wob) => { blob.style.width = (DIAM + wob) + 'px'; blob.style.height = (DIAM - wob * 0.6) + 'px'; blob.style.left = (beadCx - DIAM / 2 - wob / 2) + 'px'; blob.style.top = (beadCy - DIAM / 2 + wob * 0.3) + 'px'; blob.style.borderRadius = '50%'; };
-    const paintDrop = (cx, cy, w, h, r) => { sh.style.left = (cx - w / 2) + 'px'; sh.style.top = (cy - h / 2) + 'px'; sh.style.width = w + 'px'; sh.style.height = h + 'px'; sh.style.borderRadius = r + 'px'; };
-    const paintNeck = (y0, y1, width, alpha) => { nk.style.left = (beadCx - width / 2) + 'px'; nk.style.top = y0 + 'px'; nk.style.width = width + 'px'; nk.style.height = Math.max(0, y1 - y0) + 'px'; nk.style.borderRadius = (width / 2) + 'px'; nk.style.opacity = alpha; };
-    paintBead(0); paintNeck(beadCy, beadCy, 0, 0); paintDrop(beadCx, beadCy, DIAM, DIAM, 21); bd.style.opacity = 0;
-    const open = (t) => {
-      /* phases in ms: 0-80 emerge; 80-220 fall + stretch; 220-290 pinch; 290-520 bounce into panel */
-      if (t < 80) { const p = t / 80; const cy = beadCy + p * 18; paintDrop(beadCx, cy, DIAM, DIAM + p * 10, 21); paintNeck(beadCy, cy, DIAM * (1 - p * 0.1), 1); paintBead(p * 2); return false; }
-      if (t < 220) { const p = (t - 80) / 140, e = p * p; const dy = 18 + e * 110; const cy = beadCy + dy; const neckW = DIAM * (1 - p * 0.55); paintDrop(beadCx, cy, DIAM + e * 4, DIAM + e * 24, 22); paintNeck(beadCy, cy - DIAM / 2, neckW, 1); paintBead(2 - p * 2); return false; }
-      if (t < 290) { const p = (t - 220) / 70; const cy = beadCy + 128 + p * 20; const neckW = DIAM * 0.45 * (1 - p); const a = 1 - p; paintDrop(beadCx, cy, DIAM + 4, DIAM + 24 + p * 10, 22); paintNeck(beadCy, cy - DIAM / 2, Math.max(2, neckW), a); paintBead(0); return false; }
-      /* detached: drop bounces to final shape and position with critical overshoot */
-      paintNeck(beadCy, beadCy, 0, 0);
-      const p = Math.min(1, (t - 290) / 230);
-      /* spring with overshoot: 1 + sin(k*p)*exp(-d*p) */
-      const b = 1 - Math.exp(-5 * p) * Math.cos(10 * p);
-      const cx = beadCx + (OX + W / 2 - beadCx) * b;
-      const cy = (beadCy + 148) + (dropFinalCy - (beadCy + 148)) * b;
-      const w = (DIAM + 4) + (W - (DIAM + 4)) * b;
-      const h = (DIAM + 34) + (H - (DIAM + 34)) * b;
-      const r = Math.min(30, w / 2, h / 2);
-      paintDrop(cx, cy, w, h, r);
-      bd.style.opacity = Math.max(0, Math.min(1, (p - 0.25) / 0.3));
-      return p >= 1;
+    const sh = shapeR.current, bd = bodyR.current, goo = gooR.current, blob = blobR.current;
+    if (stage === 'closed' || !sh || !bd || !goo || !blob) return undefined;
+    const TS = 1, chain = [...goo.querySelectorAll('.am-ch')], N = chain.length;
+    const OX = 34, OY = 96, W = 280, H = bd.offsetHeight, R = OX + W, AV = 46, GAP = 48, cx0 = R - AV / 2, cy0 = OY - GAP - AV / 2;
+    const L0 = 34, Lp = 60, GRAV = 3400, KH = 150, DAMP = 6, RD = 26, DT = 1 / 480;
+    const opening = stage === 'open', clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const px = (n) => n + 'px';
+    const sneck = (L) => clamp(1 - (L - L0) / (Lp - L0), 0, 1);
+    const spring = (e, tg, w, z) => { const a = -w * w * (e.x - tg) - 2 * z * w * e.v; e.v += a * DT; e.x += e.v * DT; };
+    blob.style.cssText = 'left:' + px(cx0 - AV / 2) + ';top:' + px(cy0 - AV / 2) + ';width:' + px(AV) + ';height:' + px(AV) + ';border-radius:50%;opacity:1';
+    goo.classList.remove('set');
+    const hideChain = () => chain.forEach((c) => { c.style.width = '0px'; c.style.height = '0px'; });
+    const drawChain = (y, s, shrink) => chain.forEach((c, i) => {
+      const f = (i + 1) / (N + 1), r = shrink != null ? shrink * (0.5 + 0.5 * f) : 15 * Math.pow(s, 0.8) * (0.45 + 0.55 * f);
+      if (r < 1.2) { c.style.width = '0px'; c.style.height = '0px'; return; }
+      c.style.left = px(cx0 - r); c.style.top = px(cy0 + f * (y - cy0) - r); c.style.width = px(2 * r); c.style.height = px(2 * r);
+    });
+    const rect = (l, t, r, b) => { const w = Math.max(6, r - l), h = Math.max(6, b - t), st = sh.style; st.left = px(l); st.top = px(t); st.width = px(w); st.height = px(h); st.borderRadius = px(Math.min(30, w / 2, h / 2)); rectR.current = { l, t, r, b }; };
+    const content = (l0) => {
+      const rc = rectR.current, p = clamp((l0 - rc.l) / (l0 - OX), 0, 1);
+      bd.style.opacity = clamp((p - 0.6) / 0.3, 0, 1);
+      bd.style.clipPath = 'inset(' + px(Math.max(0, rc.t - OY)) + ' ' + px(Math.max(0, R - rc.r)) + ' ' + px(Math.max(0, OY + H - rc.b)) + ' ' + px(Math.max(0, rc.l - OX)) + ')';
     };
-    const close = (t) => {
-      const dur = 360; const p = Math.min(1, t / dur), e = p * p * p;
-      bd.style.opacity = Math.max(0, 1 - p * 2.5);
-      const cx = (OX + W / 2) + (beadCx - (OX + W / 2)) * e;
-      const cy = dropFinalCy + (beadCy - dropFinalCy) * e;
-      const w = W + (DIAM - W) * e; const h = H + (DIAM - H) * e;
-      paintDrop(cx, cy, w, h, Math.min(30, w / 2, h / 2));
-      if (p > 0.6 && p < 1) { const q = (p - 0.6) / 0.4; paintNeck(beadCy, cy - h / 2, DIAM * (1 - q) * 0.8, 1 - q); }
-      else paintNeck(beadCy, beadCy, 0, 0);
-      return p >= 1;
+    const settle = () => { rect(OX, OY, R, OY + H); hideChain(); goo.classList.add('set'); blob.style.opacity = 0; bd.style.opacity = 1; bd.style.clipPath = 'none'; };
+    let raf = 0, t0 = 0, simT = 0, ph, E, y, v, rd, tb, tbreak;
+    if (opening) { ph = 'hang'; y = cy0 + 27; v = 0; rd = 10; tbreak = null; bd.style.opacity = 0; rect(cx0 - 10, y - 10, cx0 + 10, y + 10); }
+    else { const rc = rectR.current || { l: OX, t: OY, r: R, b: OY + H }; ph = 'collapse'; E = { l: { x: rc.l, v: 0 }, t: { x: rc.t, v: 0 }, r: { x: rc.r, v: 0 }, b: { x: rc.b, v: 0 } }; }
+    const L_START = { v: cx0 - RD };
+    const step = () => {
+      if (ph === 'hang') {
+        const L = y - cy0, s = tbreak == null ? sneck(L) : 0; rd = 10 + 18 * clamp(simT / 0.2, 0, 1);
+        const rest = cy0 + AV / 2 + 0.4 * rd, ge = GRAV * (rd / 22) * (rd / 22);
+        v += (ge - KH * s * (y - rest) - DAMP * v) * DT; y += v * DT;
+        if (tbreak == null && sneck(y - cy0) <= 0.001) tbreak = simT;
+        if (y - rd >= OY) { ph = 'land'; E = { l: { x: cx0 - rd, v: 0 }, t: { x: y - rd, v }, r: { x: cx0 + rd, v: 0 }, b: { x: y + rd, v } }; L_START.v = cx0 - rd; }
+      } else if (ph === 'land') {
+        spring(E.l, OX, 17, 0.42); spring(E.r, R, 24, 0.8); spring(E.t, OY, 20, 0.75); spring(E.b, OY + H, 15, 0.4);
+      } else if (ph === 'collapse') {
+        spring(E.l, cx0 - RD, 24, 0.95); spring(E.r, cx0 + RD, 24, 0.95); spring(E.t, OY, 24, 0.95); spring(E.b, OY + 2 * RD, 24, 0.95);
+        if (Math.abs(E.l.x - (cx0 - RD)) < 2 && Math.abs(E.b.x - (OY + 2 * RD)) < 2) { ph = 'rise'; y = OY + RD; v = 0; rd = RD; }
+      } else if (ph === 'rise') {
+        v -= 5200 * DT; y += v * DT; const L = y - cy0; rd = RD * clamp((L - 24) / 14, 0, 1) + 0.0001;
+        if (L < 25) ph = 'done';
+      }
     };
-    const fn = opening ? open : close;
-    const tick = (now) => { if (!t0) t0 = now; const el = now - t0; const done = fn(el); if (!done) raf = requestAnimationFrame(tick); else if (opening) { paintDrop(OX + W / 2, dropFinalCy, W, H, 30); bd.style.opacity = 1; paintNeck(0, 0, 0, 0); blob.style.opacity = 0; } };
-    raf = requestAnimationFrame(tick);
+    const paint = () => {
+      if (ph === 'hang') {
+        const L = y - cy0, s = tbreak == null ? sneck(L) : 0, tbr = tbreak == null ? 0 : simT - tbreak;
+        const sy = tbreak == null ? 1 + 0.3 * (1 - s) * clamp((L - 30) / 8, 0, 1) : 1 + 0.2 * Math.exp(-14 * tbr) * Math.cos(46 * tbr), sx = 1 / Math.sqrt(sy);
+        const ry = rd * sy, rx = rd * sx; rect(cx0 - rx, y - ry, cx0 + rx, y + ry); bd.style.opacity = 0;
+        if (tbreak == null) drawChain(y, s); else { const k = Math.exp(-20 * tbr); drawChain(cy0 + (y - cy0) * 0.25 * k + 12 * (1 - k), 0, 9 * k); }
+      } else if (ph === 'land') { rect(E.l.x, E.t.x, E.r.x, E.b.x); hideChain(); content(L_START.v); }
+      else if (ph === 'collapse') { rect(E.l.x, E.t.x, E.r.x, E.b.x); hideChain(); bd.style.opacity = clamp(parseFloat(bd.style.opacity || 1) - 0.12, 0, 1); bd.style.clipPath = 'inset(' + px(Math.max(0, E.t.x - OY)) + ' ' + px(Math.max(0, R - E.r.x)) + ' ' + px(Math.max(0, OY + H - E.b.x)) + ' ' + px(Math.max(0, E.l.x - OX)) + ')'; }
+      else if (ph === 'rise') { const L = y - cy0, s = sneck(L), ry = rd * (1 + 0.28 * (1 - s)); rect(cx0 - rd, y - ry, cx0 + rd, y + ry); drawChain(y, s); bd.style.opacity = 0; }
+    };
+    const tick = (now) => {
+      if (!t0) t0 = now; const target = (now - t0) / 1000 * TS;
+      while (simT < target && ph !== 'done') {
+        simT += DT; step();
+        if (ph === 'land' && Math.abs(E.l.x - OX) < 0.3 && Math.abs(E.b.x - OY - H) < 0.3 && Math.abs(E.t.x - OY) < 0.3 && Math.abs(E.r.x - R) < 0.3 && Math.abs(E.l.v) < 4 && Math.abs(E.b.v) < 4 && Math.abs(E.t.v) < 4) { settle(); ph = 'rest'; break; }
+      }
+      if (ph === 'rest') return;
+      if (ph === 'done') { sh.style.width = '0px'; sh.style.height = '0px'; hideChain(); bd.style.opacity = 0; return; }
+      paint(); raf = requestAnimationFrame(tick);
+    };
+    paint(); raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [stage]);
   useEffect(() => {
@@ -6159,7 +6236,7 @@ function AccountButton() {
   const go = (fn) => () => { closeMenu(); fn(); };
   return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => (stage === 'open' ? closeMenu() : stage === 'closed' && setStage('open'))} aria-label="Account" aria-expanded=${stage === 'open'}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<span className="sb-corner"><${SyncBadge} status=${c.status} size=${19} /></span></button>
     ${stage !== 'closed' && html`<div className=${cx('acct-menu', stage)}>
-      <div className="am-goo" ref=${gooR} aria-hidden="true"><i className="am-blob" ref=${blobR}></i><i className="am-neck" ref=${neckR}></i><i className="am-shape" ref=${shapeR}></i></div>
+      <div className="am-goo" ref=${gooR} aria-hidden="true"><i className="am-blob" ref=${blobR}></i><i className="am-ch"></i><i className="am-ch"></i><i className="am-ch"></i><i className="am-ch"></i><i className="am-ch"></i><i className="am-ch"></i><i className="am-shape" ref=${shapeR}></i></div>
       <div className="am-body" ref=${bodyR}><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
         <p className=${'am-st ' + c.status}><${SyncBadge} status=${c.status} size=${16} />${label}</p>
         <button onClick=${go(() => { location.hash = '#/account'; })}><${Icon} n="fa-id-badge" /> Your account</button>
