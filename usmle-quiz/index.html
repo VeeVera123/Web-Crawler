@@ -14,7 +14,7 @@
     <script src="https://unpkg.com/framer-motion@10.18.0/dist/framer-motion.js"></script>
     <script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.109.0/dist/umd/supabase.min.js"></script>
 
     <!-- Typography: Manrope (UI), Sora (display), Space Grotesk (numerals) + Inter Tight / Instrument Serif / Outfit for the site -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1484,11 +1484,6 @@
         .pal-back .pal-foot { border: 0; padding: 12px 16px 8px; color: rgba(0,0,0,.5); gap: 14px; } .pal-back .pal-foot kbd { border: 0; background: #e9e9ec; color: rgba(0,0,0,.6); border-radius: 8px; padding: 5px 8px; box-shadow: inset 0 -2px 0 rgba(0,0,0,.08); margin-right: 6px; }
         .pal-back .pal-list p { color: rgba(0,0,0,.55) !important; }
 
-        /* ===== glossy switches ===== */
-        .ac-sw { width: 62px; height: 36px; background: linear-gradient(180deg, #d4d4d8, #ececef); box-shadow: inset 0 2px 6px rgba(0,0,0,.2), 0 1px 0 #fff; }
-        .ac-sw i { width: 30px; height: 30px; left: 3px; top: 3px; background: linear-gradient(180deg, #fff, #e3e3e7); border: 1px solid rgba(0,0,0,.08); box-shadow: 0 6px 12px -3px rgba(0,0,0,.35), inset 0 1px 0 #fff; }
-        .ac-sw.on { background: linear-gradient(180deg, #d4d4d8, #ececef); } .ac-sw.on i { transform: translateX(26px); background: linear-gradient(180deg, #c9f8d6, #7de39a); border-color: rgba(40,160,80,.55); box-shadow: 0 6px 14px -3px rgba(40,160,80,.55), inset 0 1px 0 rgba(255,255,255,.9), inset 0 0 0 5px rgba(255,255,255,.18); }
-
         /* ===== bento profile ===== */
         .bn { display: grid; grid-template-columns: repeat(4, 1fr); grid-auto-rows: minmax(150px, auto); gap: 14px; }
         .bn-hero { grid-column: span 2; grid-row: span 3; border-radius: 40px; padding: 28px; display: grid; justify-items: center; align-content: start; text-align: center; background: linear-gradient(180deg, #26262b, #0b0b0d 70%); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 30px 60px -30px rgba(0,0,0,.6); }
@@ -1526,6 +1521,14 @@
         .cp-list { position: absolute; left: 0; right: 0; top: calc(100% + 8px); z-index: 30; margin: 0; padding: 8px; list-style: none; border-radius: 22px; background: #fbfaf6; box-shadow: 0 24px 60px -16px rgba(0,0,0,.45), 0 0 0 1px rgba(0,0,0,.07); animation: dpIn .3s var(--ease-out); } .cp-list button { width: 100%; display: flex; justify-content: space-between; align-items: center; height: 42px; padding: 0 14px; border: 0; border-radius: 12px; background: transparent; font: 500 14.5px 'Montserrat'; color: #0b0b0d; cursor: pointer; } .cp-list button:hover { background: rgba(0,0,0,.07); } .cp-none { padding: 12px 14px; opacity: .55; font-size: 14px; }
         @media (max-width: 960px) { .cm-grid { grid-template-columns: 1fr; } }
         .acct-av[data-t="light"] b { color: #17171c; } .acct-av[data-t="light"] .sd { border-color: #fff; }
+
+        .gl3 { position: absolute; inset: 0; } .gl3-host { position: absolute; inset: 0; } .gl3-host canvas { cursor: grab; } .gl3-host canvas:active { cursor: grabbing; }
+        .gl3-zoom { position: absolute; right: 18px; bottom: 18px; display: grid; gap: 8px; z-index: 3; } .gl3-zoom button { width: 44px; height: 44px; border-radius: 50%; border: 1px solid rgba(255,255,255,.2); background: rgba(255,255,255,.1); backdrop-filter: blur(12px); color: #fff; cursor: pointer; transition: background .2s, transform .35s var(--ease); } .gl3-zoom button:hover { background: rgba(255,255,255,.22); transform: scale(1.08); }
+        .gl-lab { padding: 8px 14px; border-radius: 14px; background: #fff; color: #0b0b0d; font: 600 12.5px/1.4 'Montserrat', sans-serif; text-align: center; box-shadow: 0 10px 24px -8px rgba(0,0,0,.5); }
+        .cm-globe { background: #000; }
+        .au-chk { display: flex !important; grid-template-columns: none !important; gap: 12px; align-items: flex-start; font: 500 12.5px/1.5 'Montserrat' !important; letter-spacing: 0 !important; text-transform: none !important; opacity: .8 !important; } .au-chk input { width: 20px !important; height: 20px !important; flex: none; accent-color: #0d0d08; margin-top: 2px; }
+        .pk-head { display: flex; justify-content: space-between; gap: 18px; align-items: center; flex-wrap: wrap; } .pk-head .lh-btn { margin: 0; }
+        .pk-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; } .pk-list li { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 18px; background: #fff; } .pk-list li > div { flex: 1; } .pk-list b { display: block; font-size: 14.5px; } .pk-list small { display: block; margin-top: 3px; font-size: 12px; opacity: .55; } .pk-list button { border: 0; background: none; cursor: pointer; opacity: .45; } .pk-list button:hover { opacity: 1; }
 
     </style>
 </head>
@@ -4656,7 +4659,7 @@ const PlanStore = makeStore('usmle-site:plan', { exam: '', goal: 20, tasks: [] }
 const FocusLog = makeStore('usmle-site:focus', []);                 /* [{ at, sec }] finished focus blocks */
 const MasteredStore = makeStore('usmle-site:mastered', []);
 const GoalsStore = makeStore('usmle-site:goals', { accuracy: 75, weeklyHours: 20, why: '', milestones: [] });
-const PrefsStore = makeStore('usmle-site:prefs', { sound: true, collapseNav: true, reduceMotion: false, landing: 'home' });
+const PrefsStore = makeStore('usmle-site:prefs', { sound: true, collapseNav: true, reduceMotion: false, landing: 'home', globe: true });
 const useStore = (st) => useSyncExternalStore(st.subscribe, st.get);
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 const DAY = 864e5;
@@ -5055,8 +5058,27 @@ function GoalsTab() {
   </div>`;
 }
 
+function PasskeyBlock() {
+  const [list, setList] = useState(null), [msg, setMsg] = useState(''), [busy, setBusy] = useState(false);
+  const load = useCallback(async () => { try { const { data, error } = await sb.auth.passkey.list(); setList(error ? [] : data || []); if (error && !/passkey_disabled/i.test(error.message || '')) setMsg(error.message); } catch { setList([]); } }, []);
+  useEffect(() => { load(); }, []);
+  const add = async () => {
+    setMsg('');
+    if (!/^https?:$/.test(location.protocol)) { setMsg('Passkeys need the site to be hosted at its web address. They cannot be created from a file on your computer.'); return; }
+    setBusy(true);
+    try { const { error } = await sb.auth.registerPasskey(); if (error) throw error; toast('Passkey added'); load(); }
+    catch (x) { const m = String(x.message || x); setMsg(/passkey_disabled/i.test(m) ? 'Passkeys are not switched on for this site yet.' : /NotAllowed|cancel|abort/i.test(m) ? 'The passkey prompt was closed.' : /exists/i.test(m) ? 'This device already has a passkey for your account.' : m); }
+    finally { setBusy(false); }
+  };
+  const rename = async (p) => { const n = prompt('Name this passkey', p.friendly_name || ''); if (n && n.trim()) { await sb.auth.passkey.update({ passkeyId: p.id, friendlyName: n.trim().slice(0, 120) }); load(); } };
+  const del = async (p) => { if (confirm('Remove this passkey? You can still sign in with your password.')) { await sb.auth.passkey.delete({ passkeyId: p.id }); load(); } };
+  return html`<div className="ac-card col pk"><div className="pk-head"><div><b>Passkeys</b><small>Sign in with your fingerprint, face or device PIN instead of a password. Phishing-proof, and nothing to remember.</small></div><button className="lh-btn" onClick=${add} disabled=${busy}><${Icon} n="fa-fingerprint" /> ${busy ? 'Waiting…' : 'Add a passkey'}</button></div>
+    ${msg && html`<p className="au-note">${msg}</p>`}
+    ${list && list.length > 0 && html`<ul className="pk-list">${list.map((p) => html`<li key=${p.id}><${Icon} n="fa-fingerprint" /><div><b>${p.friendly_name || 'Passkey'}</b><small>Added ${new Date(p.created_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}${p.last_used_at ? ' · used ' + new Date(p.last_used_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : ''}</small></div><button onClick=${() => rename(p)} aria-label="Rename"><${Icon} n="fa-pen" /></button><button onClick=${() => del(p)} aria-label="Remove"><${Icon} n="fa-trash-can" /></button></li>`)}</ul>`}</div>`;
+}
+
 function SettingsTab() {
-  const pr = useStore(PrefsStore);
+  const pr = useStore(PrefsStore), cl = useCloud();
   const set = (p) => PrefsStore.set({ ...PrefsStore.get(), ...p });
   const Row = ({ k, title, sub }) => html`<label className="ac-row"><div><b>${title}</b><small>${sub}</small></div><button type="button" role="switch" aria-checked=${!!pr[k]} className=${cx('ac-sw', pr[k] && 'on')} onClick=${() => set({ [k]: !pr[k] })}><i></i></button></label>`;
   useEffect(() => { document.body.classList.toggle('rm', !!pr.reduceMotion); }, [pr.reduceMotion]);
@@ -5064,7 +5086,9 @@ function SettingsTab() {
     <${Row} k="sound" title="Timer sounds" sub="A soft chime when a focus block or break ends." />
     <${Row} k="collapseNav" title="Fold the menu as you scroll" sub="The navigation shrinks into the stack button while you read." />
     <${Row} k="reduceMotion" title="Calmer motion" sub="Turns off most animation across the site." />
+    ${cl.user && html`<label className="ac-row"><div><b>Show me on the community globe</b><small>Counts you in your country and state, nothing finer. Others only see totals, and places with fewer than three students stay hidden.</small></div><button type="button" role="switch" aria-checked=${pr.globe !== false} className=${cx('ac-sw', pr.globe !== false && 'on')} onClick=${async () => { const on = pr.globe === false; set({ globe: on }); try { if (on) await placeMe(cl.user, false); else { await leaveGlobe(cl.user); toast('You are off the globe.'); } } catch (x) { toast('Could not update the globe just now.'); } }}><i></i></button></label>`}
     <div className="ac-row"><div><b>Open the site on</b><small>The page you land on when you arrive.</small></div><div className="ac-sel"><${SelectBox} value=${pr.landing} onChange=${(v) => set({ landing: v })} label="Landing page" options=${[['home', 'Home'], ['quiz', 'Quiz'], ['dashboard', 'Dashboard'], ['study', 'Study'], ['library', 'Library']]} /></div></div>
+    ${cl.user && html`<${PasskeyBlock} />`}
   </div>`;
 }
 
@@ -5150,7 +5174,7 @@ const SAMPLE_PARTNERS = [
   { id: '036', name: 'Mia', goal: 'Weekly review of every missed question', streak: 17, hours: 20 },
 ];
 
-function Globe({ world, marks, me, flight, onFlightEnd }) {
+function Globe2D({ world, marks, me, flight, onFlightEnd }) {
   const cv = useRef(null), st = useRef({ rot: [10, -18], drag: null, idle: 0, flight: null, hover: null }), prop = useRef({ marks, me });
   const [tip, setTip] = useState(null);
   prop.current = { marks, me };
@@ -5220,6 +5244,51 @@ function Globe({ world, marks, me, flight, onFlightEnd }) {
   return html`<div className="gb"><canvas ref=${cv} aria-label="A globe showing where students are studying from" role="img"></canvas>${tip && html`<span className="gb-tip" style=${{ left: tip.x, top: tip.y }}>${tip.text}</span>`}</div>`;
 }
 
+function glSupported() { try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch { return false; } }
+const GL_IMG = 'https://cdn.jsdelivr.net/npm/three-globe@2.31.1/example/img/';
+function GlobeGL({ marks, me, flight, onFlightEnd, onFail }) {
+  const host = useRef(null), gref = useRef(null), live = useRef({ marks, me });
+  live.current = { marks, me };
+  const feed = (g) => {
+    const { marks: ms, me: mine } = live.current;
+    const pts = ms.map((m) => ({ lat: m.lat, lng: m.lng, n: m.n, name: m.name, me: false }));
+    if (mine) pts.push({ lat: mine[0], lng: mine[1], n: 1, name: 'You', me: true });
+    g.pointsData(pts); g.ringsData(pts.slice(0, 40));
+  };
+  useEffect(() => {
+    let dead = false, ro = null;
+    loadScript('https://cdn.jsdelivr.net/npm/globe.gl@2.32.3/dist/globe.gl.min.js').then(() => {
+      if (dead || !host.current) return;
+      const el = host.current, W = el.clientWidth || 600;
+      const g = window.Globe()(el).width(W).height(W)
+        .backgroundColor('rgba(0,0,0,0)').backgroundImageUrl(GL_IMG + 'night-sky.png')
+        .globeImageUrl(GL_IMG + 'earth-blue-marble.jpg').bumpImageUrl(GL_IMG + 'earth-topology.png')
+        .showAtmosphere(true).atmosphereColor('#8fbaff').atmosphereAltitude(0.3)
+        .pointLat('lat').pointLng('lng').pointColor((d) => (d.me ? '#ffffff' : '#ffd400')).pointAltitude((d) => 0.004 + Math.log2(d.n + 1) * 0.003).pointRadius((d) => (d.me ? 0.9 : 0.5 + Math.min(1.2, Math.log2(d.n + 1) * 0.14)))
+        .pointLabel((d) => '<div class="gl-lab"><b>' + d.name + '</b>' + (d.me ? '' : '<br>' + d.n + ' student' + (d.n === 1 ? '' : 's')) + '</div>')
+        .ringLat('lat').ringLng('lng').ringColor((d) => (t) => (d.me ? 'rgba(255,255,255,' + (1 - t) + ')' : 'rgba(255,212,0,' + (1 - t) * 0.8 + ')')).ringMaxRadius(3.2).ringPropagationSpeed(1.4).ringRepeatPeriod(1700)
+        .arcColor(() => ['#ffffff', '#ffd400']).arcStroke(0.55).arcDashLength(0.45).arcDashGap(0.12).arcDashAnimateTime(1700).arcAltitudeAutoScale(0.5).arcsTransitionDuration(0);
+      const ctl = g.controls(); ctl.autoRotate = true; ctl.autoRotateSpeed = 0.45; ctl.enableZoom = false; ctl.enablePan = false;
+      g.pointOfView({ lat: 18, lng: 10, altitude: 2.35 }, 0);
+      gref.current = g; feed(g);
+      ro = new ResizeObserver(() => { const w = el.clientWidth; if (w) g.width(w).height(w); }); ro.observe(el);
+    }).catch(() => onFail && onFail());
+    return () => { dead = true; if (ro) ro.disconnect(); if (gref.current && gref.current._destructor) gref.current._destructor(); gref.current = null; if (host.current) host.current.innerHTML = ''; };
+  }, []);
+  useEffect(() => { if (gref.current) feed(gref.current); }, [marks, me]);
+  useEffect(() => {
+    const g = gref.current; if (!g || !flight) return undefined;
+    const ctl = g.controls(); ctl.autoRotate = false;
+    const A = flight.fromLL, B = flight.toLL, mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+    g.pointOfView({ lat: mid[0], lng: Math.abs(A[1] - B[1]) > 180 ? mid[1] + 180 : mid[1], altitude: 2.1 }, 1500);
+    g.arcsData([{ startLat: A[0], startLng: A[1], endLat: B[0], endLng: B[1] }]);
+    const t = setTimeout(() => { g.arcsData([]); ctl.autoRotate = true; if (onFlightEnd) onFlightEnd(); }, 6200);
+    return () => { clearTimeout(t); };
+  }, [flight && flight.key]);
+  const zoom = (d) => { const g = gref.current; if (!g) return; const p = g.pointOfView(); g.pointOfView({ altitude: Math.max(1.2, Math.min(6.5, p.altitude + d)) }, 700); };
+  return html`<div className="gb gl3"><div ref=${host} className="gl3-host"></div><div className="gl3-zoom"><button onClick=${() => zoom(-0.6)} aria-label="Zoom in"><${Icon} n="fa-plus" /></button><button onClick=${() => zoom(0.9)} aria-label="Zoom out"><${Icon} n="fa-minus" /></button></div></div>`;
+}
+
 function CountryPicker({ world, value, onPick }) {
   const [q, setQ] = useState(''), [open, setOpen] = useState(false);
   const list = useMemo(() => (world ? world.countries.map((f) => [f.id, f.properties.name]).sort((a, b) => a[1].localeCompare(b[1])) : []), [world]);
@@ -5235,34 +5304,43 @@ function Community({ go }) {
   const [sample, setSample] = useState(true);
   const [busy, setBusy] = useState(false);
   const [flight, setFlight] = useState(null), [partner, setPartner] = useState(null);
+  const [gl, setGl] = useState(() => glSupported());
   useEffect(() => { loadWorld().then(setWorld).catch((e) => setErr(String(e.message || e))); }, []);
   const refresh = useCallback(async () => {
     if (!sb || !CloudStore.get().user) { setRows([]); setMine(null); return; }
     const a = await sb.rpc('community_map', { min_count: 3 }); if (!a.error) setRows(a.data || []);
-    const b = await sb.from('presence').select('country_id,country_name').eq('user_id', CloudStore.get().user.id).maybeSingle(); setMine(b.data || null);
+    let b = await sb.from('presence').select('country_id,country_name,region,lat,lng').eq('user_id', CloudStore.get().user.id).maybeSingle();
+    if (b.error) b = await sb.from('presence').select('country_id,country_name').eq('user_id', CloudStore.get().user.id).maybeSingle();
+    setMine(b.data || null);
   }, []);
   useEffect(() => { refresh(); }, [c.user && c.user.id]);
-  const save = async (id, name) => { setBusy(true); const { error } = await sb.from('presence').upsert({ user_id: c.user.id, country_id: id, country_name: name }); setBusy(false); if (error) toast('Could not save. ' + error.message); else { toast('You are on the globe, as ' + name + ' only.'); refresh(); } };
-  const remove = async () => { setBusy(true); await sb.from('presence').delete().eq('user_id', c.user.id); setBusy(false); setMine(null); toast('You are off the globe.'); refresh(); };
-  const real = rows.map((r) => ({ id: r.country_id, n: Number(r.n), name: r.country_name }));
-  const fake = sample && world ? SAMPLE_PEOPLE.map(([id, n]) => ({ id, n, name: world.names[id] || id })) : [];
+  const save = async (id, name) => { setBusy(true); const { error } = await sb.from('presence').upsert({ user_id: c.user.id, country_id: id, country_name: name, region: null, lat: null, lng: null }); setBusy(false); if (error) toast('Could not save. ' + error.message); else { toast('You are on the globe, as ' + name + ' only.'); refresh(); } };
+  const remove = async () => { setBusy(true); await leaveGlobe(c.user); PrefsStore.set({ ...PrefsStore.get(), globe: false }); setBusy(false); setMine(null); toast('You are off the globe.'); refresh(); };
+  const auto = async () => { setBusy(true); try { await placeMe(c.user, false); PrefsStore.set({ ...PrefsStore.get(), globe: true }); refresh(); } catch { toast('Could not work out your location. You can pick your country instead.'); } setBusy(false); };
+  const ll = (id) => { const g = world && world.cents[id]; return g ? [g[1], g[0]] : [0, 0]; };
+  const place = (r) => (r.lat != null && r.lng != null ? [r.lat, r.lng] : ll(r.country_id || r.id));
+  const real = rows.map((r) => { const p = place(r); return { id: r.country_id, n: Number(r.n), name: (r.region ? r.region + ', ' : '') + r.country_name, lat: p[0], lng: p[1] }; });
+  const fake = sample && world ? SAMPLE_PEOPLE.map(([id, n]) => { const p = ll(id); return { id, n, name: world.names[id] || id, lat: p[0], lng: p[1] }; }) : [];
   const marks = [...real, ...fake.filter((f) => !real.some((r) => r.id === f.id))];
   const total = marks.reduce((s, m) => s + m.n, 0);
+  const myLL = mine ? place(mine) : null;
   const match = () => {
-    if (!mine) { toast('Pick your country first, and the match will fly from there.'); return; }
+    if (!mine) { toast('Join the globe first, and the match will fly from your place.'); return; }
     const p = SAMPLE_PARTNERS[Math.floor(Math.random() * SAMPLE_PARTNERS.length)];
-    setPartner(null); setFlight({ from: mine.country_id, to: p.id, key: Date.now() }); setTimeout(() => setPartner(p), 2400);
+    setPartner(null); setFlight({ from: mine.country_id, to: p.id, fromLL: myLL, toLL: ll(p.id), key: Date.now() }); setTimeout(() => setPartner(p), 2600);
   };
+  const where = mine ? (mine.region ? mine.region + ', ' : '') + mine.country_name : '';
   return html`<section className="cm" data-nav="dark">
     <div className="cm-head"><p className="eyebrow">Community</p><h1>Students, <span className="hl">everywhere.</span></h1>
-      <p>A quiet look at where people are studying from. Only a country is ever shared, and only if you choose. No addresses, no cities, no names on the map.</p></div>
+      <p>A quiet look at where people are studying from. Only a country and state are ever counted, never an address, and you can leave whenever you like.</p></div>
     <div className="cm-grid">
-      <div className="cm-globe">${world ? html`<${Globe} world=${world} marks=${marks} me=${mine && mine.country_id} flight=${flight} onFlightEnd=${() => { setFlight(null); setPartner(null); }} />` : html`<div className="cm-load">${err ? 'The map could not load. Check your connection and refresh.' : html`<span></span>Loading the globe…`}</div>`}
-        <div className="cm-legend"><i></i> ${total ? total + ' student' + (total === 1 ? '' : 's') + ' in ' + marks.length + ' countr' + (marks.length === 1 ? 'y' : 'ies') : 'No one on the map yet'}${sample && fake.length ? ' · includes sample data' : ''}</div></div>
+      <div className="cm-globe">${gl ? html`<${GlobeGL} marks=${marks} me=${myLL} flight=${flight} onFlightEnd=${() => { setFlight(null); setPartner(null); }} onFail=${() => setGl(false)} />` : world ? html`<${Globe2D} world=${world} marks=${marks} me=${mine && mine.country_id} flight=${flight} onFlightEnd=${() => { setFlight(null); setPartner(null); }} />` : html`<div className="cm-load">${err ? 'The map could not load. Check your connection and refresh.' : html`<span></span>Loading the globe…`}</div>`}
+        <div className="cm-legend"><i></i> ${total ? total + ' student' + (total === 1 ? '' : 's') + ' in ' + marks.length + ' place' + (marks.length === 1 ? '' : 's') : 'No one on the map yet'}${sample && fake.length ? ' · includes sample data' : ''}</div></div>
       <div className="cm-side">
         <div className="cm-card"><small>Your place on the globe</small>
-          ${!c.user ? html`<p>Sign in to choose whether to appear, and to see real counts.</p><button className="lh-btn" onClick=${() => patchCloud({ modal: true })}><${Icon} n="fa-user" /> Sign in</button>` : html`<${Fragment}>
-            <p>${mine ? html`You show up as <b>${mine.country_name}</b>. Others only ever see how many students are in each country, and countries with fewer than three are hidden.` : 'Off by default. Choose your country to appear in the count. You can leave any time.'}</p>
+          ${!c.user ? html`<p>Sign in to be counted automatically, and to see real counts. You choose at sign-up and can change it any time.</p><button className="lh-btn" onClick=${() => patchCloud({ modal: true })}><${Icon} n="fa-user" /> Sign in</button>` : html`<${Fragment}>
+            <p>${mine ? html`You are counted in <b>${where}</b>. Others only ever see totals, and places with fewer than three students stay hidden.` : 'You are not on the globe. Add yourself from your connection, or pick a country by hand.'}</p>
+            ${!mine && html`<button className="lh-btn" onClick=${auto} disabled=${busy}><${Icon} n="fa-location-dot" /> ${busy ? 'Working it out…' : 'Add me automatically'}</button>`}
             <${CountryPicker} world=${world} value=${mine && mine.country_id} onPick=${save} />
             ${mine && html`<button className="cm-off" onClick=${remove} disabled=${busy}><${Icon} n="fa-eye-slash" /> Take me off the globe</button>`}<//>`}</div>
         <div className="cm-card dark"><small>Find a study partner</small>
@@ -5300,7 +5378,7 @@ function Study({ go, openCase }) {
    ========================================================================== */
 const SB_URL = 'https://womakbkesvwzwfviwlgs.supabase.co';
 const SB_KEY = 'sb_publishable_lAY6AW3Ho6ZlWy83ox3FgQ_Znh_mj-G';     /* publishable key: safe in the browser, row-level security protects the data */
-const sb = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true } }) : null;
+const sb = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true, experimental: { passkey: true } } }) : null;
 const memStore = (init) => { let v = init; const subs = new Set(); return { get: () => v, set(n) { v = n; subs.forEach((f) => f()); }, subscribe(fn) { subs.add(fn); return () => subs.delete(fn); } }; };
 const CloudStore = memStore({ user: null, profile: null, status: 'out', modal: false, profileOpen: false, error: '' });
 const patchCloud = (p) => CloudStore.set({ ...CloudStore.get(), ...p });
@@ -5371,6 +5449,7 @@ function startCloud() {
       patchCloud({ profile: prof || null });
       if (prof && prof.display_name && !tsAll().name && UserStore.get() === 'Charles') { applying = true; UserStore.set(prof.display_name); applying = false; }
       sb.from('profiles').update({ last_seen: new Date().toISOString() }).eq('id', user.id).then(() => {});
+      autoPlace(user);
     } catch (e) { patchCloud({ status: 'error', error: String(e.message || e) }); }
   };
   sb.auth.onAuthStateChange((_ev, session) => { setTimeout(() => hydrate(session), 0); });
@@ -5383,15 +5462,54 @@ const Cloud = {
     if (!/^https?:$/.test(location.protocol)) throw new Error('FILE_ORIGIN');
     const { error } = await sb.auth.signInWithOAuth({ provider: 'github', options: { redirectTo: location.href.split('#')[0] } }); if (error) throw error;
   },
+  async passkey() {
+    if (!/^https?:$/.test(location.protocol)) throw new Error('FILE_ORIGIN');
+    const { error } = await sb.auth.signInWithPasskey(); if (error) throw error;
+  },
   async reset(email) { const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.href.split('#')[0] }); if (error) throw error; },
   async out(wipe) { await sb.auth.signOut(); if (wipe) { Object.keys(localStorage).filter((k) => /^usmle-(site|quiz):/.test(k)).forEach((k) => localStorage.removeItem(k)); location.reload(); } },
 };
+
+const A2N = {"AW":"533","AF":"004","AO":"024","AI":"660","AX":"248","AL":"008","AD":"020","AE":"784","AR":"032","AM":"051","AS":"016","AQ":"010","TF":"260","AG":"028","AU":"036","AT":"040","AZ":"031","BI":"108","BE":"056","BJ":"204","BF":"854","BD":"050","BG":"100","BH":"048","BS":"044","BA":"070","BL":"652","SH":"654","BY":"112","BZ":"084","BM":"060","BO":"068","BQ":"535","BR":"076","BB":"052","BN":"096","BT":"064","BV":"074","BW":"072","CF":"140","CA":"124","CC":"166","CH":"756","CL":"152","CN":"156","CI":"384","CM":"120","CD":"180","CG":"178","CK":"184","CO":"170","KM":"174","CV":"132","CR":"188","CU":"192","CW":"531","CX":"162","KY":"136","CY":"196","CZ":"203","DE":"276","DJ":"262","DM":"212","DK":"208","DO":"214","DZ":"012","EC":"218","EG":"818","ER":"232","EH":"732","ES":"724","EE":"233","ET":"231","FI":"246","FJ":"242","FK":"238","FR":"250","FO":"234","FM":"583","GA":"266","GB":"826","GE":"268","GG":"831","GH":"288","GI":"292","GN":"324","GP":"312","GM":"270","GW":"624","GQ":"226","GR":"300","GD":"308","GL":"304","GT":"320","GF":"254","GU":"316","GY":"328","HK":"344","HM":"334","HN":"340","HR":"191","HT":"332","HU":"348","ID":"360","IM":"833","IN":"356","IO":"086","IE":"372","IR":"364","IQ":"368","IS":"352","IL":"376","IT":"380","JM":"388","JE":"832","JO":"400","JP":"392","KZ":"398","KE":"404","KG":"417","KH":"116","KI":"296","KN":"659","KR":"410","KW":"414","LA":"418","LB":"422","LR":"430","LY":"434","LC":"662","LI":"438","LK":"144","LS":"426","LT":"440","LU":"442","LV":"428","MO":"446","MF":"663","MA":"504","MC":"492","MD":"498","MG":"450","MV":"462","MX":"484","MH":"584","MK":"807","ML":"466","MT":"470","MM":"104","ME":"499","MN":"496","MP":"580","MZ":"508","MR":"478","MS":"500","MQ":"474","MU":"480","MW":"454","MY":"458","YT":"175","NA":"516","NC":"540","NE":"562","NF":"574","NG":"566","NI":"558","NU":"570","NL":"528","NO":"578","NP":"524","NR":"520","NZ":"554","OM":"512","PK":"586","PA":"591","PN":"612","PE":"604","PH":"608","PW":"585","PG":"598","PL":"616","PR":"630","KP":"408","PT":"620","PY":"600","PS":"275","PF":"258","QA":"634","RE":"638","RO":"642","RU":"643","RW":"646","SA":"682","SD":"729","SN":"686","SG":"702","GS":"239","SJ":"744","SB":"090","SL":"694","SV":"222","SM":"674","SO":"706","PM":"666","RS":"688","SS":"728","ST":"678","SR":"740","SK":"703","SI":"705","SE":"752","SZ":"748","SX":"534","SC":"690","SY":"760","TC":"796","TD":"148","TG":"768","TH":"764","TJ":"762","TK":"772","TM":"795","TL":"626","TO":"776","TT":"780","TN":"788","TR":"792","TV":"798","TW":"158","TZ":"834","UG":"800","UA":"804","UM":"581","UY":"858","US":"840","UZ":"860","VA":"336","VC":"670","VE":"862","VG":"092","VI":"850","VN":"704","VU":"548","WF":"876","WS":"882","YE":"887","ZA":"710","ZM":"894","ZW":"716"};
+
+/* Works out a country, a state and a rounded area (whole degrees, about 100 km) from the connection.
+   A free lookup service is asked once; nothing precise is kept, and the address is never stored. */
+async function detectPlace() {
+  const tries = ['https://ipwho.is/', 'https://ipapi.co/json/'];
+  for (const u of tries) {
+    try {
+      const r = await fetch(u); if (!r.ok) continue; const j = await r.json();
+      const cc = j.country_code, id = A2N[cc]; if (!id || j.success === false) continue;
+      return { id, country: j.country || j.country_name || cc, region: (j.region || '').slice(0, 80) || null, lat: Math.round(j.latitude), lng: Math.round(j.longitude) };
+    } catch { /* try the next one */ }
+  }
+  throw new Error('Could not work out your location');
+}
+async function placeMe(user, quiet) {
+  const g = await detectPlace();
+  const full = { user_id: user.id, country_id: g.id, country_name: g.country, region: g.region, lat: g.lat, lng: g.lng };
+  let { error } = await sb.from('presence').upsert(full);
+  if (error && /column|schema cache/i.test(error.message || '')) ({ error } = await sb.from('presence').upsert({ user_id: user.id, country_id: g.id, country_name: g.country }));
+  if (error) throw error;
+  if (!quiet) toast('You are counted on the community globe as ' + (g.region ? g.region + ', ' : '') + g.country + '.');
+  return g;
+}
+async function autoPlace(user) {
+  try {
+    if (!PrefsStore.get().globe) return;
+    const { data, error } = await sb.from('presence').select('user_id').eq('user_id', user.id).maybeSingle();
+    if (error || data) return;
+    await placeMe(user, false);
+  } catch { /* quiet: the globe is a bonus */ }
+}
+async function leaveGlobe(user) { await sb.from('presence').delete().eq('user_id', user.id); }
 
 function AuthModal() {
   const c = useCloud();
   const [mode, setMode] = useState('in');
   const [email, setEmail] = useState(''), [pw, setPw] = useState(''), [nm, setNm] = useState(UserStore.get());
   const [busy, setBusy] = useState(false), [err, setErr] = useState(''), [note, setNote] = useState('');
+  const [geoOk, setGeoOk] = useState(PrefsStore.get().globe !== false);
   useEffect(() => { if (c.user && c.modal) patchCloud({ modal: false }); }, [c.user, c.modal]);
   useEffect(() => {
     if (!c.modal) return undefined;
@@ -5399,7 +5517,7 @@ function AuthModal() {
     window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
   }, [c.modal]);
   if (!c.modal) return null;
-  const friendly = (m) => (m === 'FILE_ORIGIN' ? 'GitHub sign-in needs the site to be hosted at a web address. It cannot start from a file on your computer. Use email for now.' : /Invalid login/i.test(m) ? 'That email and password do not match.' : /already registered/i.test(m) ? 'There is already an account with that email. Try signing in.' : /provider is not enabled|Unsupported provider/i.test(m) ? 'GitHub sign-in is not switched on yet. Use email for now.' : /Password should/i.test(m) ? 'Please use a password with at least 6 characters.' : /rate limit/i.test(m) ? 'Too many tries. Please wait a minute.' : m);
+  const friendly = (m) => (m === 'FILE_ORIGIN' ? 'GitHub sign-in and passkeys need the site to be hosted at a web address. They cannot start from a file on your computer. Use email for now.' : /passkey_disabled/i.test(m) ? 'Passkeys are not switched on for this site yet.' : /webauthn_credential_not_found/i.test(m) ? 'No passkey was found for this site on that device.' : /NotAllowedError|cancel|abort/i.test(m) ? 'The passkey prompt was closed.' : /Invalid login/i.test(m) ? 'That email and password do not match.' : /already registered/i.test(m) ? 'There is already an account with that email. Try signing in.' : /provider is not enabled|Unsupported provider/i.test(m) ? 'GitHub sign-in is not switched on yet. Use email for now.' : /Password should/i.test(m) ? 'Please use a password with at least 6 characters.' : /rate limit/i.test(m) ? 'Too many tries. Please wait a minute.' : m);
   const submit = async (e) => {
     e.preventDefault(); setErr(''); setNote(''); setBusy(true);
     try {
@@ -5413,10 +5531,12 @@ function AuthModal() {
       <button type="button" className="au-x" onClick=${() => patchCloud({ modal: false })} aria-label="Close"><${Icon} n="fa-xmark" /></button>
       <h3>${mode === 'up' ? 'Create your account' : mode === 'reset' ? 'Reset your password' : 'Welcome back'}</h3>
       <p>${mode === 'up' ? 'Free, with no catch. Your notes, cards and scores will follow you to any device.' : mode === 'reset' ? 'We will email you a link.' : 'Sign in to pick up where you left off.'}</p>
+      ${mode === 'in' && html`<button type="button" className="au-gh" onClick=${async () => { setErr(''); try { await Cloud.passkey(); } catch (x) { setErr(friendly(String(x.message || x))); } }}><${Icon} n="fa-fingerprint" /> Sign in with a passkey</button>`}
       ${mode !== 'reset' && html`<button type="button" className="au-gh" onClick=${async () => { setErr(''); try { await Cloud.github(); } catch (x) { setErr(friendly(String(x.message || x))); } }}><i className="fab fa-github" aria-hidden="true"></i> Continue with GitHub</button><div className="au-or"><span>or</span></div>`}
       ${mode === 'up' && html`<label>Your name<input value=${nm} onChange=${(e) => setNm(e.target.value)} maxLength="24" autoComplete="name" /></label>`}
       <label>Email<input type="email" required value=${email} onChange=${(e) => setEmail(e.target.value)} autoComplete="email" /></label>
       ${mode !== 'reset' && html`<label>Password<input type="password" required minLength="6" value=${pw} onChange=${(e) => setPw(e.target.value)} autoComplete=${mode === 'up' ? 'new-password' : 'current-password'} /></label>`}
+      ${mode === 'up' && html`<label className="au-chk"><input type="checkbox" checked=${geoOk} onChange=${(e) => { setGeoOk(e.target.checked); PrefsStore.set({ ...PrefsStore.get(), globe: e.target.checked }); }} /><span>Add my country and state to the community globe. It is worked out from my connection, only the region is kept, never an address, and I can turn it off any time.</span></label>`}
       ${err && html`<p className="au-err" role="alert">${err}</p>`}${note && html`<p className="au-note">${note}</p>`}
       <button className="au-go" type="submit" disabled=${busy}>${busy ? 'One moment…' : mode === 'up' ? 'Create account' : mode === 'reset' ? 'Send link' : 'Sign in'}</button>
       <div className="au-sw">${mode === 'in' ? html`<button type="button" onClick=${() => { setMode('up'); setErr(''); }}>New here? Create an account</button><button type="button" onClick=${() => { setMode('reset'); setErr(''); }}>Forgot password?</button>` : html`<button type="button" onClick=${() => { setMode('in'); setErr(''); setNote(''); }}>I already have an account</button>`}</div>
