@@ -1841,6 +1841,37 @@
         .fr-stage { width: clamp(260px, min(76%, 40vh * .68 + 80px), 420px); } @media (min-width: 900px) { .fr-stage { width: clamp(300px, min(30vw, 44vh), 430px); } }
         @media (min-width: 900px) { .fr-title { font-size: clamp(76px, 8.4vw, 118px); margin: 12px 0 -6px; } .fr-stage { width: clamp(260px, min(28vw, 36vh), 400px); margin-top: 22px; } .fr-dots { margin-top: 16px; } .fr-act { margin-top: 14px; } }
         @media (min-width: 900px) and (max-height: 760px) { .fr-stage { width: clamp(220px, 30vh, 400px); } .fr-title { font-size: clamp(64px, 8vw, 96px); } }
+        /* ===== v17: cheap glass for the moving drop (no SVG filter), avatars, friend page ===== */
+        .acct-wrap .acct-menu .am-lq { position: absolute; inset: -96px -34px -34px -34px; pointer-events: none; z-index: 1; clip-path: polygon(0 0, 0 0, 0 0); will-change: clip-path;
+          background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.02) 38%), rgba(16,16,22,.44);
+          -webkit-backdrop-filter: blur(18px) saturate(1.8) brightness(1.1); backdrop-filter: blur(18px) saturate(1.8) brightness(1.1); }
+        .am-lq::before, .am-lq::after { display: none !important; }
+        .acct-wrap .acct-menu .am-rim { position: absolute; inset: -96px -34px -34px -34px; width: calc(100% + 68px); height: calc(100% + 130px); z-index: 2; pointer-events: none; overflow: visible; }
+        .am-rim path { stroke: rgba(255,255,255,.34); stroke-width: 1; }
+        .acct-wrap .acct-menu .am-rim { inset: auto; left: -34px; top: -96px; width: auto; height: auto; }
+        /* round avatars everywhere */
+        .cn-av, .pp-av, .ch-av, .ch-sa, .fv-ci, .mc-mini, .mc-sa, .ct-av, .ct-mav { aspect-ratio: 1 / 1; border-radius: 50% !important; object-fit: cover; object-position: 50% 18%; flex: none; }
+        .cn-ph.ct-av, .cn-ph.ct-mav { display: grid; place-items: center; }
+        .ct-av { width: 68px; height: 68px; font-size: 26px; } .ct-mav { width: 38px; height: 38px; font-size: 15px; margin-bottom: 2px; } .pp-dot.lg { width: 15px; height: 15px; border-width: 3px; right: 2px; bottom: 2px; }
+        .cn-chat-top { grid-template-columns: auto auto 1fr auto auto; gap: 14px; } .ct-nm b { font-size: 19px; }
+        .cn-row2 { display: flex; gap: 10px; align-items: flex-end; align-self: flex-start; max-width: 88%; } .cn-row2.me { align-self: flex-end; } .cn-row2 .cn-msg { max-width: none; align-self: auto; }
+        /* friend page: photo, then blur + dark + words written as you scroll */
+        .fv { overflow-y: auto; overflow-x: hidden; scrollbar-width: none; overscroll-behavior: contain; } .fv::-webkit-scrollbar { display: none; }
+        .fv-stage { position: sticky; top: 0; height: 100dvh; overflow: hidden; }
+        .fv-bg { filter: blur(46px) brightness(calc(.62 - var(--p) * .3)) saturate(1.2); }
+        .fv-photo { filter: blur(calc(var(--p) * 30px)) brightness(calc(1 - var(--p) * .5)); transform: translateX(-50%) scale(calc(1 + var(--p) * .07)); will-change: filter, transform; }
+        .fv-shade { position: absolute; inset: 0; z-index: 2; background: linear-gradient(180deg, rgba(0,0,0,.25) 0, rgba(0,0,0,.1) 30%, rgba(0,0,0,.55) 100%); opacity: calc(.4 + var(--p) * .6); pointer-events: none; }
+        .fv-shade::after { content: ""; position: absolute; inset: 0; background: #000; opacity: calc(var(--p) * .72); }
+        .fv-stage .fv-top { position: absolute; }
+        .fv-hint { position: absolute; z-index: 3; left: 50%; bottom: 26px; transform: translateX(-50%); display: grid; justify-items: center; gap: 8px; font: 500 12px -apple-system, Inter, Arial, sans-serif; letter-spacing: .14em; text-transform: uppercase; color: rgba(255,255,255,.8); opacity: calc(1 - var(--p) * 3); } .fv-hint i { width: 1.5px; height: 34px; background: linear-gradient(#fff, transparent); animation: fvHint 1.6s ease-in-out infinite; } @keyframes fvHint { 50% { transform: translateY(6px); opacity: .4; } }
+        .fv-flow { position: relative; z-index: 4; margin-top: -100dvh; padding: 88dvh clamp(22px, 6vw, 40px) 18dvh; max-width: 820px; margin-left: auto; margin-right: auto; }
+        .fv-lab { display: block; font: 600 12px -apple-system, Inter, Arial, sans-serif; letter-spacing: .2em; color: rgba(255,255,255,.55); }
+        .fv-h2 { margin: 8px 0 22px; font: 800 clamp(40px, 7vw, 76px)/.95 -apple-system, 'SF Pro Display', 'Helvetica Neue', Inter, Arial, sans-serif; letter-spacing: -.05em; }
+        .fv-text { margin: 0; font: 500 clamp(22px, 3.2vw, 34px)/1.38 -apple-system, 'SF Pro Display', 'Helvetica Neue', Inter, Arial, sans-serif; letter-spacing: -.02em; color: #fff; } .fv-text span { transition: opacity .2s; }
+        .fv-facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px 30px; margin: 56px 0 0; } .fv-facts b { display: block; font: 600 12px -apple-system, Inter, Arial, sans-serif; letter-spacing: .14em; text-transform: uppercase; color: rgba(255,255,255,.5); } .fv-facts span { display: block; margin-top: 6px; font: 600 20px -apple-system, 'SF Pro Display', Inter, Arial, sans-serif; }
+        .fv-h4 { margin: 56px 0 14px; font: 700 20px -apple-system, 'SF Pro Display', Inter, Arial, sans-serif; }
+        .fv-cta { margin-top: 44px; height: 56px; padding: 0 30px; border-radius: 999px; border: 0; background: #fff; color: #000; font: 600 15.5px -apple-system, Inter, Arial, sans-serif; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; }
+        .fv-ci { width: 60px; height: 60px; }
 
     </style>
 </head>
@@ -5690,16 +5721,21 @@ function myStats() {
   const last = attempts.slice(-10), acc = last.length ? Math.round(last.reduce((s, a) => s + pctOf(a), 0) / last.length) : 0;
   return { weekly_minutes: Math.min(10080, week), accuracy: acc, streak: Math.min(3650, summarize(attempts).streak), exam_date: plan.exam || null, goal_accuracy: goals.accuracy || null, weekly_goal_hours: goals.weeklyHours || null };
 }
-async function publishStats() {
+let pubTimer = 0;
+async function publishStats(force) {
   const c = CloudStore.get(); if (!c.user || !(c.profile && c.profile.discoverable)) return;
-  await sb.from('public_stats').upsert({ user_id: c.user.id, ...myStats(), updated_at: new Date().toISOString() });
+  const st = myStats(), sig = JSON.stringify(st); let last = {}; try { last = JSON.parse(localStorage.getItem('usmle-site:pub') || '{}'); } catch { /* ignore */ }
+  if (!force && last.sig === sig && last.uid === c.user.id) return;                                         /* nothing changed: no write */
+  if (!force && last.uid === c.user.id && Date.now() - (last.t || 0) < 300000) { clearTimeout(pubTimer); pubTimer = setTimeout(() => publishStats().catch(() => {}), 300000 - (Date.now() - last.t)); return; }   /* at most one write per 5 minutes */
+  try { localStorage.setItem('usmle-site:pub', JSON.stringify({ sig, t: Date.now(), uid: c.user.id })); } catch { /* ignore */ }
+  await sb.from('public_stats').upsert({ user_id: c.user.id, ...st, updated_at: new Date().toISOString() });
 }
 async function setDiscoverable(on) {
   const c = CloudStore.get(); if (!c.user) return false;
   const { error } = await sb.from('profiles').update({ discoverable: on }).eq('id', c.user.id);
   if (error) { toast(/discoverable/i.test(error.message) ? 'Matching is not switched on for this project yet.' : error.message); return false; }
   patchCloud({ profile: { ...c.profile, discoverable: on } });
-  if (on) await publishStats(); else await sb.from('public_stats').delete().eq('user_id', c.user.id);
+  if (on) await publishStats(true); else await sb.from('public_stats').delete().eq('user_id', c.user.id);
   return true;
 }
 const shareLink = (u) => location.href.split('#')[0] + '#/u/' + u;
@@ -5726,14 +5762,14 @@ const SAMPLE_MATCHES = [
 ].map((x, i) => ({ sample: true, user_id: 's' + i, step: x.st, display_name: x.name, username: x.un, study_year: x.yr, country_name: x.c, score: x.sc, weekly_minutes: x.wm, accuracy: x.ac, streak: x.sk, goal_accuracy: 80, bio: x.bio, avatar_url: SAMPLE_PHOTOS[x.ph] }));
 
 const SAMPLE_FRIENDS = [
-  { name: 'Idris', un: 'idris_v', st: 'Step 1', yr: 'MS2', c: 'United Kingdom', bio: 'Vagabond rereader. Pathology on weekends.', ph: 0, last: 'That mnemonic saved me today 😅', unread: 2, online: true },
-  { name: 'Rafael', un: 'rafa_b', st: 'Step 1', yr: 'MS1', c: 'Brazil', bio: 'Beads, biochem, breathing.', ph: 1, last: 'See you on Zoom at 7?', unread: 0, online: true },
-  { name: 'Nia', un: 'nia_m', st: 'Step 2 CK', yr: 'MS3', c: 'United States', bio: 'Matcha and MCQs.', ph: 2, last: 'Sent you the OB-GYN deck', unread: 0, online: false },
-  { name: 'Kweku', un: 'kweku_a', st: 'Step 1', yr: 'MS2', c: 'Ghana', bio: 'Trauma rotation taught me patience.', ph: 3, last: 'Typing…', unread: 0, online: true, typing: true },
-  { name: 'Diego', un: 'diego_s', st: 'Step 1', yr: 'MS2', c: 'Brazil', bio: 'Walks and audio decks.', ph: 4, last: 'Thanks, I needed that reminder.', unread: 0, online: false },
-  { name: 'Chidi', un: 'chidi_h', st: 'Step 2 CK', yr: 'MS4', c: 'Nigeria', bio: 'Rings, rhythm, rounds.', ph: 5, last: 'Lol same here', unread: 1, online: true },
-  { name: 'Marcus', un: 'marcus_t', st: 'Step 1', yr: 'MS2', c: 'United States', bio: 'Gym at 6, questions at 7.', ph: 6, last: 'You up?', unread: 0, online: false },
-].map((x, i) => ({ sample: true, conn_id: 'f' + i, other_id: 'f' + i, user_id: 'f' + i, status: 'accepted', display_name: x.name, username: x.un, step: x.st, study_year: x.yr, country_name: x.c, bio: x.bio, avatar_url: FRIEND_PHOTOS[x.ph], last_body: x.last, last_at: Date.now() - [30e3, 2 * 3600e3, 26 * 3600e3, 30 * 3600e3, 5 * 86400e3, 20 * 86400e3, 40 * 86400e3][i], unread: x.unread, online: x.online, typing: x.typing }));
+  { about: "Second-year student, quietly obsessed with pathology. I read manga on the train, and I rebuild every wrong answer into a flashcard before bed. Weekends are for long slow walks and a full block of UWorld. I study best with someone to explain things to, so message me if you want a partner for Step 1.", name: 'Idris', un: 'idris_v', st: 'Step 1', yr: 'MS2', c: 'United Kingdom', bio: 'Vagabond rereader. Pathology on weekends.', ph: 0, last: 'That mnemonic saved me today 😅', unread: 2, online: true },
+  { about: "I keep my study life simple: biochemistry in the morning, practice questions after lunch, a run when my head gets loud. I wear too many beads and I write mnemonics that make no sense to anyone else. Always up for a Zoom study hour, camera optional, snacks mandatory.", name: 'Rafael', un: 'rafa_b', st: 'Step 1', yr: 'MS1', c: 'Brazil', bio: 'Beads, biochem, breathing.', ph: 1, last: 'See you on Zoom at 7?', unread: 0, online: true },
+  { about: "Matcha, flashcards and a spotless calendar. I am preparing for Step 2 CK and I share every deck I build, so ask and I will send it over. I learn through teaching, so I will happily quiz you on anything from OB-GYN to biostats.", name: 'Nia', un: 'nia_m', st: 'Step 2 CK', yr: 'MS3', c: 'United States', bio: 'Matcha and MCQs.', ph: 2, last: 'Sent you the OB-GYN deck', unread: 0, online: false },
+  { about: "Trauma rotation taught me patience and a lot about coffee. I review in short sharp sprints, then step outside to reset. I am looking for steady study friends who show up on the hard days too, not only the good ones.", name: 'Kweku', un: 'kweku_a', st: 'Step 1', yr: 'MS2', c: 'Ghana', bio: 'Trauma rotation taught me patience.', ph: 3, last: 'Typing…', unread: 0, online: true, typing: true },
+  { about: "Walks, audio decks and a lot of repetition. I study in Portuguese and English and I switch when a concept refuses to land. I like quiet partners, shared goals and a weekly check-in about what is actually working.", name: 'Diego', un: 'diego_s', st: 'Step 1', yr: 'MS2', c: 'Brazil', bio: 'Walks and audio decks.', ph: 4, last: 'Thanks, I needed that reminder.', unread: 0, online: false },
+  { about: "Rings, rhythm and rounds. I am deep in my clinical years and I turn every patient I meet into a question I can answer later. I keep a streak, I forgive myself when I break it, and I start again the next morning.", name: 'Chidi', un: 'chidi_h', st: 'Step 2 CK', yr: 'MS4', c: 'Nigeria', bio: 'Rings, rhythm, rounds.', ph: 5, last: 'Lol same here', unread: 1, online: true },
+  { about: "Gym at six, questions at seven. I treat studying like training: a plan, a log, and a rest day I actually take. Happy to swap schedules, hold you accountable, and celebrate every score that moves.", name: 'Marcus', un: 'marcus_t', st: 'Step 1', yr: 'MS2', c: 'United States', bio: 'Gym at 6, questions at 7.', ph: 6, last: 'You up?', unread: 0, online: false },
+].map((x, i) => ({ sample: true, conn_id: 'f' + i, other_id: 'f' + i, user_id: 'f' + i, status: 'accepted', display_name: x.name, username: x.un, step: x.st, study_year: x.yr, country_name: x.c, bio: x.bio, about: x.about, avatar_url: FRIEND_PHOTOS[x.ph], last_body: x.last, last_at: Date.now() - [30e3, 2 * 3600e3, 26 * 3600e3, 30 * 3600e3, 5 * 86400e3, 20 * 86400e3, 40 * 86400e3][i], unread: x.unread, online: x.online, typing: x.typing }));
 
 
 /* inline icons for the connect layer (no font dependency) */
@@ -5811,13 +5847,13 @@ function Chat({ conn, onBack }) {
   const mine = (m) => m.sender === (c.user ? c.user.id : 'me') || m.sender === 'me';
   return html`<div className="cn-chat"><div className="cn-chat-top">
       <button className="cn-back" onClick=${onBack} aria-label="Back"><${CIcon} n="back" size=${20} /></button>
-      <span className="pp-ava"><${Av} p=${conn} cls="cn-av sm" />${conn.online && html`<i className="pp-dot sm"></i>`}</span>
+      <span className="pp-ava"><${Av} p=${conn} cls="ct-av" />${conn.online && html`<i className="pp-dot lg"></i>`}</span>
       <div className="ct-nm"><b>${conn.display_name}</b><small>${conn.online ? 'Active now' : conn.typing ? 'Typing…' : '@' + conn.username}</small></div>
       <button type="button" className="ct-ic" aria-label="Call" onClick=${() => toast('Calls are coming soon.')}><${CIcon} n="phone" size=${20} /></button>
       <button type="button" className="ct-ic" aria-label="More" onClick=${() => toast('Mute, block and report are coming soon.')}><${CIcon} n="more" size=${20} sw=${3} /></button>
     </div>
     <div className="cn-msgs" ref=${box}>${msgs.length === 0 && html`<p className="cn-hint">Say hello. Share a tip, a plan, or a question you are stuck on.</p>`}
-      ${items.map((m) => m.divider ? html`<div key=${m.id} className="ct-day"><span>${m.divider}</span></div>` : html`<div key=${m.id} className=${cx('cn-msg', mine(m) && 'me')}><span>${m.body}</span><i>${new Date(m.created_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}${mine(m) ? ' · seen' : ''}</i></div>`)}
+      ${items.map((m) => m.divider ? html`<div key=${m.id} className="ct-day"><span>${m.divider}</span></div>` : html`<div key=${m.id} className=${cx('cn-row2', mine(m) && 'me')}>${!mine(m) && html`<${Av} p=${conn} cls="ct-mav" />`}<div className=${cx('cn-msg', mine(m) && 'me')}><span>${m.body}</span><i>${new Date(m.created_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}${mine(m) ? ' · seen' : ''}</i></div></div>`)}
       ${sample && conn.typing && html`<div className="cn-msg typing"><i className="pp-wave"><em></em><em></em><em></em></i></div>`}
     </div>
     ${emoji && html`<div className="ct-emo">${['👋','😀','😂','🥹','🙌','🔥','💪','📚','🧠','☕️','🎯','✨','😩','🫶','👀','🚀','💯','✅','❓','🎉','👏','🤝','😴','🤔','😅','🥺','😌','🙏'].map((e) => html`<button key=${e} type="button" onClick=${() => pickEmoji(e)}>${e}</button>`)}</div>`}
@@ -5924,24 +5960,41 @@ function PeopleHome({ list, incoming, waiting, accept, decline, onOpen, onChat, 
     </div></div>`;
 }
 function FriendDetail({ p, others, onBack, onMessage }) {
-  const [open, setOpen] = useState(true), sy = useRef(null);
-  const bio = p.bio || 'No note yet.';
+  const sc = useRef(null), txt = useRef(null), facts = useRef(null);
+  const text = p.about || p.bio || 'No note yet.', words = text.split(/\s+/).filter(Boolean);
   const rows = [['Exam step', p.step || 'Not set'], ['Level', p.study_year || 'Not set'], ['Country', p.country_name || 'Somewhere on Earth'], ['Study streak', p.streak ? p.streak + ' days' : 'Just getting started']];
   useEffect(() => { const k = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onBack(); } }; window.addEventListener('keydown', k, true); return () => window.removeEventListener('keydown', k, true); }, [onBack]);
-  return html`<div className="fv" style=${{ '--ph': phBg(p) }}>
-    <div className="fv-bg" aria-hidden="true"></div>
-    <div className="fv-photo"><${Av} p=${p} cls="fv-img" /></div>
-    <header className="fv-top"><button className="fv-back" onClick=${onBack} aria-label="Back"><${CIcon} n="back" size=${20} sw=${2} /></button>
-      <h3 className="fv-name">${(p.display_name || '').toUpperCase()}</h3>
-      <div className="fv-right"><span className="fv-tag">${p.step || 'Step 1'}</span>${p.study_year && html`<span className="fv-tag">${p.study_year}</span>`}<button className="fv-msgbtn" onClick=${onMessage}><${CIcon} n="chat" size=${18} sw=${2.1} /><em>Message</em></button></div></header>
-    <section className=${cx('fv-sheet', !open && 'min')} onPointerDown=${(e) => { sy.current = e.clientY; }} onPointerUp=${(e) => { if (sy.current != null) { const d = e.clientY - sy.current; if (d > 40) setOpen(false); else if (d < -40) setOpen(true); } sy.current = null; }}>
-      <button className="fv-grab" onClick=${() => setOpen((o) => !o)} aria-label=${open ? 'Collapse details' : 'Show details'}></button>
-      <div className="fv-grid">
-        <div className="fv-r wide"><b>About</b><p>${bio}</p></div>
-        ${rows.map(([k, v]) => html`<div key=${k} className="fv-r"><b>${k}</b><p>${v}</p></div>`)}
-        ${others.length > 0 && html`<div className="fv-r full"><b>Study circle</b><div className="fv-cast">${others.slice(0, 10).map((x) => html`<div key=${x.conn_id || x.user_id} className="fv-c"><${Av} p=${x} cls="fv-ci" /><span>${(x.display_name || '').split(' ')[0]}</span></div>`)}</div></div>`}
-      </div>
-    </section></div>`;
+  useEffect(() => {
+    const el = sc.current; if (!el) return undefined; let raf = 0; const cl = (v, a, b) => Math.max(a, Math.min(b, v));
+    const upd = () => {
+      raf = 0; const vh = el.clientHeight, y = el.scrollTop;
+      el.style.setProperty('--p', cl(y / (vh * 0.85), 0, 1).toFixed(3));
+      const t = txt.current;
+      if (t) { const top = t.offsetTop - y, r = cl((vh * 0.9 - top) / (vh * 0.55), 0, 1), n = t.children.length; for (let i = 0; i < n; i++) t.children[i].style.opacity = (0.12 + 0.88 * cl(r * (n + 5) - i, 0, 1)).toFixed(2); }
+      const f = facts.current; if (f) { const r = cl((vh * 0.95 - (f.offsetTop - y)) / (vh * 0.3), 0, 1); f.style.opacity = r.toFixed(2); f.style.transform = 'translateY(' + ((1 - r) * 24).toFixed(1) + 'px)'; }
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(upd); };
+    el.addEventListener('scroll', on, { passive: true }); window.addEventListener('resize', on); upd();
+    return () => { el.removeEventListener('scroll', on); window.removeEventListener('resize', on); cancelAnimationFrame(raf); };
+  }, [p]);
+  return html`<div className="fv" ref=${sc} style=${{ '--ph': phBg(p), '--p': 0 }}>
+    <div className="fv-stage">
+      <div className="fv-bg" aria-hidden="true"></div>
+      <div className="fv-photo"><${Av} p=${p} cls="fv-img" /></div>
+      <div className="fv-shade" aria-hidden="true"></div>
+      <header className="fv-top"><button className="fv-back" onClick=${onBack} aria-label="Back"><${CIcon} n="back" size=${20} sw=${2} /></button>
+        <h3 className="fv-name">${(p.display_name || '').toUpperCase()}</h3>
+        <div className="fv-right"><span className="fv-tag">${p.step || 'Step 1'}</span>${p.study_year && html`<span className="fv-tag">${p.study_year}</span>`}<button className="fv-msgbtn" onClick=${onMessage}><${CIcon} n="chat" size=${18} sw=${2.1} /><em>Message</em></button></div></header>
+      <div className="fv-hint" aria-hidden="true"><i></i>Scroll</div>
+    </div>
+    <div className="fv-flow">
+      <small className="fv-lab">ABOUT</small>
+      <h2 className="fv-h2">${(p.display_name || '').split(' ')[0]}</h2>
+      <p className="fv-text" ref=${txt}>${words.map((w, i) => html`<span key=${i}>${w} </span>`)}</p>
+      <div className="fv-facts" ref=${facts}>${rows.map(([k, v]) => html`<div key=${k}><b>${k}</b><span>${v}</span></div>`)}</div>
+      ${others.length > 0 && html`<h4 className="fv-h4">Study circle</h4><div className="fv-cast">${others.slice(0, 10).map((x) => html`<div key=${x.conn_id || x.user_id} className="fv-c"><${Av} p=${x} cls="fv-ci" /><span>${(x.display_name || '').split(' ')[0]}</span></div>`)}</div>`}
+      <button className="fv-cta" onClick=${onMessage}><${CIcon} n="chat" size=${18} sw=${2.1} />Message ${(p.display_name || '').split(' ')[0]}</button>
+    </div></div>`;
 }
 
 /* ---------- the connect layer ---------- */
@@ -6058,7 +6111,7 @@ const TS_KEY = 'usmle-site:sync-ts';
 const tsAll = () => { try { return JSON.parse(localStorage.getItem(TS_KEY) || '{}'); } catch { return {}; } };
 const tsMark = (k) => { try { localStorage.setItem(TS_KEY, JSON.stringify({ ...tsAll(), [k]: Date.now() })); } catch { /* ignore */ } };
 const isBlank = (v) => v == null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
-let applying = false, warned = false; const timers = {};
+let applying = false, warned = false, lastPull = 0; const timers = {}, lastPushed = {}, pending = new Set();
 
 async function pullAndMerge(userId) {
   patchCloud({ status: 'syncing', error: '' });
@@ -6077,21 +6130,29 @@ async function pullAndMerge(userId) {
       if (JSON.stringify(next) !== JSON.stringify(loc)) def.st.set(next);
       const out = def.pack ? def.pack(next) : next;
       const same = r && JSON.stringify(out) === JSON.stringify(r.value);
+      if (same) lastPushed[k] = JSON.stringify(out);
       if (!same && !isBlank(out) && (!def.lww || touched || r)) rows.push({ user_id: userId, key: k, value: out, updated_at: new Date().toISOString() });
     }
   } finally { applying = false; }
+  rows.forEach((r) => { lastPushed[r.key] = JSON.stringify(r.value); });
   if (rows.length) { const { error: e2 } = await sb.from('user_state').upsert(rows); if (e2) throw e2; }
-  patchCloud({ status: 'synced' });
+  lastPull = Date.now(); patchCloud({ status: 'synced' });
 }
 async function pushKey(k) {
   const u = CloudStore.get().user; if (!u || !sb) return;
+  pending.delete(k); clearTimeout(timers[k]);
+  const value = SYNC[k].pack ? SYNC[k].pack(SYNC[k].st.get()) : SYNC[k].st.get(), sig = JSON.stringify(value);
+  if (lastPushed[k] === sig) return;                                                                          /* identical to what the cloud already has: no write */
   patchCloud({ status: 'syncing' });
-  const { error } = await sb.from('user_state').upsert({ user_id: u.id, key: k, value: SYNC[k].pack ? SYNC[k].pack(SYNC[k].st.get()) : SYNC[k].st.get(), updated_at: new Date().toISOString() });
+  const { error } = await sb.from('user_state').upsert({ user_id: u.id, key: k, value, updated_at: new Date().toISOString() });
+  if (!error) lastPushed[k] = sig;
   if (error) { patchCloud({ status: 'error', error: error.message }); if (!warned) { warned = true; toast('Could not sync just now. Your data is safe on this device.'); } } else { patchCloud({ status: 'synced' }); if (['attempts', 'focus', 'plan', 'goals'].includes(k)) publishStats().catch(() => {}); }
 }
 function startCloud() {
   if (startCloud.done) return; startCloud.done = true;
-  Object.entries(SYNC).forEach(([k, def]) => def.st.subscribe(() => { if (applying) return; tsMark(k); if (CloudStore.get().user) { clearTimeout(timers[k]); timers[k] = setTimeout(() => pushKey(k), 1500); } }));
+  Object.entries(SYNC).forEach(([k, def]) => def.st.subscribe(() => { if (applying) return; tsMark(k); if (CloudStore.get().user) { pending.add(k); clearTimeout(timers[k]); timers[k] = setTimeout(() => pushKey(k), 20000); } }));
+  const flush = () => { [...pending].forEach((k) => pushKey(k)); };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); }); window.addEventListener('pagehide', flush);
   if (!sb) return;
   const hydrate = async (session) => {
     const user = session && session.user; patchCloud({ user: user || null, ready: true });
@@ -6101,12 +6162,13 @@ function startCloud() {
       const { data: prof } = await sb.from('profiles').select('display_name,is_admin,username,bio,study_year,exam_date,avatar_url,discoverable,step').eq('id', user.id).maybeSingle();
       patchCloud({ profile: prof || null });
       if (prof && prof.display_name && !tsAll().name && UserStore.get() === 'Charles') { applying = true; UserStore.set(prof.display_name); applying = false; }
-      sb.from('profiles').update({ last_seen: new Date().toISOString() }).eq('id', user.id).then(() => {});
+      { let ls = 0; try { ls = Number(localStorage.getItem('usmle-site:seen') || 0); } catch { /* ignore */ } if (Date.now() - ls > 1800000) { try { localStorage.setItem('usmle-site:seen', String(Date.now())); } catch { /* ignore */ } sb.from('profiles').update({ last_seen: new Date().toISOString() }).eq('id', user.id).then(() => {}); } }
       autoPlace(user); publishStats().catch(() => {});
     } catch (e) { patchCloud({ status: 'error', error: String(e.message || e) }); }
   };
-  sb.auth.onAuthStateChange((_ev, session) => { setTimeout(() => hydrate(session), 0); });
-  document.addEventListener('visibilitychange', () => { const u = CloudStore.get().user; if (document.visibilityState === 'visible' && u && CloudStore.get().status !== 'syncing') pullAndMerge(u.id).catch(() => {}); });
+  let hydratedUid = null;
+  sb.auth.onAuthStateChange((ev, session) => { const uid = session && session.user ? session.user.id : null; if (ev === 'TOKEN_REFRESHED' || (uid && uid === hydratedUid)) return; hydratedUid = uid; setTimeout(() => hydrate(session), 0); });   /* only when the person actually changes, not on every focus or token refresh */
+  document.addEventListener('visibilitychange', () => { const u = CloudStore.get().user; if (document.visibilityState === 'visible' && u && CloudStore.get().status !== 'syncing' && Date.now() - lastPull > 1800000) pullAndMerge(u.id).catch(() => {}); });
 }
 const Cloud = {
   async signUp(email, password, name) { const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } }); if (error) throw error; return data; },
@@ -6313,8 +6375,9 @@ function AccountButton() {
     const lq = lqR.current, bd = bodyR.current, rim = rimR.current;
     if (stage === 'closed' || !lq || !bd) return undefined;
     const OX = 34, OY = 96, W = 280, H = bd.offsetHeight, R = OX + W, AV = 46, GAP = 48, cx0 = R - AV / 2, cy0 = OY - GAP - AV / 2;
-    const L0 = 34, Lp = 60, GRAV = 3400, KH = 150, DAMP = 6, RD = 26, DT = 1 / 480, K = 8, S = 3;
+    const L0 = 34, Lp = 60, GRAV = 3400, KH = 150, DAMP = 6, RD = 26, DT = 1 / 480, K = 8, S = 4;
     const GW = W + 68, GH = OY + H + 34;
+    rim.ownerSVGElement.setAttribute('width', GW); rim.ownerSVGElement.setAttribute('height', GH);
     const opening = stage === 'open', clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const px = (n) => n + 'px';
     const sneck = (L) => clamp(1 - (L - L0) / (Lp - L0), 0, 1);
@@ -6363,7 +6426,7 @@ function AccountButton() {
       return d;
     };
     const roundRect = (l, t, r, b, rr) => 'M' + (l + rr) + ',' + t + 'H' + (r - rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + r + ',' + (t + rr) + 'V' + (b - rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + (r - rr) + ',' + b + 'H' + (l + rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + l + ',' + (b - rr) + 'V' + (t + rr) + 'A' + rr + ',' + rr + ' 0 0 1 ' + (l + rr) + ',' + t + 'Z';
-    const flush = (exact) => { const d = exact || outline(); lq.style.setProperty('--clip', 'path("' + d + '")'); rim.setAttribute('d', d); shapes = []; };
+    const flush = (exact) => { const d = exact || outline(); lq.style.clipPath = 'path("' + d + '")'; rim.setAttribute('d', d); shapes = []; };
     const drawChain = (y, s, shrink) => { const N = 6; for (let i = 0; i < N; i++) { const f = (i + 1) / (N + 1), r = shrink != null ? shrink * (0.5 + 0.5 * f) : 15 * Math.pow(s, 0.8) * (0.45 + 0.55 * f); if (r >= 1.2) circ(cx0, cy0 + f * (y - cy0), r); } };
     const content = (l0) => {
       const rc = rectR.current, p = clamp((l0 - rc.l) / (l0 - OX), 0, 1);
@@ -6410,7 +6473,7 @@ function AccountButton() {
         if (ph === 'land' && Math.abs(E.l.x - OX) < 0.3 && Math.abs(E.b.x - OY - H) < 0.3 && Math.abs(E.t.x - OY) < 0.3 && Math.abs(E.r.x - R) < 0.3 && Math.abs(E.l.v) < 4 && Math.abs(E.b.v) < 4 && Math.abs(E.t.v) < 4) { settle(); ph = 'rest'; break; }
       }
       if (ph === 'rest') return;
-      if (ph === 'done') { lq.style.setProperty('--clip', 'polygon(0 0,0 0,0 0)'); rim.setAttribute('d', ''); bd.style.opacity = 0; return; }
+      if (ph === 'done') { lq.style.clipPath = 'polygon(0 0,0 0,0 0)'; rim.setAttribute('d', ''); bd.style.opacity = 0; return; }
       paint(); raf = requestAnimationFrame(tick);
     };
     paint(); raf = requestAnimationFrame(tick);
@@ -6428,7 +6491,7 @@ function AccountButton() {
   const go = (fn) => () => { closeMenu(); fn(); };
   return html`<div className="acct-wrap"><button className="acct-av glass" onClick=${() => (stage === 'open' ? closeMenu() : stage === 'closed' && setStage('open'))} aria-label="Account" aria-expanded=${stage === 'open'}>${c.profile && c.profile.avatar_url ? html`<img src=${c.profile.avatar_url} alt="" />` : html`<b>${(name || '?').trim().charAt(0).toUpperCase()}</b>`}<span className="sb-corner"><${SyncBadge} status=${c.status} size=${19} /></span></button>
     ${stage !== 'closed' && html`<div className=${cx('acct-menu', stage)}>
-      <div className="am-lq" ref=${lqR} aria-hidden="true"><svg className="am-rim"><path ref=${rimR} fill="none" /></svg></div>
+      <div className="am-lq" ref=${lqR} aria-hidden="true"></div><svg className="am-rim" aria-hidden="true"><path ref=${rimR} fill="none" /></svg>
       <div className="am-body" ref=${bodyR}><div className="am-top"><b>${name}</b><small>${c.profile && c.profile.username ? '@' + c.profile.username : c.user.email}</small></div>
         <p className=${'am-st ' + c.status}><${SyncBadge} status=${c.status} size=${16} />${label}</p>
         <button onClick=${go(() => { location.hash = '#/account'; })}><${Icon} n="fa-id-badge" /> Your account</button>
