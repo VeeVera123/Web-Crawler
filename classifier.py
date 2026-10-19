@@ -7719,8 +7719,18 @@ _RANK4_4B_STRICT_PLACE_RE = re.compile(
 # point anyway). Excludes a US state name in the "city" position (e.g.
 # "California, United States") — same "states do not qualify" policy as
 # _RANK4_PLACE_RE above; a state is not a city.
+# 2026-10 BUG FIX (real production leak: nesto, "Ontario, Canada", 4a):
+# the same "a state is not a city" rule now also covers Canadian
+# provinces/territories and Australian states in the city position.
+_NON_US_SUBDIVISIONS_FRAGMENT = (
+    r"Ontario|Quebec|Qu\u00e9bec|British\s+Columbia|Alberta|Manitoba|Saskatchewan"
+    r"|Nova\s+Scotia|New\s+Brunswick|Newfoundland(?:\s+and\s+Labrador)?"
+    r"|Prince\s+Edward\s+Island|Yukon|Nunavut|Northwest\s+Territories"
+    r"|New\s+South\s+Wales|Queensland|Western\s+Australia|South\s+Australia"
+    r"|Tasmania|Northern\s+Territory|Australian\s+Capital\s+Territory"
+)
 _RANK4_CITY_COMMA_COUNTRY_RE = re.compile(
-    r"^\s*(?!(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r")\s*,)"
+    r"^\s*(?!(?:" + _US_STATE_FULL_NAMES_FRAGMENT + r"|" + _NON_US_SUBDIVISIONS_FRAGMENT + r")\s*,)"
     r"[A-Za-z][A-Za-z.'\-]*(?:\s+[A-Za-z][A-Za-z.'\-]*){0,2}\s*,\s*"
     r"(?:" + _RANK4_ELIGIBLE_COUNTRIES_RE_FRAGMENT + r")\s*$",
     re.I,
