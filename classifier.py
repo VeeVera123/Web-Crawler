@@ -8437,6 +8437,42 @@ def rank4_text_eligibility_requirement_hit(job: dict) -> str | None:
     return None
 
 
+# 2026-10 (real leak: Flex / Jobgether / Nutritics, bare US / Canada rows whose JD had a single requirements bullet "In the US" or
+# "Located in the US"): when Rank 4 admitted on a NARROW place (one country), a JD line that merely re-states where the candidate
+# works or lives was not read as a restriction, because the hard checks want "only" / "must" / a verb + preposition + country.
+# Narrow-scope only: a bare-country location plus a JD line saying the person is based/located/working in a country IS the
+# restriction. Lines about the company itself (we / our / HQ / customers) and negated or offered wording are skipped.
+_RANK4_NARROW_RESIDENCE_RES = (
+    re.compile(r"\b(?:located|based|resid\w*|lives?|living|working|work(?:s|ed)?|reside[sd]?)\b[^.?!\n]{0,25}?\b(?:in|within|from)\s+(?:the\s+)?(?:"
+               + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b", re.I),
+    re.compile(r"^\W*(?:in|within|from)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\W*$", re.I),
+    re.compile(r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")[\s-]+based\b", re.I),
+)
+_RANK4_COMPANY_SELF_RE = re.compile(
+    r"\b(?:we|we're|our|company|headquarter\w*|HQ|offices?|customers?|clients?|founded|team\s+is|teams\s+are)\b", re.I)
+
+
+def rank4_text_narrow_residence_hit(job: dict) -> str | None:
+    desc = "\n".join(l for l in (job.get("description_snippet") or "").split("\n")
+                     if not l.strip().startswith(_APPLICATION_AUTH_QUESTION_MARKER))
+    for line in desc.split("\n"):
+        for sentence in _split_into_sentences(line):
+            sentence = sentence.strip()
+            if not sentence or not any(rx.search(sentence) for rx in _RANK4_NARROW_RESIDENCE_RES):
+                continue
+            if _RANK4_COMPANY_SELF_RE.search(sentence) and not re.search(r"\b(?:you|candidates?|applicants?|must|required?)\b", sentence, re.I):
+                continue
+            if (_REQUIREMENT_NEGATED_RE.search(sentence) or _SPONSOR_NOT_NEEDED_REMOTE_RE.search(sentence)
+                    or re.search(r"\b(?:no|not|n't|without)\b[^.?!]{0,30}\b(?:requir\w*|need\w*|necessary|have\s+to|must)\b", sentence, re.I)):
+                continue
+            if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not _RANK4_REQUIREMENT_FRAMING_RE.search(sentence):
+                continue
+            if _has_multi_region_breadth(sentence):
+                continue
+            return sentence[:200]
+    return None
+
+
 def _rank4_decide(job: dict) -> tuple[str | None, str | None, str | None]:
     """(priority, reason, rejected_by): rejected_by is None when admitted, else the name of
     the requirement that failed (stable codes used in logs and by revalidate)."""
@@ -8454,6 +8490,8 @@ def _rank4_decide(job: dict) -> tuple[str | None, str | None, str | None]:
             return None, None, "narrow_scope_eligibility_question"
         if rank4_text_eligibility_requirement_hit(job):
             return None, None, "narrow_scope_eligibility_requirement"
+        if rank4_text_narrow_residence_hit(job):
+            return None, None, "narrow_scope_residence_requirement"
     return priority, reason, None
 
 

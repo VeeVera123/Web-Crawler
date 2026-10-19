@@ -1796,3 +1796,11 @@ guard ("NOT restricted to US-based candidates only" was rejected as if it
 said the opposite). Full narrative, every confirmed false positive and
 the true positive it was checked against, in `CLASSIFICATION.md`'s
 "Top-to-bottom audit" section.
+
+## 2026-10: Rank 4 narrow-scope residence lines
+
+When Rank 4 admits on a single country (narrow scope), a JD line that places the candidate in a country now rejects
+(`narrow_scope_residence_requirement`): "In the US" as a bare bullet, "US based", "working within the United States",
+"located in the US". Lines about the company itself (we / our / HQ / customers), negated lines ("no requirement to be
+located in the US") and benefit wording are skipped. `Ontario, Canada`-style "Province, Country" locations no longer pass
+as "City, Country".
