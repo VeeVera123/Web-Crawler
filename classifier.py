@@ -5560,6 +5560,11 @@ def has_state_list_restriction_signal(job: dict) -> bool:
             if (_STATE_LIST_COMPANY_FOOTPRINT_RE.search(lead)
                     and not _STATE_LIST_FRAMING_RE.search(lead)):
                 continue
+            # 2026-10: pay-transparency boilerplate ("the estimated base pay range for this position in NY, CA, WA is $X")
+            # names states only to say which pay band applies. Read once the Lever scraper started including the closing block.
+            if (_PAY_BAND_RE.search(text[max(0, m.start() - 160):m.end() + 120])
+                    and not _STATE_LIST_FRAMING_RE.search(lead)):
+                continue
             return True
     # 2026-10 (adversarial-coverage pass, real-shape failing case: "We can
     # only hire in these states: California, Texas, New York, Washington."):
