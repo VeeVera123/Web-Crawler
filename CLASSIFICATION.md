@@ -1804,3 +1804,15 @@ When Rank 4 admits on a single country (narrow scope), a JD line that places the
 "located in the US". Lines about the company itself (we / our / HQ / customers), negated lines ("no requirement to be
 located in the US") and benefit wording are skipped. `Ontario, Canada`-style "Province, Country" locations no longer pass
 as "City, Country".
+
+## 2026-10: listing-page pagination (Crawl I HTML boards and Crawl II)
+
+`page_extract.find_pagination_urls` returns every URL that leads to another page of a listing, and both crawls queue all of
+them (visited-set; a page that adds nothing new is not expanded; ceiling 100 pages per board / listing, env
+`CRAWL_II_MAX_PAGES_PER_LISTING`). Signals, best first: `rel=next`; a next / load-more control (text, aria-label, title, alt, svg
+title or class token; English plus ~10 other languages; arrows; not disabled) reading its URL from `href`, `data-*`, `hx-get`,
+`onclick` navigation or a GET form's page input; numbered pagination; next-page keys in embedded JSON; and, only when the page
+shows a pager but offers no link, the current URL's own page parameter + 1. Same-site targets only. An icon-only arrow whose
+URL is also a titled link on the page is a job link, not a pager. A pager with no resolvable URL (JavaScript-only) is counted
+(`pagination_unresolved`) and listed in the end-of-run digest as `... pagination / js-only-pager`; those boards need a rendered
+browser and are the only ones that can still return page 1 only.

@@ -30,7 +30,7 @@ import html as html_lib
 import json
 import math
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -880,12 +880,63 @@ def sitemap_job_candidates(urls: list[str], limit: int = 400) -> list[dict]:
 
 # ── job-link candidates on a listing page (moved here from crawl_ii.py so Crawl I's generic board scraper can share it) ──
 
-NEXT_PAGE_TEXT_RE = re.compile(
-    r"^\s*(next(\s*page)?|older\s*(jobs|postings|roles)?|"
-    r"more\s*(jobs|roles|postings)?|show\s*more|load\s*more|view\s*more|"
-    r"»|>|›)\s*$",
-    re.I,
+# ── pagination ──────────────────────────────────────────────────────────────────────────────────────────────────────
+# 2026-10 (explicit user instruction: "it has to get them all"): the old finder matched only an <a> whose WHOLE text was one
+# of ~10 English phrases, so a board that paginated with numbered links, an icon-only arrow, "Next →", "Siguiente", a <button
+# data-url=...> or "Page 1 of 5" silently returned page 1 only. Everything below reads the page's own markup only (a link,
+# data attribute, form or JSON value that is really there); the single URL it may derive is the next value of a page
+# parameter the current URL already carries.
+_NEXT_WORDS = (
+    # English
+    r"next(?:\s*(?:page|\d+|set|results?|jobs?|postings?|roles?|openings?|positions?))*|older(?:\s*(?:jobs?|postings?|roles?|results?|posts?))?|"
+    r"more(?:\s*(?:jobs?|roles?|postings?|results?|openings?|positions?))?|(?:show|load|view|see|get)\s*more(?:\s*(?:jobs?|roles?|postings?|results?|openings?|positions?))?|"
+    r"(?:show|load|view|see)\s*(?:all|next)\s*(?:jobs?|roles?|postings?|results?)?|forward|go\s*to\s*next\s*page|"
+    # Spanish / Portuguese / Italian
+    r"siguiente(?:s)?(?:\s*p[a\u00e1]gina)?|p[a\u00e1]gina\s*siguiente|ver\s*m[a\u00e1]s|cargar\s*m[a\u00e1]s|mostrar\s*m[a\u00e1]s|"
+    r"pr[o\u00f3]xim[ao](?:\s*p[a\u00e1]gina)?|pr[o\u00f3]xima\s*p[a\u00e1]gina|ver\s*mais|carregar\s*mais|mostrar\s*mais|"
+    r"avanti|success(?:ivo|iva)|pagina\s*success(?:iva|ivo)|pi[u\u00f9]\s*risultati|carica\s*altri|mostra\s*altri|"
+    # French
+    r"suivant(?:e)?|page\s*suivante|voir\s*plus|charger\s*plus|afficher\s*plus|plus\s*d.offres|"
+    # German / Dutch / Nordic / Slavic / Turkish / Romanian / Asian
+    r"weiter|n[a\u00e4]chste(?:\s*seite)?|seite\s*weiter|mehr\s*(?:laden|anzeigen|jobs|stellen)|weitere\s*(?:stellen|jobs|ergebnisse|angebote)|"
+    r"volgende(?:\s*pagina)?|meer\s*(?:laden|tonen|vacatures)|n[a\u00e6]ste|neste|n[a\u00e4]sta|seuraava|"
+    r"nast[e\u0119]pn\w*|dal[s\u0161][i\u00ed]\w*|n[a\u00e1]sleduj\w*|urm[a\u0103]toarea|sonraki|daha\s*fazla|"
+    r"\u0441\u043b\u0435\u0434\u0443\u044e\u0449\w+|\u0434\u0430\u043b\u0435\u0435|\u0435\u0449\u0451|"
+    r"\u6b21\u3078|\u6b21\u306e\u30da\u30fc\u30b8|\u4e0b\u4e00\u9875|\u4e0b\u4e00\u9801|\u4e0b\u9875|\ub2e4\uc74c|\ub354\s*\ubcf4\uae30|\u0627\u0644\u062a\u0627\u0644\u064a"
 )
+_EDGE_JUNK_RE = re.compile(r"^[\W_]+|[\W_]+$")
+_RIGHT_ARROWS = "\u203a\u00bb>\u2192\u276f\u2771\u25b6\u25b8\u25ba\u2794\u279c\u27a1\u27e9\u3009\u21d2\u27f6\u2b95\u2192\u21a6\u25b7\u276d\u2759"
+NEXT_ARROW_ONLY_RE = re.compile(r"^[\s" + re.escape(_RIGHT_ARROWS) + r"]+$")
+_NEXT_WORDS_RE = re.compile(r"(?:" + _NEXT_WORDS + r")", re.I)
+_PREV_WORDS_RE = re.compile(
+    r"^(?:prev(?:ious)?(?:\s*page)?|back|newer|anterior|p[a\u00e1]gina\s*anterior|pr[e\u00e9]c[e\u00e9]dent(?:e)?|zur[u\u00fc]ck|vorherige(?:\s*seite)?|vorige|"
+    r"precedente|\u4e0a\u4e00\u9875|\u524d\u3078)$", re.I)
+
+
+def normalize_nav_text(text: str) -> str:
+    """Lower-cased, whitespace-collapsed, with arrows / punctuation trimmed off both ends ("Next →" -> "next")."""
+    return _EDGE_JUNK_RE.sub("", re.sub(r"\s+", " ", text or "").strip()).lower().strip()
+
+
+def is_next_label(text: str) -> bool:
+    """True for a pagination 'next' label in any of the supported phrasings / languages, with or without an arrow."""
+    raw = re.sub(r"\s+", " ", text or "").strip()
+    if not raw or len(raw) > 40:
+        return False
+    if NEXT_ARROW_ONLY_RE.match(raw):
+        return True
+    norm = normalize_nav_text(raw)
+    return bool(norm) and bool(_NEXT_WORDS_RE.fullmatch(norm))
+
+
+# Kept under the old name: the exact-phrase test other modules import.
+class _NextPageTextMatcher:
+    @staticmethod
+    def match(text):
+        return True if is_next_label(text) else None
+
+
+NEXT_PAGE_TEXT_RE = _NextPageTextMatcher()
 
 JOB_HREF_RE = re.compile(
     r"/(?:job|jobs|career|careers|position|positions|opening|openings|"
@@ -905,53 +956,341 @@ NAV_TEXT_BLOCKLIST_RE = re.compile(
     r"load more|back to (search|jobs|careers)|share this job)$", re.I)
 
 
-def find_next_page_url(html: str, page_url: str) -> str | None:
-    """Best-effort 'next page' detection for a paginated job-listing page.
+_NEXT_TOKEN_RE = re.compile(
+    r"^(?:[a-z0-9]*[-_]+)*(?:next|nextpage|load[-_]?more|show[-_]?more|view[-_]?more|see[-_]?more|chevron[-_]?right|"
+    r"angle[-_]?right|arrow[-_]?right|caret[-_]?right|right[-_]?arrow|right[-_]?chevron|forward)(?:[-_]+[a-z0-9]*)*$")
+_NEXT_TOKEN_BLOCK = ("__next", "nextjs", "next-js", "next-auth", "nextdoor", "next-line", "nextline")
+_DISABLED_TOKEN_RE = re.compile(r"(?:^|[-_ ])(?:disabled|inactive|unavailable|hidden)(?:$|[-_ ])", re.I)
+_PAGINATION_CONTAINER_RE = re.compile(r"(?:^|[-_ ])(?:pagination|paginator|pager|paging|page[-_]?nav\w*|pages)(?:$|[-_ ])", re.I)
+_PAGE_PARAMS = ("page", "pg", "p", "pagenumber", "page_number", "pageindex", "page_index", "paged", "pagenum", "page_num", "currentpage")
+_URL_DATA_ATTRS = ("href", "data-href", "data-url", "data-next", "data-next-url", "data-next-page", "data-next-page-url",
+                   "data-load-more-url", "data-more-url", "data-endpoint", "data-path", "data-page-url", "data-link", "hx-get",
+                   "formaction", "data-action-url", "data-src-url")
+_ONCLICK_URL_RE = re.compile(
+    r"(?:location(?:\.href)?|window\.open|window\.location(?:\.href)?|location\.assign|location\.replace)\s*[=(]\s*['\"]([^'\"]+)['\"]")
+_JSON_NEXT_KEY_RE = re.compile(
+    r"[\"'](?:next_?page_?url|next_?page_?link|next_?url|next_?link|load_?more_?url|more_?url|nextHref|next_?href)[\"']\s*:\s*[\"']([^\"']+)[\"']", re.I)
+_PAGE_X_OF_Y_RE = re.compile(r"\bpage\s+(\d{1,4})\s*(?:of|/)\s*(\d{1,4})\b|\b(\d{1,4})\s*(?:of|/)\s*(\d{1,4})\s+pages\b", re.I)
 
-    Two signals, in order of confidence:
-      1. <link rel="next" href="..."> in <head> — the standards-based
-         signal, when a site bothers to emit it.
-      2. An <a> whose rel="next", OR whose visible text/aria-label matches
-         a common 'next page' phrasing (NEXT_PAGE_TEXT_RE — the same
-         phrase list NAV_TEXT_BLOCKLIST_RE already recognizes as non-job
-         nav chrome, just used here as the positive signal it actually is).
 
-    Deliberately NEVER constructs or guesses a URL (e.g. incrementing a
-    ?page=N query param) — only a link that actually appears as a real
-    href in this page's own HTML is ever returned, so a company using a
-    URL scheme this project hasn't seen before can't cause a fabricated
-    fetch. Returns an absolute URL, or None if no next-page signal found.
-    """
+def _site_key(url: str) -> str:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    parts = host.split(".")
+    if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "net", "gov", "ac") and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _classes(node) -> list[str]:
+    return [t.lower() for t in (node.attributes.get("class") or "").split() if t]
+
+
+def _is_disabled(node) -> bool:
+    a = node.attributes
+    if "disabled" in a or (a.get("aria-disabled") or "").lower() == "true" or (a.get("tabindex") == "-1" and not a.get("href")):
+        return True
+    own = " ".join(_classes(node))
+    par = node.parent
+    par_cls = " ".join(_classes(par)) if par is not None and par.tag in ("li", "span", "div") else ""
+    return bool(_DISABLED_TOKEN_RE.search(own) or _DISABLED_TOKEN_RE.search(par_cls))
+
+
+def _node_label_texts(node) -> list[str]:
+    out = [node.text(deep=True, separator=" ").strip()]
+    a = node.attributes
+    for k in ("aria-label", "title", "data-label", "value", "alt"):
+        if a.get(k):
+            out.append(a[k])
+    try:
+        for img in node.css("img[alt]"):
+            out.append(img.attributes.get("alt") or "")
+        for t in node.css("svg title, svg desc"):
+            out.append(t.text(deep=True).strip())
+    except Exception:
+        pass
+    return [t for t in out if t]
+
+
+def _has_next_token(node) -> bool:
+    """A 'next' class / id / data-testid token on the control itself (short text only: a whole job card that is one <a> must not
+    count), or a next-looking icon class (fa-chevron-right, icon-arrow-right) INSIDE a control that has no text of its own."""
+    text = re.sub(r"\s+", " ", node.text(deep=True, separator=" ").strip())
+    own = _classes(node)
+    for k in ("id", "data-testid", "data-test", "data-qa", "data-cy", "data-action", "data-role", "name"):
+        v = (node.attributes.get(k) or "").lower().strip()
+        if v:
+            own.append(v)
+    if len(text) <= 25 and len(text.split()) <= 3:
+        for t in own:
+            if not t.startswith(_NEXT_TOKEN_BLOCK) and _NEXT_TOKEN_RE.match(t):
+                return True
+    if not re.search(r"[^\W_]", text):          # icon-only control
+        try:
+            for ic in node.css("i, svg, span"):
+                for t in _classes(ic):
+                    if not t.startswith(_NEXT_TOKEN_BLOCK) and _NEXT_TOKEN_RE.match(t):
+                        return True
+        except Exception:
+            pass
+    return False
+
+
+def _node_urls(node, page_url: str) -> list[str]:
+    """Every URL this control carries in its own markup: href, data-* / hx-get attributes, onclick navigation, GET-form."""
+    out = []
+    for k in _URL_DATA_ATTRS:
+        v = (node.attributes.get(k) or "").strip()
+        if v and not v.startswith(("#", "javascript:", "mailto:", "tel:")) and " " not in v:
+            out.append(v)
+    oc = node.attributes.get("onclick") or ""
+    m = _ONCLICK_URL_RE.search(oc)
+    if m:
+        out.append(m.group(1))
+    # <button> inside a GET form whose page-number input we can read: next = that value + 1
+    anc = node.parent
+    for _ in range(6):
+        if anc is None:
+            break
+        if anc.tag == "form" and (anc.attributes.get("method") or "get").lower() == "get":
+            action = anc.attributes.get("action") or page_url
+            q = {}
+            for inp in anc.css("input[name]"):
+                nm, val = inp.attributes.get("name") or "", inp.attributes.get("value") or ""
+                if (inp.attributes.get("type") or "").lower() in ("submit", "button", "checkbox", "radio", "file"):
+                    continue
+                q[nm] = val
+            for nm in list(q):
+                if nm.lower() in _PAGE_PARAMS and q[nm].isdigit():
+                    q[nm] = str(int(q[nm]) + 1)
+                    out.append(action + ("&" if "?" in action else "?") + "&".join(f"{k}={v}" for k, v in q.items()))
+                    break
+            break
+        anc = anc.parent
+    resolved = []
+    for u in out:
+        try:
+            resolved.append(urljoin(page_url, u))
+        except ValueError:
+            continue
+    return resolved
+
+
+def _page_param_url(url: str, delta: int = 1) -> str | None:
+    """The same URL with its OWN page-number parameter (?page=2, /page/2/) moved by delta, or None if it carries none."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    q = parse_qsl(parsed.query, keep_blank_values=True)
+    for i, (k, v) in enumerate(q):
+        if k.lower() in _PAGE_PARAMS and v.isdigit():
+            q[i] = (k, str(max(int(v) + delta, 0)))
+            return parsed._replace(query=urlencode(q)).geturl()
+    m = re.search(r"(/(?:page|pages|p|seite|pagina)/)(\d{1,4})(/?)$", parsed.path, re.I)
+    if m:
+        return parsed._replace(path=parsed.path[:m.start()] + m.group(1) + str(int(m.group(2)) + delta) + m.group(3)).geturl()
+    return None
+
+
+def _page_number_of(url: str) -> int | None:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    for k, v in parse_qsl(parsed.query):
+        if k.lower() in _PAGE_PARAMS and v.isdigit():
+            return int(v)
+    m = re.search(r"/(?:page|pages|p|seite|pagina)/(\d{1,4})/?$", parsed.path, re.I)
+    return int(m.group(1)) if m else None
+
+
+def _in_pagination_container(node) -> bool:
+    anc = node
+    for _ in range(6):
+        if anc is None:
+            return False
+        blob = " ".join(_classes(anc) + [anc.attributes.get("id") or "", anc.attributes.get("aria-label") or "",
+                                          anc.attributes.get("role") or "", anc.attributes.get("data-testid") or ""])
+        if anc.tag == "nav" and re.search(r"pag|page", blob, re.I):
+            return True
+        if _PAGINATION_CONTAINER_RE.search(blob):
+            return True
+        anc = anc.parent
+    return False
+
+
+def find_pagination_urls(html: str, page_url: str) -> list[str]:
+    """Every URL that leads to another page of THIS listing, best-signal first, from the page's own markup:
+
+      1. <link rel="next"> / <a rel="next">;
+      2. any control (a / button / role=button / li / icon) whose text, aria-label, title, alt, svg <title> or class token says
+         'next' / 'load more' / an arrow, in English or 10+ other languages (not disabled), reading its URL from href,
+         data-href / data-url / data-next*, hx-get, onclick navigation or a GET form's page input;
+      3. numbered pagination ("1 2 3 ... 10"): every numbered link of the same listing, the pages after the current one first;
+      4. next-page URL keys in embedded JSON (next_page_url, nextLink, ...);
+      5. the current URL's own page parameter + 1 ("?page=2" -> "?page=3", "/page/2/" -> "/page/3/") when the page shows
+         pagination but offers no resolvable link.
+    Same-site only; never the page itself. Callers follow all of them (visited-set + 'adds nothing new' end the walk)."""
     try:
         tree = LexborHTMLParser(html)
     except Exception:
-        return None
+        return []
+    site = _site_key(page_url)
+    found: list[str] = []
+    seen: set[str] = set()
 
-    link_next = tree.css_first('link[rel="next"]')
-    if link_next is not None:
-        href = link_next.attributes.get("href")
-        if href:
+    def add(u: str, trusted: bool = False):
+        try:
+            u = urljoin(page_url, u).split("#")[0]
+            pu = urlparse(u)
+        except ValueError:
+            return
+        if pu.scheme not in ("http", "https") or u == page_url.split("#")[0] or u in seen:
+            return
+        if not trusted and _site_key(u) != site:
+            return
+        seen.add(u)
+        found.append(u)
+
+    # 1. standards signals
+    for ln in tree.css('link[rel~="next"]'):
+        if ln.attributes.get("href"):
+            add(ln.attributes["href"], trusted=True)
+    for a in tree.css('a[rel~="next"], a[rel~="Next"]'):
+        for u in _node_urls(a, page_url):
+            add(u, trusted=True)
+
+    # hrefs that carry a real text title on this page are job / content links; an icon-only arrow pointing at one of them
+    # ("Bangalore, India  ->") opens that job, it does not page the list
+    titled_hrefs: set[str] = set()
+    for a in tree.css("a[href]"):
+        t_ = re.sub(r"\s+", " ", a.text(deep=True, separator=" ").strip())
+        if len(t_.split()) >= 2 and not is_next_label(t_):
             try:
-                return urljoin(page_url, href)
+                titled_hrefs.add(urljoin(page_url, a.attributes.get("href") or "").split("#")[0])
             except ValueError:
                 pass
 
+    # 2. next / load-more controls
+    for node in tree.css("a, button, [role=button], [role=link], li, span, div, input[type=button], input[type=submit]"):
+        tag = node.tag
+        if tag in ("span", "div", "li"):
+            a_ = node.attributes
+            if not (a_.get("role") in ("button", "link") or a_.get("onclick") or any(k in a_ for k in _URL_DATA_ATTRS)):
+                continue
+        if _is_disabled(node):
+            continue
+        labels = _node_label_texts(node)
+        is_prev = any(_PREV_WORDS_RE.match(normalize_nav_text(t)) for t in labels) or "prev" in (node.attributes.get("rel") or "").lower()
+        if is_prev:
+            continue
+        labelled = any(is_next_label(t) for t in labels)
+        if labelled or (_has_next_token(node) and (tag in ("a", "button") or _in_pagination_container(node))):
+            for u in _node_urls(node, page_url):
+                if not labelled and u.split("#")[0] in titled_hrefs:
+                    continue
+                add(u)
+
+    # list-item wrappers: <li class="next"><a href=...>
+    for li in tree.css("li, span, div"):
+        if _is_disabled(li) or any(_classes(li) and t.startswith(_NEXT_TOKEN_BLOCK) for t in _classes(li)):
+            continue
+        if any(_NEXT_TOKEN_RE.match(t) and not t.startswith(_NEXT_TOKEN_BLOCK) for t in _classes(li)) and (
+                li.tag == "li" or _in_pagination_container(li)):
+            for a in li.css("a[href]"):
+                if not _is_disabled(a) and not any(_PREV_WORDS_RE.match(normalize_nav_text(t)) for t in _node_label_texts(a)):
+                    for u in _node_urls(a, page_url):
+                        add(u)
+
+    # 3. numbered pagination
+    numbered: dict[int, str] = {}
+    current = _page_number_of(page_url)
     for a in tree.css("a[href]"):
-        href = a.attributes.get("href") or ""
+        href = (a.attributes.get("href") or "").strip()
         if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
             continue
-        rel = (a.attributes.get("rel") or "").lower().split()
-        text = a.text(deep=True, separator=" ").strip()
-        aria = (a.attributes.get("aria-label") or "").strip()
-        if "next" in rel or NEXT_PAGE_TEXT_RE.match(text) or NEXT_PAGE_TEXT_RE.match(aria):
-            try:
-                resolved = urljoin(page_url, href)
-                parsed = urlparse(resolved)
-            except ValueError:
+        txt = re.sub(r"\s+", " ", a.text(deep=True, separator=" ").strip())
+        aria = (a.attributes.get("aria-label") or a.attributes.get("title") or "")
+        m = re.fullmatch(r"\d{1,4}", txt) or re.fullmatch(r"(?:go to |goto |page |p\.? ?|seite |p\u00e1gina |pagina )\s*(\d{1,4})", aria.strip(), re.I)
+        if not m:
+            continue
+        n = int(m.group(1) if m.groups() else m.group(0))
+        try:
+            full = urljoin(page_url, href).split("#")[0]
+        except ValueError:
+            continue
+        if not (_in_pagination_container(a) or _page_number_of(full) is not None or _page_param_url(full, 0)):
+            continue
+        if (a.attributes.get("aria-current") or "").lower() in ("page", "true") or any(
+                t in ("active", "current", "selected", "is-active", "is-current") for t in _classes(a) + (_classes(a.parent) if a.parent is not None else [])):
+            current = n
+            continue
+        numbered.setdefault(n, full)
+    if numbered:
+        after = sorted(n for n in numbered if current is None or n > current)
+        before = sorted((n for n in numbered if current is not None and n < current), reverse=True)
+        for n in after:
+            add(numbered[n])
+        for n in before:
+            add(numbered[n])
+
+    # 4. embedded JSON
+    for sc in tree.css("script"):
+        body = sc.text(deep=True) or ""
+        if len(body) > 2_000_000 or not body.strip().startswith(("{", "[", "window.", "var ", "self.")) and (sc.attributes.get("type") or "") not in ("application/json", "application/ld+json"):
+            continue
+        for m in _JSON_NEXT_KEY_RE.finditer(body):
+            add(m.group(1).replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&"))
+
+    # 5. the URL's own page parameter + 1, only when the page shows pagination but offered nothing resolvable
+    if not found and pagination_control_present(html):
+        nxt = _page_param_url(page_url, 1)
+        if nxt:
+            add(nxt)
+    return found
+
+
+def pagination_control_present(html: str) -> bool:
+    """True when the page shows ANY sign of more pages (a next / load-more control that is not disabled, a numbered pager,
+    'Page 1 of N' with N > 1). Used to flag boards whose extra pages could not be resolved to a URL (JavaScript-only)."""
+    try:
+        tree = LexborHTMLParser(html)
+    except Exception:
+        return False
+    for node in tree.css("a, button, [role=button], input[type=button], input[type=submit]"):
+        if _is_disabled(node):
+            continue
+        labels = _node_label_texts(node)
+        if any(_PREV_WORDS_RE.match(normalize_nav_text(t)) for t in labels):
+            continue
+        if any(is_next_label(t) for t in labels):
+            return True
+        if _has_next_token(node) and (node.tag in ("a", "button") or _in_pagination_container(node)):
+            if node.tag == "a" and any(len(re.sub(r"\s+", " ", o.text(deep=True, separator=" ").strip()).split()) >= 2
+                                       and o.attributes.get("href") == node.attributes.get("href") and o is not node
+                                       for o in tree.css("a[href]")):
                 continue
-            if parsed.scheme in ("http", "https") and resolved != page_url:
-                return resolved
-    return None
+            return True
+    for a in tree.css("a[href]"):
+        txt = a.text(deep=True, separator=" ").strip()
+        if re.fullmatch(r"\d{1,4}", txt) and txt != "1" and _in_pagination_container(a):
+            return True
+    m = _PAGE_X_OF_Y_RE.search(tree.body.text(deep=True, separator=" ") if tree.body is not None else "")
+    if m:
+        total = int(m.group(2) or m.group(4) or 0)
+        if total > 1:
+            return True
+    return False
+
+
+def find_next_page_url(html: str, page_url: str) -> str | None:
+    """First pagination URL on the page, or None. Kept for callers that follow a single chain; the crawls use
+    find_pagination_urls and walk all of them."""
+    urls = find_pagination_urls(html, page_url)
+    return urls[0] if urls else None
 
 
 HEADING_SELECTOR = "h1,h2,h3,h4,h5,h6,[class*=title],[class*=heading],[class*=job-name],[class*=jobname],strong"

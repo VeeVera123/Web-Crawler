@@ -230,7 +230,7 @@ RETRY_CONCURRENCY = int(os.environ.get("CRAWL_II_RETRY_CONCURRENCY", "100"))
 # caps how many listing pages of ONE company's job board this file will
 # walk before giving up, so a company with an unusually deep or looping
 # pagination scheme can't blow the time budget for the whole shard.
-MAX_ARCHIVE_II_PAGES_PER_LISTING = int(os.environ.get("CRAWL_II_MAX_PAGES_PER_LISTING", "15"))
+MAX_ARCHIVE_II_PAGES_PER_LISTING = int(os.environ.get("CRAWL_II_MAX_PAGES_PER_LISTING", "100"))
 
 # Matches the exact "next page" phrasings _NAV_TEXT_BLOCKLIST_RE already
 # treats as nav chrome, not a job title (see that regex above) — reused
@@ -512,6 +512,8 @@ _JOB_HREF_RE = PE.JOB_HREF_RE
 _GENERIC_LINK_TEXT_RE = PE.GENERIC_LINK_TEXT_RE
 _NAV_TEXT_BLOCKLIST_RE = PE.NAV_TEXT_BLOCKLIST_RE
 _find_next_page_url = PE.find_next_page_url
+_find_pagination_urls = PE.find_pagination_urls
+_pagination_control_present = PE.pagination_control_present
 _card_title = PE.card_title
 _find_heuristic_candidates = PE.find_job_link_candidates
 
@@ -1050,19 +1052,29 @@ async def _walk_pagination(session: aiohttp.ClientSession, sem: asyncio.Semaphor
     seen_all = set(getattr(first_postings, "all_urls", set())) | seen_urls
     seen_pages = {first_url}
     loop = asyncio.get_running_loop()
-    current_html, current_url = first_html, first_url
 
-    for _ in range(MAX_ARCHIVE_II_PAGES_PER_LISTING - 1):
-        next_url = await loop.run_in_executor(parse_pool, _find_next_page_url, current_html, current_url)
-        if not next_url or next_url in seen_pages:
-            break
+    # 2026-10 (explicit user instruction: "it has to get them all"): every pagination URL a page offers is queued, not
+    # just the first "next" link -- numbered pages, load-more data attributes, rel=next, JSON next keys (see
+    # page_extract.find_pagination_urls). A page that adds nothing new is not expanded further, so a wrong "next" cannot
+    # loop; MAX_ARCHIVE_II_PAGES_PER_LISTING stays as the runaway ceiling.
+    queue = list(await loop.run_in_executor(parse_pool, _find_pagination_urls, first_html, first_url))
+    if not queue and await loop.run_in_executor(parse_pool, _pagination_control_present, first_html):
+        stats["pagination_unresolved"] = stats.get("pagination_unresolved", 0) + 1
+        run_log.add("crawl_ii pagination", 1, first_url, "js-only-pager", "WARN")
+    followed = 0
+    while queue and followed < MAX_ARCHIVE_II_PAGES_PER_LISTING - 1:
+        next_url = queue.pop(0)
+        if next_url in seen_pages:
+            continue
         seen_pages.add(next_url)
         async with sem:
             fetched = await node._fetch_page(session, next_url, stats)
         if not fetched:
-            break
+            continue
+        followed += 1
         stats["pagination_pages_followed"] += 1
         next_final_url, next_html = fetched
+        seen_pages.add(next_final_url)
         next_postings = await _extract_via_jsonld_or_heuristic(
             session, sem, next_html, next_final_url, company, stats, parse_pool)
 
@@ -1078,9 +1090,15 @@ async def _walk_pagination(session: aiohttp.ClientSession, sem: asyncio.Semaphor
         fresh_urls = set(getattr(next_postings, "all_urls", set())) - seen_all
         seen_all |= fresh_urls
         if new_count == 0 and not fresh_urls:
-            break
+            continue
         stats["pagination_extra_postings"] += new_count
-        current_html, current_url = next_html, next_final_url
+        more = await loop.run_in_executor(parse_pool, _find_pagination_urls, next_html, next_final_url)
+        for u in more:
+            if u not in seen_pages and u not in queue:
+                queue.append(u)
+        if not more and await loop.run_in_executor(parse_pool, _pagination_control_present, next_html):
+            stats["pagination_unresolved"] = stats.get("pagination_unresolved", 0) + 1
+            run_log.add("crawl_ii pagination", 1, next_final_url, "js-only-pager", "WARN")
 
     return _Postings(all_postings, all_urls=seen_all)
 
@@ -2095,7 +2113,7 @@ async def _run_shard(shard: int, total_shards: int) -> None:
         "heuristic_pages": 0, "heuristic_postings": 0, "no_postings_found": 0,
         "apply_page_augmented": 0,
         "career_link_follow_attempted": 0, "career_link_follow_found_postings": 0,
-        "pagination_pages_followed": 0, "pagination_extra_postings": 0,
+        "pagination_pages_followed": 0, "pagination_extra_postings": 0, "pagination_unresolved": 0,
         "microdata_pages": 0, "state_json_pages": 0, "structured_postings": 0, "detail_enriched": 0,
         "role_prefilter_skipped": 0, "frames_followed": 0, "frame_found_postings": 0,
         "ats_bridge_pages": 0, "ats_bridge_postings": 0, "feed_found_postings": 0, "wp_api_found_postings": 0,
@@ -2171,7 +2189,8 @@ async def _run_shard(shard: int, total_shards: int) -> None:
     log.info(f"  Career-link follow: {stats['career_link_follow_attempted']} links followed, "
              f"{stats['career_link_follow_found_postings']} of those pages had postings")
     log.info(f"  Pagination: {stats['pagination_pages_followed']} extra listing pages followed, "
-             f"{stats['pagination_extra_postings']} extra postings found on them")
+             f"{stats['pagination_extra_postings']} extra postings found on them, "
+             f"{stats['pagination_unresolved']} pages show a pager with no resolvable URL (JavaScript-only)")
 
     log_egress_summary(label=f"crawl_ii shard {shard}/{total_shards}")
 

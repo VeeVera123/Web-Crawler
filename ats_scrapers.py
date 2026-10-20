@@ -7477,7 +7477,7 @@ async def scrape_traffit(slug: str) -> list[dict]:
 # Description and, where the list shows none (Factorial, Loxo), location come from the job page via
 # _fetch_generic_description. Verified live: Freshteam (ninjacart, fintastic), PeopleForce (takenos), Factorial (digitail),
 # Loxo (mastec-purnell-canada-inc).
-_HTML_BOARD_MAX_PAGES = 15
+_HTML_BOARD_MAX_PAGES = 100
 
 
 def _card_text(node, selector: str) -> str:
@@ -7564,17 +7564,23 @@ async def _scrape_html_board(kind: str, slug: str) -> list[dict]:
     href_re = re.compile(href_pat)
     url, seen_pages, jobs, seen_urls = list_url.format(slug=slug), set(), [], set()
     company = slug.replace("-", " ").replace("_", " ").title()
-    while url and url not in seen_pages and len(seen_pages) < _HTML_BOARD_MAX_PAGES:
+    queue: list[str] = [url]
+    while queue and len(seen_pages) < _HTML_BOARD_MAX_PAGES:
+        url = queue.pop(0)
+        if url in seen_pages:
+            continue
         seen_pages.add(url)
         r = await _get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
         if not r or r.status_code != 200:
-            break
+            continue    # one dead queued page must not end the walk of the others
         html = r.text
         try:
             tree = LexborHTMLParser(html)
         except Exception:
-            break
+            continue
         page_url = str(r.url)
+        seen_pages.add(page_url)
+        added_here = 0
         for a in tree.css("a[href]"):
             href = (a.attributes.get("href") or "").strip()
             if not href_re.search(href):
@@ -7589,13 +7595,24 @@ async def _scrape_html_board(kind: str, slug: str) -> list[dict]:
             if not title:
                 continue
             seen_urls.add(full)
+            added_here += 1
             jobs.append({
                 "title": title, "url": full, "company": company,
                 "location": card.get("location", ""), "country": "", "department": card.get("department", ""),
                 "workplace_type": card.get("workplace_type", ""), "employment_type": card.get("employment_type", ""),
                 "salary": "", "description_snippet": "", "source_ats": label, "slug": slug,
             })
-        url = page_extract.find_next_page_url(html, page_url)
+        # 2026-10: queue EVERY pagination URL (numbered pages, load-more data attributes, rel=next, ...), not only the first
+        # "next" link; a page that added no new job is not expanded, so a wrong "next" cannot loop.
+        if added_here or len(seen_pages) == 1:
+            more = page_extract.find_pagination_urls(html, page_url)
+            queue.extend(u for u in more if u not in seen_pages and u not in queue)
+            if not more and page_extract.pagination_control_present(html):
+                try:
+                    import run_log
+                    run_log.add(f"{label} pagination", 1, page_url, "js-only-pager", "WARN")
+                except Exception:
+                    pass
     return jobs
 
 
