@@ -4884,7 +4884,7 @@ def fetch_commoncrawl_slugs(n_crawls: int = 3, cc_shard: int | None = None,
 # per this project's non-negotiable robots.txt policy we still check
 # web.archive.org/robots.txt live before every run rather than assume.
 
-WAYBACK_CDX_URL = "http://web.archive.org/cdx/search/cdx"
+WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
 # ADP's own patterns, still called out by name here since the legacy
 # family below needs its own explanation — CC_PLATFORM_PATTERNS["adp"]
 # holds these same two entries verbatim, this isn't a second definition
@@ -5016,6 +5016,39 @@ _WAYBACK_MAX_PAGES = 500  # safety cap on resumeKey pagination, see below
 # spent in parallel, not stacked onto one run's wall-clock.
 
 
+_WAYBACK_FAILED_PATTERNS: list[str] = []
+_WAYBACK_RETRY_WAITS = (5, 15, 45, 90, 180)   # seconds before attempt 2..6; IA throttles bursts and drops connections
+_wayback_session = None
+
+
+def _wayback_cdx_get(params: dict, pattern: str, page_num: int):
+    """One CDX page as parsed JSON, or None after all retries.
+
+    2026-10: the old call used plain http:// (port 80), tried once, and `break`-ed the whole pattern on the first error -- a
+    run logged "NewConnectionError" for 23 first pages and for page 21 of boards.greenhouse.io and then reported the (truncated)
+    slug count as if it were complete. https, one pooled session, and a retry with growing waits on connection errors /
+    timeouts / 429 / 5xx; the SAME page (same resumeKey) is retried, so nothing is skipped."""
+    global _wayback_session
+    if _wayback_session is None:
+        _wayback_session = requests.Session()
+        _wayback_session.headers.update({"User-Agent": _ROBOTS_UA})
+    last = None
+    for attempt in range(len(_WAYBACK_RETRY_WAITS) + 1):
+        try:
+            r = _wayback_session.get(WAYBACK_CDX_URL, params=params, timeout=90)
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise requests.HTTPError(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            rows = r.json()
+            return rows if rows is not None else []
+        except Exception as e:
+            last = e
+            if attempt < len(_WAYBACK_RETRY_WAITS):
+                time.sleep(_WAYBACK_RETRY_WAITS[attempt] + random.random() * 3)
+    log.warning(f"Wayback CDX query failed for {pattern} (page {page_num}) after {len(_WAYBACK_RETRY_WAITS) + 1} attempts: {last}")
+    return None
+
+
 def _fetch_wayback_cdx_urls(pattern: str, page_limit: int) -> list[str]:
     """One CDX pattern, fully paginated via resumeKey.
 
@@ -5046,13 +5079,10 @@ def _fetch_wayback_cdx_urls(pattern: str, page_limit: int) -> list[str]:
         }
         if resume_key:
             params["resumeKey"] = resume_key
-        try:
-            r = requests.get(WAYBACK_CDX_URL, params=params, timeout=60,
-                              headers={"User-Agent": _ROBOTS_UA})
-            r.raise_for_status()
-            rows = r.json()
-        except Exception as e:
-            log.warning(f"Wayback CDX query failed for {pattern} (page {page_num}): {e}")
+        rows = _wayback_cdx_get(params, pattern, page_num)
+        if rows is None:
+            _WAYBACK_FAILED_PATTERNS.append(pattern)
+            run_log.add("wayback cdx", 1, f"{pattern} gave up at page {page_num} with {len(urls)} URLs kept", "incomplete", "WARN")
             break
         if not rows or not isinstance(rows, list):
             break
@@ -5141,6 +5171,9 @@ def fetch_wayback_slugs(limit: int = 5000, platforms: list[str] | None = None,
             log.info(f"  {ats}: {len(slugs)} companies from Wayback Machine")
             slugs_by_ats[ats] = slugs
 
+    if _WAYBACK_FAILED_PATTERNS:
+        log.warning(f"Wayback CDX INCOMPLETE: {len(_WAYBACK_FAILED_PATTERNS)} pattern(s) gave up after retries, so the slug counts "
+                    f"above are partial for: {', '.join(sorted(set(_WAYBACK_FAILED_PATTERNS))[:20])}")
     return _drop_dead_cc_slugs(slugs_by_ats, "Wayback")
 
 
