@@ -4655,6 +4655,36 @@ _TEAM_OR_COMPANY_CONTEXT_RE = re.compile(
     re.I,
 )
 
+# 2026-10 BUG FIX (real leak: Jobgether Lever postings, "Our partner is looking for a VP of Customer Success based in the
+# United States."): the guard above skips a whole sentence as soon as it contains "team" / "company" / "office" / "partner ...
+# based in", so a sentence that ALSO states a candidate rule was never read. Three shapes say who the hire is, whatever
+# company word sits in the sentence: "looking for / seeking / hiring ... <someone> based in X", "you / candidates must be
+# based/located/reside in X", and "requires ... to be based/located/live in X".
+_CANDIDATE_BINDING_OVERRIDE_RE = re.compile(
+    r"\b(?:looking\s+for|seeking|searching\s+for|in\s+search\s+of|hiring|recruiting)\b(?:(?!\b(?:customers|clients|users|"
+    r"vendors|suppliers|merchants|patients)\b)[^.?!]){0,80}\b(?:based|located|residing|living|resident|residents)\s+(?:in|within)\b"
+    r"|\b(?:must|need\s+to|have\s+to|needs\s+to|has\s+to|required\s+to|should|will\s+need\s+to)\s+(?:currently\s+)?(?:be\s+)?"
+    r"(?:based|located|resid\w+|live|living)\b"
+    r"|\b(?:requires?|required|requiring)\b[^.?!]{0,40}\bto\s+(?:be\s+)?(?:based|located|resid\w+|live)\b",
+    re.I,
+)
+
+
+class _CompanyContextGuard:
+    """_TEAM_OR_COMPANY_CONTEXT_RE with the candidate-binding override: a sentence that states a rule about the hire is
+    never treated as a description of the company."""
+
+    def __init__(self, rx):
+        self._rx = rx
+
+    def search(self, text, *a, **k):
+        if _CANDIDATE_BINDING_OVERRIDE_RE.search(text):
+            return None
+        return self._rx.search(text, *a, **k)
+
+
+_TEAM_OR_COMPANY_CONTEXT_RE = _CompanyContextGuard(_TEAM_OR_COMPANY_CONTEXT_RE)
+
 # 2026-09 BUG FIX (explicit user report, real posting: CentralReach's
 # Greenhouse "Customer Success Lead" — "...we will consider remote
 # candidates located in other U.S. states for the right individual." The
@@ -8428,6 +8458,11 @@ def rank4_text_eligibility_requirement_hit(job: dict) -> str | None:
     for sentence in _split_into_sentences(desc + "\n" + (job.get("title") or "")):
         if not sentence.strip() or not any(rx.search(sentence) for rx in _ELIG_TEXT_RES):
             continue
+        # 2026-10: E-Verify notices ("E-Verify is not used to pre-screen candidates and is only initiated upon hire") are legal
+        # boilerplate on every US employer's posting, not an eligibility requirement. Seen on Metabase's worldwide role once
+        # the Lever scraper started reading the closing block of the posting.
+        if re.search(r"\be-?verify\b", sentence, re.I):
+            continue
         if not _ELIG_TEXT_REQUIREMENT_RE.search(sentence):
             continue
         if _RANK4_BENEFIT_FRAMING_RE.search(sentence) and not re.search(
@@ -8446,7 +8481,8 @@ _RANK4_NARROW_RESIDENCE_RES = (
     re.compile(r"\b(?:located|based|resid\w*|lives?|living|working|work(?:s|ed)?|reside[sd]?)\b[^.?!\n]{0,25}?\b(?:in|within|from)\s+(?:the\s+)?(?:"
                + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\b", re.I),
     re.compile(r"^\W*(?:in|within|from)\s+(?:the\s+)?(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")\W*$", re.I),
-    re.compile(r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")[\s-]+based\b", re.I),
+    re.compile(r"\b(?:" + _COUNTRY_AUTH_NAMES_RE_FRAGMENT + r")[\s-]+based\b(?!\s+(?:employees?|staff|workers?|colleagues?|team(?:s|mates)?|"
+               r"customers?|clients?|users?|offices?|compan(?:y|ies)|businesses|organi[sz]ations?|entities|entity)\b)", re.I),
 )
 _RANK4_COMPANY_SELF_RE = re.compile(
     r"\b(?:we|we're|our|company|headquarter\w*|HQ|offices?|customers?|clients?|founded|team\s+is|teams\s+are)\b", re.I)
@@ -8459,6 +8495,8 @@ def rank4_text_narrow_residence_hit(job: dict) -> str | None:
         for sentence in _split_into_sentences(line):
             sentence = sentence.strip()
             if not sentence or not any(rx.search(sentence) for rx in _RANK4_NARROW_RESIDENCE_RES):
+                continue
+            if re.search(r"\be-?verify\b", sentence, re.I):
                 continue
             if _RANK4_COMPANY_SELF_RE.search(sentence) and not re.search(r"\b(?:you|candidates?|applicants?|must|required?)\b", sentence, re.I):
                 continue

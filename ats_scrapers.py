@@ -1193,6 +1193,21 @@ async def scrape_greenhouse(slug: str) -> list[dict]:
 
 # ── Lever ───────────────────────────────────────────────
 
+def _lever_full_description(post: dict) -> str:
+    """Opening paragraph + every titled list (Responsibilities / Requirements bullets) + the closing block.
+
+    2026-10: the list API splits a posting into `description` (opening only), `lists` and `additional`; only the
+    opening was read, so a single "Located in the US" bullet under Requirements, or the closing paragraph, never
+    reached the classifier. `descriptionPlain` is the opening only and is empty on some postings (Jobgether), so
+    the HTML `description` is the fallback."""
+    parts = [post.get("descriptionPlain", "") or post.get("description", "")]
+    for lst in post.get("lists") or []:
+        if isinstance(lst, dict):
+            parts.append(f"{lst.get('text', '')}\n{lst.get('content', '')}")
+    parts.append(post.get("additionalPlain", "") or post.get("additional", ""))
+    return "\n".join(x for x in parts if x)
+
+
 async def scrape_lever(slug: str) -> list[dict]:
     """Lever public postings API — no auth required."""
     url = f"https://api.lever.co/v0/postings/{slug}"
@@ -1238,7 +1253,7 @@ async def scrape_lever(slug: str) -> list[dict]:
             "workplace_type": post.get("workplaceType", ""),
             "employment_type": categories.get("commitment", ""),
             "salary": salary_str,
-            "description_snippet": _snippet(post.get("descriptionPlain", "") or post.get("description", "")),
+            "description_snippet": _snippet(_lever_full_description(post)),
             "source_ats": "Lever",
             "slug": slug,
         })
